@@ -586,16 +586,27 @@ fn source_stat(audio: &Path) -> Result<Value, String> {
         .to_string();
     Ok(serde_json::json!({"size":m.len(),"modified_ns":ns}))
 }
-fn valid_engine(p: &crate::Preparation) -> bool {
-    p.source_sha256.is_some()
-        && (p
-            .analysis
-            .as_ref()
-            .is_some_and(|a| a.engine == crate::analysis::ENGINE_ID)
-            || p.extensions
+fn engine_version(engine: &str) -> Option<u64> {
+    let (family, _) = crate::analysis::ENGINE_ID.rsplit_once('-')?;
+    engine.strip_prefix(&format!("{family}-"))?.parse().ok()
+}
+fn completed_version(p: &crate::Preparation) -> Option<u64> {
+    p.analysis
+        .as_ref()
+        .and_then(|a| engine_version(&a.engine))
+        .into_iter()
+        .chain(
+            p.extensions
                 .get("analysis_engine_checked")
                 .and_then(Value::as_str)
-                == Some(crate::analysis::ENGINE_ID))
+                .and_then(engine_version),
+        )
+        .max()
+}
+fn valid_engine(p: &crate::Preparation) -> bool {
+    p.source_sha256.is_some()
+        && completed_version(p)
+            .is_some_and(|v| v >= engine_version(crate::analysis::ENGINE_ID).unwrap())
 }
 
 pub fn analyze_shared(root: &Path, relative: &Path, force: bool) -> Result<AnalysisResult, String> {
@@ -622,12 +633,18 @@ pub fn analyze_shared(root: &Path, relative: &Path, force: bool) -> Result<Analy
     let _heartbeat = lease.keep_alive();
     let audio = crate::resolve(root, relative).map_err(|e| e.to_string())?;
     let (before, bytes) = crate::preparation::load_with_revision(&audio)?;
-    if !force
+    if (!force
+        || completed_version(&before)
+            .is_some_and(|v| v > engine_version(crate::analysis::ENGINE_ID).unwrap()))
         && valid_engine(&before)
         && before.source_sha256.as_ref().is_some_and(|s| {
             crate::preparation::fingerprint(&audio).is_ok_and(|actual| &actual == s)
         })
     {
+        if before.extensions.get("analysis_source_stat") == Some(&source_stat(&audio)?) {
+            lease.finish()?;
+            return Ok(AnalysisResult::Skipped(Skip::Complete));
+        }
         let mut cached = before.clone();
         cached
             .extensions
@@ -1026,6 +1043,37 @@ mod tests {
             latest.extensions["analysis_recommendation"],
             manual.extensions["analysis_recommendation"]
         );
+    }
+    #[test]
+    fn older_engine_reuses_newer_completed_result_instead_of_downgrading_it() {
+        let root = fixture();
+        let rel = Path::new("song.wav");
+        let audio = root.path().join(rel);
+        let mut p = crate::Preparation {
+            bpm: Some(126.),
+            source_sha256: Some(crate::preparation::fingerprint(&audio).unwrap()),
+            analysis: Some(crate::preparation::AnalysisInfo {
+                engine: "amp-prep-heuristic-2".into(),
+                duration: 10.,
+                tempo_confidence: 1.,
+                key_confidence: 1.,
+                reviewed: false,
+            }),
+            ..Default::default()
+        };
+        p.extensions
+            .insert("analysis_source_stat".into(), source_stat(&audio).unwrap());
+        crate::preparation::save(root.path(), rel, &p).unwrap();
+        let before = crate::preparation::revision(&audio);
+        assert!(matches!(
+            analyze_shared(root.path(), rel, false).unwrap(),
+            AnalysisResult::Skipped(Skip::Complete)
+        ));
+        assert!(matches!(
+            analyze_shared(root.path(), rel, true).unwrap(),
+            AnalysisResult::Skipped(Skip::Complete)
+        ));
+        assert_eq!(crate::preparation::revision(&audio), before);
     }
     #[test]
     fn legacy_rules_enroll_without_losing_concurrent_edit_protection() {
