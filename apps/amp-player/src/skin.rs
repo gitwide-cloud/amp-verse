@@ -162,11 +162,11 @@ pub fn heading(ui: &mut egui::Ui, title: &str, _purple: bool) -> Option<Module> 
     egui::Popup::menu(&response).show(|ui| {
         ui.set_min_width(220.);
         for (label, module) in [
-            ("AMP VERSE", Module::Verse),
+            ("AMP Player", Module::Verse),
             ("AMP Library", Module::Library),
             ("AMP DJ", Module::Dj),
             ("AMP Cast", Module::Cast),
-            ("AMP Lab / setup", Module::LabSetup),
+            ("AMP Lab", Module::LabSetup),
             ("Plugin Manager", Module::Addons),
         ] {
             if ui.button(label).clicked() {

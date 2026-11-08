@@ -110,12 +110,6 @@ public final class MainActivity extends Activity {
             for(String name:new String[]{"AMP Player","AMP Library","AMP DJ","AMP Remote","AMP Lab","AMP Cast","Settings"})menu.getMenu().add(name);
             menu.setOnMenuItemClickListener(item->{String name=item.getTitle().toString();if(name.equals("Settings"))openSettings();else selectModule(name);return true;});menu.show();
         });brand.setTag("module-menu");brand.setTextSize(18);brand.setGravity(android.view.Gravity.START|android.view.Gravity.CENTER_VERTICAL);if(appearance.classic){brand.setBackground(Chrome.panel(appearance,false));brand.setTextColor(Color.WHITE);}brand.setTypeface(null,Typeface.BOLD_ITALIC);brand.setContentDescription("AMP Verse module dropdown");root.addView(brand,new LinearLayout.LayoutParams(-1,dp(36)));
-        if(!module.equals("AMP Player")){
-        HorizontalScrollView nav=new HorizontalScrollView(this);nav.setHorizontalScrollBarEnabled(false);LinearLayout tabs=new LinearLayout(this);
-        for(String name:new String[]{"AMP Player","AMP Library","AMP DJ","AMP Remote","AMP Lab","AMP Cast"}){
-            Button tab=button(name.replace("AMP ",""),()->selectModule(name));tab.setBackground(Chrome.button(appearance,module.equals(name)));if(module.equals(name))tab.setTextColor(Color.BLACK);LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(dp(79),dp(44));params.setMargins(1,dp(3),1,dp(3));tabs.addView(tab,params);
-        }nav.addView(tabs);root.addView(nav);
-        }
         page=new LinearLayout(this);page.setOrientation(LinearLayout.VERTICAL);
         if(module.equals("AMP Player"))root.addView(page,new LinearLayout.LayoutParams(-1,0,1));
         else {ScrollView scroll=new ScrollView(this);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));scroll.addView(page);LinearLayout caption=card();caption.addView(label(module,18,accent));}

@@ -366,23 +366,6 @@ impl Player {
                 }
                 ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Next play volume"));
             });
-            ui.horizontal(|ui| {
-                if skin::button(ui, "LIBRARY", GOLD).clicked() {
-                    self.library_open = true;
-                }
-                if skin::button(ui, "AMP DJ", GOLD).clicked() {
-                    self.dj_open = true;
-                }
-                if skin::button(ui, "ADD-ONS", GOLD).clicked() {
-                    self.addons_open = true;
-                }
-                if skin::button(ui, "AMP Lab", GOLD).clicked() {
-                    self.lab_open = true;
-                }
-                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    theme::selector(ui);
-                });
-            });
         });
     }
     fn library_ui(&mut self, ui: &mut egui::Ui) {

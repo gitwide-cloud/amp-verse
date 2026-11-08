@@ -128,3 +128,8 @@ Debug APK and lint passed. Installed on the authorized Pixel 7 (31160DLH200078),
 Workspace unit/integration tests passed (10 tests; two audio-tool tests opt-in). Explicit real FFmpeg arrangement test passed: generated source audio, two overlapped clips, cue trim, 0.5-second timeline offset, output duration within 0.1 seconds, refusal to overwrite, and decoding an individual MP3. Clippy with warnings denied and release builds passed. The explicit prepared-deck audio test also passed with the silent SDL audio device (1.43 seconds). Actual installed DJ view captured in local test-output/desktop-dj-library.png. New Lab arrangement view uses real clip placements, without simulated waveforms.
 
 Installed release Player and Cast binaries at C:/Users/pfgpe/AppData/Local/Programs/AMP Verse, with Desktop and Start menu shortcuts. Copied the audio tools and their notices/licenses from the already installed MP3 Lab runtime. Source mp3-lab repository remains unchanged. This is a local desktop preview install, not a newly published GitHub Release. CI was extended to capture Lab along with the other views; remote CI completion is not asserted here. Android was unchanged by this desktop milestone.
+
+
+### Dropdown-only module navigation (2026-11-08)
+
+Removed the redundant Android module tab strip on every main module screen, not just Player. All six module destinations plus Settings remain in the AMP VERSE dropdown; Android Lab already uses that dropdown. Removed desktop Player module shortcut buttons; the title dropdown remains the desktop module navigator. Android 0.1.8 assemble and lint passed.
