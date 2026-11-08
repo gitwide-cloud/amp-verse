@@ -40,7 +40,7 @@ public final class MainActivity extends Activity {
     private Appearance appearance;
     private int queueLimit=100;
     private int bg, panel, text, muted, accent;
-    private String message = "Import songs to save them on this device for offline playback.";
+    private String message = "Phone files are a separate local source. Desktop library browsing and radio downloads will come through AMP Remote.";
     private final Runnable tick = new Runnable() { public void run() { refresh(); handler.postDelayed(this, 500); } };
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -119,7 +119,7 @@ public final class MainActivity extends Activity {
             dj.addView(button("Open player",()->selectModule("AMP Player")));drawQueue(false);
         }else{
             LinearLayout info=card();
-            String detail=module.equals("AMP Remote")?"LAN control of AMP Verse desktop and Cast is planned. This Android preview does not connect or send remote commands yet.":module.equals("AMP Lab")?"AMP Lab uses the existing MP3 Lab editor foundation on desktop. Android audio editing and preparation tools are not implemented yet.":"AMP Cast is an independent radio server. Native Android station control is planned; the phone does not host a radio server in this preview.";
+            String detail=module.equals("AMP Remote")?"Connect to the desktop library, browse songs or playlists, listen on this phone, then Save offline for radio. This Remote workflow is not implemented in this preview yet.":module.equals("AMP Lab")?"AMP Lab uses the existing MP3 Lab editor foundation on desktop. Android audio editing and preparation tools are not implemented yet.":"AMP Cast is an independent radio server. Native Android station control is planned; the phone does not host a radio server in this preview.";
             info.addView(label(detail,16,text));info.addView(button("Settings",this::openSettings));
         }
         status=label(message,12,muted);page.addView(status);page.addView(label("AMP VERSE  "+BuildConfig.VERSION_NAME+" · LOCAL / OFFLINE",11,muted));refresh();
@@ -143,10 +143,11 @@ public final class MainActivity extends Activity {
         LinearLayout actions=new LinearLayout(this);rowButton(actions,"Library",()->selectModule("AMP Library"));rowButton(actions,"+ Music",()->{PopupMenu menu=new PopupMenu(this,root.getChildAt(0));menu.getMenu().add("Scan folder");menu.getMenu().add("Select songs");menu.setOnMenuItemClickListener(item->{if(item.getTitle().toString().equals("Scan folder"))scanFolder();else importSongs();return true;});menu.show();});rowButton(actions,"Settings",this::openSettings);now.addView(actions);drawQueue(false);
     }
     private void drawLibrary(){
-        LinearLayout files=card();files.addView(button(importing?"Importing…":"Scan music folder",this::scanFolder));files.addView(button("+ Select individual songs",this::importSongs));files.addView(label("▾ Saved on this device",17,accent));files.addView(label("    ▾ Imported ("+(player==null?0:player.getMediaItemCount())+")",15,text));drawQueue(true);
+        LinearLayout source=card();source.addView(label("Desktop library",17,accent));source.addView(label("Browse and listen through AMP Remote. Saving songs or playlists offline for radio is coming with that connection.",14,muted));source.addView(button("AMP Remote",()->selectModule("AMP Remote")));
+        LinearLayout files=card();files.addView(label("Phone files · separate local source",16,accent));files.addView(button(importing?"Importing…":"Scan music folder",this::scanFolder));files.addView(button("+ Select individual songs",this::importSongs));files.addView(label("▾ Phone imports",17,accent));files.addView(label("    ▾ Imported ("+(player==null?0:player.getMediaItemCount())+")",15,text));drawQueue(true);
     }
     private void drawQueue(boolean editable){
-        LinearLayout queue=card();queue.addView(label(editable?"AMP Library · songs":"Now Playing / Queue",16,accent));
+        LinearLayout queue=card();queue.addView(label(editable?"Phone imports · songs":"Now Playing / Queue",16,accent));
         final boolean radio=isRadio();final List<MediaItem> localItems=new ArrayList<>();
         try{if(radio)localItems.addAll(LibraryStore.read(this));else if(player!=null)for(int i=0;i<player.getMediaItemCount();i++)localItems.add(player.getMediaItemAt(i));}catch(Exception error){message="Cannot read local library: "+error.getMessage();}
         if(localItems.isEmpty()){queue.addView(label("No songs saved yet. Import local audio to begin.",14,muted));return;}
@@ -191,7 +192,7 @@ public final class MainActivity extends Activity {
     private boolean isRadio(){return player!=null&&player.getCurrentMediaItem()!=null&&player.getCurrentMediaItem().mediaId.equals("amp-radio");}
     private void radio(){
         EditText url=new EditText(this);url.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_URI);url.setSingleLine(true);url.setHint("https://station.example/stream.mp3");url.setText(prefs.getString("radio-url",""));
-        new android.app.AlertDialog.Builder(this).setTitle("Internet radio / AMP Cast stream").setMessage("Enter a direct HTTP or HTTPS audio-stream URL. Uses your network connection.").setView(url).setNegativeButton("Cancel",null).setPositiveButton("Play stream",(dialog,which)->{
+        new android.app.AlertDialog.Builder(this).setTitle("Internet radio / AMP Cast stream").setMessage("Direct stream playback only. Desktop-library browsing and Save offline for radio are not implemented yet. Uses your network connection.").setView(url).setNegativeButton("Cancel",null).setPositiveButton("Play stream",(dialog,which)->{
             Uri uri=Uri.parse(url.getText().toString().trim());if(!("http".equals(uri.getScheme())||"https".equals(uri.getScheme()))||uri.getHost()==null){message="Enter a valid HTTP or HTTPS stream URL.";refresh();return;}
             if(player==null)return;prefs.edit().putString("radio-url",uri.toString()).apply();player.setMediaItem(new MediaItem.Builder().setMediaId("amp-radio").setUri(uri).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle("Radio · "+uri.getHost()).build()).build());player.prepare();player.play();draw();
         }).show();

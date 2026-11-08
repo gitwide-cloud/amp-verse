@@ -10,3 +10,6 @@
 Future work is intentionally listed as acceptance criteria rather than disabled controls that suggest it already works.
 
 Android handoff preference: when an AMP Verse APK is built for the user, install it on the Pixel and leave it installed. Do not uninstall it as test cleanup.
+
+
+Android source-flow correction: build desktop library/playlist read and streaming endpoints, then Android Remote browse/listen-on-phone, then explicit Save offline into the radio collection. Phone-folder imports are not that radio-download collection. Direct phone-folder playback remains as a separate local-player option; retain existing imports.

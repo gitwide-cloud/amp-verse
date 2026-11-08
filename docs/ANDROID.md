@@ -1,5 +1,15 @@
 # AMP Verse Android preview
 
+
+## Desktop library and Android Remote ownership (current direction)
+
+Desktop AMP Verse owns the music libraries, folder roots and playlists. Android Remote connects to that desktop/server, browses its songs/playlists and streams selected content to the phone. From that remote source, the user can explicitly Save offline; that downloaded collection belongs to the radio portion. A phone-folder import is a separate local-player source, not the definition of the radio offline library.
+
+Target flow: desktop adds library → Android Remote connects → browse songs/playlists → listen on phone → Save offline for radio. Downloading a song or playlist must copy the actual audio and portable preparation to a managed radio cache, persist membership/source identity and report completion only once playback is available without the desktop. Offline radio items must remain usable when the source is unavailable; refresh must preserve local cue overrides. Do not cache a live station stream and label it as downloaded playlist songs. No desktop playback command should be sent when the user chooses to listen on the phone.
+
+Current limitations: the Android build supports independent phone-file imports and direct radio-stream URLs. Desktop library browsing/streaming APIs, Remote browsing and Save offline from that source are not implemented. Retain existing imported phone audio; do not silently move, delete or relabel it as radio downloads. Direct phone-folder playback remains available as a separate local-player source, as confirmed by the user.
+
+
 Package: `cloud.gitwide.ampverse`. Android 9+; compile/target SDK 35; JDK 17; Gradle 8.9; Android Gradle Plugin 8.7.3. Media3 1.8.1 is pinned for this SDK/toolchain preview. Source and app data are separate from MP3 Lab.
 
 ## Build

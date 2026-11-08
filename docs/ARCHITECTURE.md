@@ -1,5 +1,15 @@
 # AMP Verse architecture
 
+
+## Desktop library and Android Remote ownership (current direction)
+
+Desktop AMP Verse owns the music libraries, folder roots and playlists. Android Remote connects to that desktop/server, browses its songs/playlists and streams selected content to the phone. From that remote source, the user can explicitly Save offline; that downloaded collection belongs to the radio portion. A phone-folder import is a separate local-player source, not the definition of the radio offline library.
+
+Target flow: desktop adds library → Android Remote connects → browse songs/playlists → listen on phone → Save offline for radio. Downloading a song or playlist must copy the actual audio and portable preparation to a managed radio cache, persist membership/source identity and report completion only once playback is available without the desktop. Offline radio items must remain usable when the source is unavailable; refresh must preserve local cue overrides. Do not cache a live station stream and label it as downloaded playlist songs. No desktop playback command should be sent when the user chooses to listen on the phone.
+
+Current limitations: the Android build supports independent phone-file imports and direct radio-stream URLs. Desktop library browsing/streaming APIs, Remote browsing and Save offline from that source are not implemented. Retain existing imported phone audio; do not silently move, delete or relabel it as radio downloads. Direct phone-folder playback remains available as a separate local-player source, as confirmed by the user.
+
+
 ## Boundaries implemented now
 
 ```text
@@ -27,7 +37,7 @@ Cast has one encoder task at a time. It traverses the prepared track list in det
 
 Android stays **one compact integrated application**, not desktop plugins. Use a foreground media playback service and platform media session for screen-off/background operation; local storage/SAF imports and a local database hold downloaded songs and portable preparation. Only songs saved on the device are guaranteed offline. NAS/server preparation supplies stems, cues and beatgrid data; heavy stem analysis stays off-device. Device-local cue overrides take precedence over downloaded preparation and survive refreshes. Simplified Auto DJ uses locally cached songs and prepared data, with no promise of desktop FX parity.
 
-LAN discovery should advertise a versioned AMP service with role and port (mDNS/DNS-SD planned). Android provides simple-password remote control of desktop/Cast. Discovery is a convenience, not authentication; manual IP entry must work when discovery fails. Offline playback must never require a station or account. No Android app or discovery protocol is implemented yet.
+LAN discovery should advertise a versioned AMP service with role and port (mDNS/DNS-SD planned). Android provides simple-password remote control of desktop/Cast. Discovery is a convenience, not authentication; manual IP entry must work when discovery fails. Offline playback must never require a station or account. An Android local-player preview now exists; discovery and Remote library protocol are still unimplemented.
 
 ## Data and evolution
 
