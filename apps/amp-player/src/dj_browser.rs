@@ -31,6 +31,7 @@ impl Player {
         let mut open_playlist = false;
         let mut load = None;
         let mut load_smart = false;
+        let mut edit_smart = false;
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(195., 320.),
@@ -145,6 +146,7 @@ impl Player {
                             ui.horizontal(|ui| {
                                 ui.strong(&profile.name);
                                 load_smart = ui.button("Load for Auto DJ").clicked();
+                                edit_smart = ui.button("Edit sources / rules in Library").clicked();
                             });
                             let eligible: Vec<_> = lib
                                 .tracks
@@ -227,6 +229,11 @@ impl Player {
                 }
                 Err(e) => self.status = e.to_string(),
             }
+        }
+        if edit_smart {
+            self.show_editor
+                .open_playlist(&self.dj_browser.smart, &self.root, &self.run.settings);
+            self.activate(ui, Some(skin::Module::Library));
         }
         if load_smart {
             self.run.choice = self.dj_browser.smart.clone();

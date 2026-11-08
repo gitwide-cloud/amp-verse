@@ -230,7 +230,7 @@ impl Player {
                 if self.layout.parent[1] == Some(0) {
                     ui.ctx().send_viewport_cmd_to(
                         egui::ViewportId::ROOT,
-                        egui::ViewportCommand::MinInnerSize(egui::vec2(1000., 800.)),
+                        egui::ViewportCommand::MinInnerSize(egui::vec2(740., 480.)),
                     );
                     ui.ctx().send_viewport_cmd_to(
                         egui::ViewportId::ROOT,
@@ -764,9 +764,12 @@ impl Player {
                 0.,
                 theme::current(ui.ctx()).palette().background,
             );
-            egui::ScrollArea::vertical()
+            egui::ScrollArea::both()
+                .max_height(ui.available_height())
+                .auto_shrink([false, false])
                 .id_salt(("merged-window", host))
                 .show(ui, |ui| self.group_contents(ui, host));
+            window_layout::resize_edges(ui);
         } else {
             self.group_contents(ui, host);
         }
@@ -793,7 +796,11 @@ impl Player {
             let height = if host == 0 {
                 135.
             } else if host == 2 {
-                920.
+                if embedded {
+                    920.
+                } else {
+                    (ctx.viewport_rect().height() - 16.).clamp(400., 920.)
+                }
             } else {
                 680.
             };
@@ -979,9 +986,9 @@ impl Player {
         ctx.send_viewport_cmd_to(
             egui::ViewportId::ROOT,
             egui::ViewportCommand::MinInnerSize(if expanded {
-                egui::vec2(1000., 800.)
+                egui::vec2(740., 480.)
             } else {
-                egui::vec2(980., 160.)
+                egui::vec2(740., 160.)
             }),
         );
         ctx.send_viewport_cmd_to(
@@ -1567,8 +1574,7 @@ impl Player {
                 let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
                 self.waveforms[d].show(ui, &self.root, track, position, self.wave_span, d);
             }
-            egui::ScrollArea::vertical().id_salt("dj-controls-body").show(ui,|ui|{
-                self.sampler_ui(ui);
+            egui::ScrollArea::both().scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible).max_height(ui.available_height().max(160.)).id_salt("dj-controls-body").show(ui,|ui|{
                 let deck_width=((ui.available_width()-198.)/2.).max(260.);
                 ui.horizontal_top(|ui|{
                     self.deck_ui(ui,0,deck_width);
@@ -1592,6 +1598,7 @@ if ui.button("FX").clicked(){self.fx_open=true;}});
                 ui.horizontal(|ui|{ui.add(egui::Slider::new(&mut self.volume,0..=100).text("Master"));if let Some(a)=&self.audio{ui.weak(format!("{} · {} Hz",a.device,a.sample_rate));}});
                 ui.separator();
                 self.dj_library_ui(ui);
+                self.sampler_ui(ui);
                 ui.label(RichText::new(&self.status).color(skin::accent(ui)));
                 if let Some(a)=&self.audio{let under=a.controls.underruns.iter().map(|x|x.load(std::sync::atomic::Ordering::Relaxed)).sum::<u64>();if under>0{ui.label(format!("Audio buffer underruns: {under} frames"));}}
             });
@@ -1738,6 +1745,7 @@ impl eframe::App for Player {
                 self.library_ui(ui);
             }
             "dj" => self.dj_ui(ui),
+            "dj-window" => self.group_ui(ui, 2),
             "dj-library" => self.dj_library_ui(ui),
             "sampler" => self.sampler_ui(ui),
             "addons" => self.addons_ui(ui),
@@ -1753,11 +1761,7 @@ impl eframe::App for Player {
             if !is_open || self.layout.parent[pane].is_some() {
                 continue;
             }
-            let size = if pane == 2 {
-                [1000., 960.]
-            } else {
-                [1100., 800.]
-            };
+            let size = window_layout::initial_size(pane, ctx.input(|i| i.viewport().monitor_size));
             ctx.show_viewport_immediate(
                 window_layout::viewport(pane),
                 egui::ViewportBuilder::default()
@@ -1765,7 +1769,9 @@ impl eframe::App for Player {
                     .with_decorations(false)
                     .with_icon(app_icon())
                     .with_inner_size(size)
-                    .with_min_inner_size([900., 680.]),
+                    .with_min_inner_size([size[0].min(740.), size[1].min(480.)])
+                    .with_resizable(true)
+                    .with_clamp_size_to_monitor_size(true),
                 |ui, _| {
                     if ui.ctx().input(|i| i.viewport().close_requested()) {
                         match pane {
@@ -1809,6 +1815,7 @@ fn main() -> eframe::Result {
         "library" => [1100., 830.],
         "preparation" | "rules" => [1200., 830.],
         "dj" => [1000., 920.],
+        "dj-window" => [900., 600.],
         "dj-library" => [1100., 430.],
         "sampler" => [1000., 400.],
         "lab" => [1100., 760.],
@@ -1823,7 +1830,9 @@ fn main() -> eframe::Result {
                 .with_decorations(false)
                 .with_icon(app_icon())
                 .with_inner_size(size)
-                .with_min_inner_size(size),
+                .with_min_inner_size([740., 160.])
+                .with_resizable(true)
+                .with_clamp_size_to_monitor_size(true),
             ..Default::default()
         },
         Box::new(|cc| {
@@ -1958,6 +1967,27 @@ mod window_tests {
         assert_eq!(
             player.library.as_ref().unwrap().tracks[2].preparation.bpm,
             Some(126.)
+        );
+    }
+    #[test]
+    fn dj_container_fits_a_short_viewport() {
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(900., 600.),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 2));
+        output.textures_delta.clear();
+        let dj = ctx
+            .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique(("pane-bounds", 2usize))))
+            .unwrap();
+        assert!(
+            dj.height() <= 600.,
+            "DJ container must fit the native viewport: {dj:?}"
         );
     }
     #[test]

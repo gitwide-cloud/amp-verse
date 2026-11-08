@@ -65,7 +65,7 @@ jobs:
           python3 -c "import json,pathlib; p=pathlib.Path('test-output/music/.ampverse/tracks/Tone.wav.json'); d=json.loads(p.read_text()); d['cue_in']=0.2; d['manual_override']=True; p.write_text(json.dumps(d))"
           target/release/amp-prepare test-output/music --force
           for theme in classic modern-light modern-dark; do
-            for view in player combined library preparation rules dj dj-library sampler lab addons cast; do
+            for view in player combined library preparation rules dj dj-window dj-library sampler lab addons cast; do
               timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_THEME="$theme" AMP_VERSE_CONFIG_DIR=test-output/theme-config AMP_SCREENSHOT_VIEW="$view" AMP_SCREENSHOT="test-output/$theme-$view.png" target/release/amp-player test-output/music
               test -s "test-output/$theme-$view.png"
             done

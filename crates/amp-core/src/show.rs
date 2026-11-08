@@ -38,6 +38,8 @@ pub struct SmartPlaylist {
     #[serde(default)]
     pub folders: Vec<PathBuf>,
     #[serde(default)]
+    pub restrict_folders: bool,
+    #[serde(default)]
     pub allowed: Vec<String>,
     #[serde(default)]
     pub restrict_allowed: bool,
@@ -92,6 +94,7 @@ impl Default for Settings {
                 name: name.into(),
                 style,
                 folders: vec![],
+                restrict_folders: false,
                 allowed: vec![],
                 restrict_allowed: false,
                 excluded: vec![],
@@ -192,7 +195,8 @@ pub fn eligible(p: &SmartPlaylist, t: &Track) -> bool {
     let id = song_id(t);
     !p.excluded.contains(&id)
         && ((!p.restrict_allowed && p.allowed.is_empty()) || p.allowed.contains(&id))
-        && (p.folders.is_empty() || p.folders.iter().any(|f| t.path.starts_with(f)))
+        && ((!p.restrict_folders && p.folders.is_empty())
+            || p.folders.iter().any(|f| t.path.starts_with(f)))
 }
 pub fn choose(
     p: &SmartPlaylist,
