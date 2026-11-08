@@ -57,6 +57,7 @@ public final class MainActivity extends Activity {
             try {
                 player = pending.get();
                 syncSavedLibrary();
+                player.setRepeatMode(prefs.getBoolean("repeat",false)?Player.REPEAT_MODE_ALL:Player.REPEAT_MODE_OFF);
                 player.addListener(new Player.Listener() {
                     @Override public void onPlayerError(PlaybackException error) { message = "Cannot play this file: " + error.getErrorCodeName(); refresh(); }
                     @Override public void onMediaItemTransition(MediaItem item, int reason) { refresh(); }
@@ -89,12 +90,9 @@ public final class MainActivity extends Activity {
     }
     private void rowButton(LinearLayout row, String caption, Runnable action) { row.addView(button(caption, action), new LinearLayout.LayoutParams(0, dp(54), 1)); }
     private void draw() {
-        String theme = prefs.getString("theme", "classic");
-        boolean light = theme.equals("modern-light"), classic = theme.equals("classic");
-        bg = Color.parseColor(light ? "#f1f3f9" : classic ? "#222426" : "#10141d");
-        panel = Color.parseColor(light ? "#ffffff" : classic ? "#55585e" : "#202735");
-        text = Color.parseColor(light ? "#202332" : "#f0eef7"); muted = Color.parseColor(light ? "#647089" : "#aaa4bd");
-        accent = Color.parseColor(light ? "#7142cc" : classic ? "#ffd52b" : "#b586ff");
+        Appearance appearance = new Appearance(this);
+        boolean classic = appearance.classic;
+        bg=appearance.background;panel=appearance.surface;text=appearance.text;muted=appearance.muted;accent=appearance.accent;
         getWindow().setStatusBarColor(bg); getWindow().setNavigationBarColor(bg);
         root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(dp(12), dp(8), dp(12), 0); root.setBackgroundColor(bg);
         // Respect system bars on edge-to-edge Android versions.
@@ -102,8 +100,8 @@ public final class MainActivity extends Activity {
         setContentView(root);
         Button brand = button("ϟ AMP VERSE  ▾", () -> {
             PopupMenu menu = new PopupMenu(this, root.getChildAt(0));
-            for (String name : new String[]{"Player", "Library", "Classic", "Modern Light", "Modern Dark"}) menu.getMenu().add(name);
-            menu.setOnMenuItemClickListener(item -> { String name = item.getTitle().toString(); if (name.equals("Player") || name.equals("Library")) library = name.equals("Library"); else prefs.edit().putString("theme", name.equals("Classic") ? "classic" : name.equals("Modern Light") ? "modern-light" : "modern-dark").apply(); draw(); return true; }); menu.show();
+            for (String name : new String[]{"Player", "Library", "Settings"}) menu.getMenu().add(name);
+            menu.setOnMenuItemClickListener(item -> { String name = item.getTitle().toString(); if (name.equals("Settings")) startActivity(new Intent(this, SettingsActivity.class)); else { library = name.equals("Library"); draw(); } return true; }); menu.show();
         }); brand.setTextColor(accent); brand.setTextSize(23); brand.setTypeface(null, Typeface.BOLD_ITALIC); root.addView(brand);
         LinearLayout tabs = new LinearLayout(this); rowButton(tabs, "Player", () -> { library = false; draw(); }); rowButton(tabs, "Library", () -> { library = true; draw(); }); root.addView(tabs);
         ScrollView scroll = new ScrollView(this); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
@@ -134,12 +132,12 @@ public final class MainActivity extends Activity {
             }
             if (player == null || player.getMediaItemCount() == 0) files.addView(label("Your library is empty. Import audio files to begin.", 15, muted));
         } else {
-            LinearLayout settings = card(); CheckBox repeat = new CheckBox(this); repeat.setText("Repeat queue · sequential playback"); repeat.setTextColor(text); repeat.setChecked(prefs.getBoolean("repeat", false));
-            repeat.setOnCheckedChangeListener((view, enabled) -> { prefs.edit().putBoolean("repeat", enabled).apply(); if (player != null) player.setRepeatMode(enabled ? Player.REPEAT_MODE_ALL : Player.REPEAT_MODE_OFF); }); settings.addView(repeat);
+            LinearLayout settings = card();
+            settings.addView(button("Settings", () -> startActivity(new Intent(this, SettingsActivity.class))));
             settings.addView(button("Open Library / import songs", () -> { library = true; draw(); }));
             settings.addView(label("Playback continues through Android media controls when the screen is off. Prepared cues, stems and LAN remote control are coming later.", 13, muted));
         }
-        status = label(message, 13, muted); page.addView(status); page.addView(label("AMP Verse 0.1 · Android preview", 12, muted)); refresh();
+        status = label(message, 13, muted); page.addView(status); page.addView(label("AMP Verse " + BuildConfig.VERSION_NAME + " · Android preview", 12, muted)); refresh();
     }
     private void refresh() {
         if (status == null) return; status.setText(message);
