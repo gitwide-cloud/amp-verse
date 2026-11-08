@@ -1,0 +1,82 @@
+name: Build and verify AMP Verse
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  desktop:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact: amp-verse-windows
+            suffix: .exe
+          - os: ubuntu-24.04
+            artifact: amp-verse-linux
+            suffix: ''
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev ffmpeg xvfb
+      - run: cargo fmt --all --check
+      - run: cargo test --workspace --locked
+      - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - run: cargo build --workspace --release --locked
+      - name: Test live radio with generated audio
+        if: runner.os == 'Linux'
+        run: python3 tools/smoke_cast.py target/release/amp-cast
+      - name: Capture actual desktop UI
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p test-output/music
+          ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 test-output/music/Tone.wav
+          timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_SCREENSHOT=test-output/player.png target/release/amp-player test-output/music
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Linux'
+        with:
+          name: amp-player-ui
+          path: test-output/player.png
+      - name: Package binaries and documentation
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} dist/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md dist/
+          cp -r docs dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}
+          path: dist/
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: desktop
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: amp-verse-*
+          path: packages
+      - run: |
+          cd packages
+          for dir in amp-verse-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
+          sha256sum *.zip > SHA256SUMS.txt
+      - uses: softprops/action-gh-release@v2
+        with:
+          prerelease: true
+          generate_release_notes: true
+          files: |
+            packages/*.zip
+            packages/SHA256SUMS.txt

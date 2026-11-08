@@ -1,0 +1,10 @@
+# Milestones and acceptance gates
+
+1. **0.1 implemented foundation:** build Player/Core/Cast separately; real local audio via FFplay; folder tree and relative-path playlists; prepared cues; independent Cast MP3 broadcast; optional password; unit/API tests; real encoder/network smoke test; Windows/Linux CI and tag-gated prereleases. Verification results belong in `VERIFICATION.md`.
+2. **Desktop reliability:** actual format/tag/duration metadata, persist settings/playlists atomically, cue editor, seek/pause, background rescans, multi-root/NAS availability, device selection and an in-process audio engine. Require audio fixtures, device-error recovery and manual listening on Windows/Linux.
+3. **DJ preparation:** cue collections/beatgrids, two-deck mixer and crossfade, measured gapless Auto DJ, prepared stem playback. Require deterministic rendered-audio tests and listening tests; then expand deck count/FX/MIDI/OSC/Companion.
+4. **Cast operations:** persisted station playlists, soundcard monitor/device routing independent of browser listeners, schedules, better diagnostics, graceful service installation and controller discovery. Test concurrent listeners, restart and decoder failure, memory bounds and overnight endurance. Later evaluate optional Cast dual-path redundancy; no bonding product.
+5. **Integrated Android:** compact local playback app with a foreground media service, media session, SAF imports, local cache and prepared metadata. Local manual cues override server cues. Then simplified local Auto DJ, LAN discovery and password remote control. Require real-device screen-off/background endurance and offline tests before claiming support.
+6. **Optional AMP Lab and updates:** manual verified release download/launch first, versioned project handoff and compatible add-on manifest, then explicit checksum-verified updates. Preserve independently distributed MP3 Lab and all licenses. Never silently execute downloads.
+
+Future work is intentionally listed as acceptance criteria rather than disabled controls that suggest it already works.
