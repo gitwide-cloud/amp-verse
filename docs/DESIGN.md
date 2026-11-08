@@ -43,3 +43,8 @@ The web UI is intentionally basic: live station/track status, listening on this 
 - Desktop Plugin Manager is the home for downloading/managing add-ons. Current implementation is an offline catalog, manual download links and external-editor connection; automatic download/install/update management is still unbuilt. Android has an integrated feature set with no plugin loader.
 - AMP Lab must extend/reuse the existing MP3 Lab editor foundation. Do not create a second independent editor implementation. Current integration launches an explicitly selected MP3 Lab installation; deeper editor integration/branding is future work. This does not authorize modifying the separate mp3-lab repository in this AMP Verse task.
 - Use the Pixel 7 for real-device Android development/testing and leave AMP Verse installed once installation succeeds. A reported commit/local pass is not proof that CI or device tests passed; report actual results separately.
+
+
+## Android compact reference follow-up
+
+Keep AMP VERSE as the topmost dropdown brand. List AMP Player, AMP Library, AMP DJ, AMP Remote, AMP Lab and AMP Cast by name, with Settings retained. Version 0.1.2 restyles the integrated app with shared Classic bevels/black displays/green text and compact transport/queue panels. Modern themes retain the same screen structure/functions. Unbuilt module entry pages must identify their preview status rather than show fabricated working control sets. Android still has no desktop plugin loader.

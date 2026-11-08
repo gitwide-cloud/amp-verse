@@ -7,7 +7,6 @@ import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.graphics.Color;
 import android.graphics.Typeface;
-import android.graphics.drawable.GradientDrawable;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.Handler;
@@ -36,18 +35,20 @@ public final class MainActivity extends Activity {
     private SeekBar seek;
     private Button play;
     private boolean library, dragging, importing;
+    private String module = "AMP Player";
+    private Appearance appearance;
     private int bg, panel, text, muted, accent;
     private String message = "Import songs to save them on this device for offline playback.";
     private final Runnable tick = new Runnable() { public void run() { refresh(); handler.postDelayed(this, 500); } };
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         prefs = getSharedPreferences("settings", MODE_PRIVATE);
-        if (state != null) library = state.getBoolean("library");
+        if (state != null) { module=state.getString("module","AMP Player"); library=module.equals("AMP Library"); }
         draw();
         if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 2);
     }
-    @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state); state.putBoolean("library", library); }
+    @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state); state.putString("module", module); }
     @Override public void onStart() {
         super.onStart();
         connection = new MediaController.Builder(this, new SessionToken(this, new ComponentName(this, PlaybackService.class))).buildAsync();
@@ -76,77 +77,84 @@ public final class MainActivity extends Activity {
     }
     private int dp(int n) { return (int)(n * getResources().getDisplayMetrics().density); }
     private TextView label(String value, int size, int color) {
-        TextView view = new TextView(this); view.setText(value); view.setTextSize(size); view.setTextColor(color); view.setPadding(0, dp(5), 0, dp(5)); return view;
-    }
-    private GradientDrawable box(int color) {
-        GradientDrawable drawable = new GradientDrawable(); drawable.setColor(color); drawable.setCornerRadius(dp(prefs.getString("theme", "classic").equals("classic") ? 3 : 14)); drawable.setStroke(dp(1), muted); return drawable;
+        TextView view = new TextView(this); view.setText(value); view.setTextSize(size); view.setTextColor(color); view.setPadding(0, dp(3), 0, dp(3)); return view;
     }
     private LinearLayout card() {
-        LinearLayout view = new LinearLayout(this); view.setOrientation(LinearLayout.VERTICAL); view.setPadding(dp(14), dp(12), dp(14), dp(12)); view.setBackground(box(panel));
-        LinearLayout.LayoutParams params = new LinearLayout.LayoutParams(-1, -2); params.setMargins(0, dp(9), 0, dp(5)); page.addView(view, params); return view;
+        LinearLayout view = new LinearLayout(this); view.setOrientation(LinearLayout.VERTICAL); view.setPadding(dp(9),dp(8),dp(9),dp(8));view.setBackground(Chrome.panel(appearance,false));
+        LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);params.setMargins(0,dp(5),0,0);page.addView(view,params);return view;
     }
-    private Button button(String caption, Runnable action) {
-        Button button = new Button(this); button.setText(caption); button.setTextColor(text); button.setTextSize(14); button.setAllCaps(false); button.setBackgroundTintList(android.content.res.ColorStateList.valueOf(panel)); button.setOnClickListener(v -> action.run()); return button;
+    private Button button(String caption,Runnable action) {
+        Button view=new Button(this);view.setText(caption);view.setAllCaps(false);view.setTextSize(13);view.setMinHeight(dp(44));view.setMinimumHeight(dp(44));view.setMinWidth(0);view.setMinimumWidth(0);view.setPadding(dp(6),dp(4),dp(6),dp(4));
+        view.setTextColor(appearance.classic?Color.rgb(15,18,27):text);view.setBackgroundTintList(null);view.setBackground(Chrome.button(appearance,false));view.setOnClickListener(v->action.run());return view;
     }
-    private void rowButton(LinearLayout row, String caption, Runnable action) { row.addView(button(caption, action), new LinearLayout.LayoutParams(0, dp(54), 1)); }
+    private void rowButton(LinearLayout row,String caption,Runnable action) { LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,dp(46),1);params.setMargins(dp(1),dp(2),dp(1),dp(2));row.addView(button(caption,action),params); }
+    private void selectModule(String name) { module=name;library=name.equals("AMP Library");draw(); }
+    private void openSettings(){startActivity(new Intent(this,SettingsActivity.class));}
     private void draw() {
-        Appearance appearance = new Appearance(this);
-        boolean classic = appearance.classic;
-        bg=appearance.background;panel=appearance.surface;text=appearance.text;muted=appearance.muted;accent=appearance.accent;
-        getWindow().setStatusBarColor(bg); getWindow().setNavigationBarColor(bg);
-        root = new LinearLayout(this); root.setOrientation(LinearLayout.VERTICAL); root.setPadding(dp(12), dp(8), dp(12), 0); root.setBackgroundColor(bg);
-        // Respect system bars on edge-to-edge Android versions.
-        root.setOnApplyWindowInsetsListener((view, insets) -> { view.setPadding(dp(12) + insets.getSystemWindowInsetLeft(), dp(8) + insets.getSystemWindowInsetTop(), dp(12) + insets.getSystemWindowInsetRight(), insets.getSystemWindowInsetBottom()); return insets; });
-        setContentView(root);
-        Button brand = button("ϟ AMP VERSE  ▾", () -> {
-            PopupMenu menu = new PopupMenu(this, root.getChildAt(0));
-            for (String name : new String[]{"Player", "Library", "Settings"}) menu.getMenu().add(name);
-            menu.setOnMenuItemClickListener(item -> { String name = item.getTitle().toString(); if (name.equals("Settings")) startActivity(new Intent(this, SettingsActivity.class)); else { library = name.equals("Library"); draw(); } return true; }); menu.show();
-        }); brand.setTextColor(accent); brand.setTextSize(23); brand.setTypeface(null, Typeface.BOLD_ITALIC); root.addView(brand);
-        LinearLayout tabs = new LinearLayout(this); rowButton(tabs, "Player", () -> { library = false; draw(); }); rowButton(tabs, "Library", () -> { library = true; draw(); }); root.addView(tabs);
-        ScrollView scroll = new ScrollView(this); root.addView(scroll, new LinearLayout.LayoutParams(-1, 0, 1));
-        page = new LinearLayout(this); page.setOrientation(LinearLayout.VERTICAL); scroll.addView(page);
-        LinearLayout now = card(); now.addView(label(library ? "AMP LIBRARY · LOCAL" : "LOCAL OFFLINE PLAYER", 13, accent));
-        title = label("Choose a song", 24, classic ? Color.rgb(163,255,37) : text); title.setTypeface(null, Typeface.BOLD); now.addView(title);
-        clock = label("00:00 / 00:00", 16, muted); now.addView(clock);
-        seek = new SeekBar(this); seek.setMax(1000); now.addView(seek);
-        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener() {
-            public void onStartTrackingTouch(SeekBar bar) { dragging = true; }
-            public void onStopTrackingTouch(SeekBar bar) { if (player != null && player.getDuration() > 0) player.seekTo(player.getDuration() * bar.getProgress() / 1000); dragging = false; }
-            public void onProgressChanged(SeekBar bar, int value, boolean user) { }
-        });
-        LinearLayout transport = new LinearLayout(this);
-        rowButton(transport, "Previous", () -> { if (player != null) player.seekToPreviousMediaItem(); });
-        play = button("Play", () -> { if (player == null || player.getMediaItemCount() == 0) return; if (player.isPlaying()) player.pause(); else { if (player.getPlaybackState() == Player.STATE_ENDED) player.seekToDefaultPosition(); player.prepare(); player.play(); } }); transport.addView(play, new LinearLayout.LayoutParams(0, dp(54), 1));
-        rowButton(transport, "Next", () -> { if (player != null) player.seekToNextMediaItem(); }); now.addView(transport);
-        now.addView(button("Stop playback", () -> { if (player != null) { player.pause(); player.seekToDefaultPosition(); } }));
-        if (library) {
-            LinearLayout files = card(); files.addView(button(importing ? "Importing…" : "+ Import local songs", this::importSongs));
-            files.addView(label("Saved on this device / Imported", 15, accent));
-            if (player != null) for (int i = 0; i < player.getMediaItemCount(); i++) {
-                final int index = i; MediaItem item = player.getMediaItemAt(i);
-                LinearLayout row = new LinearLayout(this); row.setGravity(android.view.Gravity.CENTER_VERTICAL);
-                Button song = button((i+1) + ". " + item.mediaMetadata.title, () -> { player.seekTo(index, 0); player.prepare(); player.play(); refresh(); });
-                row.addView(song, new LinearLayout.LayoutParams(0, -2, 1));
-                Button remove = button("−", () -> { player.removeMediaItem(index); saveQueue(); draw(); }); remove.setContentDescription("Remove " + item.mediaMetadata.title + " from library"); row.addView(remove, new LinearLayout.LayoutParams(dp(48), dp(52))); files.addView(row);
-            }
-            if (player == null || player.getMediaItemCount() == 0) files.addView(label("Your library is empty. Import audio files to begin.", 15, muted));
-        } else {
-            LinearLayout settings = card();
-            settings.addView(button("Settings", () -> startActivity(new Intent(this, SettingsActivity.class))));
-            settings.addView(button("Open Library / import songs", () -> { library = true; draw(); }));
-            settings.addView(label("Playback continues through Android media controls when the screen is off. Prepared cues, stems and LAN remote control are coming later.", 13, muted));
+        appearance=new Appearance(this);bg=appearance.background;panel=appearance.surface;text=appearance.text;muted=appearance.muted;accent=appearance.accent;
+        title=null;clock=null;seek=null;play=null;status=null;
+        getWindow().setStatusBarColor(bg);getWindow().setNavigationBarColor(bg);
+        root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackground(Chrome.panel(appearance,false));
+        root.setOnApplyWindowInsetsListener((view,insets)->{view.setPadding(dp(6)+insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),dp(6)+insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;});setContentView(root);
+        Button brand=button("ϟ AMP VERSE  ▾",()->{
+            PopupMenu menu=new PopupMenu(this,root.getChildAt(0));
+            for(String name:new String[]{"AMP Player","AMP Library","AMP DJ","AMP Remote","AMP Lab","AMP Cast","Settings"})menu.getMenu().add(name);
+            menu.setOnMenuItemClickListener(item->{String name=item.getTitle().toString();if(name.equals("Settings"))openSettings();else selectModule(name);return true;});menu.show();
+        });brand.setTag("module-menu");brand.setTextSize(21);brand.setTypeface(null,Typeface.BOLD_ITALIC);brand.setContentDescription("AMP Verse module dropdown");root.addView(brand,new LinearLayout.LayoutParams(-1,dp(44)));
+        HorizontalScrollView nav=new HorizontalScrollView(this);nav.setHorizontalScrollBarEnabled(false);LinearLayout tabs=new LinearLayout(this);
+        for(String name:new String[]{"AMP Player","AMP Library","AMP DJ","AMP Remote","AMP Lab","AMP Cast"}){
+            Button tab=button(name.replace("AMP ",""),()->selectModule(name));tab.setBackground(Chrome.button(appearance,module.equals(name)));if(module.equals(name))tab.setTextColor(Color.BLACK);LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(dp(79),dp(44));params.setMargins(1,dp(3),1,dp(3));tabs.addView(tab,params);
+        }nav.addView(tabs);root.addView(nav);
+        ScrollView scroll=new ScrollView(this);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));page=new LinearLayout(this);page.setOrientation(LinearLayout.VERTICAL);scroll.addView(page);
+        LinearLayout caption=card();caption.addView(label(module,18,accent));
+        if(module.equals("AMP Player"))drawPlayer();
+        else if(library)drawLibrary();
+        else if(module.equals("AMP DJ")){
+            LinearLayout dj=card();dj.addView(label("Prepared playback · early preview",17,text));
+            dj.addView(label("Local sequential queue playback is available. Mixing decks, cue editing, beat sync and stems are not implemented yet.",14,muted));
+            CheckBox repeat=new CheckBox(this);repeat.setText("Repeat local queue");repeat.setTextColor(text);repeat.setChecked(prefs.getBoolean("repeat",false));repeat.setOnCheckedChangeListener((v,value)->{prefs.edit().putBoolean("repeat",value).apply();if(player!=null)player.setRepeatMode(value?Player.REPEAT_MODE_ALL:Player.REPEAT_MODE_OFF);});dj.addView(repeat);
+            dj.addView(button("Open player",()->selectModule("AMP Player")));drawQueue(false);
+        }else{
+            LinearLayout info=card();
+            String detail=module.equals("AMP Remote")?"LAN control of AMP Verse desktop and Cast is planned. This Android preview does not connect or send remote commands yet.":module.equals("AMP Lab")?"AMP Lab uses the existing MP3 Lab editor foundation on desktop. Android audio editing and preparation tools are not implemented yet.":"AMP Cast is an independent radio server. Native Android station control is planned; the phone does not host a radio server in this preview.";
+            info.addView(label(detail,16,text));info.addView(button("Settings",this::openSettings));
         }
-        status = label(message, 13, muted); page.addView(status); page.addView(label("AMP Verse " + BuildConfig.VERSION_NAME + " · Android preview", 12, muted)); refresh();
+        status=label(message,12,muted);page.addView(status);page.addView(label("AMP VERSE  "+BuildConfig.VERSION_NAME+" · LOCAL / OFFLINE",11,muted));refresh();
+    }
+    private void drawPlayer(){
+        LinearLayout now=card();
+        LinearLayout display=new LinearLayout(this);display.setOrientation(LinearLayout.HORIZONTAL);display.setPadding(dp(8),dp(10),dp(8),dp(10));display.setBackground(Chrome.panel(appearance,true));
+        ImageView art=new ImageView(this);art.setImageResource(cloud.gitwide.ampverse.R.drawable.app_icon);art.setContentDescription("AMP Verse icon");display.addView(art,new LinearLayout.LayoutParams(dp(88),dp(88)));
+        LinearLayout copy=new LinearLayout(this);copy.setOrientation(LinearLayout.VERTICAL);copy.setPadding(dp(10),0,0,0);display.addView(copy,new LinearLayout.LayoutParams(0,-2,1));
+        title=label("Choose a song",19,appearance.classic?Color.rgb(163,255,37):text);title.setTypeface(null,Typeface.BOLD);title.setMaxLines(3);copy.addView(title);copy.addView(label("Local audio · saved on device",12,muted));clock=label("00:00 / --:--",20,appearance.classic?Color.rgb(163,255,37):accent);clock.setTypeface(Typeface.MONOSPACE);copy.addView(clock);now.addView(display);
+        seek=new SeekBar(this);seek.setMax(1000);seek.setProgressTintList(android.content.res.ColorStateList.valueOf(accent));seek.setThumbTintList(android.content.res.ColorStateList.valueOf(accent));now.addView(seek);
+        seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){dragging=true;}public void onStopTrackingTouch(SeekBar b){if(player!=null&&player.getDuration()>0)player.seekTo(player.getDuration()*b.getProgress()/1000);dragging=false;}public void onProgressChanged(SeekBar b,int v,boolean u){}});
+        LinearLayout controls=new LinearLayout(this);rowButton(controls,"|◀",()->{if(player!=null)player.seekToPreviousMediaItem();});controls.getChildAt(0).setContentDescription("Previous track");
+        play=button("▶",()->{if(player==null||player.getMediaItemCount()==0)return;if(player.isPlaying())player.pause();else{if(player.getPlaybackState()==Player.STATE_ENDED)player.seekToDefaultPosition();player.prepare();player.play();}refresh();});play.setContentDescription("Play or pause");controls.addView(play,new LinearLayout.LayoutParams(0,dp(46),1));
+        rowButton(controls,"■",()->{if(player!=null){player.pause();player.seekToDefaultPosition();}refresh();});controls.getChildAt(2).setContentDescription("Stop playback");rowButton(controls,"▶|",()->{if(player!=null)player.seekToNextMediaItem();});controls.getChildAt(3).setContentDescription("Next track");now.addView(controls);
+        LinearLayout actions=new LinearLayout(this);rowButton(actions,"Library",()->selectModule("AMP Library"));rowButton(actions,"+ Songs",this::importSongs);rowButton(actions,"Settings",this::openSettings);now.addView(actions);drawQueue(false);
+    }
+    private void drawLibrary(){
+        LinearLayout files=card();files.addView(button(importing?"Importing…":"+ Import local songs",this::importSongs));files.addView(label("▾ Saved on this device",17,accent));files.addView(label("    ▾ Imported ("+(player==null?0:player.getMediaItemCount())+")",15,text));drawQueue(true);
+    }
+    private void drawQueue(boolean editable){
+        LinearLayout queue=card();queue.addView(label(editable?"AMP Library · songs":"Now Playing / Queue",16,accent));
+        if(player==null||player.getMediaItemCount()==0){queue.addView(label("No songs saved yet. Import local audio to begin.",14,muted));return;}
+        for(int i=0;i<player.getMediaItemCount();i++){
+            final int index=i;MediaItem item=player.getMediaItemAt(i);LinearLayout row=new LinearLayout(this);
+            Button song=button((i+1)+". "+item.mediaMetadata.title,()->{if(player==null)return;player.seekTo(index,0);player.prepare();player.play();refresh();});song.setGravity(android.view.Gravity.START|android.view.Gravity.CENTER_VERTICAL);song.setTextSize(14);row.addView(song,new LinearLayout.LayoutParams(0,dp(46),1));
+            if(editable){Button remove=button("−",()->{if(player!=null){player.removeMediaItem(index);saveQueue();draw();}});remove.setContentDescription("Remove "+item.mediaMetadata.title+" from library");row.addView(remove,new LinearLayout.LayoutParams(dp(44),dp(46)));}queue.addView(row);
+        }
     }
     private void refresh() {
         if (status == null) return; status.setText(message);
-        if (player == null) return;
+        if (player == null || title == null || clock == null || seek == null || play == null) return;
         MediaItem item = player.getCurrentMediaItem(); title.setText(item == null ? "Choose a song" : item.mediaMetadata.title);
         long duration = player.getDuration(), position = player.getCurrentPosition();
         clock.setText(time(position) + " / " + (duration == C.TIME_UNSET ? "--:--" : time(duration)));
         if (!dragging) seek.setProgress(duration > 0 ? (int)(position * 1000 / duration) : 0);
-        play.setText(player.isPlaying() ? "Pause" : "Play");
+        play.setText(player.isPlaying() ? "Ⅱ" : "▶");
+        play.setBackground(Chrome.button(appearance,player.isPlaying()));
     }
     static String time(long millis) { return String.format(Locale.ROOT, "%02d:%02d", Math.max(0,millis)/60000, Math.max(0,millis)/1000%60); }
     private void syncSavedLibrary() {
@@ -202,7 +210,7 @@ public final class MainActivity extends Activity {
                     if (player != null) player.addMediaItems(added);
                     message = "Saved " + added.size() + " songs offline." + (failure.isEmpty() ? "" : " Some imports failed: " + failure);
                 } catch (Exception saveError) { message = "Could not save imports: " + saveError.getMessage(); }
-                library = true; draw();
+                module="AMP Library";library = true; draw();
             }); worker.shutdown();
         });
     }

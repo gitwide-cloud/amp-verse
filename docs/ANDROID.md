@@ -12,7 +12,7 @@ APK: `android/app/build/outputs/apk/debug/app-debug.apk`. It is a debug preview 
 
 Open **AMP Verse**, then **Library → Import local songs**. Choose one or more audio documents. Imports are copied into the app's local storage; originals are untouched. The queue persists across activity/process restarts. Removing an entry removes it from the queue; copied files are currently retained in private storage. A storage-management UI is still needed. Imported audio is retained until app data is cleared or the app is uninstalled.
 
-The topmost **AMP VERSE** dropdown switches Player/Library or opens **Settings**. Settings contains **Classic**, **Modern Light** and **Modern Dark**, Repeat queue, Android notification settings, local storage information and App Updater. Appearance uses one palette shared by all app screens. Player exposes real seek, pause, previous/next and stop. Queue order plays sequentially; Repeat loops it. The media service supplies standard Android media controls. Do not claim endurance, Bluetooth/device-route coverage or screen-off reliability until verified on hardware.
+The topmost **AMP VERSE** dropdown lists **AMP Player, AMP Library, AMP DJ, AMP Remote, AMP Lab, AMP Cast**, plus **Settings**. A horizontally scrollable module strip repeats the six module shortcuts. Settings contains **Classic**, **Modern Light** and **Modern Dark**, Repeat queue, Android notification settings, local storage information and App Updater. Appearance uses one palette shared by all app screens. Player exposes real seek, pause, previous/next and stop. Queue order plays sequentially; Repeat loops it. The media service supplies standard Android media controls. Do not claim endurance, Bluetooth/device-route coverage or screen-off reliability until verified on hardware.
 
 ## Device test / installation
 
@@ -28,3 +28,10 @@ Still unbuilt: folder-tree import/browser, named/reordered playlists, prepared c
 ## App updater
 
 Version 0.1.1 adds a manual **Settings → App updater → Check for updates** request to GitHub's HTTPS latest-release endpoint. It compares stable three-part version tags, reports unavailable/private releases honestly, and offers **Open GitHub Releases / Download**. This opens the canonical repository Releases page in the browser, where sign-in can happen if required. No GitHub credentials are stored in the app. APK download and installation are user-driven; no silent update or plugin loader is included. The Android INTERNET permission is used only for this explicit update check in the current app. Local playback still works offline.
+
+
+## Compact Classic shell (0.1.2)
+
+The reference-inspired shell uses a compact metallic/beveled title dropdown and buttons, dark information panels, green elapsed-time/track displays, local icon fallback, seek/transport row and a local queue. Modern Light/Dark reuse the same views and actions with flat surfaces. No animated spectrum, fake artwork, artist metadata or fabricated queue songs are added. The imported folder/count reflects actual local saved tracks.
+
+AMP Player and AMP Library retain playback/import/queue-removal operations. AMP DJ exposes the currently implemented local sequential queue/repeat path, with advanced mixing marked unfinished. AMP Remote, AMP Lab and AMP Cast are navigable preview pages explaining what is not yet implemented on Android. They do not pretend to connect, edit or broadcast. Settings remains the sole theme-selection location and contains the updater.
