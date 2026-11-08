@@ -86,3 +86,7 @@ APK/test APK and lint pass. Updated main app installed on the Pixel 7 with its d
 ## Android compact Classic and six-module navigation (0.1.2)
 
 Built main/test APKs and passed Android lint after adding shared Chrome drawables, compact native layouts and six named dropdown/module shortcuts. Actual playback code/service remains the same; no spectrum simulation or fabricated content was introduced. Pixel installation was attempted but failed because the previously connected device disappeared from USB. No new on-device UI/screenshot or playback-test pass is claimed for this build. The prior installed 0.1.1 app was not removed; 0.1.2 device validation requires reconnection. Prior on-device results remain tied to their earlier builds.
+
+## Pixel 0.1.2 follow-up
+
+USB connection returned. Installed 0.1.2 successfully (versionCode 3), opened the native app and checked the dropdown containing AMP Player, AMP Library, AMP DJ, AMP Remote, AMP Lab, AMP Cast and Settings. Selected Classic through Settings and visually inspected the actual silver/beveled layout with dark/green display. Captures: `test-output/pixel-012.png`, `pixel-012-menu.png`, `pixel-012-classic.png`. The actual playback regression test passed on this build: **OK (1 test)**, 7.002 seconds, including local queue/transition/pause and short screen-off progress. Test fixtures were restored/removed as before. Main app remains installed and Classic selected. Remote/Lab/Cast destinations remain explicitly labeled unbuilt previews, not working native integrations.
