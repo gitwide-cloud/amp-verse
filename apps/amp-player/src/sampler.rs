@@ -229,18 +229,21 @@ impl Sampler {
                 if ui.button("Stop all pads").clicked() {actions.push(Action::StopAll);}
                 ui.weak("One-shot · 1–9 · independent of crossfader");
             });
-            let pad_width=((ui.available_width()-16.)/3.).clamp(150.,310.);
-            egui::Grid::new("sampler-pads").num_columns(3).spacing([8.,5.]).show(ui,|ui|{
+            let pad_width=((ui.available_width()-24.)/3.).clamp(144.,192.);
+            let grid_width=pad_width*3.+24.;
+            ui.horizontal(|ui|{
+            ui.add_space(((ui.available_width()-grid_width)/2.).max(0.));
+            egui::Grid::new("sampler-pads").num_columns(3).spacing([12.,12.]).show(ui,|ui|{
                 for pad in 0..9 {
                     ui.push_id(pad,|ui|ui.vertical(|ui|{
                         let playing=engine.is_some_and(|e|e.controls.sample_playing[pad].load(std::sync::atomic::Ordering::Relaxed));
                         let name=self.bank.paths[pad].as_ref().and_then(|p|p.file_stem()).map(|s|s.to_string_lossy().into_owned()).unwrap_or_else(||"Load effect…".into());
                         let loading=self.loading==Some(pad)||self.queue.iter().any(|(p,_)|*p==pad);
-                        let short:String=name.chars().take(28).collect();
-                        let label=format!("{} · {}{}",pad+1,if loading {"Loading…"} else {&short},if playing {"  ▶"} else {""});
+                        let short:String=name.chars().take(34).collect();
+                        let label=format!("PAD {}\n\n{}{}",pad+1,if loading {"Loading…"} else {&short},if playing {"\nPLAYING"} else {""});
                         ui.set_width(pad_width);
-                        let text=RichText::new(label).color(if playing {crate::skin::signal(ui)} else {crate::skin::accent(ui)});
-                        let response=ui.add_enabled(!loading,egui::Button::new(text).selected(playing).min_size(egui::vec2(pad_width,36.))).on_hover_text(self.bank.paths[pad].as_ref().map(|p|format!("{}\nClick to play/restart. Key {}. Right-click for pad volume.",p.display(),pad+1)).unwrap_or_else(||"Load a short sound effect (up to 30 seconds / 12 MiB decoded).".into()));
+                        let text=RichText::new(label).size(18.).strong().color(if playing {crate::skin::signal(ui)} else {crate::skin::accent(ui)});
+                        let response=ui.add_enabled_ui(!loading,|ui|ui.add_sized([pad_width,pad_width],egui::Button::new(text).wrap().selected(playing))).inner.on_hover_text(self.bank.paths[pad].as_ref().map(|p|format!("{}\nClick to play/restart. Key {}. Right-click for pad volume.",p.display(),pad+1)).unwrap_or_else(||"Load a short sound effect (up to 30 seconds / 12 MiB decoded).".into()));
                         response.context_menu(|ui|{
                             if ui.add(egui::Slider::new(&mut self.bank.gains[pad],0. ..=1.).text("Pad volume")).changed() {self.save();}
                         });
@@ -248,13 +251,16 @@ impl Sampler {
                             if self.ready[pad] {actions.push(Action::Trigger(pad));} else {actions.push(Action::Load(pad));}
                         }
                         ui.horizontal(|ui|{
-                            if ui.add_enabled(!busy,egui::Button::new("Load")).clicked(){actions.push(Action::Load(pad));}
-                            if ui.add_enabled(playing,egui::Button::new("Stop")).clicked(){actions.push(Action::Stop(pad));}
-                            if ui.add_enabled(!busy&&self.bank.paths[pad].is_some(),egui::Button::new("Clear")).clicked(){actions.push(Action::Clear(pad));}
+                            ui.spacing_mut().item_spacing.x=6.;
+                            let width=(pad_width-12.)/3.;
+                            for (label,enabled,action) in [("Load",!busy,Action::Load(pad)),("Stop",playing,Action::Stop(pad)),("Clear",!busy&&self.bank.paths[pad].is_some(),Action::Clear(pad))] {
+                                if ui.add_enabled_ui(enabled,|ui|ui.add_sized([width,44.],egui::Button::new(label))).inner.clicked(){actions.push(action);}
+                            }
                         });
                     }));
                     if pad%3==2 {ui.end_row();}
                 }
+            });
             });
             ui.weak(&self.status);
         });
