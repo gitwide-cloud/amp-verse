@@ -195,3 +195,8 @@ Bound pane heights inside the shared outer scroll area so attaching DJ below Lib
 ## DJ Library source sidebar (2026-11-08)
 
 Added a left sidebar below the mixer: Auto DJ switch, saved Smart Playlists, Playlists and folder tree. Right pane filters by source and search and loads either deck. Saved playlists open for browsing without replacing the live queue, retaining track order and repeats. Smart previews show rule-eligible tracks; actual Auto DJ selection remains governed by the performance engine. A chosen Smart Playlist can be loaded paused or started through the Auto DJ switch. Source browsing does not write preparation metadata. Player tests and strict lint passed; CI captures the dedicated DJ Library view in each theme.
+
+
+## Multicore song preparation (2026-11-08)
+
+Library batch analysis and the headless helper now share bounded song workers. Tests prove three callbacks overlap, each song executes exactly once, stop prevents new work, and automatic/manual limits respect available CPUs and batch size. Real FFmpeg regression analyzes three generated songs with three workers, checks BPM/key, preserves approved metadata and original audio hashes, and validates relocated metadata. All 54 regular workspace tests and strict Clippy passed; all release binaries built. Native Library screenshot confirms 16 logical CPUs detected and an Auto limit of eight parallel songs. No throughput multiplier or playback-underrun guarantee is claimed; NAS and codec costs affect actual performance.

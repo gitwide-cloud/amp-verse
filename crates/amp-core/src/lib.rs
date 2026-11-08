@@ -1,6 +1,7 @@
 //! Offline-first library, preparation data and process audio adapter. No GUI or network dependency.
 pub mod analysis;
 pub mod arrangement;
+pub mod batch;
 pub mod preparation;
 pub mod review;
 pub mod show;

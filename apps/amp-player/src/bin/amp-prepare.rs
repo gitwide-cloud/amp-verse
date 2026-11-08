@@ -6,13 +6,33 @@ fn main() {
     }
 }
 fn run() -> Result<(), String> {
-    let root = std::env::args_os()
-        .nth(1)
+    let mut args = std::env::args_os().skip(1);
+    let root = args
+        .next()
         .map(std::path::PathBuf::from)
-        .ok_or("Usage: amp-prepare MUSIC_FOLDER")?;
+        .ok_or("Usage: amp-prepare MUSIC_FOLDER [--jobs N]")?;
+    let mut requested = 0;
+    if let Some(flag) = args.next() {
+        if flag != "--jobs" {
+            return Err("Usage: amp-prepare MUSIC_FOLDER [--jobs N]".into());
+        }
+        requested = args
+            .next()
+            .and_then(|v| v.to_str().and_then(|s| s.parse::<usize>().ok()))
+            .filter(|&n| n > 0)
+            .ok_or("--jobs requires a positive worker count")?;
+        if args.next().is_some() {
+            return Err("Unexpected extra arguments".into());
+        }
+    }
     let library = amp_core::scan(&root).map_err(|e| e.to_string())?;
-    let mut errors = 0;
-    for track in &library.tracks {
+    let errors = std::sync::atomic::AtomicUsize::new(0);
+    let workers = amp_core::batch::workers(requested, library.tracks.len());
+    eprintln!(
+        "Analyzing {} tracks with {workers} parallel workers",
+        library.tracks.len()
+    );
+    amp_core::batch::for_each(&library.tracks, workers, |track| {
         let result: Result<amp_core::Preparation, String> = (|| {
             let path = amp_core::resolve(&root, &track.path).map_err(|e| e.to_string())?;
             let (existing, before) = amp_core::preparation::load_with_revision(&path)?;
@@ -34,11 +54,13 @@ fn run() -> Result<(), String> {
                 p.cues.len() + p.manual_cues.len()
             ),
             Err(e) => {
-                errors += 1;
+                errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 eprintln!("{}: {e}", track.path.display());
             }
         }
-    }
+        true
+    });
+    let errors = errors.load(std::sync::atomic::Ordering::Relaxed);
     if errors > 0 {
         return Err(format!("{errors} tracks could not be prepared"));
     }

@@ -1039,6 +1039,24 @@ impl Player {
                 }
                 ui.label(&self.preparer.status);
             });
+            ui.horizontal(|ui| {
+                ui.label("Analysis workers");
+                ui.add_enabled(
+                    !self.preparer.busy(),
+                    egui::DragValue::new(&mut self.preparer.workers)
+                        .range(0..=amp_core::batch::cpu_count().min(32)),
+                );
+                let count = amp_core::batch::workers(self.preparer.workers, usize::MAX);
+                ui.weak(format!(
+                    "{} = {count} songs at once · {} logical CPUs",
+                    if self.preparer.workers == 0 {
+                        "Auto"
+                    } else {
+                        "Selected"
+                    },
+                    amp_core::batch::cpu_count()
+                ));
+            });
             let content_height = (ui.available_height() - 150.).max(300.);
             ui.horizontal_top(|ui| {
                 let sidebar_width = 210.;

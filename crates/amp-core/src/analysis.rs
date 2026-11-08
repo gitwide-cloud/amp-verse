@@ -270,7 +270,7 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
     }
     let before = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let mut child = crate::command("ffmpeg")
-        .args(["-v", "error", "-i"])
+        .args(["-v", "error", "-threads", "1", "-i"])
         .arg(path)
         .args(["-vn", "-ac", "1", "-ar", "11025", "-f", "f32le", "pipe:1"])
         .stdin(Stdio::null())

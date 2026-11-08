@@ -23,6 +23,8 @@ pub struct Preparer {
     draft: Preparation,
     job: Option<mpsc::Receiver<Update>>,
     pub status: String,
+    pub workers: usize,
+    active_workers: usize,
     total: usize,
     done: usize,
     failures: usize,
@@ -67,8 +69,14 @@ impl Preparer {
     fn start(&mut self, root: PathBuf, tracks: Vec<Track>, selected: bool) {
         let (tx, rx) = mpsc::channel();
         self.job = Some(rx);
+        self.active_workers = amp_core::batch::workers(self.workers, tracks.len());
+        let workers = self.active_workers;
+        self.status = format!(
+            "Preparing {} tracks with {workers} parallel workers",
+            tracks.len()
+        );
         std::thread::spawn(move || {
-            for track in tracks {
+            amp_core::batch::for_each(&tracks, workers, |track| {
                 let result = (|| {
                     let path = amp_core::resolve(&root, &track.path).map_err(|e| e.to_string())?;
                     let (snapshot, sidecar_before) = preparation::load_with_revision(&path)?;
@@ -94,18 +102,14 @@ impl Preparer {
                     }
                     Ok(result)
                 })();
-                if tx
-                    .send(Update {
-                        root: root.clone(),
-                        path: track.path,
-                        result,
-                        selected,
-                    })
-                    .is_err()
-                {
-                    break;
-                }
-            }
+                tx.send(Update {
+                    root: root.clone(),
+                    path: track.path.clone(),
+                    result,
+                    selected,
+                })
+                .is_ok()
+            });
         });
     }
     pub fn poll(&mut self, root: &std::path::Path, library: Option<&mut Library>) {
@@ -141,9 +145,10 @@ impl Preparer {
                             t.preparation = p;
                         }
                         self.status = format!(
-                            "Prepared {}/{}: {}",
+                            "Prepared {}/{} ({} workers): {}",
                             self.done,
                             self.total,
+                            self.active_workers,
                             update.path.display()
                         );
                     }

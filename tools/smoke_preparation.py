@@ -15,9 +15,15 @@ with tempfile.TemporaryDirectory() as tmp:
         frames.append(struct.pack("<h", int(max(-1,min(1,value)) * 32767)))
     with wave.open(str(audio), "wb") as w:
         w.setnchannels(1); w.setsampwidth(2); w.setframerate(rate); w.writeframes(b"".join(frames))
+    copies = [folder / "parallel-a.wav", folder / "parallel-b.wav"]
+    for other in copies: shutil.copyfile(audio, other)
     source_hash = hashlib.sha256(audio.read_bytes()).hexdigest()
-    subprocess.run([binary, str(folder)], check=True)
+    subprocess.run([binary, str(folder), "--jobs", "3"], check=True)
     assert hashlib.sha256(audio.read_bytes()).hexdigest() == source_hash
+    for other in copies:
+        parallel = json.loads((folder / ".ampverse" / "tracks" / (other.name + ".json")).read_text())
+        assert abs(parallel["bpm"] - 120) < 2 and parallel["harmonic_key"] == "8B", parallel
+        assert hashlib.sha256(other.read_bytes()).hexdigest() == source_hash
     sidecar = folder / ".ampverse" / "tracks" / (audio.name + ".json")
     prep = json.loads(sidecar.read_text())
     assert abs(prep["bpm"] - 120) < 2, prep
@@ -27,7 +33,7 @@ with tempfile.TemporaryDirectory() as tmp:
     prep["manual_override"] = True; prep["cue_in"] = 2.; prep["cue_out"] = 8.
     prep["vendor_extension"] = {"preserved":True}
     sidecar.write_text(json.dumps(prep))
-    subprocess.run([binary, str(folder)], check=True)
+    subprocess.run([binary, str(folder), "--jobs", "3"], check=True)
     prep = json.loads(sidecar.read_text())
     assert prep["cue_in"] == 2 and prep["cue_out"] == 8
     assert prep["manual_cues"][0]["id"] == "my-drop" and prep["vendor_extension"]["preserved"]
@@ -35,4 +41,4 @@ with tempfile.TemporaryDirectory() as tmp:
     shutil.copyfile(audio, moved / audio.name); shutil.copytree(folder / ".ampverse", moved / ".ampverse")
     subprocess.run([binary, str(moved)], check=True)
     assert json.loads((moved / ".ampverse" / "tracks" / sidecar.name).read_text())["source_sha256"] == prep["source_sha256"]
-print("PASS: tempo/key, silence trim, manual cues, extensions and relocated metadata")
+print("PASS: parallel song analysis, tempo/key, silence trim, manual cues, extensions and relocated metadata")
