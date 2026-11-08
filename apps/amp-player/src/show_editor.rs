@@ -1,6 +1,16 @@
 //! AMP Library edits a draft; only explicit Save publishes rules for future performances.
 use amp_core::show::{EnergyPlan, Fallback, Settings, Style};
 use eframe::egui;
+pub fn edit_menu(response: &egui::Response) -> bool {
+    let mut edit = false;
+    response.context_menu(|ui| {
+        if ui.button("Edit in Library").clicked() {
+            edit = true;
+            ui.close();
+        }
+    });
+    edit
+}
 #[derive(Default)]
 pub struct Editor {
     pub open: bool,

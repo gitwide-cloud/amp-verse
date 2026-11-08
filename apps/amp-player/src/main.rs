@@ -1452,10 +1452,24 @@ impl Player {
             let _ = command.reply.send(reply);
         }
     }
+    fn edit_smart_in_library(&mut self, ui: &mut egui::Ui, id: &str) {
+        match amp_core::show::Settings::load(&self.root) {
+            Ok(settings) if settings.playlists.iter().any(|p| p.id == id) => {
+                self.show_editor.open_playlist(id, &self.root, &settings);
+                self.activate(ui, Some(skin::Module::Library));
+            }
+            Ok(_) => {
+                self.status =
+                    "That Smart Playlist no longer exists. Reload saved rules in Library.".into()
+            }
+            Err(error) => self.status = format!("Could not open Smart Playlist: {error}"),
+        }
+    }
     fn performance_controls(&mut self, ui: &mut egui::Ui) {
         let mut selected = self.run.choice.clone();
+        let mut context_edit = None;
         ui.horizontal_wrapped(|ui| {
-            egui::ComboBox::from_id_salt("performance-playlist")
+            let selector = egui::ComboBox::from_id_salt("performance-playlist")
                 .selected_text(
                     self.run
                         .settings
@@ -1466,9 +1480,15 @@ impl Player {
                 )
                 .show_ui(ui, |ui| {
                     for p in &self.run.settings.playlists {
-                        ui.selectable_value(&mut selected, p.id.clone(), &p.name);
+                        let row = ui.selectable_value(&mut selected, p.id.clone(), &p.name);
+                        if show_editor::edit_menu(&row) {
+                            context_edit = Some(p.id.clone());
+                        }
                     }
                 });
+            if !selected.is_empty() && show_editor::edit_menu(&selector.response) {
+                context_edit = Some(selected.clone());
+            }
             if ui.button("Load").clicked()
                 && let Err(e) = self.execute_control(control::Action::LoadSmartPlaylist {
                     playlist: selected.clone(),
@@ -1518,6 +1538,9 @@ impl Player {
             ));
         });
         self.run.choice = selected;
+        if let Some(id) = context_edit {
+            self.edit_smart_in_library(ui, &id);
+        }
     }
     fn sampler_ui(&mut self, ui: &mut egui::Ui) {
         if !self.sampler.started {

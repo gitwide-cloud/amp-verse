@@ -32,6 +32,7 @@ impl Player {
         let mut load = None;
         let mut load_smart = false;
         let mut edit_smart = false;
+        let mut context_edit = None;
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(195., 320.),
@@ -58,11 +59,14 @@ impl Player {
                         .show(ui, |ui| match self.dj_browser.source {
                             Source::Smart => {
                                 for profile in &self.run.settings.playlists {
-                                    ui.selectable_value(
+                                    let row = ui.selectable_value(
                                         &mut self.dj_browser.smart,
                                         profile.id.clone(),
                                         &profile.name,
                                     );
+                                    if show_editor::edit_menu(&row) {
+                                        context_edit = Some(profile.id.clone());
+                                    }
                                 }
                             }
                             Source::Playlists => {
@@ -231,9 +235,10 @@ impl Player {
             }
         }
         if edit_smart {
-            self.show_editor
-                .open_playlist(&self.dj_browser.smart, &self.root, &self.run.settings);
-            self.activate(ui, Some(skin::Module::Library));
+            context_edit = Some(self.dj_browser.smart.clone());
+        }
+        if let Some(id) = context_edit {
+            self.edit_smart_in_library(ui, &id);
         }
         if load_smart {
             self.run.choice = self.dj_browser.smart.clone();
