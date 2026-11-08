@@ -160,13 +160,17 @@ impl Playlist {
 }
 
 pub fn command(name: &str) -> Command {
-    let mut cmd = Command::new(name);
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
+        let mut cmd = Command::new(name);
         cmd.creation_flags(0x08000000);
+        cmd
     }
-    cmd
+    #[cfg(not(windows))]
+    {
+        Command::new(name)
+    }
 }
 pub fn cue_args(prep: &Preparation) -> Result<Vec<String>, String> {
     prep.validate()?;

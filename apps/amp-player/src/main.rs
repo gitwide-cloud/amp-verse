@@ -3,6 +3,66 @@ use amp_core::{Deck, Folder, Library, Playlist};
 use eframe::egui::{self, Color32, RichText};
 use std::{path::PathBuf, sync::mpsc, time::Duration};
 
+fn chrome(ui: &mut egui::Ui, text: &str) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(
+        egui::vec2(text.len() as f32 * 7.5 + 20., 27.),
+        egui::Sense::click(),
+    );
+    let pressed = response.is_pointer_button_down_on();
+    let mut mesh = egui::Mesh::default();
+    let top = Color32::from_gray(if pressed { 100 } else { 220 });
+    let bottom = Color32::from_gray(if pressed { 170 } else { 125 });
+    for (pos, color) in [
+        (rect.left_top(), top),
+        (rect.right_top(), top),
+        (rect.left_bottom(), bottom),
+        (rect.right_bottom(), bottom),
+    ] {
+        mesh.colored_vertex(pos, color);
+    }
+    mesh.indices = vec![0, 1, 2, 2, 1, 3];
+    ui.painter().add(egui::Shape::mesh(mesh));
+    ui.painter().rect_stroke(
+        rect,
+        2.,
+        egui::Stroke::new(
+            1.,
+            if response.hovered() {
+                Color32::LIGHT_BLUE
+            } else {
+                Color32::from_gray(70)
+            },
+        ),
+        egui::StrokeKind::Inside,
+    );
+    ui.painter().text(
+        rect.center(),
+        egui::Align2::CENTER_CENTER,
+        text,
+        egui::FontId::monospace(12.),
+        Color32::from_rgb(17, 22, 29),
+    );
+    response
+}
+
+fn capture(ctx: &egui::Context, path: PathBuf, close: bool) {
+    use eframe::icon_data::IconDataExt;
+    let context = ctx.clone();
+    ctx.request_screenshot(move |image| {
+        let icon = egui::IconData {
+            width: image.size[0] as u32,
+            height: image.size[1] as u32,
+            rgba: image.pixels.iter().flat_map(|c| c.to_array()).collect(),
+        };
+        if let Ok(bytes) = icon.to_png_bytes() {
+            let _ = std::fs::write(path, bytes);
+        }
+        if close {
+            context.send_viewport_cmd(egui::ViewportCommand::Close);
+        }
+    });
+}
+
 struct Player {
     root: PathBuf,
     library: Option<Library>,
@@ -124,9 +184,10 @@ impl eframe::App for Player {
             .fill(Color32::from_rgb(39, 43, 52))
             .inner_margin(10)
             .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
                 ui.horizontal(|ui| {
                     ui.label(
-                        RichText::new("AMP⚡VERSE")
+                        RichText::new("AMP VERSE")
                             .strong()
                             .color(Color32::from_rgb(245, 211, 80)),
                     );
@@ -150,134 +211,159 @@ impl eframe::App for Player {
                         ui.label(RichText::new(&self.status).color(Color32::LIGHT_GREEN));
                     });
                 ui.horizontal(|ui| {
-                    if ui.button("▶ PLAY").clicked()
+                    if chrome(ui, "PLAY >").clicked()
                         && let Some(i) = self.selected
                     {
                         self.play(0, i);
                     }
-                    if ui.button("■ STOP").clicked() {
+                    if chrome(ui, "STOP").clicked() {
                         self.auto = false;
                         self.decks[0].stop();
                         self.status = "Stopped".into();
                     }
-                    if ui.button("NEXT ▶|").clicked() {
+                    if chrome(ui, "NEXT >|").clicked() {
                         self.next();
                     }
                     ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Next play volume"));
                 });
                 ui.horizontal(|ui| {
-                    if ui.button("FOLDER LIBRARY").clicked() {
+                    if chrome(ui, "FOLDER LIBRARY").clicked() {
                         self.library_open = true;
                     }
-                    if ui.button("AMP DJ").clicked() {
+                    if chrome(ui, "AMP DJ").clicked() {
                         self.dj_open = true;
                     }
                     ui.hyperlink_to(
-                        "AMP Lab downloads ↗",
+                        "AMP Lab downloads",
                         "https://github.com/gitwide-cloud/mp3-lab/releases",
                     );
                 });
             });
-        let mut library_open = self.library_open;
-        egui::Window::new("AMP LIBRARY · Folders & Playlists")
-            .open(&mut library_open)
-            .default_width(500.)
-            .show(&ctx, |ui| {
-                ui.horizontal(|ui| {
-                    if ui
-                        .add_enabled(self.scan.is_none(), egui::Button::new("Choose folder…"))
-                        .clicked()
-                        && let Some(root) = rfd::FileDialog::new().pick_folder()
-                    {
-                        self.root = root;
-                        self.library = None;
-                        self.scan();
+        if self.library_open {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("amp-library"),
+                egui::ViewportBuilder::default()
+                    .with_title("AMP LIBRARY · Folders & Playlists")
+                    .with_inner_size([720., 520.]),
+                |ui, _| {
+                    if ui.ctx().input(|i| i.viewport().close_requested()) {
+                        self.library_open = false;
                     }
-                    if ui
-                        .add_enabled(
-                            self.scan.is_none() && !self.root.as_os_str().is_empty(),
-                            egui::Button::new("Rescan"),
-                        )
-                        .clicked()
-                    {
-                        self.scan();
-                    }
-                    ui.label(self.root.display().to_string());
-                });
-                egui::ScrollArea::vertical()
-                    .max_height(240.)
-                    .show(ui, |ui| {
-                        if let Some(lib) = &self.library {
-                            Self::tree(ui, &lib.tree, lib, &mut self.selected);
-                        }
-                    });
-                ui.horizontal(|ui| {
-                    if ui.button("Add selected to playlist").clicked()
-                        && let Some(i) = self.selected
-                    {
-                        self.queue.push(i);
-                    }
-                    if ui.button("Save playlist…").clicked()
-                        && let Some(lib) = &self.library
-                        && let Some(path) = rfd::FileDialog::new()
-                            .add_filter("AMP playlist", &["json"])
-                            .save_file()
-                    {
-                        let list = Playlist {
-                            version: 1,
-                            name: "Playlist".into(),
-                            tracks: self
-                                .queue
-                                .iter()
-                                .map(|&i| lib.tracks[i].path.clone())
-                                .collect(),
-                        };
-                        self.status = list
-                            .save(&path)
-                            .map(|_| "Playlist saved".into())
-                            .unwrap_or_else(|e| e.to_string());
-                    }
-                    if ui.button("Load playlist…").clicked()
-                        && let Some(path) = rfd::FileDialog::new().pick_file()
-                    {
-                        match Playlist::load(&path, &self.root) {
-                            Ok(list) => {
+                    egui::CentralPanel::default().show(ui, |ui| {
+                        ui.horizontal(|ui| {
+                            if ui
+                                .add_enabled(
+                                    self.scan.is_none(),
+                                    egui::Button::new("Choose folder…"),
+                                )
+                                .clicked()
+                                && let Some(root) = rfd::FileDialog::new().pick_folder()
+                            {
+                                self.root = root;
+                                self.library = None;
+                                self.scan();
+                            }
+                            if ui
+                                .add_enabled(
+                                    self.scan.is_none() && !self.root.as_os_str().is_empty(),
+                                    egui::Button::new("Rescan"),
+                                )
+                                .clicked()
+                            {
+                                self.scan();
+                            }
+                            ui.label(self.root.display().to_string());
+                        });
+                        egui::ScrollArea::vertical()
+                            .max_height(240.)
+                            .show(ui, |ui| {
                                 if let Some(lib) = &self.library {
-                                    let indices: Option<Vec<_>> = list
-                                        .tracks
+                                    Self::tree(ui, &lib.tree, lib, &mut self.selected);
+                                }
+                            });
+                        ui.horizontal(|ui| {
+                            if ui.button("Add selected to playlist").clicked()
+                                && let Some(i) = self.selected
+                            {
+                                self.queue.push(i);
+                            }
+                            if ui.button("Save playlist…").clicked()
+                                && let Some(lib) = &self.library
+                                && let Some(path) = rfd::FileDialog::new()
+                                    .add_filter("AMP playlist", &["json"])
+                                    .save_file()
+                            {
+                                let list = Playlist {
+                                    version: 1,
+                                    name: "Playlist".into(),
+                                    tracks: self
+                                        .queue
                                         .iter()
-                                        .map(|p| lib.tracks.iter().position(|t| &t.path == p))
-                                        .collect();
-                                    if let Some(indices) = indices {
-                                        self.queue = indices;
-                                    } else {
-                                        self.status =
-                                            "Rescan: playlist includes an unindexed track".into();
+                                        .map(|&i| lib.tracks[i].path.clone())
+                                        .collect(),
+                                };
+                                self.status = list
+                                    .save(&path)
+                                    .map(|_| "Playlist saved".into())
+                                    .unwrap_or_else(|e| e.to_string());
+                            }
+                            if ui.button("Load playlist…").clicked()
+                                && let Some(path) = rfd::FileDialog::new().pick_file()
+                            {
+                                match Playlist::load(&path, &self.root) {
+                                    Ok(list) => {
+                                        if let Some(lib) = &self.library {
+                                            let indices: Option<Vec<_>> = list
+                                                .tracks
+                                                .iter()
+                                                .map(|p| {
+                                                    lib.tracks.iter().position(|t| &t.path == p)
+                                                })
+                                                .collect();
+                                            if let Some(indices) = indices {
+                                                self.queue = indices;
+                                            } else {
+                                                self.status =
+                                                    "Rescan: playlist includes an unindexed track"
+                                                        .into();
+                                            }
+                                        }
                                     }
+                                    Err(e) => self.status = e.to_string(),
                                 }
                             }
-                            Err(e) => self.status = e.to_string(),
+                        });
+                        ui.label(format!("Playlist · {} queued tracks", self.queue.len()));
+                        if let Some(lib) = &self.library {
+                            for &i in &self.queue {
+                                ui.label(&lib.tracks[i].title);
+                            }
                         }
+                        if ui.button("Clear playlist").clicked() {
+                            self.queue.clear();
+                        }
+                    });
+                    if self.screenshot_frames == 10
+                        && let Some(path) = std::env::var_os("AMP_SCREENSHOT")
+                    {
+                        capture(
+                            ui.ctx(),
+                            PathBuf::from(path).with_extension("library.png"),
+                            false,
+                        );
                     }
-                });
-                ui.label(format!("Playlist · {} queued tracks", self.queue.len()));
-                if let Some(lib) = &self.library {
-                    for &i in &self.queue {
-                        ui.label(&lib.tracks[i].title);
-                    }
-                }
-                if ui.button("Clear playlist").clicked() {
-                    self.queue.clear();
-                }
-            });
-        self.library_open = library_open;
-        let mut dj_open = self.dj_open;
-        egui::Window::new("AMP DJ · Two-deck prototype")
-            .open(&mut dj_open)
-            .show(&ctx, |ui| {
+                },
+            );
+        }
+        if self.dj_open {
+            ctx.show_viewport_immediate(egui::ViewportId::from_hash_of("amp-dj"),egui::ViewportBuilder::default().with_title("AMP DJ · Two-deck prototype").with_inner_size([720.,300.]), |ui,_| {
+                if ui.ctx().input(|i|i.viewport().close_requested()) { self.dj_open = false; }
+                egui::CentralPanel::default().show(ui, |ui| {
                 for deck in 0..2 {
+                    let accent = if deck == 0 {Color32::from_rgb(245,164,55)}else{Color32::from_rgb(70,190,245)};
+                    egui::Frame::new().stroke(egui::Stroke::new(1.,accent)).inner_margin(12).show(ui, |ui| {
                     ui.horizontal(|ui| {
-                        ui.label(format!("DECK {}", deck + 1));
+                        ui.label(RichText::new(format!("DECK {}", deck + 1)).strong().color(accent));
                         if ui.button("Play selected").clicked()
                             && let Some(i) = self.selected
                         {
@@ -295,32 +381,23 @@ impl eframe::App for Player {
                             .unwrap_or("Empty");
                         ui.label(title);
                     });
+                    });
                 }
                 ui.checkbox(
                     &mut self.auto,
                     "Prepared Auto DJ · sequential playlist on deck 1",
                 );
                 ui.label("Uses cue IN/OUT from .amp.json sidecars. No beat sync or crossfade yet.");
+                });
+                if self.screenshot_frames == 10 && let Some(path) = std::env::var_os("AMP_SCREENSHOT") { capture(ui.ctx(),PathBuf::from(path).with_extension("dj.png"),false); }
             });
-        self.dj_open = dj_open;
-        if let Some(path) = std::env::var_os("AMP_SCREENSHOT") {
-            use eframe::icon_data::IconDataExt;
-            if self.scan.is_none() {
-                self.screenshot_frames += 1;
-                if self.screenshot_frames == 10 {
-                    let context = ctx.clone();
-                    ctx.request_screenshot(move |image| {
-                        let icon = egui::IconData {
-                            width: image.size[0] as u32,
-                            height: image.size[1] as u32,
-                            rgba: image.pixels.iter().flat_map(|c| c.to_array()).collect(),
-                        };
-                        if let Ok(bytes) = icon.to_png_bytes() {
-                            let _ = std::fs::write(path, bytes);
-                        }
-                        context.send_viewport_cmd(egui::ViewportCommand::Close);
-                    });
-                }
+        }
+        if let Some(path) = std::env::var_os("AMP_SCREENSHOT")
+            && self.scan.is_none()
+        {
+            self.screenshot_frames += 1;
+            if self.screenshot_frames == 20 {
+                capture(&ctx, PathBuf::from(path), true);
             }
         }
         ctx.request_repaint_after(Duration::from_millis(100));
@@ -328,6 +405,10 @@ impl eframe::App for Player {
 }
 fn main() -> eframe::Result {
     let mut player = Player::default();
+    if std::env::var_os("AMP_SCREENSHOT").is_some() {
+        player.library_open = true;
+        player.dj_open = true;
+    }
     if !player.root.as_os_str().is_empty() {
         player.scan();
     }
@@ -335,8 +416,8 @@ fn main() -> eframe::Result {
         "AMP⚡VERSE",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
-                .with_inner_size([600., 210.])
-                .with_min_inner_size([540., 200.]),
+                .with_inner_size([600., 185.])
+                .with_min_inner_size([600., 185.]),
             ..Default::default()
         },
         Box::new(|cc| {

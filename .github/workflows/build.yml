@@ -26,6 +26,8 @@ jobs:
         with:
           components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev ffmpeg xvfb
@@ -46,7 +48,7 @@ jobs:
         if: runner.os == 'Linux'
         with:
           name: amp-player-ui
-          path: test-output/player.png
+          path: test-output/*.png
       - name: Package binaries and documentation
         shell: bash
         run: |
