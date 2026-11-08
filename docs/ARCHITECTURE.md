@@ -87,3 +87,6 @@ Android AMP Lab now integrates MP3 Lab's existing Android Java editor and pinned
 
 
 Lab mix arrangements live in `amp-core::arrangement`: clips reference library-relative files plus timeline start, preparation cue range and gain. Export resolves every source within the library root, trims source ranges, resets timestamps, delays clips to timeline positions, mixes and limits, then encodes MP3 on a worker thread. Individual exports use the same renderer with zero timeline start. The desktop Lab shell adds arrangement editing beside the existing MP3 Lab waveform editor; it does not fork the waveform engine. DJ uses the scanned folder library directly and keeps multitrack arrangement out of the deck interface.
+
+
+Portable preparation now has a concrete version-1 implementation in amp-core::preparation/analysis. Desktop Library and amp-prepare use the same decoder/analyzer and adjacent metadata writer. See PREPARATION.md for persisted fields, manual protection, concurrency limits and unfinished Android consumption.

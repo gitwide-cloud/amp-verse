@@ -10,6 +10,7 @@ mod addons;
 mod cast;
 mod docking;
 mod lab;
+mod preparer;
 mod skin;
 mod theme;
 use skin::{CYAN, GOLD, ORANGE};
@@ -72,6 +73,7 @@ struct Player {
     dj_open: bool,
     lab_open: bool,
     lab: lab::Arrangement,
+    preparer: preparer::Preparer,
     addons_open: bool,
     cast_open: bool,
     cast: cast::Dashboard,
@@ -110,6 +112,7 @@ impl Default for Player {
             dj_open: false,
             lab_open: false,
             lab: lab::Arrangement::default(),
+            preparer: preparer::Preparer::default(),
             addons_open: false,
             cast_open: false,
             cast: cast::Dashboard::default(),
@@ -175,6 +178,7 @@ impl Player {
         });
     }
     fn poll(&mut self) {
+        self.preparer.poll(&self.root, self.library.as_mut());
         if let Some(rx) = &self.scan {
             match rx.try_recv() {
                 Ok(result) => {
@@ -192,6 +196,12 @@ impl Player {
                             self.auto = false;
                             self.status = format!("{} tracks / offline ready", lib.tracks.len());
                             self.library = Some(lib);
+                            if self.screenshot_view == "preparation"
+                                && let Some(t) =
+                                    self.library.as_ref().and_then(|l| l.tracks.first())
+                            {
+                                self.preparer.edit(&self.root, t);
+                            }
                         }
                         Err(e) => self.status = e,
                     }
@@ -217,6 +227,28 @@ impl Player {
                     self.playing[deck] = true;
                     self.started[deck] = Some(std::time::Instant::now());
                     self.status = format!("Deck {} / {}", deck + 1, track.title);
+                }
+                Err(e) => self.status = e,
+            }
+        }
+    }
+    fn play_cue(&mut self, deck: usize, index: usize, seconds: f64) {
+        if let Some(mut track) = self
+            .library
+            .as_ref()
+            .and_then(|l| l.tracks.get(index))
+            .cloned()
+        {
+            track.preparation.cue_in = seconds;
+            if track.preparation.cue_out.is_some_and(|out| out <= seconds) {
+                return;
+            }
+            match self.decks[deck].play(&self.root, &track, self.volume) {
+                Ok(()) => {
+                    self.loaded[deck] = Some(index);
+                    self.playing[deck] = true;
+                    self.started[deck] = Some(std::time::Instant::now());
+                    self.status = format!("Deck {} cue {:.2}s", deck + 1, seconds);
                 }
                 Err(e) => self.status = e,
             }
@@ -419,6 +451,8 @@ impl Player {
         });
     }
     fn library_ui(&mut self, ui: &mut egui::Ui) {
+        self.preparer
+            .show(ui.ctx(), &self.root, self.library.as_mut());
         skin::panel(ui, false, |ui| {
             ui.set_min_size(ui.available_size());
             self.header(ui, "AMP Library", false);
@@ -447,7 +481,32 @@ impl Player {
                         .desired_width(280.),
                 );
             });
-            let content_height = (ui.available_height() - 85.).max(340.);
+            ui.horizontal(|ui| {
+                if ui
+                    .add_enabled(
+                        !self.preparer.busy() && self.selected.is_some(),
+                        egui::Button::new("Prepare selected / cues..."),
+                    )
+                    .clicked()
+                    && let Some(t) = self
+                        .selected
+                        .and_then(|i| self.library.as_ref()?.tracks.get(i))
+                {
+                    self.preparer.edit(&self.root, t);
+                }
+                if ui
+                    .add_enabled(
+                        !self.preparer.busy() && self.library.is_some(),
+                        egui::Button::new("Analyze library and save metadata"),
+                    )
+                    .clicked()
+                    && let Some(lib) = &self.library
+                {
+                    self.preparer.batch(self.root.clone(), lib.tracks.clone());
+                }
+                ui.label(&self.preparer.status);
+            });
+            let content_height = (ui.available_height() - 120.).max(340.);
             ui.horizontal_top(|ui| {
                 let sidebar_width = 210.;
                 skin::panel(ui, false, |ui| {
@@ -491,7 +550,10 @@ impl Player {
                                     .striped(true)
                                     .min_col_width(64.)
                                     .show(ui, |ui| {
-                                        for h in ["Name", "BPM", "Cue IN", "Cue OUT", "Type"] {
+                                        for h in [
+                                            "Name", "BPM", "Key", "Cues", "Cue IN", "Cue OUT",
+                                            "Type",
+                                        ] {
                                             ui.label(
                                                 RichText::new(h).strong().color(skin::accent(ui)),
                                             );
@@ -524,6 +586,19 @@ impl Player {
                                                         .bpm
                                                         .map(|x| format!("{x:.1}"))
                                                         .unwrap_or_else(|| "--".into()),
+                                                );
+                                                ui.label(
+                                                    track
+                                                        .preparation
+                                                        .harmonic_key
+                                                        .as_deref()
+                                                        .or(track.preparation.key.as_deref())
+                                                        .unwrap_or("--"),
+                                                );
+                                                ui.label(
+                                                    (track.preparation.cues.len()
+                                                        + track.preparation.manual_cues.len())
+                                                    .to_string(),
                                                 );
                                                 ui.label(format!(
                                                     "{:.2}s",
@@ -711,6 +786,41 @@ impl Player {
                                 .monospace()
                                 .color(skin::color(ui, accent)),
                         );
+                        let cue_buttons = self.loaded[deck].and_then(|i| {
+                            self.library
+                                .as_ref()
+                                .and_then(|l| l.tracks.get(i))
+                                .map(|t| {
+                                    (
+                                        i,
+                                        t.preparation
+                                            .manual_cues
+                                            .iter()
+                                            .chain(
+                                                t.preparation
+                                                    .cues
+                                                    .iter()
+                                                    .filter(|c| c.kind == "grid"),
+                                            )
+                                            .take(8)
+                                            .cloned()
+                                            .collect::<Vec<_>>(),
+                                    )
+                                })
+                        });
+                        if let Some((index, cues)) = cue_buttons {
+                            ui.horizontal_wrapped(|ui| {
+                                for cue in cues {
+                                    if ui
+                                        .button(&cue.label)
+                                        .on_hover_text(format!("Jump to {:.2}s", cue.seconds))
+                                        .clicked()
+                                    {
+                                        self.play_cue(deck, index, cue.seconds);
+                                    }
+                                }
+                            });
+                        }
                         ui.horizontal(|ui| {
                             if skin::button(ui, "PLAY / CUE", accent).clicked()
                                 && let Some(i) = self.loaded[deck].or(self.selected)
@@ -795,7 +905,7 @@ impl eframe::App for Player {
         }
         docking::retain(&ctx, &active);
         match self.screenshot_view.as_str() {
-            "library" => self.library_ui(ui),
+            "library" | "preparation" => self.library_ui(ui),
             "dj" => self.dj_ui(ui),
             "addons" => self.addons_ui(ui),
             "cast" => self.cast_ui(ui),
@@ -916,6 +1026,7 @@ fn main() -> eframe::Result {
     }
     let size = match player.screenshot_view.as_str() {
         "library" => [1100., 730.],
+        "preparation" => [1200., 830.],
         "dj" => [1000., 920.],
         "lab" => [1100., 760.],
         "addons" => [1120., 760.],

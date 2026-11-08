@@ -1,5 +1,6 @@
 [package]
 name = "amp-player"
+default-run = "amp-player"
 version.workspace = true
 edition.workspace = true
 license.workspace = true

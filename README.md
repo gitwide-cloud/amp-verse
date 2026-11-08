@@ -109,3 +109,6 @@ Windows local installation after a release build: `./tools/install-desktop.ps1`.
 
 
 Desktop magnetic windows: drag the title rail beside the AMP VERSE dropdown to dock nearby native AMP windows. Attached windows move as a group; hold Shift while starting a drag to pull one free. Windows and X11 provide the required absolute positions; Wayland uses its compositor drag. The external MP3 Lab editor runs separately.
+
+
+Desktop preparation is now an implemented first milestone: select a track in Library and choose **Prepare selected / cues...**, or use **Analyze library and save metadata**. The engine writes versioned key/BPM/grid/cue metadata beside the audio, preserves manual edits and provides DJ cue buttons. See [portable preparation](docs/PREPARATION.md) for the schema and accuracy/platform limits. Android sidecar consumption is still pending.

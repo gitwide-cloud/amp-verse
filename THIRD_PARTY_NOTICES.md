@@ -2,7 +2,7 @@
 
 AMP Verse original code is MIT licensed. It is not affiliated with Winamp.
 
-Rust dependencies are resolved in `Cargo.lock` and retain their respective licenses. Key direct dependencies include eframe/egui (MIT OR Apache-2.0), rfd (MIT), serde/serde_json (MIT OR Apache-2.0), Tokio (MIT), Axum (MIT), bytes (MIT), async-stream (MIT), ureq (MIT OR Apache-2.0), and test-only tempfile/tower (MIT). Consult each dependency's source license for the complete terms, including transitive dependencies and embedded fonts. Before public binary distribution, generate and review a complete dependency license bundle.
+Rust dependencies are resolved in `Cargo.lock` and retain their respective licenses. Key direct dependencies include eframe/egui (MIT OR Apache-2.0), rfd (MIT), serde/serde_json (MIT OR Apache-2.0), RustCrypto sha2 (MIT OR Apache-2.0), Tokio (MIT), Axum (MIT), bytes (MIT), async-stream (MIT), ureq (MIT OR Apache-2.0), and test-only tempfile/tower (MIT). Consult each dependency's source license for the complete terms, including transitive dependencies and embedded fonts. Before public binary distribution, generate and review a complete dependency license bundle.
 
 Desktop FFmpeg and FFplay remain external user-installed tools; no desktop codec runtime is bundled. Android AMP Lab now includes the same dynamically linked FFmpegKit audio runtime as the MP3 Lab editor. Their licenses depend on the build configuration. Any future bundled runtime must include matching license notices and required source/rebuild materials.
 

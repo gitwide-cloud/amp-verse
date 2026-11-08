@@ -1,5 +1,7 @@
 //! Offline-first library, preparation data and process audio adapter. No GUI or network dependency.
+pub mod analysis;
 pub mod arrangement;
+pub mod preparation;
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -15,6 +17,24 @@ pub struct Preparation {
     pub beat_offset: Option<f64>,
     #[serde(default)]
     pub stems: Vec<String>,
+    #[serde(default)]
+    pub schema_version: Option<u32>,
+    #[serde(default)]
+    pub key: Option<String>,
+    #[serde(default)]
+    pub harmonic_key: Option<String>,
+    #[serde(default)]
+    pub cues: Vec<preparation::Cue>,
+    #[serde(default)]
+    pub manual_cues: Vec<preparation::Cue>,
+    #[serde(default)]
+    pub manual_override: bool,
+    #[serde(default)]
+    pub analysis: Option<preparation::AnalysisInfo>,
+    #[serde(default)]
+    pub source_sha256: Option<String>,
+    #[serde(flatten)]
+    pub extensions: std::collections::BTreeMap<String, serde_json::Value>,
 }
 impl Preparation {
     pub fn validate(&self) -> Result<(), String> {
@@ -33,6 +53,7 @@ impl Preparation {
         if self.beat_offset.is_some_and(|x| !x.is_finite() || x < 0.0) {
             return Err("Beat offset must be nonnegative".into());
         }
+        preparation::validate(self)?;
         Ok(())
     }
 }

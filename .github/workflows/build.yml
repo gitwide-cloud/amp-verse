@@ -43,13 +43,16 @@ jobs:
       - name: Test live radio with generated audio
         if: runner.os == 'Linux'
         run: python3 tools/smoke_cast.py target/release/amp-cast
+      - name: Test portable preparation with generated audio
+        if: runner.os == 'Linux'
+        run: python3 tools/smoke_preparation.py target/release/amp-prepare
       - name: Capture actual desktop UI
         if: runner.os == 'Linux'
         run: |
           mkdir -p test-output/music
           ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 test-output/music/Tone.wav
           for theme in classic modern-light modern-dark; do
-            for view in player library dj lab addons cast; do
+            for view in player library preparation dj lab addons cast; do
               timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_THEME="$theme" AMP_VERSE_CONFIG_DIR=test-output/theme-config AMP_SCREENSHOT_VIEW="$view" AMP_SCREENSHOT="test-output/$theme-$view.png" target/release/amp-player test-output/music
               test -s "test-output/$theme-$view.png"
             done
@@ -68,7 +71,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} dist/
+          cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} target/release/amp-prepare${{ matrix.suffix }} dist/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md dist/
           cp -r docs dist/
       - uses: actions/upload-artifact@v4

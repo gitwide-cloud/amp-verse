@@ -13,3 +13,6 @@ Android handoff preference: when an AMP Verse APK is built for the user, install
 
 
 Android source-flow correction: build desktop library/playlist read and streaming endpoints, then Android Remote browse/listen-on-phone, then explicit Save offline into the radio collection. Phone-folder imports are not that radio-download collection. Direct phone-folder playback remains as a separate local-player option; retain existing imports.
+
+
+2026-11-08 update: first desktop key/tempo/cue analysis, cue collection editor, batch metadata writing and portable versioned sidecars are now implemented. Broader real-song accuracy validation, Android sidecar import/local overrides and network metadata transfer remain outstanding.
