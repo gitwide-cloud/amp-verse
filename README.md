@@ -89,3 +89,20 @@ The **web UI stays simple**: listen, see current status, start/stop broadcasting
 
 
 Android **AMP Lab** is now the integrated MP3 Lab editor foundation: open audio, waveform/trim/fades/gain/normalize, original/edited preview, 256 kbps MP3 export and session restore. Open it from the top module dropdown. [Integration and source provenance](third-party/mp3-lab/PROVENANCE.md) includes upstream licensing and the corresponding codec source bundle. Desktop still uses the separately installed editor connection.
+
+
+### Desktop DJ and Lab arrangement
+
+AMP DJ has two deck platters and an embedded searchable library. Choose a music folder (including a mounted NAS folder), select Load A or Load B, then Play / Cue. Each deck uses the track's prepared cue IN/OUT. Live crossfade, tempo sync, pitch and FX remain future work. The chosen library folder is remembered for the next launch.
+
+AMP Lab opens a mix arrangement with one lane per song. Add tracks from the scanned library, set timeline starts, cue IN/OUT and gain, then export one combined 320 kbps MP3 or individual trimmed MP3 files. Overlapping lanes mix together with a final limiter. Save/load arrangements as JSON. The existing installed MP3 Lab opens separately for waveform editing; arrangement bars indicate clip positions rather than audio waveforms. Arrangement fades, audition transport and automatic beat alignment are not implemented yet.
+
+Cue metadata is read from adjacent AMP preparation files, such as `song.mp3.amp.json`:
+
+```json
+{"cue_in": 8.0, "cue_out": 188.0, "bpm": 128.0, "beat_offset": 0.0, "stems": []}
+```
+
+Times are seconds in the original file. This is AMP sidecar metadata; arbitrary DJ vendor cue tags embedded in ID3 are not imported yet. Without cue OUT, DJ plays to the end; Lab probes duration when adding a track.
+
+Windows local installation after a release build: `./tools/install-desktop.ps1`. Optional `-AudioTools` points to an existing audio runtime directory containing ffmpeg/ffplay/ffprobe and its notices. Installation uses LocalAppData/Programs/AMP Verse and creates Desktop and Start menu shortcuts, without changing other applications. Installed audio tools are resolved beside AMP Verse; development can use PATH.

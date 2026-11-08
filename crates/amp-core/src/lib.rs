@@ -1,4 +1,5 @@
 //! Offline-first library, preparation data and process audio adapter. No GUI or network dependency.
+pub mod arrangement;
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -160,16 +161,30 @@ impl Playlist {
 }
 
 pub fn command(name: &str) -> Command {
+    // Installed audio tools live beside the app; development can still use PATH.
+    let bundled = std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.parent().map(|p| {
+                p.join(if cfg!(windows) {
+                    format!("{name}.exe")
+                } else {
+                    name.to_owned()
+                })
+            })
+        })
+        .filter(|p| p.is_file());
+    let executable = bundled.as_deref().unwrap_or_else(|| Path::new(name));
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
-        let mut cmd = Command::new(name);
+        let mut cmd = Command::new(executable);
         cmd.creation_flags(0x08000000);
         cmd
     }
     #[cfg(not(windows))]
     {
-        Command::new(name)
+        Command::new(executable)
     }
 }
 pub fn cue_args(prep: &Preparation) -> Result<Vec<String>, String> {

@@ -8,10 +8,23 @@ use std::{
 };
 mod addons;
 mod cast;
+mod lab;
 mod skin;
 mod theme;
 use skin::{CYAN, GOLD, ORANGE};
 
+fn library_preference() -> PathBuf {
+    std::env::var_os("APPDATA")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from))
+        .unwrap_or_else(|| {
+            std::env::var_os("HOME")
+                .map(PathBuf::from)
+                .unwrap_or_default()
+                .join(".config")
+        })
+        .join("amp-verse/music-root.txt")
+}
 fn app_icon() -> std::sync::Arc<egui::IconData> {
     static ICON: std::sync::OnceLock<std::sync::Arc<egui::IconData>> = std::sync::OnceLock::new();
     ICON.get_or_init(|| {
@@ -55,6 +68,8 @@ struct Player {
     auto: bool,
     library_open: bool,
     dj_open: bool,
+    lab_open: bool,
+    lab: lab::Arrangement,
     addons_open: bool,
     cast_open: bool,
     cast: cast::Dashboard,
@@ -69,6 +84,11 @@ impl Default for Player {
             root: std::env::args_os()
                 .nth(1)
                 .map(PathBuf::from)
+                .or_else(|| {
+                    std::fs::read_to_string(library_preference())
+                        .ok()
+                        .map(|s| PathBuf::from(s.trim()))
+                })
                 .unwrap_or_default(),
             library: None,
             scan: None,
@@ -84,6 +104,8 @@ impl Default for Player {
             auto: false,
             library_open: false,
             dj_open: false,
+            lab_open: false,
+            lab: lab::Arrangement::default(),
             addons_open: false,
             cast_open: false,
             cast: cast::Dashboard::default(),
@@ -133,12 +155,7 @@ impl Player {
                 );
             }
             Some(skin::Module::LabSetup) => {
-                self.addons.selected = 4;
-                self.addons_open = true;
-                ui.ctx().send_viewport_cmd_to(
-                    egui::ViewportId::from_hash_of("amp-addons"),
-                    egui::ViewportCommand::Focus,
-                );
+                self.lab_open = true;
             }
             None => (),
         }
@@ -236,6 +253,11 @@ impl Player {
             self.queue_selected = None;
             self.library = None;
             self.root = root;
+            let pref = library_preference();
+            if let Some(parent) = pref.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(pref, self.root.to_string_lossy().as_bytes());
             self.scan();
         }
     }
@@ -354,10 +376,9 @@ impl Player {
                 if skin::button(ui, "ADD-ONS", GOLD).clicked() {
                     self.addons_open = true;
                 }
-                ui.hyperlink_to(
-                    "AMP Lab downloads",
-                    "https://github.com/gitwide-cloud/mp3-lab/releases",
-                );
+                if skin::button(ui, "AMP Lab", GOLD).clicked() {
+                    self.lab_open = true;
+                }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     theme::selector(ui);
                 });
@@ -659,9 +680,15 @@ impl Player {
                         );
                         ui.horizontal(|ui| {
                             if skin::button(ui, "PLAY / CUE", accent).clicked()
-                                && let Some(i) = self.selected.or(self.loaded[deck])
+                                && let Some(i) = self.loaded[deck].or(self.selected)
                             {
                                 self.play(deck, i);
+                            }
+                            if skin::button(ui, "LOAD SELECTED", accent).clicked()
+                                && let Some(i) = self.selected
+                            {
+                                self.stop(deck);
+                                self.loaded[deck] = Some(i);
                             }
                             if skin::button(ui, "STOP", accent).clicked() {
                                 self.stop(deck);
@@ -677,6 +704,26 @@ impl Player {
                 );
                 ui.label("Prepared cue IN/OUT is active. Crossfade, sync, pitch and FX are future milestones.");
             });
+            ui.separator();
+            ui.horizontal(|ui| {
+                skin::label(ui, "LIBRARY · LOAD TO DECK A / B");
+                if ui.button("Choose folder...").clicked() {
+                    self.choose_folder();
+                }
+                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search music"));
+            });
+            let mut load = None;
+            egui::ScrollArea::vertical().id_salt("dj-library").max_height(210.).show(ui,|ui|{
+                if let Some(lib)=&self.library {for (i,t) in lib.tracks.iter().enumerate(){if !t.title.to_lowercase().contains(&self.search.to_lowercase()){continue;}
+                    ui.horizontal(|ui|{if ui.selectable_label(self.selected==Some(i),&t.title).clicked(){self.selected=Some(i);}ui.weak(format!("IN {:.2} · OUT {} · BPM {}",t.preparation.cue_in,t.preparation.cue_out.map(|v|format!("{v:.2}")).unwrap_or_else(||"End".into()),t.preparation.bpm.map(|v|format!("{v:.1}")).unwrap_or_else(||"--".into())));if ui.button("Load A").clicked(){load=Some((0,i));}
+if ui.button("Load B").clicked(){load=Some((1,i));}});
+                }}else{ui.weak("Choose a local or mounted NAS music folder. Cue metadata is read beside each track.");}
+            });
+            if let Some((deck, i)) = load {
+                self.stop(deck);
+                self.selected = Some(i);
+                self.loaded[deck] = Some(i);
+            }
             ui.label(RichText::new(&self.status).color(skin::accent(ui)));
         });
     }
@@ -706,6 +753,7 @@ impl eframe::App for Player {
             "dj" => self.dj_ui(ui),
             "addons" => self.addons_ui(ui),
             "cast" => self.cast_ui(ui),
+            "lab" => self.lab.show(ui, &self.root, self.library.as_ref()),
             _ => self.player_ui(ui),
         }
         if self.library_open {
@@ -732,13 +780,28 @@ impl eframe::App for Player {
                     .with_title("AMP VERSE / DJ")
                     .with_decorations(false)
                     .with_icon(app_icon())
-                    .with_inner_size([820., 660.])
+                    .with_inner_size([1000., 920.])
                     .with_min_inner_size([730., 620.]),
                 |ui, _| {
                     if ui.ctx().input(|i| i.viewport().close_requested()) {
                         self.dj_open = false;
                     }
                     self.dj_ui(ui);
+                },
+            );
+        }
+        if self.lab_open {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("amp-lab-arrangement"),
+                egui::ViewportBuilder::default()
+                    .with_title("AMP Lab / Mix arrangement")
+                    .with_icon(app_icon())
+                    .with_inner_size([1100., 760.]),
+                |ui, _| {
+                    if ui.ctx().input(|i| i.viewport().close_requested()) {
+                        self.lab_open = false;
+                    }
+                    self.lab.show(ui, &self.root, self.library.as_ref());
                 },
             );
         }
@@ -798,7 +861,8 @@ fn main() -> eframe::Result {
     }
     let size = match player.screenshot_view.as_str() {
         "library" => [1100., 730.],
-        "dj" => [820., 660.],
+        "dj" => [1000., 920.],
+        "lab" => [1100., 760.],
         "addons" => [1120., 760.],
         "cast" => [1120., 800.],
         _ => [700., 255.],
