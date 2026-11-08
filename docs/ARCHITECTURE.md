@@ -55,3 +55,12 @@ The web UI is intentionally basic: live station/track status, listening on this 
 The integrated Android application lives under `android/`, with its own package identity and no changes to MP3 Lab. Native Android views keep the initial shell small; Media3 ExoPlayer/MediaSessionService owns audio focus, noisy-route handling, media notifications and service playback. The activity connects by MediaController and releases its controller on stop without owning the audio engine lifetime. Imports use the system document picker and copy selected audio to private app storage on a worker thread, so later playback is local and independent of document-provider/NAS availability. `LibraryStore` atomically saves a relative-file queue. Themes use the same Classic/Modern Light/Modern Dark IDs in local preferences.
 
 This preview has sequential queue playback and optional repeat; prepared cue overrides, beatgrid/stems, folder tree, named/reordered playlists, simplified cue-aware Auto DJ and LAN discovery/remote control remain unbuilt. No internet/storage-wide permissions or desktop plugin loader are included. The app currently targets API 35 and supports API 28+ (Android 9+). Playback duration and seek come from the actual player, not mock values.
+
+
+## Current product decisions
+
+- Application-wide themes share screens and behavior: Classic is metallic grey with beveled controls and green displays; Modern Light is bright/minimal; Modern Dark is charcoal with subtle accents. Earlier purple-first references are superseded by this Classic direction.
+- The browser Cast surface stays minimal. Its Open App / Downloads action opens `https://github.com/gitwide-cloud/amp-verse/releases`.
+- Desktop Plugin Manager is the home for downloading/managing add-ons. Current implementation is an offline catalog, manual download links and external-editor connection; automatic download/install/update management is still unbuilt. Android has an integrated feature set with no plugin loader.
+- AMP Lab must extend/reuse the existing MP3 Lab editor foundation. Do not create a second independent editor implementation. Current integration launches an explicitly selected MP3 Lab installation; deeper editor integration/branding is future work. This does not authorize modifying the separate mp3-lab repository in this AMP Verse task.
+- Use the Pixel 7 for real-device Android development/testing and leave AMP Verse installed once installation succeeds. A reported commit/local pass is not proof that CI or device tests passed; report actual results separately.

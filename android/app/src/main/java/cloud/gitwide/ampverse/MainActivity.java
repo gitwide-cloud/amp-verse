@@ -91,8 +91,8 @@ public final class MainActivity extends Activity {
     private void draw() {
         String theme = prefs.getString("theme", "classic");
         boolean light = theme.equals("modern-light"), classic = theme.equals("classic");
-        bg = Color.parseColor(light ? "#f1f3f9" : classic ? "#171322" : "#10141d");
-        panel = Color.parseColor(light ? "#ffffff" : classic ? "#30283f" : "#202735");
+        bg = Color.parseColor(light ? "#f1f3f9" : classic ? "#222426" : "#10141d");
+        panel = Color.parseColor(light ? "#ffffff" : classic ? "#55585e" : "#202735");
         text = Color.parseColor(light ? "#202332" : "#f0eef7"); muted = Color.parseColor(light ? "#647089" : "#aaa4bd");
         accent = Color.parseColor(light ? "#7142cc" : classic ? "#ffd52b" : "#b586ff");
         getWindow().setStatusBarColor(bg); getWindow().setNavigationBarColor(bg);

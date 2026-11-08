@@ -4,7 +4,7 @@ The current desktop and Cast interfaces offer exactly three themes:
 
 | Name | Portable ID | Appearance |
 | --- | --- | --- |
-| Classic | `classic` | Retro metal/purple chrome, black panels, green displays, gold accents |
+| Classic | `classic` | Metallic grey chrome, beveled buttons, black/green displays and gold accents |
 | Modern Light | `modern-light` | White/light-gray panels, dark text, dark gold accents and readable green status text |
 | Modern Dark | `modern-dark` | Flat charcoal panels, light text, gold accents and subdued green status text |
 
@@ -17,3 +17,6 @@ Theme changes affect appearance only, including custom panels, title bars, butto
 For QA, `AMP_THEME=classic|modern-light|modern-dark` overrides the desktop startup preference; `AMP_VERSE_CONFIG_DIR` can point to an isolated settings folder. CI captures all five desktop surfaces in every theme. A preferences test checks saving/replacing/reading all three values and rejecting unknown IDs.
 
 The supplied Android mockups define the integrated mobile direction. Android must expose these same three names/IDs and save its choice locally when that app is implemented. An Android APK has not been created by this theme change. Notification and lock-screen controls must follow platform media-session requirements; the mockup is not a claim that arbitrary system chrome is already customizable. When an APK is built, install it on the Pixel and leave it installed as requested.
+
+
+All three themes are shared appearance settings over one interface implementation per platform, not separate products/screens. Keep functions and layouts the same wherever practical. Theme code may change palettes, bevels and contrast; it must not decide feature availability. The Android preview now builds with these same theme IDs; Pixel installation/testing is pending reconnection. Earlier Android target text above describes the original theme milestone, not the current APK build status.

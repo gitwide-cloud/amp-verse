@@ -34,3 +34,12 @@ The latest dashboard reference is explicitly assigned to the built-in desktop AM
 ## Interface ownership
 
 The web UI is intentionally basic: live station/track status, listening on this device, basic broadcast Start/Stop, a collapsed read-only queue and local theme selection. It is not the full Cast management dashboard. Playlist creation/reordering, library management, cue editing, Auto DJ rules/mixing, schedules, routing and detailed station controls belong in AMP Verse desktop and the integrated Android app as implemented. The server owns execution and prepared state so it remains independent of both clients. Android is still unbuilt; this ownership does not imply its controls already exist. Do not mirror advanced desktop mockups or placeholder future-feature panels into the simple browser page.
+
+
+## Current product decisions
+
+- Application-wide themes share screens and behavior: Classic is metallic grey with beveled controls and green displays; Modern Light is bright/minimal; Modern Dark is charcoal with subtle accents. Earlier purple-first references are superseded by this Classic direction.
+- The browser Cast surface stays minimal. Its Open App / Downloads action opens `https://github.com/gitwide-cloud/amp-verse/releases`.
+- Desktop Plugin Manager is the home for downloading/managing add-ons. Current implementation is an offline catalog, manual download links and external-editor connection; automatic download/install/update management is still unbuilt. Android has an integrated feature set with no plugin loader.
+- AMP Lab must extend/reuse the existing MP3 Lab editor foundation. Do not create a second independent editor implementation. Current integration launches an explicitly selected MP3 Lab installation; deeper editor integration/branding is future work. This does not authorize modifying the separate mp3-lab repository in this AMP Verse task.
+- Use the Pixel 7 for real-device Android development/testing and leave AMP Verse installed once installation succeeds. A reported commit/local pass is not proof that CI or device tests passed; report actual results separately.

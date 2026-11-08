@@ -50,7 +50,7 @@ fn gradient(painter: &egui::Painter, rect: Rect, top: C, bottom: C) -> egui::Sha
     egui::Shape::mesh(mesh)
 }
 
-pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+pub fn panel<R>(ui: &mut egui::Ui, _purple: bool, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let theme = crate::theme::current(ui.ctx());
     let p = theme.palette();
     let bg = ui.painter().add(egui::Shape::Noop);
@@ -64,10 +64,8 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
     let rect = response.response.rect;
     let (top, bottom) = if theme != crate::theme::Theme::Classic {
         (p.surface, p.surface)
-    } else if purple {
-        (C::from_rgb(48, 41, 70), C::from_rgb(23, 20, 37))
     } else {
-        (C::from_rgb(31, 32, 42), C::from_rgb(12, 13, 19))
+        (p.elevated, p.surface)
     };
     ui.painter()
         .set(bg, gradient(ui.painter(), rect, top, bottom));
@@ -96,7 +94,7 @@ pub enum Module {
     LabSetup,
 }
 
-pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
+pub fn heading(ui: &mut egui::Ui, title: &str, _purple: bool) -> Option<Module> {
     let theme = crate::theme::current(ui.ctx());
     let p = theme.palette();
     let (rect, _) =
@@ -104,13 +102,7 @@ pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
     ui.painter().add(gradient(
         ui.painter(),
         rect,
-        if theme != crate::theme::Theme::Classic {
-            p.elevated
-        } else if purple {
-            C::from_rgb(75, 63, 99)
-        } else {
-            C::from_rgb(59, 60, 72)
-        },
+        p.elevated,
         if theme == crate::theme::Theme::Classic {
             BLACK
         } else {
@@ -257,14 +249,14 @@ pub fn button(ui: &mut egui::Ui, text: &str, accent: C) -> egui::Response {
         } else if active {
             C::from_rgb(85, 65, 20)
         } else {
-            C::from_rgb(68, 67, 81)
+            C::from_rgb(130, 134, 140)
         },
         if theme != crate::theme::Theme::Classic {
             p.elevated
         } else if active {
             C::from_rgb(43, 30, 9)
         } else {
-            C::from_rgb(14, 15, 22)
+            C::from_rgb(54, 57, 62)
         },
     ));
     ui.painter().rect_stroke(
