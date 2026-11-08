@@ -38,7 +38,7 @@ jobs:
         if: runner.os == 'Linux'
         env:
           SDL_AUDIODRIVER: dummy
-        run: cargo test -p amp-core --features analysis --locked -- --include-ignored
+        run: cargo test -p amp-core --features analysis --locked -- --ignored --test-threads=1
       - run: cargo build --workspace --release --locked
       - name: Build base player without analysis implementation
         run: cargo build -p amp-player --release --locked
