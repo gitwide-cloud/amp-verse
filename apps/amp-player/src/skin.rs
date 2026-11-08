@@ -409,29 +409,6 @@ pub fn platter(ui: &mut egui::Ui, size: f32, accent: C, playing: bool, phase: f3
     );
 }
 
-/// Live post-EQ envelope from the actual mixer callback; no synthesized spectrum.
-pub fn scope(ui: &mut egui::Ui, wave: &[f32; 96], accent: C) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), 58.), egui::Sense::hover());
-    ui.painter().rect_filled(rect, 2., BLACK);
-    for (i, value) in wave.iter().enumerate() {
-        let x = rect.left() + i as f32 * rect.width() / 96.;
-        let h = value.clamp(0., 1.) * rect.height() * 0.45;
-        ui.painter().line_segment(
-            [
-                egui::pos2(x, rect.center().y - h),
-                egui::pos2(x, rect.center().y + h),
-            ],
-            Stroke::new(2., accent),
-        );
-    }
-    ui.painter().rect_stroke(
-        rect,
-        2.,
-        Stroke::new(1., accent.gamma_multiply(0.5)),
-        egui::StrokeKind::Inside,
-    );
-}
 pub fn meter(ui: &mut egui::Ui, peak: f32, size: Vec2) {
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     ui.painter().rect_filled(rect, 1., BLACK);

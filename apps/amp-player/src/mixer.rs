@@ -379,6 +379,7 @@ pub struct Engine {
     pub sample_rate: u32,
     pub device: String,
     cancel: [Option<Arc<AtomicBool>>; 2],
+    source_start: [f64; 2],
 }
 impl Engine {
     pub fn new() -> Result<Self, String> {
@@ -410,6 +411,7 @@ impl Engine {
             sample_rate: rate,
             device: name,
             cancel: Default::default(),
+            source_start: [0.; 2],
         })
     }
     pub fn load(
@@ -420,6 +422,7 @@ impl Engine {
         play: bool,
     ) -> Result<(), String> {
         track.preparation.validate()?;
+        self.source_start[deck] = track.preparation.cue_in;
         let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
         if let Some(cancel) = self.cancel[deck].take() {
             cancel.store(true, Relaxed);
@@ -589,6 +592,9 @@ impl Engine {
         let c = &self.controls.play[deck];
         c.store(!c.load(Relaxed), Relaxed);
     }
+    pub fn source_position(&self, deck: usize) -> f64 {
+        self.source_start[deck] + self.position(deck)
+    }
     pub fn position(&self, deck: usize) -> f64 {
         self.controls.position[deck].load(Relaxed) as f64 / self.sample_rate as f64
     }
@@ -669,9 +675,6 @@ impl Engine {
     }
     pub fn peak(&self, deck: usize) -> f32 {
         get(&self.controls.peak[deck])
-    }
-    pub fn wave(&self, deck: usize) -> [f32; 96] {
-        std::array::from_fn(|i| get(&self.controls.scope[deck][i]))
     }
     pub fn take_error(&self) -> Option<String> {
         self.controls.error.lock().ok()?.take()

@@ -14,6 +14,7 @@ mod mixer;
 mod preparer;
 mod skin;
 mod theme;
+mod waveform;
 use skin::{CYAN, GOLD, ORANGE};
 
 fn library_preference() -> PathBuf {
@@ -63,6 +64,8 @@ struct Player {
     folder: PathBuf,
     search: String,
     audio: Option<mixer::Engine>,
+    waveforms: [waveform::Lane; 2],
+    wave_span: f64,
     pitch: [f32; 2],
     channel_gain: [f32; 2],
     fader: f32,
@@ -109,6 +112,8 @@ impl Default for Player {
             folder: PathBuf::new(),
             search: String::new(),
             audio: None,
+            waveforms: Default::default(),
+            wave_span: 16.,
             pitch: [0.; 2],
             channel_gain: [1.; 2],
             fader: 0.,
@@ -212,6 +217,12 @@ impl Player {
                             self.auto = false;
                             self.status = format!("{} tracks / offline ready", lib.tracks.len());
                             self.library = Some(lib);
+                            if std::env::var_os("AMP_WAVEFORM_SMOKE").is_some() {
+                                self.volume = 0;
+                                self.load_deck(0, 0, false);
+                                self.load_deck(1, 0, false);
+                            }
+
                             if self.screenshot_view == "preparation"
                                 && let Some(t) =
                                     self.library.as_ref().and_then(|l| l.tracks.first())
@@ -850,12 +861,15 @@ impl Player {
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
             self.header(ui, "AMP DJ", true);
-            ui.columns(2, |columns| {
-                for (d, column) in columns.iter_mut().enumerate() {
-                    let wave = self.audio.as_ref().map(|a| a.wave(d)).unwrap_or([0.; 96]);
-                    skin::scope(column, &wave, if d == 0 { ORANGE } else { CYAN });
-                }
+            ui.horizontal(|ui| {
+                ui.weak("SCROLLING WAVEFORMS · cue markers / source time");
+                ui.add(egui::Slider::new(&mut self.wave_span, 4. ..=64.).text("seconds visible"));
             });
+            for d in 0..2 {
+                let track = self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i));
+                let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
+                self.waveforms[d].show(ui, &self.root, track, position, self.wave_span, d);
+            }
             egui::ScrollArea::vertical().id_salt("dj-controls-body").show(ui,|ui|{
                 let deck_width=((ui.available_width()-198.)/2.).max(260.);
                 ui.horizontal_top(|ui|{
