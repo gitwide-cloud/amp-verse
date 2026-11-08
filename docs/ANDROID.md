@@ -35,3 +35,10 @@ Version 0.1.1 adds a manual **Settings → App updater → Check for updates** r
 The reference-inspired shell uses a compact metallic/beveled title dropdown and buttons, dark information panels, green elapsed-time/track displays, local icon fallback, seek/transport row and a local queue. Modern Light/Dark reuse the same views and actions with flat surfaces. No animated spectrum, fake artwork, artist metadata or fabricated queue songs are added. The imported folder/count reflects actual local saved tracks.
 
 AMP Player and AMP Library retain playback/import/queue-removal operations. AMP DJ exposes the currently implemented local sequential queue/repeat path, with advanced mixing marked unfinished. AMP Remote, AMP Lab and AMP Cast are navigable preview pages explaining what is not yet implemented on Android. They do not pretend to connect, edit or broadcast. Settings remains the sole theme-selection location and contains the updater.
+
+
+## Scan music folder (0.1.3)
+
+Use **AMP Library → Scan music folder** (or **Player → + Music → Scan folder**). Choose a folder and approve **Use this folder** in Android's picker. All audio documents in that folder and its subfolders are scanned on a background worker and copied to private local storage for offline playback. No storage-wide permission is requested. **Select individual songs** remains available. Android may restrict selecting storage roots/Downloads; choose an allowed music folder.
+
+Repeated imports of the same document URI are skipped while that source is already in the saved library. This is source-identity matching, not content hashing: the same file selected through a different provider/URI, or songs imported before source tracking was added, may be copied again. The current library is still an Imported collection, not a browsable representation of the source folder hierarchy. The UI initially renders up to 100 songs with a Show more action; all imported songs remain in the playback queue. Formats depend on the Android playback engine; an audio extension is not proof of codec support.

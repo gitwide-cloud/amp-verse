@@ -37,6 +37,7 @@ public final class MainActivity extends Activity {
     private boolean library, dragging, importing;
     private String module = "AMP Player";
     private Appearance appearance;
+    private int queueLimit=100;
     private int bg, panel, text, muted, accent;
     private String message = "Import songs to save them on this device for offline playback.";
     private final Runnable tick = new Runnable() { public void run() { refresh(); handler.postDelayed(this, 500); } };
@@ -132,19 +133,20 @@ public final class MainActivity extends Activity {
         LinearLayout controls=new LinearLayout(this);rowButton(controls,"|◀",()->{if(player!=null)player.seekToPreviousMediaItem();});controls.getChildAt(0).setContentDescription("Previous track");
         play=button("▶",()->{if(player==null||player.getMediaItemCount()==0)return;if(player.isPlaying())player.pause();else{if(player.getPlaybackState()==Player.STATE_ENDED)player.seekToDefaultPosition();player.prepare();player.play();}refresh();});play.setContentDescription("Play or pause");controls.addView(play,new LinearLayout.LayoutParams(0,dp(46),1));
         rowButton(controls,"■",()->{if(player!=null){player.pause();player.seekToDefaultPosition();}refresh();});controls.getChildAt(2).setContentDescription("Stop playback");rowButton(controls,"▶|",()->{if(player!=null)player.seekToNextMediaItem();});controls.getChildAt(3).setContentDescription("Next track");now.addView(controls);
-        LinearLayout actions=new LinearLayout(this);rowButton(actions,"Library",()->selectModule("AMP Library"));rowButton(actions,"+ Songs",this::importSongs);rowButton(actions,"Settings",this::openSettings);now.addView(actions);drawQueue(false);
+        LinearLayout actions=new LinearLayout(this);rowButton(actions,"Library",()->selectModule("AMP Library"));rowButton(actions,"+ Music",()->{PopupMenu menu=new PopupMenu(this,root.getChildAt(0));menu.getMenu().add("Scan folder");menu.getMenu().add("Select songs");menu.setOnMenuItemClickListener(item->{if(item.getTitle().toString().equals("Scan folder"))scanFolder();else importSongs();return true;});menu.show();});rowButton(actions,"Settings",this::openSettings);now.addView(actions);drawQueue(false);
     }
     private void drawLibrary(){
-        LinearLayout files=card();files.addView(button(importing?"Importing…":"+ Import local songs",this::importSongs));files.addView(label("▾ Saved on this device",17,accent));files.addView(label("    ▾ Imported ("+(player==null?0:player.getMediaItemCount())+")",15,text));drawQueue(true);
+        LinearLayout files=card();files.addView(button(importing?"Importing…":"Scan music folder",this::scanFolder));files.addView(button("+ Select individual songs",this::importSongs));files.addView(label("▾ Saved on this device",17,accent));files.addView(label("    ▾ Imported ("+(player==null?0:player.getMediaItemCount())+")",15,text));drawQueue(true);
     }
     private void drawQueue(boolean editable){
         LinearLayout queue=card();queue.addView(label(editable?"AMP Library · songs":"Now Playing / Queue",16,accent));
         if(player==null||player.getMediaItemCount()==0){queue.addView(label("No songs saved yet. Import local audio to begin.",14,muted));return;}
-        for(int i=0;i<player.getMediaItemCount();i++){
+        for(int i=0;i<Math.min(queueLimit,player.getMediaItemCount());i++){
             final int index=i;MediaItem item=player.getMediaItemAt(i);LinearLayout row=new LinearLayout(this);
             Button song=button((i+1)+". "+item.mediaMetadata.title,()->{if(player==null)return;player.seekTo(index,0);player.prepare();player.play();refresh();});song.setGravity(android.view.Gravity.START|android.view.Gravity.CENTER_VERTICAL);song.setTextSize(14);row.addView(song,new LinearLayout.LayoutParams(0,dp(46),1));
             if(editable){Button remove=button("−",()->{if(player!=null){player.removeMediaItem(index);saveQueue();draw();}});remove.setContentDescription("Remove "+item.mediaMetadata.title+" from library");row.addView(remove,new LinearLayout.LayoutParams(dp(44),dp(46)));}queue.addView(row);
         }
+        if(player.getMediaItemCount()>queueLimit)queue.addView(button("Show 100 more songs",()->{queueLimit+=100;draw();}));
     }
     private void refresh() {
         if (status == null) return; status.setText(message);
@@ -179,17 +181,31 @@ public final class MainActivity extends Activity {
         Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("audio/*").addCategory(Intent.CATEGORY_OPENABLE).putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
         startActivityForResult(intent, 1);
     }
+    private void scanFolder() {
+        if(importing)return;
+        Intent intent=new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        startActivityForResult(intent,3);
+    }
     @Override public void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (request != 1 || result != RESULT_OK || data == null) return;
+        if ((request != 1 && request != 3) || result != RESULT_OK || data == null) return;
+        final Uri tree = request == 3 ? data.getData() : null;
+        if(request==3 && tree==null)return;
+        if(tree!=null)try{getContentResolver().takePersistableUriPermission(tree,Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(SecurityException ignored){}
         List<Uri> uris = new ArrayList<>();
         if (data.getClipData() != null) for (int i=0;i<data.getClipData().getItemCount();i++) uris.add(data.getClipData().getItemAt(i).getUri());
         else if (data.getData() != null) uris.add(data.getData());
-        importing = true; message = "Copying audio for offline playback…"; refresh();
+        importing = true; message = tree==null?"Copying audio for offline playback…":"Scanning folder and subfolders…"; refresh();
         java.util.concurrent.ExecutorService worker = Executors.newSingleThreadExecutor();
         worker.execute(() -> {
             List<MediaItem> added = new ArrayList<>(); String error = "";
+            Map<String,String> importedSources=new HashMap<>();int skipped=0;
+            Set<String> savedIds=new HashSet<>();
+            try{for(MediaItem saved:LibraryStore.read(this))savedIds.add(saved.mediaId);}catch(Exception failure){error=failure.getMessage();}
+            if(tree!=null)try{uris.clear();uris.addAll(FolderScanner.scan(getContentResolver(),tree));}catch(Exception failure){error="Could not scan folder: "+failure.getMessage();uris.clear();}
+            final android.content.SharedPreferences sources=getSharedPreferences("import-sources",MODE_PRIVATE);
             for (Uri uri : uris) {
+                if(savedIds.contains(sources.getString(uri.toString(),""))){skipped++;continue;}
                 File target = null;
                 try {
                     String name = "Imported audio";
@@ -199,16 +215,19 @@ public final class MainActivity extends Activity {
                     target = new File(dir, UUID.randomUUID() + extension);
                     try (InputStream input = getContentResolver().openInputStream(uri); OutputStream output = new FileOutputStream(target)) { if (input == null) throw new IOException("Cannot open audio"); byte[] bytes = new byte[65536]; int size; while ((size = input.read(bytes)) != -1) output.write(bytes, 0, size); }
                     added.add(LibraryStore.item(target, name));
+                    importedSources.put(uri.toString(),target.getName());
+                    final int count=added.size();runOnUiThread(()->{message="Saving local songs… "+count;refresh();});
                 } catch (Exception failure) { if (target != null) target.delete(); error = failure.getMessage(); }
             }
-            String failure = error;
+            String failure = error; final int skippedCount=skipped;
             runOnUiThread(() -> {
                 importing = false;
                 // Persist from the current saved library if the activity controller was stopped by the picker.
                 try {
                     List<MediaItem> items = LibraryStore.read(this); items.addAll(added); LibraryStore.write(this, items);
+                    android.content.SharedPreferences.Editor sourceEditor=sources.edit();for(Map.Entry<String,String> entry:importedSources.entrySet())sourceEditor.putString(entry.getKey(),entry.getValue());sourceEditor.apply();
                     if (player != null) player.addMediaItems(added);
-                    message = "Saved " + added.size() + " songs offline." + (failure.isEmpty() ? "" : " Some imports failed: " + failure);
+                    message = "Saved " + added.size() + " songs offline." + (skippedCount>0?" Skipped "+skippedCount+" already imported.":"") + (failure.isEmpty() ? "" : " "+failure);
                 } catch (Exception saveError) { message = "Could not save imports: " + saveError.getMessage(); }
                 module="AMP Library";library = true; draw();
             }); worker.shutdown();
