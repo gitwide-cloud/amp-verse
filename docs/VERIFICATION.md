@@ -190,3 +190,8 @@ The protection regression preserves reviewed generated cues, grid, BPM, analysis
 ## Attached-window visibility fix (2026-11-08)
 
 Bound pane heights inside the shared outer scroll area so attaching DJ below Library cannot place it beyond an unbounded Library. Removed nested group scroll areas. The magnet is now a compact drawn horseshoe next to minimize, lights when attachment is available, and detaches an embedded pane. Removed the redundant Player magnet row button. Tests click the actual title-bar control for merge/detach, preserve alternate host ownership and assert finite reachable DJ bounds beneath Library. Player tests and strict lint pass; optimized Windows build and installation verified.
+
+
+## DJ Library source sidebar (2026-11-08)
+
+Added a left sidebar below the mixer: Auto DJ switch, saved Smart Playlists, Playlists and folder tree. Right pane filters by source and search and loads either deck. Saved playlists open for browsing without replacing the live queue, retaining track order and repeats. Smart previews show rule-eligible tracks; actual Auto DJ selection remains governed by the performance engine. A chosen Smart Playlist can be loaded paused or started through the Auto DJ switch. Source browsing does not write preparation metadata. Player tests and strict lint passed; CI captures the dedicated DJ Library view in each theme.

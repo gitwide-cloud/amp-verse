@@ -9,6 +9,7 @@ use std::{
 mod addons;
 mod cast;
 mod control;
+mod dj_browser;
 mod docking;
 mod lab;
 mod mixer;
@@ -70,6 +71,7 @@ struct Player {
     search: String,
     audio: Option<mixer::Engine>,
     sampler: sampler::Sampler,
+    dj_browser: dj_browser::Browser,
     run: performance::Run,
     show_editor: show_editor::Editor,
     control: Option<control::Control>,
@@ -133,6 +135,7 @@ impl Default for Player {
             search: String::new(),
             audio: None,
             sampler: Default::default(),
+            dj_browser: Default::default(),
             run: Default::default(),
             show_editor: Default::default(),
             control: None,
@@ -1477,15 +1480,7 @@ if ui.button("FX").clicked(){self.fx_open=true;}});
                 });
                 ui.horizontal(|ui|{ui.add(egui::Slider::new(&mut self.volume,0..=100).text("Master"));if let Some(a)=&self.audio{ui.weak(format!("{} · {} Hz",a.device,a.sample_rate));}});
                 ui.separator();
-                ui.horizontal(|ui|{skin::label(ui,"LIBRARY");ui.weak("Manage sources in AMP Library");ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search music"));if ui.button("Load playlist...").clicked(){self.load_playlist();}});
-                let mut load=None;
-                egui::ScrollArea::vertical().id_salt("dj-library").max_height(180.).min_scrolled_height(120.).show(ui,|ui|{
-                    if let Some(lib)=&self.library{for(i,t)in lib.tracks.iter().enumerate(){if !t.title.to_lowercase().contains(&self.search.to_lowercase()){continue;}
-                        ui.horizontal(|ui|{if ui.selectable_label(self.selected==Some(i),&t.title).clicked(){self.selected=Some(i);}ui.weak(format!("{} BPM · {}",t.preparation.bpm.map(|b|format!("{b:.1}")).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--")));if ui.button("Load A").clicked(){load=Some((0,i));}
-if ui.button("Load B").clicked(){load=Some((1,i));}});
-                    }}else{ui.weak("Choose your local or mounted NAS music folder. Prepared cues and BPM are read beside the music.");}
-                });
-                if let Some((d,i))=load{self.selected=Some(i);self.load_deck(d,i,false);}
+                self.dj_library_ui(ui);
                 ui.label(RichText::new(&self.status).color(skin::accent(ui)));
                 if let Some(a)=&self.audio{let under=a.controls.underruns.iter().map(|x|x.load(std::sync::atomic::Ordering::Relaxed)).sum::<u64>();if under>0{ui.label(format!("Audio buffer underruns: {under} frames"));}}
             });
@@ -1632,6 +1627,7 @@ impl eframe::App for Player {
                 self.library_ui(ui);
             }
             "dj" => self.dj_ui(ui),
+            "dj-library" => self.dj_library_ui(ui),
             "sampler" => self.sampler_ui(ui),
             "addons" => self.addons_ui(ui),
             "cast" => self.cast_ui(ui),
@@ -1702,6 +1698,7 @@ fn main() -> eframe::Result {
         "library" => [1100., 830.],
         "preparation" | "rules" => [1200., 830.],
         "dj" => [1000., 920.],
+        "dj-library" => [1100., 430.],
         "sampler" => [1000., 400.],
         "lab" => [1100., 760.],
         "addons" => [1120., 760.],
