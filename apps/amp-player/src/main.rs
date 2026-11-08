@@ -74,6 +74,8 @@ struct Player {
     sampler: sampler::Sampler,
     dj_browser: dj_browser::Browser,
     dj_tab: usize,
+    player_mode: u8,
+    mini_on_top: bool,
     run: performance::Run,
     show_editor: show_editor::Editor,
     control: Option<control::Control>,
@@ -141,6 +143,8 @@ impl Default for Player {
             sampler: Default::default(),
             dj_browser: Default::default(),
             dj_tab: 0,
+            player_mode: 0,
+            mini_on_top: false,
             run: Default::default(),
             show_editor: Default::default(),
             control: None,
@@ -209,6 +213,9 @@ impl Player {
             Some(skin::Module::Addons) => Some(5),
             _ => None,
         };
+        if pane.is_some() && self.player_mode != 0 {
+            self.set_player_mode(ui.ctx(), 0);
+        }
         if let Some(pane) = pane {
             let mut host = pane;
             let mut hidden = false;
@@ -270,6 +277,9 @@ impl Player {
                 self.lab_open = true;
             }
             None => (),
+        }
+        if pane.is_some() && self.player_mode != 0 {
+            self.set_player_mode(ui.ctx(), 0);
         }
         if let Some(pane) = pane {
             let mut host = pane;
@@ -760,6 +770,11 @@ impl Player {
         }
     }
     fn group_ui(&mut self, ui: &mut egui::Ui, host: usize) {
+        if host == 0 && self.player_mode != 0 {
+            self.small_player_ui(ui);
+            window_layout::resize_edges(ui);
+            return;
+        }
         if self.layout.parent[host].is_none() {
             ui.painter().rect_filled(
                 ui.max_rect(),
@@ -988,6 +1003,7 @@ impl Player {
                 ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Vol"));
             });
             ui.horizontal(|ui| {
+                self.player_view_menu(ui);
                 if ui
                     .button(if self.library_open && (self.layout.parent[1] == Some(0)) {
                         "Collapse Library"
@@ -1017,6 +1033,187 @@ impl Player {
                 ui.weak(&self.status);
             });
         });
+    }
+    fn set_player_mode(&mut self, ctx: &egui::Context, mode: u8) {
+        self.player_mode = mode;
+        if mode == 0 {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal),
+            );
+            self.resize_player(ctx, self.library_open && self.layout.parent[1] == Some(0));
+        } else {
+            let size = if mode == 1 {
+                egui::vec2(520., 210.)
+            } else {
+                egui::vec2(620., 100.)
+            };
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::MinInnerSize(size * 0.7),
+            );
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::InnerSize(size),
+            );
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::WindowLevel(if self.mini_on_top {
+                    egui::WindowLevel::AlwaysOnTop
+                } else {
+                    egui::WindowLevel::Normal
+                }),
+            );
+        }
+    }
+    fn player_view_menu(&mut self, ui: &mut egui::Ui) {
+        ui.menu_button("Player view", |ui| {
+            for (mode, name) in [
+                (0, "Full player"),
+                (1, "Compact player"),
+                (2, "Taskbar mini player"),
+            ] {
+                if ui
+                    .selectable_label(self.player_mode == mode, name)
+                    .clicked()
+                {
+                    self.set_player_mode(ui.ctx(), mode);
+                    ui.close();
+                }
+            }
+            if ui
+                .checkbox(&mut self.mini_on_top, "Keep small player on top")
+                .changed()
+                && self.player_mode != 0
+            {
+                ui.ctx().send_viewport_cmd_to(
+                    egui::ViewportId::ROOT,
+                    egui::ViewportCommand::WindowLevel(if self.mini_on_top {
+                        egui::WindowLevel::AlwaysOnTop
+                    } else {
+                        egui::WindowLevel::Normal
+                    }),
+                );
+            }
+        });
+    }
+    fn small_player_ui(&mut self, ui: &mut egui::Ui) {
+        let mini = self.player_mode == 2;
+        let design = if mini {
+            egui::vec2(620., 100.)
+        } else {
+            egui::vec2(520., 210.)
+        };
+        let scale = (ui.available_width() / design.x)
+            .min(ui.available_height() / design.y)
+            .max(0.01);
+        let mut bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, design);
+        egui::Scene::new()
+            .sense(egui::Sense::hover())
+            .zoom_range(scale..=scale)
+            .max_inner_size(design)
+            .show(ui, &mut bounds, |ui| {
+                skin::panel(ui, false, |ui| {
+                    ui.set_min_size(design - egui::vec2(20., 20.));
+                    ui.horizontal(|ui| {
+                        let title = ui.add(
+                            egui::Label::new(RichText::new("AMP VERSE").strong())
+                                .sense(egui::Sense::click_and_drag()),
+                        );
+                        if title.drag_started() {
+                            ui.ctx().send_viewport_cmd_to(
+                                egui::ViewportId::ROOT,
+                                egui::ViewportCommand::StartDrag,
+                            );
+                        }
+                        self.player_view_menu(ui);
+                        if ui
+                            .button("Full")
+                            .on_hover_text("Restore full player and attached panels")
+                            .clicked()
+                        {
+                            self.set_player_mode(ui.ctx(), 0);
+                        }
+                        if ui
+                            .button("_")
+                            .on_hover_text("Minimize to taskbar")
+                            .clicked()
+                        {
+                            ui.ctx().send_viewport_cmd_to(
+                                egui::ViewportId::ROOT,
+                                egui::ViewportCommand::Minimized(true),
+                            );
+                        }
+                    });
+                    if !mini {
+                        ui.add_sized(
+                            [480., 30.],
+                            egui::Label::new(
+                                RichText::new(self.title(0))
+                                    .strong()
+                                    .color(skin::signal(ui)),
+                            )
+                            .truncate(),
+                        );
+                        let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
+                        ui.label(format!(
+                            "{:02}:{:02}",
+                            position as u64 / 60,
+                            position as u64 % 60
+                        ));
+                    }
+                    ui.horizontal(|ui| {
+                        for (label, action) in [
+                            ("|<", 0),
+                            (if self.playing[0] { "Pause" } else { "Play" }, 1),
+                            ("Stop", 2),
+                            (">|", 3),
+                        ] {
+                            if ui.add_sized([46., 30.], egui::Button::new(label)).clicked() {
+                                match action {
+                                    0 => {
+                                        if let Some(i) = self.loaded[0] {
+                                            self.play(0, i.saturating_sub(1));
+                                        }
+                                    }
+                                    1 => {
+                                        if self.loaded[0].is_none() {
+                                            if let Some(i) = self
+                                                .selected
+                                                .or_else(|| self.queue.first().copied())
+                                            {
+                                                self.play(0, i);
+                                            }
+                                        } else {
+                                            self.toggle_deck(0);
+                                        }
+                                        if let Some(a) = &self.audio {
+                                            a.set_fader(0.);
+                                        }
+                                    }
+                                    2 => self.stop(0),
+                                    _ => self.next(),
+                                }
+                            }
+                        }
+                        if mini {
+                            ui.add_sized([170., 28.], egui::Label::new(self.title(0)).truncate());
+                        }
+                        ui.spacing_mut().slider_width = 90.;
+                        ui.add(egui::Slider::new(&mut self.volume, 0..=100).show_value(false))
+                            .on_hover_text("Master volume");
+                    });
+                    if !mini {
+                        ui.horizontal(|ui| {
+                            ui.toggle_value(&mut self.shuffle, "Shuffle");
+                            ui.toggle_value(&mut self.repeat_one, "Repeat one");
+                            if ui.button("EQ").clicked() {
+                                self.eq_open = true;
+                            }
+                        });
+                    }
+                });
+            });
     }
     fn resize_player(&self, ctx: &egui::Context, expanded: bool) {
         ctx.send_viewport_cmd_to(
@@ -1925,6 +2122,14 @@ impl eframe::App for Player {
             }
             "dj" => self.dj_ui(ui),
             "dj-window" => self.group_ui(ui, 2),
+            "compact" => {
+                self.player_mode = 1;
+                self.group_ui(ui, 0);
+            }
+            "mini" => {
+                self.player_mode = 2;
+                self.group_ui(ui, 0);
+            }
             "dj-library" => self.dj_library_ui(ui),
             "sampler" => self.sampler_ui(ui),
             "addons" => self.addons_ui(ui),
@@ -1995,6 +2200,8 @@ fn main() -> eframe::Result {
         "preparation" | "rules" => [1200., 830.],
         "dj" => [1000., 920.],
         "dj-window" => [900., 600.],
+        "compact" => [520., 210.],
+        "mini" => [620., 100.],
         "dj-library" => [1100., 430.],
         "sampler" => [800., 850.],
         "lab" => [1100., 760.],
@@ -2009,7 +2216,7 @@ fn main() -> eframe::Result {
                 .with_decorations(false)
                 .with_icon(app_icon())
                 .with_inner_size(size)
-                .with_min_inner_size([740., 160.])
+                .with_min_inner_size([size[0].min(740.), size[1].min(160.)])
                 .with_resizable(true)
                 .with_clamp_size_to_monitor_size(true),
             ..Default::default()
@@ -2147,6 +2354,26 @@ mod window_tests {
             player.library.as_ref().unwrap().tracks[2].preparation.bpm,
             Some(126.)
         );
+    }
+    #[test]
+    fn small_player_modes_preserve_session_and_magnetic_layout() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            loaded: [Some(4), Some(6)],
+            playing: [true, false],
+            queue: vec![4, 6],
+            library_open: true,
+            ..Default::default()
+        };
+        let parent = player.layout.parent;
+        for mode in [1, 2, 0] {
+            player.set_player_mode(&ctx, mode);
+            assert_eq!(player.loaded, [Some(4), Some(6)]);
+            assert_eq!(player.playing, [true, false]);
+            assert_eq!(player.queue, vec![4, 6]);
+            assert_eq!(player.layout.parent, parent);
+            assert!(player.library_open);
+        }
     }
     #[test]
     fn resized_mixer_controls_stay_inside_the_viewport() {

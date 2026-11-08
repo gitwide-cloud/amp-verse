@@ -252,3 +252,9 @@ The real-server discovery smoke passed: response identity and advertised HTTP po
 Desktop magnetic groups now fit into their available viewport through a uniform scene transform. Each panel receives a finite share of the group height, and smaller windows scale controls and pointer hit regions together instead of growing an outer horizontal/vertical canvas. Larger windows expand the available layout. Inner music lists and editors retain their own scrolling.
 
 Player tests passed (34 passed, 7 hardware-dependent tests ignored), with strict Clippy passing. A repeated-resize regression checks both deck transport rows and the auto-crossfade button in actual transformed screen coordinates at 1200x900, 740x480, 540x360, then 1000x760. Existing magnetic merge/detach and attached Library/DJ tests pass. Very small or heavily merged windows necessarily make controls smaller; detach panels for more working space.
+
+## Compact and taskbar mini players
+
+Added a 520x210 compact view and 620x100 floating taskbar mini view, both scaled with their window. They reuse the active desktop playback engine and queue. Full restores the existing magnetic layout; compact views temporarily omit attached panels without closing or detaching them. Window-level pinning is optional and Full restores normal window level. These are app windows, not a native taskbar toolbar or taskbar thumbnail controls.
+
+Player unit tests and strict Clippy passed. The view-switch regression verifies loaded decks, play state, queue, library visibility and magnetic parent relationships survive Compact, Mini and Full transitions. Native preview screenshots are generated for both views. No new hardware audio or Linux window-manager behavior is claimed from these layout checks.

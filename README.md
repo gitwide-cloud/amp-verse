@@ -134,3 +134,5 @@ Desktop analysis is now an optional executable add-on. Build `amp-engine` separa
 Android 0.1.10 adds an integrated AMP Cast client: selected-server connection, station start/stop, actual status/read-only queue and independent phone listening through the media service. See [Android Cast usage and limits](docs/ANDROID.md#integrated-amp-cast-client-0110). Google Cast receivers and offline downloads remain pending.
 
 Search is available for phone music and the Cast station queue. **Find servers** locates compatible Cast servers on the local IPv4 network; manual address/password settings remain available. Desktop DJ separates Mixer, Music library and Sampler tools so playback controls stay reachable in smaller windows.
+
+Desktop **Player view** offers Full, Compact, and Taskbar mini views. The mini view is a narrow floating player you can position above the taskbar; it is not an embedded Windows taskbar toolbar. Small views include playback and volume, minimize, restore, and optional always-on-top. Switching views preserves playback, queue and magnetic attachments; attached panels return with Full player.
