@@ -31,3 +31,9 @@ After the six reference images were supplied, the native Player/Library/DJ and C
 Local strict linting and all seven tests passed; the optimized binaries built. The extended real Cast smoke test passed, including public playlist schema/cue data, absence of filesystem paths, active index and index reset on stop. Captured and visually inspected all three native surfaces. Authenticated browser Launch and Stop still updated actual Cast state; the live playlist highlighted the broadcasting track. Evidence is in `test-output/themed-{player,library,dj,cast}.png`. The test server was stopped after browser QA. CI now captures each native surface independently using `AMP_SCREENSHOT_VIEW`.
 
 Visual pass source: `17457efb0effc901370cfeaf85abbf6ea8a79930`. [Windows/Linux CI](https://github.com/gitwide-cloud/amp-verse/actions/runs/42484196602): **both passed**, including all three Linux UI captures and the extended Cast test. Platform and UI artifacts were uploaded; no release tag was published.
+
+## Lab and Plugin Manager references
+
+Added an offline Plugin Manager with real included build versions, component search/filtering, module open actions, Cast companion-file presence detection, manual download links and explicit external-editor connection/launch. The supplied icon is shown in its detail panel. No network install/update system or multichannel AMP Lab editor is claimed. The existing editor repository was only read; no editor code was copied or changed.
+
+Local optimized build and strict linting passed. Captured and inspected `test-output/plugin-manager.png`, including the AMP Lab optional/unconnected state. The external-editor launch/file-picker flow has not been manually exercised. CI now also captures the manager with `AMP_SCREENSHOT_VIEW=addons`.

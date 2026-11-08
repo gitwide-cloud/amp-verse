@@ -75,6 +75,8 @@ pub enum Module {
     Verse,
     Library,
     Dj,
+    Addons,
+    LabSetup,
 }
 
 pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
@@ -146,6 +148,8 @@ pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
             ("AMP VERSE", Module::Verse),
             ("AMP Library", Module::Library),
             ("AMP DJ", Module::Dj),
+            ("AMP Lab / setup", Module::LabSetup),
+            ("Plugin Manager", Module::Addons),
         ] {
             if ui.button(label).clicked() {
                 selected = Some(module);

@@ -6,6 +6,7 @@ use std::{
     sync::mpsc,
     time::Duration,
 };
+mod addons;
 mod skin;
 use skin::{CYAN, GOLD, GREEN, ORANGE};
 
@@ -52,6 +53,8 @@ struct Player {
     auto: bool,
     library_open: bool,
     dj_open: bool,
+    addons_open: bool,
+    addons: addons::Manager,
     status: String,
     screenshot_frames: u32,
     screenshot_view: String,
@@ -77,6 +80,8 @@ impl Default for Player {
             auto: false,
             library_open: false,
             dj_open: false,
+            addons_open: false,
+            addons: addons::Manager::default(),
             status: "Choose your music folder in Library".into(),
             screenshot_frames: 0,
             screenshot_view: std::env::var("AMP_SCREENSHOT_VIEW").unwrap_or_default(),
@@ -85,7 +90,11 @@ impl Default for Player {
 }
 impl Player {
     fn header(&mut self, ui: &mut egui::Ui, title: &str, purple: bool) {
-        match skin::heading(ui, title, purple) {
+        let action = skin::heading(ui, title, purple);
+        self.activate(ui, action);
+    }
+    fn activate(&mut self, ui: &mut egui::Ui, module: Option<skin::Module>) {
+        match module {
             Some(skin::Module::Verse) => ui
                 .ctx()
                 .send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus),
@@ -100,6 +109,21 @@ impl Player {
                 self.dj_open = true;
                 ui.ctx().send_viewport_cmd_to(
                     egui::ViewportId::from_hash_of("amp-dj"),
+                    egui::ViewportCommand::Focus,
+                );
+            }
+            Some(skin::Module::Addons) => {
+                self.addons_open = true;
+                ui.ctx().send_viewport_cmd_to(
+                    egui::ViewportId::from_hash_of("amp-addons"),
+                    egui::ViewportCommand::Focus,
+                );
+            }
+            Some(skin::Module::LabSetup) => {
+                self.addons.selected = 4;
+                self.addons_open = true;
+                ui.ctx().send_viewport_cmd_to(
+                    egui::ViewportId::from_hash_of("amp-addons"),
                     egui::ViewportCommand::Focus,
                 );
             }
@@ -303,6 +327,9 @@ impl Player {
                 }
                 if skin::button(ui, "AMP DJ", GOLD).clicked() {
                     self.dj_open = true;
+                }
+                if skin::button(ui, "ADD-ONS", GOLD).clicked() {
+                    self.addons_open = true;
                 }
                 ui.hyperlink_to(
                     "AMP Lab downloads",
@@ -621,6 +648,14 @@ impl Player {
             ui.label(RichText::new(&self.status).color(GOLD));
         });
     }
+    fn addons_ui(&mut self, ui: &mut egui::Ui) {
+        skin::panel(ui, false, |ui| {
+            ui.set_min_size(ui.available_size());
+            self.header(ui, "Plugin Manager", false);
+            let action = self.addons.show(ui);
+            self.activate(ui, action);
+        });
+    }
 }
 impl eframe::App for Player {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
@@ -629,6 +664,7 @@ impl eframe::App for Player {
         match self.screenshot_view.as_str() {
             "library" => self.library_ui(ui),
             "dj" => self.dj_ui(ui),
+            "addons" => self.addons_ui(ui),
             _ => self.player_ui(ui),
         }
         if self.library_open {
@@ -665,6 +701,23 @@ impl eframe::App for Player {
                 },
             );
         }
+        if self.addons_open {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("amp-addons"),
+                egui::ViewportBuilder::default()
+                    .with_title("AMP VERSE / Plugin Manager")
+                    .with_decorations(false)
+                    .with_icon(app_icon())
+                    .with_inner_size([1120., 760.])
+                    .with_min_inner_size([1050., 720.]),
+                |ui, _| {
+                    if ui.ctx().input(|i| i.viewport().close_requested()) {
+                        self.addons_open = false;
+                    }
+                    self.addons_ui(ui);
+                },
+            );
+        }
         if let Some(path) = std::env::var_os("AMP_SCREENSHOT")
             && self.scan.is_none()
         {
@@ -688,6 +741,7 @@ fn main() -> eframe::Result {
     let size = match player.screenshot_view.as_str() {
         "library" => [1100., 730.],
         "dj" => [820., 660.],
+        "addons" => [1120., 760.],
         _ => [700., 255.],
     };
     eframe::run_native(

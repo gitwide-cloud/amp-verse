@@ -8,3 +8,5 @@
 6. **Optional AMP Lab and updates:** manual verified release download/launch first, versioned project handoff and compatible add-on manifest, then explicit checksum-verified updates. Preserve independently distributed MP3 Lab and all licenses. Never silently execute downloads.
 
 Future work is intentionally listed as acceptance criteria rather than disabled controls that suggest it already works.
+
+Android handoff preference: when an AMP Verse APK is built for the user, install it on the Pixel and leave it installed. Do not uninstall it as test cleanup.
