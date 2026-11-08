@@ -1096,6 +1096,53 @@ mod tests {
         );
     }
     #[test]
+    fn analysis_entry_point_never_bypasses_busy_or_broken_coordination() {
+        let root = fixture();
+        let rel = Path::new("song.wav");
+        let approved = crate::Preparation {
+            bpm: Some(127.0),
+            ..Default::default()
+        };
+        crate::preparation::save(root.path(), rel, &approved).unwrap();
+        let record = crate::preparation::load_with_revision(&root.path().join(rel))
+            .unwrap()
+            .1
+            .unwrap();
+        let lease = match Lease::claim(
+            root.path(),
+            rel,
+            crate::analysis::JOB_TYPE,
+            "other-device",
+            Duration::from_secs(120),
+        )
+        .unwrap()
+        {
+            Claimed::Owned(lease) => lease,
+            _ => panic!("expected ownership"),
+        };
+        // Invalid fixture audio would fail decoding if either path bypassed the claim.
+        assert!(matches!(
+            analyze_shared(root.path(), rel, true).unwrap(),
+            AnalysisResult::Skipped(_)
+        ));
+        assert_eq!(
+            crate::preparation::load_with_revision(&root.path().join(rel))
+                .unwrap()
+                .1
+                .unwrap(),
+            record
+        );
+        fs::write(&lease.path, b"{interrupted").unwrap();
+        assert!(analyze_shared(root.path(), rel, true).is_err());
+        assert_eq!(
+            crate::preparation::load_with_revision(&root.path().join(rel))
+                .unwrap()
+                .1
+                .unwrap(),
+            record
+        );
+    }
+    #[test]
     fn disconnected_share_and_partial_records_fail_closed() {
         let root = fixture();
         let lease = claim(root.path(), "device");

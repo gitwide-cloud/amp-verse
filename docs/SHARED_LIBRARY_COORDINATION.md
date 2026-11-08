@@ -54,3 +54,11 @@ Loaded DJ decks hold independent snapshots. Library refresh/review does not repl
 | Independent radio servers | Native two-server smoke checks distinct persistent IDs and isolated start/stop; wrong selected-server ID denied. |
 
 Locking references: [Linux flock SMB behavior](https://man7.org/linux/man-pages/man2/flock.2.html), [Linux OFD byte-range locks](https://man7.org/linux/man-pages/man2/F_OFD_SETLK.2const.html). Disable local-only/offline metadata caching on shared mounts; cached audio is separate from authoritative `.ampverse` transactions.
+
+## Coordination-first rollout rule
+
+Build and verify coordination before enabling simultaneous analysis against any shared NAS library. Local tests and CI are prerequisites, not approval for an untested mount. Keep LAG analysis disabled except during isolated generated-audio tests; keep AUHUBNAS production analysis disabled until the actual cross-host SMB/NFS acceptance gate passes. Never use a real imported library to discover locking behavior.
+
+Desktop batch analysis, explicit editor analysis, CLI and Cast workers all acquire shared claims before decoding. Busy claims skip; malformed claims and locking failures fail closed, including forced reanalysis. The entry-point regression verifies that busy/broken coordination cannot invoke analysis or alter existing metadata. No fallback may silently bypass coordination. Installation alone does not enable Cast background analysis; explicit enablement is device-local. Android is not an analysis worker.
+
+If a mount cannot provide reliable coordination, do not enable cooperative writers. A designated single-writer deployment requires all other installations to remain read-only, including metadata editing; automated enforcement of that fallback is not implemented. General conflict/outbox review screens and additional status views in the attached requirements remain future work.
