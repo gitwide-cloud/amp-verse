@@ -766,11 +766,53 @@ impl Player {
                 0.,
                 theme::current(ui.ctx()).palette().background,
             );
-            egui::ScrollArea::both()
-                .max_height(ui.available_height())
-                .auto_shrink([false, false])
-                .id_salt(("merged-window", host))
-                .show(ui, |ui| self.group_contents(ui, host));
+            // Fit the entire magnetic group, including its title bars, in this viewport.
+            // A fixed scene transform also maps pointer input to the scaled controls.
+            let open = self.open_panes();
+            let panes: Vec<_> = (0..6)
+                .filter(|&p| {
+                    if p != host && !open[p] {
+                        return false;
+                    }
+                    let mut at = Some(p);
+                    while let Some(parent) = at {
+                        if parent == host {
+                            return true;
+                        }
+                        at = self.layout.parent[parent];
+                    }
+                    false
+                })
+                .collect();
+            let preferred = |p| {
+                if p == 0 {
+                    135.
+                } else if p == 2 {
+                    600.
+                } else {
+                    680.
+                }
+            };
+            let minimum_height: f32 = panes.iter().map(|&p| preferred(p) + 8.).sum();
+            let available = ui.available_size().max(egui::vec2(1., 1.));
+            let scale = (available.x / 900.)
+                .min(available.y / minimum_height)
+                .min(1.);
+            let logical = available / scale;
+            for &pane in &panes {
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(
+                        egui::Id::unique(("pane-fit-height", pane)),
+                        (preferred(pane) + 8.) * logical.y / minimum_height - 8.,
+                    )
+                });
+            }
+            let mut bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, logical);
+            egui::Scene::new()
+                .sense(egui::Sense::hover())
+                .zoom_range(scale..=scale)
+                .max_inner_size(logical)
+                .show(ui, &mut bounds, |ui| self.group_contents(ui, host));
             window_layout::resize_edges(ui);
         } else {
             self.group_contents(ui, host);
@@ -795,17 +837,9 @@ impl Player {
         });
         window_layout::set_embedded(&ctx, embedded);
         ui.push_id(("pane", host), |ui| {
-            let height = if host == 0 {
-                135.
-            } else if host == 2 {
-                if embedded {
-                    920.
-                } else {
-                    (ctx.viewport_rect().height() - 16.).clamp(400., 920.)
-                }
-            } else {
-                680.
-            };
+            let height = ctx
+                .data(|d| d.get_temp::<f32>(egui::Id::unique(("pane-fit-height", host))))
+                .unwrap_or(600.);
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), height),
                 egui::Layout::top_down(egui::Align::Min),
@@ -1682,7 +1716,11 @@ impl Player {
                                 .wrap(),
                             );
                             ui.ctx().data_mut(|d| {
-                                d.insert_temp(egui::Id::unique("dj-auto-fade-bounds"), fade.rect)
+                                d.insert_temp(egui::Id::unique("dj-auto-fade-bounds"), fade.rect);
+                                d.insert_temp(
+                                    egui::Id::unique("dj-auto-fade-bounds").with("screen"),
+                                    (fade.rect, ui.layer_id()),
+                                )
                             });
                             if fade.clicked() {
                                 self.auto = false;
@@ -1748,7 +1786,7 @@ impl Player {
                     if skin::button(ui,"SYNC",accent).on_hover_text("Match prepared BPM to the other deck. Changes pitch with speed; beat-phase sync/key lock are not available.").clicked(){self.sync_deck(deck);}
                     if ui.button("STOP").clicked(){self.stop(deck);}
                 });
-                ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique(("dj-transport",deck)),transport.response.rect));
+                ui.ctx().data_mut(|d|{d.insert_temp(egui::Id::unique(("dj-transport",deck)),transport.response.rect);d.insert_temp(egui::Id::unique(("dj-transport",deck)).with("screen"),(transport.response.rect,ui.layer_id()));});
                 let cues=self.loaded[deck].and_then(|index|self.loaded_track(deck).map(|t|(index,t.preparation.manual_cues.iter().chain(t.preparation.cues.iter().filter(|c|c.kind=="grid")).take(8).cloned().collect::<Vec<_>>())));
                 ui.horizontal_wrapped(|ui| {
                     let looping=self.audio.as_ref().is_some_and(|a|a.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed));
@@ -2109,6 +2147,41 @@ mod window_tests {
             player.library.as_ref().unwrap().tracks[2].preparation.bpm,
             Some(126.)
         );
+    }
+    #[test]
+    fn resized_mixer_controls_stay_inside_the_viewport() {
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        for size in [
+            egui::vec2(1200., 900.),
+            egui::vec2(740., 480.),
+            egui::vec2(540., 360.),
+            egui::vec2(1000., 760.),
+        ] {
+            let raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                ..Default::default()
+            };
+            let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 2));
+            output.textures_delta.clear();
+            for id in [
+                egui::Id::unique(("dj-transport", 0usize)),
+                egui::Id::unique(("dj-transport", 1usize)),
+                egui::Id::unique("dj-auto-fade-bounds"),
+            ] {
+                let (rect, layer) = ctx
+                    .data(|d| d.get_temp::<(egui::Rect, egui::LayerId)>(id.with("screen")))
+                    .unwrap();
+                let screen = ctx.layer_transform_to_global(layer).unwrap_or_default() * rect;
+                assert!(
+                    screen.left() >= -1.
+                        && screen.top() >= -1.
+                        && screen.right() <= size.x + 1.
+                        && screen.bottom() <= size.y + 1.,
+                    "{size:?}: control outside window {screen:?}"
+                );
+            }
+        }
     }
     #[test]
     fn dj_container_fits_a_short_viewport() {

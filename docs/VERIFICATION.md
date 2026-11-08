@@ -246,3 +246,9 @@ Android 0.1.11 (versionCode 12) was installed over the existing Pixel 7 app with
 Rust workspace tests and strict Clippy passed. The 900x600 DJ regression checks actual deck transport and auto-fade bounds; the optimized native screenshot was visually inspected, including master volume. Mixer, Music library and Sampler tabs prevent tools from pushing transport controls below the window. Optimized Windows player and Cast builds were installed locally. The running older player was preserved and needs reopening.
 
 The real-server discovery smoke passed: response identity and advertised HTTP port match status, malformed requests receive no response, and discovery does not start a station or analysis. Android build and lint passed. CI execution after this commit is separate from these local results.
+
+## Dynamic desktop window fitting
+
+Desktop magnetic groups now fit into their available viewport through a uniform scene transform. Each panel receives a finite share of the group height, and smaller windows scale controls and pointer hit regions together instead of growing an outer horizontal/vertical canvas. Larger windows expand the available layout. Inner music lists and editors retain their own scrolling.
+
+Player tests passed (34 passed, 7 hardware-dependent tests ignored), with strict Clippy passing. A repeated-resize regression checks both deck transport rows and the auto-crossfade button in actual transformed screen coordinates at 1200x900, 740x480, 540x360, then 1000x760. Existing magnetic merge/detach and attached Library/DJ tests pass. Very small or heavily merged windows necessarily make controls smaller; detach panels for more working space.
