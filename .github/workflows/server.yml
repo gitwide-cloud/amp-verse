@@ -99,7 +99,15 @@ jobs:
       - name: Test candidate container before publication
         run: |
           image=ghcr.io/gitwide-cloud/amp-verse-cast:${{ github.sha }}-${{ matrix.suffix }}
-          docker run -d --platform '${{ matrix.platform }}' --name amp-cast-check "$image"
+          mkdir -p test-output/image-music
+          chmod 777 test-output/image-music
+          python3 - <<'PY'
+          import math,struct,wave
+          with wave.open('test-output/image-music/Tone.wav','wb') as w:
+              w.setparams((1,2,11025,0,'NONE','not compressed'))
+              w.writeframes(b''.join(struct.pack('<h',int(6000*math.sin(2*math.pi*440*i/11025))) for i in range(11025*4)))
+          PY
+          docker run -d --platform '${{ matrix.platform }}' --name amp-cast-check --mount "type=bind,source=$PWD/test-output/image-music,target=/music" -e AMP_ANALYSIS_ENABLED=true -e AMP_ANALYSIS_WORKERS=1 "$image"
           ready=false
           for attempt in $(seq 1 60); do
             if docker exec amp-cast-check curl --fail --silent http://127.0.0.1:8787/health; then ready=true; break; fi
@@ -107,6 +115,16 @@ jobs:
           done
           docker logs amp-cast-check
           if [ "$ready" != true ]; then exit 1; fi
+          prepared=false
+          for attempt in $(seq 1 60); do
+            if docker exec amp-cast-check curl --fail --silent http://127.0.0.1:8787/api/status | python3 -c 'import json,sys; sys.exit(0 if json.load(sys.stdin)["analysis"]["completed"] == 1 else 1)'; then prepared=true; break; fi
+            sleep 1
+          done
+          test "$prepared" = true
+          docker exec amp-cast-check curl --fail --silent -X POST http://127.0.0.1:8787/api/start
+          docker exec amp-cast-check sh -c 'curl --silent --max-time 5 http://127.0.0.1:8787/listen.mp3 -o /tmp/cast-check.mp3 || test "$?" = 28'
+          docker exec amp-cast-check ffmpeg -v error -i /tmp/cast-check.mp3 -t 0.2 -f null -
+          docker exec amp-cast-check curl --fail --silent -X POST http://127.0.0.1:8787/api/stop
           docker exec amp-cast-check uname -m
           docker stats --no-stream amp-cast-check
           docker stop --time 30 amp-cast-check
