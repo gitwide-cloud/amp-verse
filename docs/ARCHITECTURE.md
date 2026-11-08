@@ -64,3 +64,8 @@ This preview has sequential queue playback and optional repeat; prepared cue ove
 - Desktop Plugin Manager is the home for downloading/managing add-ons. Current implementation is an offline catalog, manual download links and external-editor connection; automatic download/install/update management is still unbuilt. Android has an integrated feature set with no plugin loader.
 - AMP Lab must extend/reuse the existing MP3 Lab editor foundation. Do not create a second independent editor implementation. Current integration launches an explicitly selected MP3 Lab installation; deeper editor integration/branding is future work. This does not authorize modifying the separate mp3-lab repository in this AMP Verse task.
 - Use the Pixel 7 for real-device Android development/testing and leave AMP Verse installed once installation succeeds. A reported commit/local pass is not proof that CI or device tests passed; report actual results separately.
+
+
+## Android audio processing
+
+PlaybackService uses a custom DefaultAudioSink PCM chain with a five-band peaking EQ and a post-EQ spectral measurement tap (AudioDsp). The tap does not modify samples while EQ is bypassed. A foreground SpectrumView reads immutable volatile level snapshots and decays stale frames. No Android Visualizer/microphone permission, downloaded DSP or simulated spectrum is used. Settings preferences update EQ coefficients in the audio thread without letting the UI call decoder methods. Native Radio temporarily loads an explicit HTTP(S) stream into the same media session, while LibraryStore remains the persistent local queue authority.
