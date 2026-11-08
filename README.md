@@ -2,6 +2,8 @@
 
 An independent, modular audio project for Windows/Linux, with an integrated Android app planned. Inspired by compact classic players; not affiliated with Winamp. This repository is separate from MP3 Lab.
 
+The supplied AMP Verse references now guide the drawn desktop chrome and embedded Cast UI: purple/silver Player and orange/cyan DJ decks, black/gold folder Library and Cast console. See [visual direction](docs/DESIGN.md). The Library uses folders and playlists; older mockups' crates and integrated player strip are not included.
+
 ## Runnable milestone 0.1
 
 - **AMP Player:** native Rust/egui compact player, Play/Stop/Next, next-play volume, a separate folder-library window and JSON playlists. FFplay performs local playback.

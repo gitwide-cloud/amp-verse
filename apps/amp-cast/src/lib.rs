@@ -20,6 +20,7 @@ use tokio::{
 struct Station {
     running: bool,
     now_playing: Option<String>,
+    current_index: Option<usize>,
     error: Option<String>,
     #[serde(skip)]
     worker: Option<AbortHandle>,
@@ -49,6 +50,7 @@ impl Cast {
         }
         station.running = false;
         station.now_playing = None;
+        station.current_index = None;
     }
     fn authorized(&self, headers: &HeaderMap) -> bool {
         // Reject browser cross-site requests even for password-free trusted-LAN operation.
@@ -79,6 +81,7 @@ pub fn router(cast: Arc<Cast>) -> Router {
             get(|| async { Html(include_str!("../web/index.html")) }),
         )
         .route("/api/status", get(status))
+        .route("/api/playlist", get(playlist))
         .route("/api/start", post(start))
         .route("/api/stop", post(stop))
         .route("/listen.mp3", get(listen))
@@ -87,7 +90,12 @@ pub fn router(cast: Arc<Cast>) -> Router {
 async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
     let station = cast.station.lock().await;
     Json(
-        serde_json::json!({"running":station.running,"now_playing":station.now_playing,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
+        serde_json::json!({"running":station.running,"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
+    )
+}
+async fn playlist(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
+    Json(
+        serde_json::json!({"tracks":cast.tracks.iter().enumerate().map(|(index,track)|serde_json::json!({"index":index,"title":track.title,"cue_in":track.preparation.cue_in,"cue_out":track.preparation.cue_out,"bpm":track.preparation.bpm})).collect::<Vec<_>>()}),
     )
 }
 async fn start(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
@@ -113,6 +121,7 @@ async fn start(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
         let mut station = worker_cast.station.lock().await;
         station.running = false;
         station.now_playing = None;
+        station.current_index = None;
         station.error = outcome.err();
         station.worker = None;
     });
@@ -128,9 +137,13 @@ async fn stop(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
 }
 async fn broadcast_tracks(cast: Arc<Cast>) -> Result<(), String> {
     loop {
-        for track in &cast.tracks {
+        for (index, track) in cast.tracks.iter().enumerate() {
             let path = amp_core::resolve(&cast.root, &track.path).map_err(|e| e.to_string())?;
-            cast.station.lock().await.now_playing = Some(track.title.clone());
+            {
+                let mut station = cast.station.lock().await;
+                station.now_playing = Some(track.title.clone());
+                station.current_index = Some(index);
+            }
             let mut command = tokio::process::Command::new("ffmpeg");
             #[cfg(windows)]
             command.creation_flags(0x08000000);

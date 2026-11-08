@@ -48,7 +48,10 @@ jobs:
         run: |
           mkdir -p test-output/music
           ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 test-output/music/Tone.wav
-          timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_SCREENSHOT=test-output/player.png target/release/amp-player test-output/music
+          for view in player library dj; do
+            timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_SCREENSHOT_VIEW="$view" AMP_SCREENSHOT="test-output/$view.png" target/release/amp-player test-output/music
+            test -s "test-output/$view.png"
+          done
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:

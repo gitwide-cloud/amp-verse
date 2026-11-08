@@ -39,6 +39,12 @@ def main():
                     time.sleep(0.1)
             else:
                 raise AssertionError("Server failed to start")
+            with request("/api/playlist") as response:
+                playlist = json.load(response)["tracks"]
+            assert [track["title"] for track in playlist] == ["a", "b"]
+            assert [track["index"] for track in playlist] == [0, 1]
+            assert playlist[0]["cue_in"] == 0.2 and playlist[0]["cue_out"] == 1.2
+            assert all("path" not in track for track in playlist)
             try:
                 request("/api/start", "POST")
                 raise AssertionError("Missing password accepted")
@@ -51,6 +57,7 @@ def main():
                 assert len(data) == 12000
                 assert len(second.read(4096)) == 4096
                 assert status()["listeners"] >= 2
+                assert status()["current_index"] in (0, 1)
                 # Decode captured bytes to prove this is audio, not just a successful HTTP response.
                 captured = root / "capture.mp3"
                 captured.write_bytes(data)
@@ -67,6 +74,7 @@ def main():
             with request("/api/stop", "POST", "test-only") as response:
                 assert response.status == 204
             assert not status()["running"]
+            assert status()["current_index"] is None
             try:
                 request("/listen.mp3")
                 raise AssertionError("Stopped station still accepts listeners")
