@@ -1,0 +1,8 @@
+[package]
+name = "amp-engine"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+[dependencies]
+amp-core = { workspace = true, features = ["analysis"] }
+serde_json.workspace = true

@@ -1,8 +1,10 @@
 //! Offline-first library, preparation data and process audio adapter. No GUI or network dependency.
+#[cfg(feature = "analysis")]
 pub mod analysis;
 pub mod arrangement;
 pub mod batch;
 pub mod coordination;
+pub mod engine_api;
 pub mod offline;
 pub mod preparation;
 pub mod review;

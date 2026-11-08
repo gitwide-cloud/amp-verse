@@ -38,8 +38,15 @@ jobs:
         if: runner.os == 'Linux'
         env:
           SDL_AUDIODRIVER: dummy
-        run: cargo test -p amp-core --locked -- --include-ignored
+        run: cargo test -p amp-core --features analysis --locked -- --include-ignored
       - run: cargo build --workspace --release --locked
+      - name: Build base player without analysis implementation
+        run: cargo build -p amp-player --release --locked
+      - name: Verify optional analysis process
+        if: runner.os == 'Linux'
+        run: |
+          python3 tools/smoke_engine_addon.py target/release/amp-engine
+          AMP_ENGINE_TEST_EXE="$PWD/target/release/amp-engine" cargo test -p amp-player real_installed_engine_round_trip -- --ignored
       - name: Test live radio with generated audio
         if: runner.os == 'Linux'
         run: python3 tools/smoke_cast.py target/release/amp-cast
@@ -77,13 +84,23 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} target/release/amp-prepare${{ matrix.suffix }} dist/
+          cp target/release/amp-player${{ matrix.suffix }} dist/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md dist/
           cp -r docs dist/
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
           path: dist/
+      - name: Package optional analysis add-on
+        shell: bash
+        run: |
+          mkdir -p engine-dist
+          cp target/release/amp-engine${{ matrix.suffix }} LICENSE THIRD_PARTY_NOTICES.md engine-dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amp-analysis-engine-${{ runner.os }}
+          path: engine-dist/
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: desktop
@@ -95,9 +112,13 @@ jobs:
         with:
           pattern: amp-verse-*
           path: packages
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: amp-analysis-engine-*
+          path: packages
       - run: |
           cd packages
-          for dir in amp-verse-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
+          for dir in amp-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
           sha256sum *.zip > SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:

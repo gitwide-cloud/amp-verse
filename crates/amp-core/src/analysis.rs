@@ -1,11 +1,10 @@
 //! Independent offline preparation estimates. Not the proprietary Mixed In Key engine.
+pub use crate::engine_api::{ENGINE_ID, JOB_TYPE};
 use crate::{
     Preparation,
     preparation::{self, AnalysisInfo, Cue},
 };
 use std::{io::Read, path::Path, process::Stdio};
-pub const ENGINE_ID: &str = "amp-prep-heuristic-1";
-pub const JOB_TYPE: &str = "preparation";
 const RATE: f64 = 11025.;
 const BLOCK: usize = 110;
 const FFT: usize = 4096;

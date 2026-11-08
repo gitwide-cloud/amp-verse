@@ -121,3 +121,7 @@ Detailed implementation boundaries and unmet revised-spec items are recorded in 
 ## Shared-library coordination and headless builds
 
 `amp-core::coordination` owns identity, OS-lock transactions, renewable generation-fenced analysis claims, revisions and independent-field merges. `amp-core::offline` stages explicit local proposals; reconnect is never a write trigger. Both desktop Preparer and server worker call `analyze_shared`; the headless CLI moved into the Cast package to remove GUI dependencies from server/ARM builds. Cast private configuration owns server/station identity; these do not live in the shared music directory. Loaded desktop deck snapshots remain stable while Library data changes. See SHARED_LIBRARY_COORDINATION.md for the protocol, filesystem prerequisites and remaining client/hardware gates.
+
+## Optional desktop analysis boundary
+
+See [OPTIONAL_ANALYSIS.md](OPTIONAL_ANALYSIS.md). Basic player builds exclude the analysis implementation; Library invokes the separately installed `amp-engine` process. QNAP app deployment is cancelled; shared NAS storage coordination still applies. DJ/Library UI separation into installable modules remains unfinished.

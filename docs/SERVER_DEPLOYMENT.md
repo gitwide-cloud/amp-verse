@@ -1,5 +1,7 @@
 # Headless AMP Cast deployment — current milestone
 
+**Scope update:** QNAP app/deployment work is cancelled. LAG and AUHUBNAS plans below are historical, not active instructions. Focus is Sager Linux and the Windows/Linux player with optional analysis. NAS shares remain storage. See OPTIONAL_ANALYSIS.md.
+
 One shared Rust server and analysis engine serve Windows, Linux and ARM candidates. Device-specific choices live in configuration/environment files. The complete requested server plan is in CAST_SERVER_SPEC.md; the revised roles below supersede its earlier home-QNAP production role.
 
 | Device | Role / gate |

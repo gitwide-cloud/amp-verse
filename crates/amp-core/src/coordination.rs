@@ -475,7 +475,7 @@ impl Lease {
         )
     }
     pub(crate) fn primary_analysis(&self) -> bool {
-        self.analysis_type == crate::analysis::JOB_TYPE
+        self.analysis_type == crate::engine_api::JOB_TYPE
     }
     pub(crate) fn verify_record_locked(&self, record: &Path, library: &str) -> Result<(), String> {
         if self.record != record || self.library != library {
@@ -510,6 +510,7 @@ impl Lease {
         let _lock = Lock::acquire(&self.record)?;
         self.finish_locked()
     }
+    #[cfg(feature = "analysis")]
     fn stamp(&self, p: &mut crate::Preparation) {
         if p.source_sha256.is_none() {
             p.source_sha256 = p
@@ -521,7 +522,7 @@ impl Lease {
         }
         p.extensions.insert(
             "analysis_engine_checked".into(),
-            Value::String(crate::analysis::ENGINE_ID.into()),
+            Value::String(crate::engine_api::ENGINE_ID.into()),
         );
 
         p.extensions.insert("analysis_origin".into(), serde_json::json!({"device_id": self.device,"library_id":self.library,"token":self.token,"generation":self.generation,"analysis_type":self.analysis_type}));
@@ -575,6 +576,7 @@ pub enum AnalysisResult {
     Prepared(Box<crate::Preparation>),
     Skipped(Skip),
 }
+#[cfg(feature = "analysis")]
 fn source_stat(audio: &Path) -> Result<Value, String> {
     let m = fs::metadata(audio).map_err(|e| e.to_string())?;
     let ns = m
@@ -586,10 +588,12 @@ fn source_stat(audio: &Path) -> Result<Value, String> {
         .to_string();
     Ok(serde_json::json!({"size":m.len(),"modified_ns":ns}))
 }
+#[cfg(feature = "analysis")]
 fn engine_version(engine: &str) -> Option<u64> {
-    let (family, _) = crate::analysis::ENGINE_ID.rsplit_once('-')?;
+    let (family, _) = crate::engine_api::ENGINE_ID.rsplit_once('-')?;
     engine.strip_prefix(&format!("{family}-"))?.parse().ok()
 }
+#[cfg(feature = "analysis")]
 fn completed_version(p: &crate::Preparation) -> Option<u64> {
     p.analysis
         .as_ref()
@@ -603,12 +607,14 @@ fn completed_version(p: &crate::Preparation) -> Option<u64> {
         )
         .max()
 }
+#[cfg(feature = "analysis")]
 fn valid_engine(p: &crate::Preparation) -> bool {
     p.source_sha256.is_some()
         && completed_version(p)
-            .is_some_and(|v| v >= engine_version(crate::analysis::ENGINE_ID).unwrap())
+            .is_some_and(|v| v >= engine_version(crate::engine_api::ENGINE_ID).unwrap())
 }
 
+#[cfg(feature = "analysis")]
 pub fn analyze_shared(root: &Path, relative: &Path, force: bool) -> Result<AnalysisResult, String> {
     let audio = crate::resolve(root, relative).map_err(|e| e.to_string())?;
     let signature = source_stat(&audio)?;
@@ -623,7 +629,7 @@ pub fn analyze_shared(root: &Path, relative: &Path, force: bool) -> Result<Analy
     let lease = match Lease::claim(
         root,
         relative,
-        crate::analysis::JOB_TYPE,
+        crate::engine_api::JOB_TYPE,
         &device,
         Duration::from_secs(120),
     )? {
@@ -635,7 +641,7 @@ pub fn analyze_shared(root: &Path, relative: &Path, force: bool) -> Result<Analy
     let (before, bytes) = crate::preparation::load_with_revision(&audio)?;
     if (!force
         || completed_version(&before)
-            .is_some_and(|v| v > engine_version(crate::analysis::ENGINE_ID).unwrap()))
+            .is_some_and(|v| v > engine_version(crate::engine_api::ENGINE_ID).unwrap()))
         && valid_engine(&before)
         && before.source_sha256.as_ref().is_some_and(|s| {
             crate::preparation::fingerprint(&audio).is_ok_and(|actual| &actual == s)
@@ -664,6 +670,7 @@ pub fn analyze_shared(root: &Path, relative: &Path, force: bool) -> Result<Analy
 }
 
 /// Analyze an explicit editor draft under a shared claim, without publishing it.
+#[cfg(feature = "analysis")]
 pub fn analyze_draft(
     root: &Path,
     relative: &Path,
@@ -673,7 +680,7 @@ pub fn analyze_draft(
     let lease = match Lease::claim(
         root,
         relative,
-        crate::analysis::JOB_TYPE,
+        crate::engine_api::JOB_TYPE,
         &device,
         Duration::from_secs(120),
     )? {
@@ -695,7 +702,7 @@ pub fn analyze_draft(
     Ok(result)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "analysis"))]
 mod tests {
     use super::*;
     fn fixture() -> tempfile::TempDir {
@@ -1111,7 +1118,7 @@ mod tests {
         let lease = match Lease::claim(
             root.path(),
             rel,
-            crate::analysis::JOB_TYPE,
+            crate::engine_api::JOB_TYPE,
             "other-device",
             Duration::from_secs(120),
         )

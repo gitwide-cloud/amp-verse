@@ -80,6 +80,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "amp-engine"
+version = "0.1.0"
+dependencies = [
+ "amp-core",
+ "serde_json",
+]
+
+[[package]]
 name = "amp-player"
 version = "0.1.0"
 dependencies = [

@@ -11,6 +11,7 @@ mod cast;
 mod control;
 mod dj_browser;
 mod docking;
+mod engine;
 mod lab;
 mod mixer;
 mod performance;

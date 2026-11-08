@@ -72,6 +72,11 @@ impl Preparer {
         self.start(root, tracks, false);
     }
     fn start(&mut self, root: PathBuf, tracks: Vec<Track>, selected: bool) {
+        if crate::engine::path().is_none() {
+            self.status = "Analysis add-on is not installed. Open Plugin Manager; playback and manual edits remain available.".into();
+            return;
+        }
+
         let (tx, rx) = mpsc::channel();
         self.job = Some(rx);
         self.active_workers = amp_core::batch::workers(self.workers, tracks.len());
@@ -83,17 +88,17 @@ impl Preparer {
         std::thread::spawn(move || {
             amp_core::batch::for_each(&tracks, workers, |track| {
                 let mut skipped = false;
-                let result = if selected {
-                    amp_core::coordination::analyze_draft(&root, &track.path, &track.preparation)
-                } else {
-                    match amp_core::coordination::analyze_shared(&root, &track.path, false) {
-                        Ok(amp_core::coordination::AnalysisResult::Prepared(p)) => Ok(*p),
-                        Ok(amp_core::coordination::AnalysisResult::Skipped(_)) => {
-                            skipped = true;
-                            preparation::load(&root.join(&track.path))
-                        }
-                        Err(e) => Err(e),
+                let result = match crate::engine::analyze(
+                    &root,
+                    &track.path,
+                    selected.then_some(&track.preparation),
+                ) {
+                    Ok(Some(p)) => Ok(p),
+                    Ok(None) => {
+                        skipped = true;
+                        preparation::load(&root.join(&track.path))
                     }
+                    Err(e) => Err(e),
                 };
                 tx.send(Update {
                     root: root.clone(),

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/amp-core", "apps/amp-player", "apps/amp-cast"]
+members = ["crates/amp-core", "apps/amp-player", "apps/amp-cast", "apps/amp-engine"]
 resolver = "2"
 
 [workspace.package]
