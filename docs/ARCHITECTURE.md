@@ -48,3 +48,10 @@ Native tests use the actual Cast TCP router to verify JSON/status/queue compatib
 ## Interface ownership
 
 The web UI is intentionally basic: live station/track status, listening on this device, basic broadcast Start/Stop, a collapsed read-only queue and local theme selection. It is not the full Cast management dashboard. Playlist creation/reordering, library management, cue editing, Auto DJ rules/mixing, schedules, routing and detailed station controls belong in AMP Verse desktop and the integrated Android app as implemented. The server owns execution and prepared state so it remains independent of both clients. Android is still unbuilt; this ownership does not imply its controls already exist. Do not mirror advanced desktop mockups or placeholder future-feature panels into the simple browser page.
+
+
+## Android preview implementation
+
+The integrated Android application lives under `android/`, with its own package identity and no changes to MP3 Lab. Native Android views keep the initial shell small; Media3 ExoPlayer/MediaSessionService owns audio focus, noisy-route handling, media notifications and service playback. The activity connects by MediaController and releases its controller on stop without owning the audio engine lifetime. Imports use the system document picker and copy selected audio to private app storage on a worker thread, so later playback is local and independent of document-provider/NAS availability. `LibraryStore` atomically saves a relative-file queue. Themes use the same Classic/Modern Light/Modern Dark IDs in local preferences.
+
+This preview has sequential queue playback and optional repeat; prepared cue overrides, beatgrid/stems, folder tree, named/reordered playlists, simplified cue-aware Auto DJ and LAN discovery/remote control remain unbuilt. No internet/storage-wide permissions or desktop plugin loader are included. The app currently targets API 35 and supports API 28+ (Android 9+). Playback duration and seek come from the actual player, not mock values.

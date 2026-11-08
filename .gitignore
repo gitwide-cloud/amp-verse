@@ -1,3 +1,6 @@
 /target/
 *.log
 /test-output/
+/android/.gradle/
+/android/**/build/
+/android/local.properties

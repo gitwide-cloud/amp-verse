@@ -7,3 +7,5 @@ Rust dependencies are resolved in `Cargo.lock` and retain their respective licen
 FFmpeg and FFplay are external user-installed tools in this milestone. No FFmpeg binary, codec library or MP3 Lab runtime is bundled or downloaded automatically. Their licenses depend on the build configuration. Any future bundled runtime must include matching license notices and required source/rebuild materials.
 
 MP3 Lab architecture was inspected read-only; no original MP3 Lab code/assets are copied. If its code is ported later, retain `Copyright (c) 2026 MP3 Lab contributors` and its MIT license. Its independent downloads have separate third-party obligations.
+
+Android preview additionally uses AndroidX Media3 (Apache-2.0), AndroidX Test (Apache-2.0) and their transitive dependencies, including Guava (Apache-2.0). The supplied user icon is copied unchanged. No FFmpeg or MP3 Lab runtime is included in the APK.

@@ -15,7 +15,7 @@ The supplied AMP Verse references now guide the drawn desktop chrome and embedde
 - **Plugin Manager:** searchable offline component catalog, real included build versions, companion-binary detection and module launch actions. Open it from the top-bar dropdown or **ADD-ONS** button.
 - **AMP Lab:** manual links to MP3 Lab Releases and an explicit connection to a separately installed editor. Pick its executable in Plugin Manager, or set `AMP_LAB_EXE` to its full path before launch. Picker connections last for the session. **Open editor** launches it separately, without file handoff or modifying MP3 Lab. No editor code copied, automatic downloader, installer or native plugin loader yet.
 
-**Not built yet:** Android application; desktop/Cast LAN discovery and Android remote-control client; metadata tag extraction; local cue-editing UI; persisted queues/session recovery; Cast local soundcard output, scheduling and station playlist selection; native in-process audio engine; advanced DJ controls; automatic updates or add-on installation. See [architecture](docs/ARCHITECTURE.md) and [roadmap](docs/ROADMAP.md). The UI reports prototype status; it does not display fictitious waveforms, meters or listener counts.
+**Not built yet:** Android prepared cues/stems, folder-tree import and LAN remote control; desktop/Cast LAN discovery and Android remote-control client; metadata tag extraction; local cue-editing UI; persisted queues/session recovery; Cast local soundcard output, scheduling and station playlist selection; native in-process audio engine; advanced DJ controls; automatic updates or add-on installation. See [architecture](docs/ARCHITECTURE.md) and [roadmap](docs/ROADMAP.md). The UI reports prototype status; it does not display fictitious waveforms, meters or listener counts.
 
 ## Run from source
 
@@ -81,3 +81,8 @@ MIT for AMP Verse code. MP3 Lab was inspected read-only for editor architecture,
 In AMP Verse, open the top-bar dropdown and choose **AMP Cast**. This opens a separate native window inside the desktop software, with Dashboard, Queue, Streaming and Settings sections. Enter the running server's `host:port` (default `127.0.0.1:8787`) and optional admin password, then **Connect / apply**. Start/Stop controls the independent server broadcast; the dashboard displays real track, cue, listener and station status. Closing the window does not stop the server. Passwords are kept in memory only. Start the `amp-cast` companion separately using the instructions above. Native soundcard listening and queue editing remain planned; the browser listener remains separately available.
 
 The **web UI stays simple**: listen, see current status, start/stop broadcasting, and view the read-only queue. Real editing and advanced control belong to AMP Verse desktop and the Android app (Android remains in development).
+
+
+### Android preview
+
+`android/` now builds a compact integrated app (`cloud.gitwide.ampverse`) with Player/Library, three saved themes, file-picker imports copied to private local storage, a saved queue, seek/pause/previous/next, sequential queue playback/repeat and a Media3 foreground media service. See [Android build and device verification](docs/ANDROID.md). This is a first preview, not the complete Android milestone. No desktop plugins are loaded on Android.

@@ -56,3 +56,9 @@ The latest supplied dashboard reference applies to native software Cast, indepen
 ## Simple browser scope
 
 Removed the disabled playlist-source selector and advanced sync/Auto DJ panels from the web page. The browser now exposes only basic station status, local listening, basic broadcast Start/Stop, theme/access settings and a collapsed read-only queue without preparation fields. Advanced editing/control ownership is documented for desktop and Android; Android remains unbuilt. The release binary built, actual browser status/theme rendering was verified, and the real Cast encoder/network smoke test passed. Screenshot: `test-output/simple-web.png`. The temporary QA server was stopped.
+
+## First Android build / Pixel connection
+
+Added a separate Android app in this repository: native compact Player/Library, locally copied SAF imports, atomic saved queue, real transport/seek, three locally saved themes, sequential playback/repeat and a Media3 foreground media session/service. Main APK and instrumentation APK build; Android lint passes with 0 errors and 9 warnings (dependency updates, backup/icon guidance and English-only text). Device instrumentation covers saved queue round-trip, decoder progress, sequential transition, pause and screen-off progress with generated silent fixtures, restoring the prior library afterward. That test has compiled but has NOT run yet.
+
+The Pixel 7 initially appeared authorized as `Pixel_7` via USB, then disappeared before installation. Installation failed with device not found; subsequent device lists were empty. No APK was installed or uninstalled in this attempt, and no phone playback or screenshots are claimed. Reconnect is required to finish installation, real-device UI checks and the screen-off test. APK: `android/app/build/outputs/apk/debug/app-debug.apk` (12.5 MB approximately). The user requested the main app remain installed after testing; this is recorded in `ANDROID.md` and `ROADMAP.md`.
