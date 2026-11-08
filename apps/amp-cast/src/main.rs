@@ -20,9 +20,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         "AMP Cast prototype listening on http://{}",
         listener.local_addr()?
     );
-    axum::serve(listener, amp_cast::router(cast))
-        .with_graceful_shutdown(async {
+    axum::serve(listener, amp_cast::router(cast.clone()))
+        .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            cast.shutdown().await;
         })
         .await?;
     Ok(())

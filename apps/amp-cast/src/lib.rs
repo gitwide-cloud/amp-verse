@@ -42,6 +42,14 @@ impl Cast {
             audio,
         })
     }
+    pub async fn shutdown(&self) {
+        let mut station = self.station.lock().await;
+        if let Some(worker) = station.worker.take() {
+            worker.abort();
+        }
+        station.running = false;
+        station.now_playing = None;
+    }
     fn authorized(&self, headers: &HeaderMap) -> bool {
         // Reject browser cross-site requests even for password-free trusted-LAN operation.
         if headers
@@ -115,12 +123,7 @@ async fn stop(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let mut station = cast.station.lock().await;
-    if let Some(worker) = station.worker.take() {
-        worker.abort();
-    }
-    station.running = false;
-    station.now_playing = None;
+    cast.shutdown().await;
     StatusCode::NO_CONTENT.into_response()
 }
 async fn broadcast_tracks(cast: Arc<Cast>) -> Result<(), String> {
@@ -281,5 +284,27 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), 401);
+    }
+
+    #[tokio::test]
+    async fn origin_is_checked_with_optional_password_disabled() {
+        let app = app(None);
+        for (origin, expected) in [
+            ("http://radio.local:8787", 204),
+            ("http://other.local", 401),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::post("/api/stop")
+                        .header("host", "radio.local:8787")
+                        .header("origin", origin)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), expected);
+        }
     }
 }

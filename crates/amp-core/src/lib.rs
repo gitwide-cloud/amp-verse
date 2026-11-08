@@ -296,4 +296,21 @@ mod tests {
         fs::write(tmp.path().join("a.wav.amp.json"), "broken").unwrap();
         assert!(scan(tmp.path()).is_err());
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn symlinks_cannot_escape_or_recurse() {
+        use std::os::unix::fs::symlink;
+        let root = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.mp3"), []).unwrap();
+        symlink(
+            outside.path().join("secret.mp3"),
+            root.path().join("link.mp3"),
+        )
+        .unwrap();
+        symlink(root.path(), root.path().join("cycle")).unwrap();
+        assert!(scan(root.path()).unwrap().tracks.is_empty());
+        assert!(resolve(root.path(), Path::new("link.mp3")).is_err());
+    }
 }
