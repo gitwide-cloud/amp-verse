@@ -54,3 +54,9 @@ Read-only preflight: architecture, kernel, free RAM, free disk, existing contain
 - [Rust file-lock API source/stability](https://github.com/rust-lang/rust/blob/1.89.0/library/std/src/fs.rs)
 
 This workstation has neither Docker nor WSL installed. Local verification uses Windows processes, real FFmpeg, the shared unit/native tests and an ARM32 cross-build. Linux/container/emulated ARM checks run in GitHub CI; actual LAG/AUHUBNAS/Sager deployments require management connectivity and are not claimed as completed. Hardware resource benchmarks remain unmeasured.
+
+### LAN discovery
+
+A Cast HTTP listener on a non-loopback IPv4 address also listens on UDP 18787. Clients send AMPVERSE_CAST_DISCOVER_V1 and receive versioned server/station identity, station name and HTTP port. Discovery never joins a session or starts playback/analysis. Loopback HTTP listeners are not advertised. AMP_CAST_DISCOVERY_PORT=0 disables discovery; AMP_CAST_ADVERTISE_PORT overrides the HTTP port in replies for mapped deployments. The default is the actual HTTP listener port. Replies are limited to private/link-local/loopback IPv4 sources and rate limited.
+
+Allow UDP 18787 and the configured HTTP port on the trusted LAN. Docker Compose exposes discovery on the same configured bind address and advertises AMP_PORT. Broadcast traversal across Docker/NAT, VLANs and firewalls is not guaranteed; use a manual server URL when discovery cannot reach the server. No physical LAN or NAS deployment is implied by loopback smoke tests.

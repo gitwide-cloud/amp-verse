@@ -132,3 +132,5 @@ Desktop preparation is now an implemented first milestone: select a track in Lib
 Desktop analysis is now an optional executable add-on. Build `amp-engine` separately and install it through Plugin Manager; prepared playback and manual edits remain available without it. See [optional analysis architecture](docs/OPTIONAL_ANALYSIS.md) for packaging, limitations and the cancelled QNAP deployment scope.
 
 Android 0.1.10 adds an integrated AMP Cast client: selected-server connection, station start/stop, actual status/read-only queue and independent phone listening through the media service. See [Android Cast usage and limits](docs/ANDROID.md#integrated-amp-cast-client-0110). Google Cast receivers and offline downloads remain pending.
+
+Search is available for phone music and the Cast station queue. **Find servers** locates compatible Cast servers on the local IPv4 network; manual address/password settings remain available. Desktop DJ separates Mixer, Music library and Sampler tools so playback controls stay reachable in smaller windows.

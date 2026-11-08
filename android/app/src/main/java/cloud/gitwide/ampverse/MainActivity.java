@@ -44,8 +44,9 @@ public final class MainActivity extends Activity {
     private String module = "AMP Player";
     private Appearance appearance;
     private int queueLimit=100;
+    private String musicQuery="";
     private int bg, panel, text, muted, accent;
-    private String message = "Phone files are a separate local source. Desktop library browsing and Cast downloads will come through AMP Remote.";
+    private String message = "";
     private final Runnable tick = new Runnable() { public void run() { refresh(); handler.postDelayed(this, 500); } };
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
@@ -137,7 +138,7 @@ public final class MainActivity extends Activity {
             String detail=module.equals("AMP Remote")?"Connect to the desktop library, browse songs or playlists, listen on this phone, then Save offline for Cast. This Remote workflow is not implemented in this preview yet.":module.equals("AMP Lab")?"AMP Lab uses the existing MP3 Lab editor foundation on desktop. Android audio editing and preparation tools are not implemented yet.":"Choose AMP Cast from the module dropdown to connect to a running radio station.";
             info.addView(label(detail,16,text));info.addView(button("Settings",this::openSettings));
         }
-        status=label(message,12,muted);page.addView(status);if(!module.equals("AMP Player"))page.addView(label("AMP VERSE  "+BuildConfig.VERSION_NAME+" · LOCAL / OFFLINE",11,muted));refresh();
+        status=label(message,12,muted);page.addView(status);refresh();
     }
     private void drawPlayer(){
         LinearLayout spectrum=card();spectrum.setPadding(dp(6),dp(5),dp(6),dp(5));spectrum.addView(new SpectrumView(this),new LinearLayout.LayoutParams(-1,dp(62)));
@@ -169,23 +170,34 @@ public final class MainActivity extends Activity {
         if(items.size()>queueLimit)rows.addView(button("Show 100 more songs",()->{queueLimit+=100;draw();}));
     }
     private void drawLibrary(){
-        LinearLayout source=card();source.addView(label("Desktop library",17,accent));source.addView(label("Browse and listen through AMP Remote. Saving songs or playlists offline for Cast is coming with that connection.",14,muted));source.addView(button("AMP Remote",()->selectModule("AMP Remote")));
-        LinearLayout files=card();files.addView(label("Phone files · separate local source",16,accent));files.addView(button(importing?"Importing…":"Scan music folder",this::scanFolder));files.addView(button("+ Select individual songs",this::importSongs));files.addView(label("▾ Phone imports",17,accent));files.addView(label("    ▾ Imported ("+(player==null?0:player.getMediaItemCount())+")",15,text));drawQueue(true);
+        LinearLayout files=card();files.addView(label("Add music",17,accent));
+        LinearLayout actions=new LinearLayout(this);rowButton(actions,importing?"Scanning…":"Scan folder",this::scanFolder);rowButton(actions,"Add songs",this::importSongs);files.addView(actions);
+        drawQueue(true);
     }
     private void drawQueue(boolean editable){
-        LinearLayout queue=card();queue.addView(label(editable?"Phone imports · songs":"Now Playing / Queue",16,accent));
+        LinearLayout queue=card();queue.addView(label(editable?"Songs":"Now Playing",16,accent));
         final boolean radio=isRadio();final List<MediaItem> localItems=new ArrayList<>();
         try{if(radio)localItems.addAll(LibraryStore.read(this));else if(player!=null)for(int i=0;i<player.getMediaItemCount();i++)localItems.add(player.getMediaItemAt(i));}catch(Exception error){message="Cannot read local library: "+error.getMessage();}
-        if(localItems.isEmpty()){queue.addView(label("No songs saved yet. Import local audio to begin.",14,muted));return;}
-        for(int i=0;i<Math.min(queueLimit,localItems.size());i++){
+        EditText search=new EditText(this);search.setSingleLine(true);search.setHint("Search your songs");search.setTextColor(text);search.setHintTextColor(muted);search.setContentDescription("Search phone music");search.setText(musicQuery);queue.addView(search);
+        LinearLayout rows=new LinearLayout(this);rows.setOrientation(LinearLayout.VERTICAL);queue.addView(rows);
+        Runnable filter=()->{rows.removeAllViews();drawMusicRows(rows,localItems,radio,editable,search.getText().toString().trim().toLowerCase(Locale.ROOT));};
+        search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int a,int c,int d){}public void onTextChanged(CharSequence t,int a,int b,int c){musicQuery=t.toString();filter.run();}public void afterTextChanged(android.text.Editable t){}});filter.run();
+    }
+    private void drawMusicRows(LinearLayout rows,List<MediaItem> localItems,boolean radio,boolean editable,String query){
+        int matches=0,shown=0;
+        for(int i=0;i<localItems.size();i++){
+            MediaItem candidate=localItems.get(i);
+            String description=String.valueOf(candidate.mediaMetadata.title)+" "+String.valueOf(candidate.mediaMetadata.artist)+" "+String.valueOf(candidate.mediaMetadata.albumTitle);
+            if(!description.toLowerCase(Locale.ROOT).contains(query))continue;matches++;if(shown++>=queueLimit)continue;
             final int index=i;MediaItem item=localItems.get(i);LinearLayout row=new LinearLayout(this);
             Button song=button((i+1)+". "+item.mediaMetadata.title,()->{if(player==null)return;if(radio)player.setMediaItems(localItems);player.seekTo(index,0);player.prepare();player.play();draw();});song.setGravity(android.view.Gravity.START|android.view.Gravity.CENTER_VERTICAL);song.setTextSize(14);row.addView(song,new LinearLayout.LayoutParams(0,dp(46),1));
-            if(editable){Button remove=button("−",()->{if(player!=null){if(radio){try{localItems.remove(index);LibraryStore.write(this,localItems);}catch(Exception error){message=error.getMessage();}}else{player.removeMediaItem(index);saveQueue();}draw();}});remove.setContentDescription("Remove "+item.mediaMetadata.title+" from library");row.addView(remove,new LinearLayout.LayoutParams(dp(44),dp(46)));}queue.addView(row);
+            if(editable){Button remove=button("−",()->{if(player!=null){if(radio){try{localItems.remove(index);LibraryStore.write(this,localItems);}catch(Exception error){message=error.getMessage();}}else{player.removeMediaItem(index);saveQueue();}draw();}});remove.setContentDescription("Remove "+item.mediaMetadata.title+" from library");row.addView(remove,new LinearLayout.LayoutParams(dp(44),dp(46)));}rows.addView(row);
         }
-        if(localItems.size()>queueLimit)queue.addView(button("Show 100 more songs",()->{queueLimit+=100;draw();}));
+        if(matches>queueLimit)rows.addView(button("Show 100 more songs",()->{queueLimit+=100;draw();}));
+        if(matches==0)rows.addView(label(localItems.isEmpty()?"No songs yet. Scan a music folder to begin.":"No songs match your search.",14,muted));
     }
     private void refresh() {
-        if (status == null) return; status.setText(message);status.setVisibility(module.equals("AMP Player")&&!importing&&!message.startsWith("Cannot")&&!message.startsWith("Could not")?View.GONE:View.VISIBLE);
+        if (status == null) return; status.setText(message);status.setVisibility(message.isEmpty()||(module.equals("AMP Player")&&!importing&&!message.startsWith("Cannot")&&!message.startsWith("Could not"))?View.GONE:View.VISIBLE);
         if (player == null || title == null || clock == null || seek == null || play == null) return;
         MediaItem item = player.getCurrentMediaItem(); title.setText(item == null ? "Choose a song" : item.mediaMetadata.title);
         long duration = player.getDuration(), position = player.getCurrentPosition();

@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod arrangement;
 pub mod batch;
 pub mod coordination;
+pub mod discovery;
 pub mod engine_api;
 pub mod offline;
 pub mod preparation;

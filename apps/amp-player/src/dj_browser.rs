@@ -273,6 +273,7 @@ impl Player {
         if let Some((deck, index)) = load {
             self.selected = Some(index);
             self.load_deck(deck, index, false);
+            self.dj_tab = 0;
         }
     }
 }

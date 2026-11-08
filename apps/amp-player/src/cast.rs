@@ -114,6 +114,9 @@ pub struct Dashboard {
     busy: bool,
     message: String,
     section: usize,
+    search: String,
+    discovery: Option<mpsc::Receiver<Result<Vec<amp_core::discovery::Found>, String>>>,
+    servers: Vec<amp_core::discovery::Found>,
 }
 impl Default for Dashboard {
     fn default() -> Self {
@@ -176,6 +179,9 @@ impl Default for Dashboard {
             busy: false,
             message: "Connect to a running AMP Cast server.".into(),
             section: 0,
+            search: String::new(),
+            discovery: None,
+            servers: Vec::new(),
         };
         if std::env::var("AMP_CAST_AUTOCONNECT").as_deref() == Ok("1") {
             dashboard.connected_address = dashboard.address.trim().into();
@@ -198,6 +204,23 @@ impl Dashboard {
         }
     }
     pub fn poll(&mut self) {
+        if let Some(rx) = &self.discovery
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok(servers) => {
+                    self.message = if servers.is_empty() {
+                        "No servers found. Check the same Wi-Fi/LAN or enter an address.".into()
+                    } else {
+                        format!("Found {} servers. Choose one to connect.", servers.len())
+                    };
+                    self.servers = servers;
+                }
+                Err(e) => self.message = e,
+            }
+            self.discovery = None;
+        }
+
         while let Ok(update) = self.rx.try_recv() {
             self.busy = false;
             match update.snapshot {
@@ -220,26 +243,66 @@ impl Dashboard {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.poll();
         ui.horizontal_wrapped(|ui| {
-            ui.label("Server host:port");
-            ui.add(egui::TextEdit::singleline(&mut self.address).desired_width(175.));
-            ui.label("Admin password");
-            ui.add(
-                egui::TextEdit::singleline(&mut self.password)
-                    .password(true)
-                    .desired_width(140.),
-            );
             if ui
-                .add_enabled(!self.busy, egui::Button::new("Connect / apply"))
+                .add_enabled(
+                    self.discovery.is_none(),
+                    egui::Button::new(if self.discovery.is_some() {
+                        "Searching…"
+                    } else {
+                        "Find servers"
+                    }),
+                )
                 .clicked()
             {
-                self.connected_address = self.address.trim().into();
-                self.snapshot = None;
-                self.send(Command::Connect(
-                    self.address.clone(),
-                    self.password.clone(),
-                ));
+                let (tx, rx) = mpsc::channel();
+                self.discovery = Some(rx);
+                std::thread::spawn(move || {
+                    let _ = tx.send(amp_core::discovery::discover());
+                });
             }
         });
+        egui::CollapsingHeader::new("Server settings / manual address").show(ui, |ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Server address");
+                ui.add(egui::TextEdit::singleline(&mut self.address).desired_width(175.));
+                ui.label("Admin password");
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.password)
+                        .password(true)
+                        .desired_width(140.),
+                );
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Connect / apply"))
+                    .clicked()
+                {
+                    self.connected_address = self.address.trim().into();
+                    self.snapshot = None;
+                    self.send(Command::Connect(
+                        self.address.clone(),
+                        self.password.clone(),
+                    ));
+                }
+            });
+        });
+        let mut chosen = None;
+        for server in &self.servers {
+            if ui
+                .button(format!("{} · {}", server.info.name, server.address))
+                .clicked()
+            {
+                chosen = Some(server.address.clone());
+            }
+        }
+        if let Some(address) = chosen {
+            self.address = address;
+            self.password.clear();
+            self.connected_address = self.address.clone();
+            self.snapshot = None;
+            self.send(Command::Connect(
+                self.address.clone(),
+                self.password.clone(),
+            ));
+        }
         ui.add_space(8.);
         ui.horizontal_top(|ui| {
             skin::panel(ui, true, |ui| {
@@ -355,6 +418,7 @@ impl Dashboard {
                         self.snapshot.as_ref().map(|s| s.status.tracks).unwrap_or(0)
                     ));
                 });
+                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search songs in this station…").desired_width(ui.available_width()));
                 egui::ScrollArea::vertical()
                     .id_salt("cast-queue")
                     .max_height(245.)
@@ -369,7 +433,7 @@ impl Dashboard {
                                     ui.strong("Title");
                                     ui.strong("Prepared cues");
                                     ui.end_row();
-                                    for track in &snapshot.queue.tracks {
+                                    for track in snapshot.queue.tracks.iter().filter(|t|t.title.to_lowercase().contains(&self.search.to_lowercase())) {
                                         let active = running
                                             && snapshot.status.current_index == Some(track.index);
                                         ui.label(

@@ -13,6 +13,7 @@ use std::{
 const BIN: usize = 160; // 20 ms, independent of device sample rate.
 #[derive(Default)]
 pub struct Lane {
+    pub height: Option<f32>,
     path: Option<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
     rx: Option<mpsc::Receiver<Result<Vec<[f32; 2]>, String>>>,
@@ -129,8 +130,10 @@ impl Lane {
         } else {
             super::skin::CYAN
         };
-        let (rect, response) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 80.), egui::Sense::hover());
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), self.height.unwrap_or(80.)),
+            egui::Sense::hover(),
+        );
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3., Color32::from_rgb(5, 7, 10));
         let graph = rect.shrink2(egui::vec2(0., 20.));

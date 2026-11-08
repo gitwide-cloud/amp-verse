@@ -7,8 +7,10 @@ services:
     init: true
     ports:
       - "${AMP_BIND_ADDRESS:-127.0.0.1}:${AMP_PORT:-8787}:8787"
+      - "${AMP_BIND_ADDRESS:-127.0.0.1}:18787:18787/udp"
     environment:
       AMP_CAST_BIND: 0.0.0.0:8787
+      AMP_CAST_ADVERTISE_PORT: ${AMP_PORT:-8787}
       AMP_CAST_CONFIG_DIR: /data/cast
       AMP_DEVICE_CONFIG_DIR: /data/device
       AMP_CAST_PASSWORD: ${AMP_CAST_PASSWORD:-}

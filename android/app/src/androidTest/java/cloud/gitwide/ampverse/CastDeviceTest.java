@@ -37,12 +37,21 @@ public class CastDeviceTest {
             main(()->{for(int i=0;i<player[0].getMediaItemCount();i++)saved.add(player[0].getMediaItemAt(i));volume[0]=player[0].getVolume();position[0]=player[0].getCurrentPosition();index[0]=Math.max(0,player[0].getCurrentMediaItemIndex());playing[0]=player[0].getPlayWhenReady();player[0].setVolume(0);});
             Intent intent=new Intent(context,MainActivity.class).putExtra("module","AMP Cast").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
             try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(intent)) {
+                assertTrue(device.wait(Until.hasObject(By.text("Server settings / enter address")),5000));
+                device.findObject(By.text("Server settings / enter address")).click();
                 assertTrue(device.wait(Until.hasObject(By.text("Connect")),5000));
                 device.findObject(By.text("Connect")).click();
                 assertTrue(device.wait(Until.hasObject(By.text("Connected to selected AMP Cast server")),12000));
+                device.findObject(By.text("Server settings / enter address")).click();
                 device.findObject(By.desc("AMP Cast admin password")).setText("test-secret");
                 device.findObject(By.text("Connect")).click();
                 assertTrue(device.wait(Until.hasObject(By.text("Connected to selected AMP Cast server")),12000));
+                device.findObject(By.desc("Search station songs")).setText("zzzz-no-match");
+                assertTrue(device.wait(Until.hasObject(By.text("No songs match your search.")),3000));
+                device.findObject(By.desc("Search station songs")).setText("phone-test");
+                assertTrue(device.wait(Until.hasObject(By.textContains("Phone-test")),3000));
+                device.findObject(By.desc("Search station songs")).setText("");
+                scenario.onActivity(a->((android.view.inputmethod.InputMethodManager)a.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(a.getWindow().getDecorView().getWindowToken(),0));
                 device.findObject(By.text("Start station")).click();
                 assertTrue(device.wait(Until.hasObject(By.text("Station started")),12000));assertTrue(client.status().getBoolean("running"));
                 device.findObject(By.text("Listen on this phone")).click();

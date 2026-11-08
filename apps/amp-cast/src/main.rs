@@ -25,9 +25,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         root,
         library,
         password,
-        config.server_id,
-        config.station_id,
-        config.station_name,
+        config.server_id.clone(),
+        config.station_id.clone(),
+        config.station_name.clone(),
     );
     *cast.config_dir.lock().unwrap() = Some(config_dir);
     let enabled = if first_start {
@@ -56,6 +56,55 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.scan_interval_seconds,
         config.pause_analysis_during_radio,
     );
+    // Loopback-only HTTP stays private and is intentionally not advertised on LAN.
+    let discovery_port = std::env::var("AMP_CAST_DISCOVERY_PORT")
+        .ok()
+        .map(|p| p.parse::<u16>())
+        .transpose()?
+        .unwrap_or(amp_core::discovery::PORT);
+    if !address.ip().is_loopback() && address.is_ipv4() && discovery_port != 0 {
+        match tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, discovery_port)).await {
+            Ok(socket) => {
+                let reply = serde_json::to_vec(&amp_core::discovery::Advertisement {
+                    protocol: 1,
+                    service: "amp-cast".into(),
+                    server_id: config.server_id.clone(),
+                    station_id: config.station_id.clone(),
+                    name: config.station_name.chars().take(64).collect(),
+                    port: std::env::var("AMP_CAST_ADVERTISE_PORT")
+                        .ok()
+                        .map(|p| p.parse::<u16>())
+                        .transpose()?
+                        .filter(|p| *p != 0)
+                        .unwrap_or(listener.local_addr()?.port()),
+                })?;
+                tokio::spawn(async move {
+                    let mut packet = [0; 256];
+                    let mut window = std::time::Instant::now();
+                    let mut replies = 0u32;
+                    while let Ok((len, peer)) = socket.recv_from(&mut packet).await {
+                        let local = match peer.ip() {
+                            std::net::IpAddr::V4(ip) => {
+                                ip.is_private() || ip.is_loopback() || ip.is_link_local()
+                            }
+                            _ => false,
+                        };
+                        if window.elapsed() >= std::time::Duration::from_secs(1) {
+                            window = std::time::Instant::now();
+                            replies = 0;
+                        }
+                        if local && &packet[..len] == amp_core::discovery::QUERY && replies < 20 {
+                            replies += 1;
+                            let _ = socket.send_to(&reply, peer).await;
+                        }
+                    }
+                });
+            }
+            Err(error) => eprintln!(
+                "LAN discovery unavailable ({error}); manual server connection remains available"
+            ),
+        }
+    }
     println!(
         "AMP Cast prototype listening on http://{}",
         listener.local_addr()?
