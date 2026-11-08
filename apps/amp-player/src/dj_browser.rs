@@ -289,6 +289,7 @@ mod tests {
             },
         };
         let playlist = Playlist {
+            sync: None,
             version: 1,
             name: "Show".into(),
             tracks: vec!["b.mp3".into(), "a.mp3".into(), "b.mp3".into()],

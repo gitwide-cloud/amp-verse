@@ -1,0 +1,8 @@
+.git
+.amp-tools
+target
+test-output
+android
+third-party
+**/.env
+**/device.json

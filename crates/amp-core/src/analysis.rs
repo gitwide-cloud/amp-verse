@@ -4,6 +4,8 @@ use crate::{
     preparation::{self, AnalysisInfo, Cue},
 };
 use std::{io::Read, path::Path, process::Stdio};
+pub const ENGINE_ID: &str = "amp-prep-heuristic-1";
+pub const JOB_TYPE: &str = "preparation";
 const RATE: f64 = 11025.;
 const BLOCK: usize = 110;
 const FFT: usize = 4096;
@@ -232,7 +234,7 @@ fn result(
         }
     }
     p.analysis = Some(AnalysisInfo {
-        engine: "amp-prep-heuristic-1".into(),
+        engine: ENGINE_ID.into(),
         duration,
         tempo_confidence,
         key_confidence,
@@ -247,7 +249,9 @@ fn result(
         suggested.key = key;
         suggested.harmonic_key = harmonic_key;
         suggested.manual_override = false;
-        suggested.extensions.remove("analysis_recommendation");
+        for key in ["analysis_recommendation", "analysis_proposals", "_amp_sync"] {
+            suggested.extensions.remove(key);
+        }
         p = existing.clone();
         p.extensions.remove("analysis_recommendation");
         p.extensions.insert(
@@ -480,6 +484,8 @@ mod tests {
         assert!((p.analysis.as_ref().unwrap().duration - 3.).abs() < 0.02);
         assert_eq!(p.source_sha256.as_ref().unwrap().len(), 64);
         preparation::save(dir.path(), Path::new("tone.wav"), &p).unwrap();
-        assert_eq!(preparation::load(&path).unwrap(), p);
+        let mut loaded = preparation::load(&path).unwrap();
+        loaded.extensions.remove("_amp_sync");
+        assert_eq!(loaded, p);
     }
 }

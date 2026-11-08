@@ -1,3 +1,5 @@
+pub mod analysis_worker;
+pub mod config;
 use amp_core::{Library, Track};
 use axum::{
     Json, Router,
@@ -13,7 +15,7 @@ use std::{path::PathBuf, sync::Arc};
 use tokio::{
     io::AsyncReadExt,
     sync::{Mutex, broadcast},
-    task::AbortHandle,
+    task::JoinHandle,
 };
 
 #[derive(Default, Serialize)]
@@ -23,9 +25,15 @@ struct Station {
     current_index: Option<usize>,
     error: Option<String>,
     #[serde(skip)]
-    worker: Option<AbortHandle>,
+    worker: Option<JoinHandle<()>>,
 }
 pub struct Cast {
+    server_id: String,
+    library_id: Option<String>,
+    pub config_dir: std::sync::Mutex<Option<PathBuf>>,
+    station_id: String,
+    station_name: String,
+    pub analysis: Arc<analysis_worker::Worker>,
     root: PathBuf,
     tracks: Vec<Track>,
     password: Option<String>,
@@ -34,8 +42,31 @@ pub struct Cast {
 }
 impl Cast {
     pub fn new(root: PathBuf, library: Library, password: Option<String>) -> Arc<Self> {
+        Self::with_identity(
+            root,
+            library,
+            password,
+            amp_core::coordination::token(),
+            amp_core::coordination::token(),
+            "AMP Radio".into(),
+        )
+    }
+    pub fn with_identity(
+        root: PathBuf,
+        library: Library,
+        password: Option<String>,
+        server_id: String,
+        station_id: String,
+        station_name: String,
+    ) -> Arc<Self> {
         let (audio, _) = broadcast::channel(256);
         Arc::new(Self {
+            library_id: amp_core::coordination::library_id(&root).ok(),
+            config_dir: std::sync::Mutex::new(None),
+            server_id,
+            station_id,
+            station_name,
+            analysis: analysis_worker::Worker::new(),
             root,
             tracks: library.tracks,
             password,
@@ -44,15 +75,28 @@ impl Cast {
         })
     }
     pub async fn shutdown(&self) {
-        let mut station = self.station.lock().await;
-        if let Some(worker) = station.worker.take() {
+        let worker = {
+            let mut station = self.station.lock().await;
+            station.running = false;
+            station.now_playing = None;
+            station.current_index = None;
+            station.worker.take()
+        };
+        if let Some(worker) = worker {
             worker.abort();
+            let _ = worker.await;
         }
-        station.running = false;
-        station.now_playing = None;
-        station.current_index = None;
     }
     fn authorized(&self, headers: &HeaderMap) -> bool {
+        if headers
+            .get("x-amp-server")
+            .is_some_and(|v| v.to_str().ok() != Some(self.server_id.as_str()))
+            || headers
+                .get("x-amp-station")
+                .is_some_and(|v| v.to_str().ok() != Some(self.station_id.as_str()))
+        {
+            return false;
+        }
         // Reject browser cross-site requests even for password-free trusted-LAN operation.
         if headers
             .get("sec-fetch-site")
@@ -93,6 +137,9 @@ pub fn router(cast: Arc<Cast>) -> Router {
                 )
             }),
         )
+        .route("/api/analysis/pause", post(pause_analysis))
+        .route("/api/analysis/resume", post(resume_analysis))
+        .route("/health", get(|| async { "ok" }))
         .route("/api/playlist", get(playlist))
         .route("/api/start", post(start))
         .route("/api/stop", post(stop))
@@ -101,9 +148,44 @@ pub fn router(cast: Arc<Cast>) -> Router {
 }
 async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
     let station = cast.station.lock().await;
+    let mut analysis = cast.analysis.snapshot();
+    analysis.paused_for_radio = analysis.enabled
+        && station.running
+        && cast
+            .analysis
+            .pause_for_radio
+            .load(std::sync::atomic::Ordering::Relaxed);
     Json(
-        serde_json::json!({"running":station.running,"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
+        serde_json::json!({"library_id":cast.library_id,"capabilities":{"coordination_version":1,"stations_per_server":1,"google_cast":false,"hls":false},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":cast.station_name,"analysis":analysis,"running":station.running,"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
     )
+}
+async fn pause_analysis(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
+    if !cast.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(dir) = cast.config_dir.lock().unwrap().as_ref()
+        && let Err(e) = config::Config::set_analysis(dir, false)
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, e).into_response();
+    }
+    cast.analysis
+        .enabled
+        .store(false, std::sync::atomic::Ordering::Relaxed);
+    StatusCode::NO_CONTENT.into_response()
+}
+async fn resume_analysis(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
+    if !cast.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(dir) = cast.config_dir.lock().unwrap().as_ref()
+        && let Err(e) = config::Config::set_analysis(dir, true)
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, e).into_response();
+    }
+    cast.analysis
+        .enabled
+        .store(true, std::sync::atomic::Ordering::Relaxed);
+    StatusCode::NO_CONTENT.into_response()
 }
 async fn playlist(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
     Json(
@@ -137,7 +219,7 @@ async fn start(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
         station.error = outcome.err();
         station.worker = None;
     });
-    station.worker = Some(task.abort_handle());
+    station.worker = Some(task);
     StatusCode::NO_CONTENT.into_response()
 }
 async fn stop(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
@@ -151,6 +233,8 @@ async fn broadcast_tracks(cast: Arc<Cast>) -> Result<(), String> {
     loop {
         for (index, track) in cast.tracks.iter().enumerate() {
             let path = amp_core::resolve(&cast.root, &track.path).map_err(|e| e.to_string())?;
+            // Read once before loading; never change the running track's cues.
+            let preparation = amp_core::preparation::load(&path)?;
             {
                 let mut station = cast.station.lock().await;
                 station.now_playing = Some(track.title.clone());
@@ -162,19 +246,13 @@ async fn broadcast_tracks(cast: Arc<Cast>) -> Result<(), String> {
             let mut child = command
                 .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-re"])
                 .arg("-ss")
-                .arg(track.preparation.cue_in.to_string())
+                .arg(preparation.cue_in.to_string())
                 .arg("-i")
                 .arg(path)
                 .args(
-                    track
-                        .preparation
+                    preparation
                         .cue_out
-                        .map(|out| {
-                            vec![
-                                "-t".to_string(),
-                                (out - track.preparation.cue_in).to_string(),
-                            ]
-                        })
+                        .map(|out| vec!["-t".to_string(), (out - preparation.cue_in).to_string()])
                         .unwrap_or_default(),
                 )
                 .args([

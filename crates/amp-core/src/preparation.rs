@@ -157,7 +157,7 @@ pub fn load_with_revision(path: &Path) -> Result<(Preparation, Option<Vec<u8>>),
     }
 }
 pub fn save(root: &Path, relative: &Path, p: &Preparation) -> Result<(), String> {
-    save_record(root, relative, p, None)
+    save_record(root, relative, p, None, None)
 }
 pub fn save_if_unchanged(
     root: &Path,
@@ -165,13 +165,23 @@ pub fn save_if_unchanged(
     p: &Preparation,
     expected: Option<&[u8]>,
 ) -> Result<(), String> {
-    save_record(root, relative, p, Some(expected))
+    save_record(root, relative, p, Some(expected), None)
+}
+pub fn publish_claimed(
+    root: &Path,
+    relative: &Path,
+    p: &Preparation,
+    expected: Option<&[u8]>,
+    lease: &crate::coordination::Lease,
+) -> Result<(), String> {
+    save_record(root, relative, p, Some(expected), Some(lease))
 }
 fn save_record(
     root: &Path,
     relative: &Path,
     p: &Preparation,
     expected: Option<Option<&[u8]>>,
+    lease: Option<&crate::coordination::Lease>,
 ) -> Result<(), String> {
     p.validate()?;
     let audio = resolve(root, relative).map_err(|e| e.to_string())?;
@@ -204,24 +214,134 @@ fn save_record(
         return Err("Portable metadata must stay beside its music folder".into());
     }
 
-    let lock_path = target.with_extension("json.lock");
-    if fs::symlink_metadata(&lock_path).is_ok_and(|m| m.file_type().is_symlink()) {
-        return Err("Metadata lock must be a regular file".into());
+    let device = if let Some(lease) = lease {
+        lease.device.clone()
+    } else {
+        crate::coordination::device_id()?
+    };
+    let library = crate::coordination::library_id(root)?;
+    let _lock = crate::coordination::Lock::acquire(&target)?;
+    if let Some(lease) = lease {
+        lease.verify_record_locked(&target, &library)?;
     }
-    let lock = fs::OpenOptions::new()
-        .create(true)
-        .truncate(false)
-        .read(true)
-        .write(true)
-        .open(lock_path)
-        .map_err(|e| e.to_string())?;
-    lock.try_lock()
-        .map_err(|e| format!("Metadata is busy or cannot be locked: {e}"))?;
-    if let Some(expected) = expected
-        && revision(&audio).as_deref() != expected
+    let (current, current_bytes) = load_with_revision(&audio)?;
+    let current_json = serde_json::to_value(&current).map_err(|e| e.to_string())?;
+    let mut proposed = serde_json::to_value(p).map_err(|e| e.to_string())?;
+    if expected.is_none()
+        && current_bytes.is_some()
+        && proposed.get("_amp_sync").is_none()
+        && proposed != current_json
     {
-        return Err("Metadata changed since it was read; newer values retained".into());
+        return Err(
+            "Legacy metadata needs a read snapshot before editing; reload and use a guarded save"
+                .into(),
+        );
     }
+    let mut base = if let Some(expected) = expected {
+        let mut base: Preparation = if let Some(bytes) = expected {
+            serde_json::from_slice(bytes).map_err(|e| e.to_string())?
+        } else {
+            Preparation::default()
+        };
+        assign_numbers(&mut base);
+        serde_json::to_value(base).map_err(|e| e.to_string())?
+    } else {
+        if crate::coordination::revision(&proposed).revision
+            != crate::coordination::revision(&current_json).revision
+        {
+            return Err("Metadata revision changed; reload before saving".into());
+        }
+        current_json.clone()
+    };
+    // Stage protected automatic deltas against CURRENT values: an energy-only
+    // worker must not accidentally propose undoing a cue edited on another PC.
+    let automatic_fields = [
+        "_amp_sync",
+        "source_sha256",
+        "schema_version",
+        "analysis_origin",
+        "analysis_source_stat",
+        "analysis_engine_checked",
+        "analysis_recommendation",
+        "analysis_proposals",
+        "waveform",
+        "waveform_overview",
+    ];
+    let keys: std::collections::BTreeSet<_> = base
+        .as_object()
+        .unwrap()
+        .keys()
+        .chain(proposed.as_object().unwrap().keys())
+        .cloned()
+        .collect();
+    let changes_protected = keys
+        .iter()
+        .any(|key| !automatic_fields.contains(&key.as_str()) && proposed.get(key) != base.get(key));
+    if let Some(lease) = lease
+        && (current.manual_override
+            || !current.manual_cues.is_empty()
+            || current.analysis.as_ref().is_some_and(|a| a.reviewed))
+        && changes_protected
+    {
+        let original = proposed.clone();
+        let mut candidate = current_json.clone();
+        for key in &keys {
+            if original.get(key) != base.get(key) {
+                if let Some(value) = original.get(key) {
+                    candidate
+                        .as_object_mut()
+                        .unwrap()
+                        .insert(key.clone(), value.clone());
+                } else {
+                    candidate.as_object_mut().unwrap().remove(key);
+                }
+            }
+        }
+        for key in ["_amp_sync", "analysis_recommendation", "analysis_proposals"] {
+            candidate.as_object_mut().unwrap().remove(key);
+        }
+        proposed = current_json.clone();
+        // Nonconflicting derived assets/provenance may coexist with an approved cue.
+        for key in automatic_fields.iter().filter(|&&k| {
+            !matches!(
+                k,
+                "_amp_sync" | "analysis_recommendation" | "analysis_proposals"
+            )
+        }) {
+            if original.get(*key) != base.get(*key)
+                && (current_json.get(*key) == base.get(*key)
+                    || current_json.get(*key) == original.get(*key))
+                && let Some(value) = original.get(*key)
+            {
+                proposed
+                    .as_object_mut()
+                    .unwrap()
+                    .insert((*key).into(), value.clone());
+            }
+        }
+
+        let mut proposals = current_json
+            .get("analysis_proposals")
+            .and_then(serde_json::Value::as_object)
+            .cloned()
+            .unwrap_or_default();
+        let (key, record) = lease.proposal_record(&candidate);
+        proposals.insert(key, record);
+        proposed.as_object_mut().unwrap().insert(
+            "analysis_proposals".into(),
+            serde_json::Value::Object(proposals),
+        );
+        if lease.primary_analysis() || current_json.get("analysis_recommendation").is_none() {
+            proposed
+                .as_object_mut()
+                .unwrap()
+                .insert("analysis_recommendation".into(), candidate);
+        }
+        base = current_json.clone();
+    }
+    let merged = crate::coordination::merge(&base, &current_json, &proposed, &device, &library)?;
+    let checked: Preparation = serde_json::from_value(merged).map_err(|e| e.to_string())?;
+    checked.validate()?;
     // Refuse a metadata symlink instead of overwriting an unrelated file.
     if fs::symlink_metadata(&target).is_ok_and(|m| m.file_type().is_symlink()) {
         return Err("Metadata sidecar must be a regular file".into());
@@ -242,10 +362,21 @@ fn save_record(
             .create_new(true)
             .open(&temp)
             .map_err(|e| e.to_string())?;
-        f.write_all(&serde_json::to_vec_pretty(p).map_err(|e| e.to_string())?)
+        f.write_all(&serde_json::to_vec_pretty(&checked).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
         f.sync_all().map_err(|e| e.to_string())?;
-        fs::rename(&temp, &target).map_err(|e| e.to_string())
+        if let Some(lease) = lease {
+            lease.verify_record_locked(&target, &library)?;
+        }
+        fs::rename(&temp, &target).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        fs::File::open(target.parent().unwrap())
+            .and_then(|f| f.sync_all())
+            .map_err(|e| e.to_string())?;
+        if let Some(lease) = lease {
+            lease.finish_locked()?;
+        }
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(temp);
@@ -278,7 +409,10 @@ mod tests {
             .insert("title".into(), serde_json::json!("Reviewed title"));
         assign_numbers(&mut p);
         save(d.path(), Path::new("song.wav"), &p).unwrap();
-        assert_eq!(load(&d.path().join("song.wav")).unwrap(), p);
+        let mut loaded = load(&d.path().join("song.wav")).unwrap();
+        let sync = loaded.extensions.remove("_amp_sync").unwrap();
+        assert_eq!(loaded, p);
+        p.extensions.insert("_amp_sync".into(), sync);
         assert_eq!(
             crate::scan(d.path()).unwrap().tracks[0].title,
             "Reviewed title"
@@ -306,13 +440,15 @@ mod tests {
         let first = Preparation::default();
         save(d.path(), Path::new("song.wav"), &first).unwrap();
         let before = revision(&d.path().join("song.wav")).unwrap();
-        let corrected = Preparation {
-            cue_in: 2.,
-            manual_override: true,
-            ..Default::default()
-        };
+        let mut corrected = load(&d.path().join("song.wav")).unwrap();
+        corrected.cue_in = 2.;
+        corrected.manual_override = true;
         save(d.path(), Path::new("song.wav"), &corrected).unwrap();
-        assert!(save_if_unchanged(d.path(), Path::new("song.wav"), &first, Some(&before)).is_err());
+        let mut obsolete = first.clone();
+        obsolete.cue_in = 1.;
+        assert!(
+            save_if_unchanged(d.path(), Path::new("song.wav"), &obsolete, Some(&before)).is_err()
+        );
         assert_eq!(load(&d.path().join("song.wav")).unwrap().cue_in, 2.);
     }
     #[test]
@@ -342,7 +478,8 @@ mod tests {
             bpm: Some(121.),
             ..Default::default()
         };
-        save(d.path(), Path::new("song.wav"), &new).unwrap();
+        let before = revision(&audio);
+        save_if_unchanged(d.path(), Path::new("song.wav"), &new, before.as_deref()).unwrap();
         assert_eq!(load(&audio).unwrap().bpm, Some(121.));
         assert_eq!(fs::read(sidecar(&audio)).unwrap(), legacy);
         assert_eq!(crate::scan(d.path()).unwrap().tracks.len(), 1);

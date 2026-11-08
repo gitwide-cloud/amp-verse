@@ -1,0 +1,25 @@
+[Unit]
+Description=AMP Verse independent Cast server
+After=network-online.target
+Wants=network-online.target
+RequiresMountsFor=/srv/amp-music
+
+[Service]
+Type=simple
+User=ampverse
+Group=ampverse
+StateDirectory=amp-verse
+WorkingDirectory=/var/lib/amp-verse
+Environment=AMP_DEVICE_CONFIG_DIR=/var/lib/amp-verse/device
+Environment=AMP_CAST_CONFIG_DIR=/var/lib/amp-verse/cast
+EnvironmentFile=-/etc/amp-verse/cast.env
+ExecStart=/usr/local/bin/amp-cast /srv/amp-music
+Restart=on-failure
+RestartSec=10
+TimeoutStopSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+Nice=5
+
+[Install]
+WantedBy=multi-user.target

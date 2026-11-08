@@ -200,3 +200,18 @@ Added a left sidebar below the mixer: Auto DJ switch, saved Smart Playlists, Pla
 ## Multicore song preparation (2026-11-08)
 
 Library batch analysis and the headless helper now share bounded song workers. Tests prove three callbacks overlap, each song executes exactly once, stop prevents new work, and automatic/manual limits respect available CPUs and batch size. Real FFmpeg regression analyzes three generated songs with three workers, checks BPM/key, preserves approved metadata and original audio hashes, and validates relocated metadata. All 54 regular workspace tests and strict Clippy passed; all release binaries built. Native Library screenshot confirms 16 logical CPUs detected and an Auto limit of eight parallel songs. No throughput multiplier or playback-underrun guarantee is claimed; NAS and codec costs affect actual performance.
+
+
+## Shared-library coordination / headless Cast foundation (2026-11-08)
+
+The regular workspace tests and additional offline-approval/document-queue/proposal-coexistence regressions passed. Strict Clippy and optimized Windows builds passed. Core coverage includes competing claims, real timed subprocess-crash lease recovery, expired publisher rejection, mismatched-track lease rejection, same-cue conflicts, independent energy/waveform merges with per-field authors, concurrent playlist/rule edits, legacy migration, Windows-to-Linux playlist paths, malformed/missing claims, interrupted temp files, preserving a lock when an unrelated descriptor closes, local document queuing during share loss, and retaining concurrent analysis proposals without undoing an unrelated approved cue.
+
+Two muted native performance tests passed: shared metadata/rescan retains the playing source offset/BPM until explicit reload, and show-control transitions/progression preserve preparation files. Refresh remaps queue/loaded indices without stopping playback, including duplicate playlist entries. Candidate selection uses the loaded snapshot too.
+
+Native generated-audio smoke checks passed for two participating devices analyzing six tracks exactly once, byte-for-byte reuse, two independent server/station identities on the same Library ID, wrong-server command rejection, isolated station start/stop, persistent enabled state and resumed headless analysis. Preparation smoke also covers approved/manual fields, protected first-time proposals, avoiding repeated computation after dismissing a suggestion, and relocating metadata. Existing desktop HTTP/WebSocket and two-listener MP3/decode checks passed. Web JavaScript syntax passed Node's checker.
+
+Rust 1.89 headless compatibility check and static ARMv7-musl server/analyzer cross-build passed. ELF inspection reports 32-bit ARM, hard-float EABI5 and no dynamic interpreter. This does not prove QNAP execution. Native Linux, container and emulated ARM checks are defined in server.yml and must have their actual CI results checked; LAG, AUHUBNAS and Sager hardware deployments remain unverified. Linux uses OFD byte-range locks instead of older-SMB-local flock semantics, and actual cross-host locking remains a required LAG gate.
+
+A short Windows idle sample (16 logical CPUs, one generated track, station/analysis disabled, two-second sample) measured 6,934,528 bytes working set, 1,904,640 bytes private memory and no measurable process CPU increase. This is a small workstation observation, not a NAS benchmark or endurance claim. Local evidence lives in ignored test-output logs/artifacts.
+
+No production NAS services, real music, network isolation or Android APK were changed. Remaining server/client features and deployment gates are explicit in SERVER_DEPLOYMENT.md and SHARED_LIBRARY_COORDINATION.md.

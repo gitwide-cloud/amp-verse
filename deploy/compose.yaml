@@ -1,0 +1,33 @@
+name: amp-cast
+services:
+  cast:
+    image: ${AMP_CAST_IMAGE:-ghcr.io/gitwide-cloud/amp-verse-cast:edge-amd64}
+    user: "${AMP_UID:-1000}:${AMP_GID:-1000}"
+    restart: unless-stopped
+    init: true
+    ports:
+      - "${AMP_BIND_ADDRESS:-127.0.0.1}:${AMP_PORT:-8787}:8787"
+    environment:
+      AMP_CAST_BIND: 0.0.0.0:8787
+      AMP_CAST_CONFIG_DIR: /data/cast
+      AMP_DEVICE_CONFIG_DIR: /data/device
+      AMP_CAST_PASSWORD: ${AMP_CAST_PASSWORD:-}
+    volumes:
+      - type: bind
+        source: ${AMP_MUSIC_PATH:?Set AMP_MUSIC_PATH to the trusted mounted music directory}
+        target: /music
+        bind:
+          create_host_path: false
+      - type: bind
+        source: ${AMP_DATA_PATH:?Set AMP_DATA_PATH to a private persistent server data directory}
+        target: /data
+        bind:
+          create_host_path: false
+    mem_limit: ${AMP_MEMORY_LIMIT:-512m}
+    cpus: ${AMP_CPU_LIMIT:-1.0}
+    pids_limit: 96
+    stop_grace_period: 30s
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL

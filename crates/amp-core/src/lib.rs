@@ -2,6 +2,8 @@
 pub mod analysis;
 pub mod arrangement;
 pub mod batch;
+pub mod coordination;
+pub mod offline;
 pub mod preparation;
 pub mod review;
 pub mod show;
@@ -163,15 +165,23 @@ pub fn resolve(root: &Path, relative: &Path) -> io::Result<PathBuf> {
     Ok(file)
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Playlist {
+    #[serde(default, rename = "_amp_sync", skip_serializing_if = "Option::is_none")]
+    pub sync: Option<coordination::Revision>,
     pub version: u32,
     pub name: String,
     pub tracks: Vec<PathBuf>,
 }
 impl Playlist {
     pub fn load(path: &Path, root: &Path) -> io::Result<Self> {
-        let list: Self = serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
+        coordination::adopt_legacy(&mut value).map_err(io::Error::other)?;
+        let mut list: Self = serde_json::from_value(value).map_err(io::Error::other)?;
+        for path in &mut list.tracks {
+            *path = PathBuf::from(path.to_string_lossy().replace('\\', "/"));
+        }
         if list.version != 1 || list.tracks.is_empty() {
             return Err(io::Error::other("Expected nonempty version 1 playlist"));
         }
@@ -181,10 +191,36 @@ impl Playlist {
         Ok(list)
     }
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        fs::write(
+        self.save_in_library(
             path,
-            serde_json::to_vec_pretty(self).map_err(io::Error::other)?,
+            path.parent()
+                .ok_or_else(|| io::Error::other("Playlist needs a parent"))?,
         )
+    }
+    pub fn save_in_library(&self, path: &Path, root: &Path) -> io::Result<()> {
+        let mut portable = self.clone();
+        for path in &mut portable.tracks {
+            *path = PathBuf::from(path.to_string_lossy().replace('\\', "/"));
+        }
+        if portable.version != 1 || portable.tracks.is_empty() {
+            return Err(io::Error::other("Expected nonempty version 1 playlist"));
+        }
+        let proposed = serde_json::to_value(&portable).map_err(io::Error::other)?;
+        let result = (|| {
+            for track in &portable.tracks {
+                resolve(root, track).map_err(|e| e.to_string())?;
+            }
+            let library_id = coordination::library_id(root)?;
+            coordination::save_document(path, &proposed, &library_id)
+        })();
+        result.map_err(|e| {
+            io::Error::other(coordination::retain_document(
+                path,
+                &proposed,
+                portable.sync.as_ref().map_or("", |r| r.library_id.as_str()),
+                e,
+            ))
+        })
     }
 }
 
@@ -372,6 +408,7 @@ mod tests {
         assert_eq!(library.tree.folders[0].tracks, [0]);
         assert_eq!(library.tracks[0].preparation, prep);
         let list = Playlist {
+            sync: None,
             version: 1,
             name: "Evening".into(),
             tracks: vec!["Albums/a.MP3".into()],
@@ -385,6 +422,26 @@ mod tests {
         );
         assert!(resolve(root, Path::new("../outside.mp3")).is_err());
         assert!(resolve(root, &root.join("Albums/a.MP3")).is_err());
+    }
+    #[test]
+    fn windows_playlist_paths_enroll_as_portable_paths() {
+        let root = tempfile::tempdir().unwrap();
+        fs::create_dir(root.path().join("Albums")).unwrap();
+        fs::write(root.path().join("Albums/a.mp3"), b"fixture").unwrap();
+        let file = root.path().join("show.json");
+        fs::write(
+            &file,
+            serde_json::to_vec(
+                &serde_json::json!({"version":1,"name":"Show","tracks":["Albums\\a.mp3"]}),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+        let list = Playlist::load(&file, root.path()).unwrap();
+        assert_eq!(list.tracks, vec![PathBuf::from("Albums/a.mp3")]);
+        list.save_in_library(&file, root.path()).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&fs::read(&file).unwrap()).unwrap();
+        assert_eq!(value["tracks"][0], "Albums/a.mp3");
     }
     #[test]
     fn malformed_preparation_is_reported() {

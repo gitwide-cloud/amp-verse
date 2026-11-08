@@ -53,3 +53,8 @@ Background/reference reading: [music21 pitch-profile key analysis](https://music
 ### Parallel batch analysis
 
 Desktop Library and `amp-prepare` share a bounded pool that analyzes different songs simultaneously. Library has an Analysis workers control: 0 means Auto, otherwise choose a worker count. Auto uses logical CPU count minus two, at least one and at most eight, to leave playback capacity and limit concurrent NAS reads. Explicit counts are capped at available logical CPUs and 32; fewer songs use fewer workers. The CLI accepts `amp-prepare MUSIC_FOLDER --jobs N`. Decoders use one codec thread per song to avoid multiplying CPU usage. Completion order may differ from folder order; each result is matched by its own relative path. Approved metadata revision checks and file locks still apply individually. Settings take effect on the next batch.
+
+
+### Cooperative preparation
+
+Batch processing is now incremental and coordinated across participating installations. Completed unchanged tracks are reused. Pending work is claimed with an expiring renewable lease and a fencing generation before analysis. `--force` requests reanalysis rather than skipping completed work; it does not bypass manual protection or lease ownership. The watch CLI belongs to package `amp-cast`, not the GUI package. Saves now use record/field revisions and three-way merges: independent fields may coexist, while conflicting cue edits preserve current data. Shared-folder behavior must be validated on LAG before production use; see SHARED_LIBRARY_COORDINATION.md.

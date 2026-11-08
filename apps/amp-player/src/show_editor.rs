@@ -38,7 +38,7 @@ impl Editor {
                     let mut p=Settings::default().playlists.pop().unwrap();p.id=format!("custom-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());p.name="New Smart Playlist".into();settings.playlists.push(p);self.selected=settings.playlists.len()-1;
                 }
                 if ui.button("Remove selected").clicked()&&self.selected<settings.playlists.len(){settings.playlists.remove(self.selected);self.selected=self.selected.min(settings.playlists.len().saturating_sub(1));}
-                if ui.button("Reload saved rules").clicked(){*settings=saved.clone();self.selected=0;self.status="Reloaded saved configuration".into();}
+                if ui.button("Reload saved rules").clicked(){match Settings::load(root){Ok(fresh)=>{*saved=fresh.clone();*settings=fresh;self.selected=0;self.status="Reloaded current shared configuration".into();},Err(e)=>self.status=e}}
             });
             if let Some(p)=settings.playlists.get_mut(self.selected){
                 ui.horizontal(|ui|{ui.label("Name");ui.text_edit_singleline(&mut p.name);if ui.button("Copy control ID").clicked(){ui.ctx().copy_text(p.id.clone());}});
@@ -85,7 +85,7 @@ impl Editor {
                     ui.horizontal(|ui|{ui.label("Assigned recognition song ID / exact title");let mut song=p.recognition_song.clone().unwrap_or_default();if ui.text_edit_singleline(&mut song).changed(){p.recognition_song=(!song.trim().is_empty()).then_some(song);}});
                 });
             }
-            if ui.button("Save Library configurations").clicked(){self.status=if root.as_os_str().is_empty(){"Choose a music root first".into()}else{match settings.save(root){Ok(())=>{*saved=settings.clone();"Saved. Active performances keep their loaded rules.".into()},Err(e)=>e}};}
+            if ui.button("Save Library configurations").clicked(){self.status=if root.as_os_str().is_empty(){"Choose a music root first".into()}else{match settings.save(root){Ok(())=>{if let Ok(fresh)=Settings::load(root){*settings=fresh;}*saved=settings.clone();"Saved. Active performances keep their loaded rules.".into()},Err(e)=>e}};}
             ui.weak(&self.status);ui.weak("Automatic section detection, scenes and hardware mappings remain separate milestones.");
         });
         self.open = open;

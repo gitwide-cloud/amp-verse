@@ -66,12 +66,15 @@ fn yes() -> bool {
 }
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Settings {
+    #[serde(default, rename = "_amp_sync", skip_serializing_if = "Option::is_none")]
+    pub sync: Option<crate::coordination::Revision>,
     pub version: u32,
     pub playlists: Vec<SmartPlaylist>,
 }
 impl Default for Settings {
     fn default() -> Self {
         Self {
+            sync: None,
             version: 1,
             playlists: [
                 ("recognition", "Recognition", Style::Hype),
@@ -150,7 +153,10 @@ impl Settings {
     pub fn load(root: &Path) -> Result<Self, String> {
         match std::fs::read(root.join(".ampverse/show.json")) {
             Ok(b) => {
-                let mut s: Self = serde_json::from_slice(&b).map_err(|e| e.to_string())?;
+                let mut value: serde_json::Value =
+                    serde_json::from_slice(&b).map_err(|e| e.to_string())?;
+                crate::coordination::adopt_legacy(&mut value)?;
+                let mut s: Self = serde_json::from_value(value).map_err(|e| e.to_string())?;
                 s.normalize();
                 s.validate()?;
                 Ok(s)
@@ -163,18 +169,20 @@ impl Settings {
         let mut portable = self.clone();
         portable.normalize();
         portable.validate()?;
-        let dir = root.join(".ampverse");
-        if std::fs::symlink_metadata(&dir).is_ok_and(|m| m.file_type().is_symlink()) {
-            return Err("Metadata directory must not be a symlink".into());
-        }
-        std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-        let temp = dir.join(format!("show-{}.tmp", std::process::id()));
-        std::fs::write(
-            &temp,
-            serde_json::to_vec_pretty(&portable).map_err(|e| e.to_string())?,
-        )
-        .map_err(|e| e.to_string())?;
-        std::fs::rename(temp, dir.join("show.json")).map_err(|e| e.to_string())
+        let file = root.join(".ampverse/show.json");
+        let proposed = serde_json::to_value(&portable).map_err(|e| e.to_string())?;
+        let result = (|| {
+            let id = crate::coordination::library_id(root)?;
+            crate::coordination::save_document(&file, &proposed, &id)
+        })();
+        result.map_err(|e| {
+            crate::coordination::retain_document(
+                &file,
+                &proposed,
+                portable.sync.as_ref().map_or("", |r| r.library_id.as_str()),
+                e,
+            )
+        })
     }
 }
 pub fn energy(p: &Preparation) -> Option<f64> {
@@ -194,6 +202,18 @@ pub fn choose(
     target: Option<f64>,
     alternate: usize,
 ) -> Option<usize> {
+    choose_with_snapshot(p, tracks, current, recent, target, alternate, None)
+}
+pub fn choose_with_snapshot(
+    p: &SmartPlaylist,
+    tracks: &[Track],
+    current: Option<usize>,
+    recent: &[String],
+    target: Option<f64>,
+    alternate: usize,
+    snapshot: Option<&Preparation>,
+) -> Option<usize> {
+    let playing = snapshot.or_else(|| current.and_then(|i| tracks.get(i)).map(|t| &t.preparation));
     let mut candidates: Vec<_> = tracks
         .iter()
         .enumerate()
@@ -215,26 +235,20 @@ pub fn choose(
     } else if p.fallback == Fallback::Stop {
         return None;
     }
-    let wanted = target
-        .or(p.target_energy)
-        .or(current.and_then(|i| energy(&tracks[i].preparation)));
+    let wanted = target.or(p.target_energy).or(playing.and_then(energy));
     candidates.sort_by(|(a, x), (b, y)| {
         let score = |t: &Track| {
             let e = match (wanted, energy(&t.preparation)) {
                 (Some(a), Some(b)) => (a - b).abs(),
                 _ => 3.,
             };
-            let tempo = current
-                .and_then(|i| tracks[i].preparation.bpm)
+            let tempo = playing
+                .and_then(|p| p.bpm)
                 .zip(t.preparation.bpm)
                 .map_or(1., |(a, b)| (a / b).ln().abs() * 5.);
             e + tempo
-                + current.map_or(1., |i| {
-                    crate::smart::cost(
-                        &tracks[i].preparation,
-                        &t.preparation,
-                        wanted.map(|e| (e - 1.) / 9.),
-                    )
+                + playing.map_or(1., |p| {
+                    crate::smart::cost(p, &t.preparation, wanted.map(|e| (e - 1.) / 9.))
                 })
                 - if p.preferred.contains(&song_id(t)) {
                     0.25
@@ -342,5 +356,31 @@ mod tests {
         let b = serde_json::to_vec(&s).unwrap();
         let v: Settings = serde_json::from_slice(&b).unwrap();
         assert_eq!(v.playlists[0].id, "recognition");
+    }
+    #[test]
+    fn performance_selection_uses_loaded_snapshot_after_shared_update() {
+        let p = Settings::default().playlists.pop().unwrap();
+        let track = |name: &str, bpm| Track {
+            path: name.into(),
+            title: name.into(),
+            preparation: Preparation {
+                bpm: Some(bpm),
+                ..Default::default()
+            },
+        };
+        let tracks = vec![
+            track("playing.wav", 128.),
+            track("old-match.wav", 120.),
+            track("new-match.wav", 128.),
+        ];
+        let snapshot = Preparation {
+            bpm: Some(120.),
+            ..Default::default()
+        };
+        assert_eq!(choose(&p, &tracks, Some(0), &[], None, 0), Some(2));
+        assert_eq!(
+            choose_with_snapshot(&p, &tracks, Some(0), &[], None, 0, Some(&snapshot)),
+            Some(1)
+        );
     }
 }

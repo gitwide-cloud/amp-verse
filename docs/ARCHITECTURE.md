@@ -116,3 +116,8 @@ Desktop Player/DJ now use a shared CPAL stream and bounded FFmpeg decoder worker
 `amp-core::show` holds portable saved rules, IDs and selection logic. `amp-core::review` applies explicit field-level recommendation decisions. `amp-core::preparation` prefers `.ampverse/tracks` records and falls back to legacy adjacent sidecars; only explicit/automatic unconfirmed preparation writes use the new store. Runtime playback has no write path. Approved values are held unchanged when analysis creates a candidate. Manual hot-cue numbers and unknown per-cue extensions are preserved. Saved show-rule folder paths normalize across Windows/Linux separators.
 
 Detailed implementation boundaries and unmet revised-spec items are recorded in SPEC_STATUS.md.
+
+
+## Shared-library coordination and headless builds
+
+`amp-core::coordination` owns identity, OS-lock transactions, renewable generation-fenced analysis claims, revisions and independent-field merges. `amp-core::offline` stages explicit local proposals; reconnect is never a write trigger. Both desktop Preparer and server worker call `analyze_shared`; the headless CLI moved into the Cast package to remove GUI dependencies from server/ARM builds. Cast private configuration owns server/station identity; these do not live in the shared music directory. Loaded desktop deck snapshots remain stable while Library data changes. See SHARED_LIBRARY_COORDINATION.md for the protocol, filesystem prerequisites and remaining client/hardware gates.

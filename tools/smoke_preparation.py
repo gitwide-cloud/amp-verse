@@ -33,10 +33,21 @@ with tempfile.TemporaryDirectory() as tmp:
     prep["manual_override"] = True; prep["cue_in"] = 2.; prep["cue_out"] = 8.
     prep["vendor_extension"] = {"preserved":True}
     sidecar.write_text(json.dumps(prep))
-    subprocess.run([binary, str(folder), "--jobs", "3"], check=True)
+    subprocess.run([binary, str(folder), "--jobs", "3", "--force"], check=True)
     prep = json.loads(sidecar.read_text())
     assert prep["cue_in"] == 2 and prep["cue_out"] == 8
     assert prep["manual_cues"][0]["id"] == "my-drop" and prep["vendor_extension"]["preserved"]
+    manual_audio = folder / "manual-first.wav"; shutil.copyfile(audio, manual_audio)
+    manual_sidecar = folder / ".ampverse" / "tracks" / "manual-first.wav.json"
+    manual_sidecar.write_text(json.dumps({"cue_in":2.,"cue_out":8.,"bpm":127.,"manual_override":True}))
+    subprocess.run([binary,str(folder),"--jobs","3"],check=True)
+    manual = json.loads(manual_sidecar.read_text())
+    assert manual["bpm"] == 127 and manual["source_sha256"] == source_hash
+    assert manual["analysis_recommendation"]["analysis"]["engine"] == "amp-prep-heuristic-1"
+    del manual["analysis_recommendation"]; manual_sidecar.write_text(json.dumps(manual))
+    declined_bytes = manual_sidecar.read_bytes()
+    subprocess.run([binary,str(folder),"--jobs","3"],check=True)
+    assert manual_sidecar.read_bytes() == declined_bytes, "Declined proposals must not be repeatedly recomputed"
     moved = Path(tmp) / "relocated"; moved.mkdir()
     shutil.copyfile(audio, moved / audio.name); shutil.copytree(folder / ".ampverse", moved / ".ampverse")
     subprocess.run([binary, str(moved)], check=True)

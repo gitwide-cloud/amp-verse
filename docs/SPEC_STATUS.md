@@ -35,3 +35,8 @@ Source of truth: REVISED_BUILD_SPEC.md. This milestone delivers desktop show con
 - Durable command journal beyond the 512-result gateway-session retry window.
 
 Not reported as complete until implemented and verified on the appropriate runtime/hardware.
+
+
+## Shared library / Cast server follow-up
+
+Persistent Library/Device IDs, type-specific renewable claims, fenced publication, record/field revisions, conservative playlist/rule conflicts, core offline proposals and fixed loaded-deck snapshots are implemented. Cast now has independent persistent server/station identities and shared background analysis; headless native/container build candidates reuse the same code. Full scope and acceptance boundaries: SHARED_LIBRARY_COORDINATION.md and SERVER_DEPLOYMENT.md. Android Sync My Changes UI/transport, actual QNAP/Sager deployment, multi-station Smart DJ mixing, Google Cast/HLS, soundcard routing and receiver synchronization remain unfinished.

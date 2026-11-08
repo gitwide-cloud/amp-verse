@@ -93,8 +93,10 @@ struct Player {
     eq: [[f32; 3]; 2],
     filter: [f32; 2],
     loaded: [Option<usize>; 2],
+    loaded_snapshot: [Option<amp_core::Track>; 2],
     playing: [bool; 2],
     volume: u8,
+    playlist_snapshot: Option<(PathBuf, Playlist)>,
     queue: Vec<usize>,
     queue_selected: Option<usize>,
     auto: bool,
@@ -158,8 +160,10 @@ impl Default for Player {
             eq: [[0.; 3]; 2],
             filter: [22000.; 2],
             loaded: [None; 2],
+            loaded_snapshot: [None, None],
             playing: [false; 2],
             volume: 75,
+            playlist_snapshot: None,
             queue: vec![],
             queue_selected: None,
             auto: false,
@@ -282,6 +286,57 @@ impl Player {
             let _ = tx.send(amp_core::scan(&root).map_err(|e| e.to_string()));
         });
     }
+    fn accept_library_scan(&mut self, lib: Library) {
+        let lookup: std::collections::HashMap<_, _> = lib
+            .tracks
+            .iter()
+            .enumerate()
+            .map(|(i, t)| (t.path.clone(), i))
+            .collect();
+        let remap = |index: usize| {
+            self.library
+                .as_ref()
+                .and_then(|old| old.tracks.get(index))
+                .and_then(|t| lookup.get(&t.path))
+                .copied()
+        };
+        let loaded = self.loaded.map(|i| i.and_then(remap));
+        let selected = self.selected.and_then(remap);
+        let queue = self.queue.iter().filter_map(|&i| remap(i)).collect();
+        let queue_selected = self
+            .queue_selected
+            .filter(|&row| row < self.queue.len())
+            .and_then(|row| {
+                remap(self.queue[row]).map(|_| {
+                    self.queue[..row]
+                        .iter()
+                        .filter(|&&i| remap(i).is_some())
+                        .count()
+                })
+            });
+        let preloaded = self
+            .run
+            .preloaded
+            .and_then(|(d, i)| remap(i).map(|i| (d, i)));
+        self.loaded = loaded;
+        self.selected = selected;
+        self.queue = queue;
+        self.queue_selected = queue_selected;
+        self.run.preloaded = preloaded;
+        if self
+            .run
+            .pending
+            .is_some_and(|(d, _)| self.loaded[d].is_none())
+        {
+            self.run.pending = None;
+            self.run.pending_at = None;
+        }
+        self.status = format!(
+            "{} tracks / library refreshed; playback retained",
+            lib.tracks.len()
+        );
+        self.library = Some(lib);
+    }
     fn poll(&mut self) {
         if let Some(engine) = &mut self.audio {
             self.sampler.poll(engine);
@@ -292,22 +347,7 @@ impl Player {
                 Ok(result) => {
                     match result {
                         Ok(lib) => {
-                            if let Some(audio) = &mut self.audio {
-                                audio.stop(0);
-                                audio.stop(1);
-                            }
-                            self.preview_wave = Default::default();
-                            self.waveforms = Default::default();
-                            self.loaded = [None; 2];
-                            self.playing = [false; 2];
-                            self.selected = None;
-                            self.folder.clear();
-                            self.queue.clear();
-                            self.queue_selected = None;
-                            self.auto = false;
-                            self.status = format!("{} tracks / offline ready", lib.tracks.len());
-                            self.library = Some(lib);
-                            self.run.cancel_automation();
+                            self.accept_library_scan(lib);
                             match amp_core::show::Settings::load(&self.root) {
                                 Ok(settings) => self.run.settings = settings,
                                 Err(e) => self.status = e,
@@ -395,12 +435,19 @@ impl Player {
         if deck == 0 && !play {
             self.auto = false;
         }
-        if let Some(track) = self
+        if let Some(_track) = self
             .library
             .as_ref()
             .and_then(|l| l.tracks.get(index))
             .cloned()
         {
+            let track = match self.fresh_track(index) {
+                Ok(track) => track,
+                Err(e) => {
+                    self.status = e;
+                    return;
+                }
+            };
             let result = self.ensure_audio().and_then(|_| {
                 self.audio
                     .as_mut()
@@ -423,6 +470,7 @@ impl Player {
                     if !play {
                         self.run.preloaded = Some((deck, index));
                     }
+                    self.loaded_snapshot[deck] = Some(track.clone());
                     self.loaded[deck] = Some(index);
                     self.playing[deck] = play;
                     self.status = format!("Deck {} / {}", deck + 1, track.title);
@@ -436,12 +484,19 @@ impl Player {
     }
     fn play_cue(&mut self, deck: usize, index: usize, seconds: f64) {
         self.run.cancel_automation();
-        if let Some(mut track) = self
+        if let Some(_track) = self
             .library
             .as_ref()
             .and_then(|l| l.tracks.get(index))
             .cloned()
         {
+            let mut track = match self.fresh_track(index) {
+                Ok(track) => track,
+                Err(e) => {
+                    self.status = e;
+                    return;
+                }
+            };
             track.preparation.cue_in = seconds;
             if track.preparation.cue_out.is_some_and(|out| out <= seconds) {
                 return;
@@ -454,6 +509,7 @@ impl Player {
             });
             match result {
                 Ok(()) => {
+                    self.loaded_snapshot[deck] = Some(track.clone());
                     self.loaded[deck] = Some(index);
                     self.status = format!("Deck {} cue {:.2}s", deck + 1, seconds);
                 }
@@ -484,9 +540,7 @@ impl Player {
         }
     }
     fn sync_deck(&mut self, deck: usize) {
-        let bpm = |d: usize| {
-            self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)?.preparation.bpm)
-        };
+        let bpm = |d: usize| self.loaded_track(d).and_then(|t| t.preparation.bpm);
         if let (Some(own), Some(other)) = (bpm(deck), bpm(1 - deck)) {
             let target = other * (1. + self.pitch[1 - deck] as f64 / 100.);
             let requested = ((target / own - 1.) * 100.) as f32;
@@ -548,9 +602,32 @@ impl Player {
             self.status = "Playlist finished".into();
         }
     }
+    fn fresh_track(&self, index: usize) -> Result<amp_core::Track, String> {
+        let mut track = self
+            .library
+            .as_ref()
+            .and_then(|l| l.tracks.get(index))
+            .cloned()
+            .ok_or("Song unavailable")?;
+        let audio = amp_core::resolve(&self.root, &track.path).map_err(|e| e.to_string())?;
+        track.preparation = amp_core::preparation::load(&audio)?;
+        if let Some(title) = track
+            .preparation
+            .extensions
+            .get("title")
+            .and_then(|v| v.as_str())
+        {
+            track.title = title.into();
+        }
+        Ok(track)
+    }
+    fn loaded_track(&self, deck: usize) -> Option<&amp_core::Track> {
+        self.loaded_snapshot[deck]
+            .as_ref()
+            .or_else(|| self.loaded[deck].and_then(|i| self.library.as_ref()?.tracks.get(i)))
+    }
     fn title(&self, deck: usize) -> &str {
-        self.loaded[deck]
-            .and_then(|i| self.library.as_ref()?.tracks.get(i))
+        self.loaded_track(deck)
             .map(|t| t.title.as_str())
             .unwrap_or("NO TRACK LOADED")
     }
@@ -562,6 +639,10 @@ impl Player {
             }
             self.auto = false;
             self.loaded = [None; 2];
+            self.loaded_snapshot = [None, None];
+            self.waveforms = Default::default();
+            self.preview_wave = Default::default();
+            self.run.cancel_automation();
             self.playing = [false; 2];
             self.selected = None;
             self.queue.clear();
@@ -584,6 +665,11 @@ impl Player {
                 .save_file()
         {
             let list = Playlist {
+                sync: self
+                    .playlist_snapshot
+                    .as_ref()
+                    .filter(|(p, _)| p == &path)
+                    .and_then(|(_, list)| list.sync.clone()),
                 version: 1,
                 name: "Playlist".into(),
                 tracks: self
@@ -592,10 +678,15 @@ impl Player {
                     .map(|&i| lib.tracks[i].path.clone())
                     .collect(),
             };
-            self.status = list
-                .save(&path)
-                .map(|_| "Playlist saved".into())
-                .unwrap_or_else(|e| e.to_string());
+            match list.save_in_library(&path, &self.root) {
+                Ok(()) => {
+                    self.status = "Playlist saved".into();
+                    if let Ok(saved) = Playlist::load(&path, &self.root) {
+                        self.playlist_snapshot = Some((path, saved));
+                    }
+                }
+                Err(e) => self.status = e.to_string(),
+            }
         }
     }
     fn load_playlist(&mut self) {
@@ -615,6 +706,7 @@ impl Player {
                             self.queue = indices;
                             self.queue_selected = None;
                             self.status = "Playlist loaded".into();
+                            self.playlist_snapshot = Some((path.clone(), list.clone()));
                         } else {
                             self.status = "Rescan: playlist includes an unindexed track".into();
                         }
@@ -784,8 +876,8 @@ impl Player {
                 }
                 skin::display(ui, |ui| {
                     let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
-                    let duration = self.loaded[0]
-                        .and_then(|i| self.library.as_ref()?.tracks.get(i))
+                    let duration = self
+                        .loaded_track(0)
                         .and_then(|t| t.preparation.analysis.as_ref().map(|a| a.duration));
                     ui.horizontal(|ui| {
                         ui.label(
@@ -807,8 +899,7 @@ impl Player {
                                 egui::Label::new(RichText::new(self.title(0)).strong()).truncate(),
                             );
                             ui.weak(
-                                self.loaded[0]
-                                    .and_then(|i| self.library.as_ref()?.tracks.get(i))
+                                self.loaded_track(0)
                                     .map(|t| {
                                         format!(
                                             "{} · {} BPM · {}",
@@ -1470,7 +1561,8 @@ impl Player {
                 ui.add(egui::Slider::new(&mut self.wave_span, 4. ..=64.).text("seconds visible"));
             });
             for d in 0..2 {
-                let track = self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i));
+                let snapshot = self.loaded_track(d).cloned();
+                let track = snapshot.as_ref();
                 let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
                 self.waveforms[d].show(ui, &self.root, track, position, self.wave_span, d);
             }
@@ -1509,7 +1601,7 @@ if ui.button("FX").clicked(){self.fx_open=true;}});
         ui.allocate_ui_with_layout(egui::vec2(width,0.),egui::Layout::top_down(egui::Align::Center),|ui|{
             skin::panel(ui,true,|ui|{ui.set_width(width-18.);
                 ui.horizontal(|ui|{skin::label(ui,if deck==0{"DECK A"}else{"DECK B"});let position=self.audio.as_ref().map_or(0.,|a|a.position(deck));ui.label(RichText::new(format!("{:02}:{:02}",position as u64/60,position as u64%60)).monospace().color(skin::signal(ui)));});
-                skin::display(ui,|ui|{ui.set_min_width(ui.available_width());ui.label(RichText::new(self.title(deck)).strong().color(skin::signal(ui)));let track=self.loaded[deck].and_then(|i|self.library.as_ref()?.tracks.get(i));ui.label(track.map(|t|format!("{} BPM · {}",t.preparation.bpm.map(|b|format!("{:.1}",b*(1.+self.pitch[deck]as f64/100.))).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--"))).unwrap_or_else(||"Load a track from the library".into()));});
+                skin::display(ui,|ui|{ui.set_min_width(ui.available_width());ui.label(RichText::new(self.title(deck)).strong().color(skin::signal(ui)));let track=self.loaded_track(deck);ui.label(track.map(|t|format!("{} BPM · {}",t.preparation.bpm.map(|b|format!("{:.1}",b*(1.+self.pitch[deck]as f64/100.))).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--"))).unwrap_or_else(||"Load a track from the library".into()));});
                 ui.horizontal(|ui|{ui.vertical(|ui|{ui.label("PITCH");ui.spacing_mut().slider_width=235.;if ui.add(egui::Slider::new(&mut self.pitch[deck],-16. ..=16.).vertical().show_value(false)).changed()&&let Some(a)=&self.audio{a.set_rate(deck,1.+self.pitch[deck]/100.);}ui.label(format!("{:+.1}%",self.pitch[deck]));});let phase=ui.ctx().input(|i|i.time)as f32;skin::platter(ui,(width-94.).clamp(170.,290.),accent,self.playing[deck],phase);});
                 ui.horizontal(|ui|{
                     if skin::button(ui,"CUE",accent).on_hover_text("Return to the prepared cue IN and pause").clicked()&&let Some(i)=self.loaded[deck]{self.load_deck(deck,i,false);}
@@ -1517,9 +1609,9 @@ if ui.button("FX").clicked(){self.fx_open=true;}});
                     if skin::button(ui,"SYNC",accent).on_hover_text("Match prepared BPM to the other deck. Changes pitch with speed; beat-phase sync/key lock are not available.").clicked(){self.sync_deck(deck);}
                     if ui.button("STOP").clicked(){self.stop(deck);}
                 });
-                ui.horizontal(|ui|{let looping=self.audio.as_ref().is_some_and(|a|a.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed));if ui.button(if looping{"LOOP OFF"}else if self.loaded[deck].and_then(|i|self.library.as_ref()?.tracks.get(i)?.preparation.bpm).is_some(){"LOOP 4 BEATS"}else{"LOOP 2 s"}).clicked(){let seconds=self.loaded[deck].and_then(|i|self.library.as_ref()?.tracks.get(i)?.preparation.bpm).map_or(2.,|bpm|4.*60./(bpm*(1.+self.pitch[deck]as f64/100.)));if let Some(a)=&self.audio&&let Err(e)=a.loop_toggle(deck,seconds as f32){self.status=e;}}
+                ui.horizontal(|ui|{let looping=self.audio.as_ref().is_some_and(|a|a.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed));if ui.button(if looping{"LOOP OFF"}else if self.loaded_track(deck).and_then(|t|t.preparation.bpm).is_some(){"LOOP 4 BEATS"}else{"LOOP 2 s"}).clicked(){let seconds=self.loaded_track(deck).and_then(|t|t.preparation.bpm).map_or(2.,|bpm|4.*60./(bpm*(1.+self.pitch[deck]as f64/100.)));if let Some(a)=&self.audio&&let Err(e)=a.loop_toggle(deck,seconds as f32){self.status=e;}}
 if ui.button("Pitch reset").clicked(){self.pitch[deck]=0.;if let Some(a)=&self.audio{a.set_rate(deck,1.);}}});
-                let cues=self.loaded[deck].and_then(|i|self.library.as_ref().and_then(|l|l.tracks.get(i)).map(|t|(i,t.preparation.manual_cues.iter().chain(t.preparation.cues.iter().filter(|c|c.kind=="grid")).take(8).cloned().collect::<Vec<_>>())));
+                let cues=self.loaded[deck].and_then(|i|self.loaded_track(deck).map(|t|(i,t.preparation.manual_cues.iter().chain(t.preparation.cues.iter().filter(|c|c.kind=="grid")).take(8).cloned().collect::<Vec<_>>())));
                 if let Some((index,cues))=cues{ui.horizontal_wrapped(|ui|{for cue in cues{if ui.button(&cue.label).on_hover_text(format!("{:.2}s",cue.seconds)).clicked(){self.play_cue(deck,index,cue.seconds);}}});}
             });
         });
@@ -1809,6 +1901,63 @@ mod window_tests {
         }
         let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 1));
         output.textures_delta.clear();
+    }
+    #[test]
+    fn library_refresh_remaps_indices_and_keeps_session_snapshots() {
+        let track = |name: &str, bpm| amp_core::Track {
+            path: name.into(),
+            title: name.into(),
+            preparation: amp_core::Preparation {
+                bpm: Some(bpm),
+                ..Default::default()
+            },
+        };
+        let tree = || Folder {
+            name: "Music".into(),
+            folders: vec![],
+            tracks: vec![],
+        };
+        let old = Library {
+            tracks: vec![
+                track("a.wav", 120.),
+                track("b.wav", 120.),
+                track("c.wav", 120.),
+            ],
+            tree: tree(),
+        };
+        let mut player = Player {
+            loaded: [Some(1), None],
+            loaded_snapshot: [Some(old.tracks[1].clone()), None],
+            selected: Some(0),
+            queue: vec![2, 1, 1, 0],
+            queue_selected: Some(2),
+            playing: [true, false],
+            auto: true,
+            library: Some(old),
+            ..Default::default()
+        };
+        player.run.auto = true;
+        player.run.preloaded = Some((1, 2));
+        player.accept_library_scan(Library {
+            tracks: vec![
+                track("c.wav", 120.),
+                track("a.wav", 120.),
+                track("b.wav", 126.),
+                track("new.wav", 124.),
+            ],
+            tree: tree(),
+        });
+        assert_eq!(player.loaded, [Some(2), None]);
+        assert_eq!(player.queue, vec![0, 2, 2, 1]);
+        assert_eq!(player.queue_selected, Some(2));
+        assert_eq!(player.selected, Some(1));
+        assert_eq!(player.run.preloaded, Some((1, 0)));
+        assert!(player.playing[0] && player.auto && player.run.auto);
+        assert_eq!(player.loaded_track(0).unwrap().preparation.bpm, Some(120.));
+        assert_eq!(
+            player.library.as_ref().unwrap().tracks[2].preparation.bpm,
+            Some(126.)
+        );
     }
     #[test]
     fn dj_below_attached_library_has_finite_reachable_bounds() {

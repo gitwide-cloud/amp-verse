@@ -1,5 +1,7 @@
 # AMP⚡VERSE
 
+Shared-library/server milestone: coordinated per-track analysis leases, persistent library/device IDs, conflict-aware metadata revisions and protected playlist saves now live in AMP Library Core. Cast can run the same incremental analyzer headlessly. See [coordination](docs/SHARED_LIBRARY_COORDINATION.md) and [server deployment/status](docs/SERVER_DEPLOYMENT.md). ARM32 binaries/images are candidates pending actual LAG validation; AUHUBNAS production remains gated. Google Cast and Android offline-sync UI are not implemented by this milestone.
+
 An independent, modular audio project for Windows/Linux, with an integrated Android app planned. Inspired by compact classic players; not affiliated with Winamp. This repository is separate from MP3 Lab.
 
 The supplied AMP Verse references now guide the drawn desktop chrome and embedded Cast UI: purple/silver Player and orange/cyan DJ decks, black/gold folder Library and Cast console. See [visual direction](docs/DESIGN.md). The Library uses folders and playlists; the player expands into an attached Library, with explicit magnetic merge and detach controls. Crates are excluded.

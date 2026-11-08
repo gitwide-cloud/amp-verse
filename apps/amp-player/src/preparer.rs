@@ -1,6 +1,6 @@
 //! Desktop preparation review and background library analysis.
 use amp_core::{
-    Library, Preparation, Track, analysis,
+    Library, Preparation, Track,
     preparation::{self, Cue},
 };
 use eframe::egui;
@@ -10,6 +10,7 @@ struct Update {
     path: PathBuf,
     result: Result<Preparation, String>,
     selected: bool,
+    skipped: bool,
 }
 #[derive(Default)]
 pub struct Preparer {
@@ -17,6 +18,7 @@ pub struct Preparer {
     pub preview: Option<(PathBuf, f64)>,
     review_selected: std::collections::HashSet<String>,
     editing_revision: Option<Vec<u8>>,
+    library_id: String,
     root: PathBuf,
     path: PathBuf,
     title: String,
@@ -28,6 +30,7 @@ pub struct Preparer {
     total: usize,
     done: usize,
     failures: usize,
+    skipped: usize,
 }
 impl Preparer {
     pub fn busy(&self) -> bool {
@@ -53,6 +56,7 @@ impl Preparer {
         if let Some(title) = self.draft.extensions.get("title").and_then(|v| v.as_str()) {
             self.title = title.into();
         }
+        self.library_id = amp_core::coordination::library_id(root).unwrap_or_default();
         self.review_selected.clear();
         self.open = true;
     }
@@ -63,6 +67,7 @@ impl Preparer {
         self.total = tracks.len();
         self.done = 0;
         self.failures = 0;
+        self.skipped = 0;
         self.status = format!("Preparing {} tracks...", self.total);
         self.start(root, tracks, false);
     }
@@ -77,36 +82,25 @@ impl Preparer {
         );
         std::thread::spawn(move || {
             amp_core::batch::for_each(&tracks, workers, |track| {
-                let result = (|| {
-                    let path = amp_core::resolve(&root, &track.path).map_err(|e| e.to_string())?;
-                    let (snapshot, sidecar_before) = preparation::load_with_revision(&path)?;
-                    let existing = if selected {
-                        track.preparation.clone()
-                    } else {
-                        snapshot
-                    };
-                    let result = analysis::analyze(&path, &existing)?;
-                    if !selected {
-                        if sidecar_before != amp_core::preparation::revision(&path) {
-                            return Err(
-                                "Preparation was edited during analysis; kept the newer metadata"
-                                    .into(),
-                            );
+                let mut skipped = false;
+                let result = if selected {
+                    amp_core::coordination::analyze_draft(&root, &track.path, &track.preparation)
+                } else {
+                    match amp_core::coordination::analyze_shared(&root, &track.path, false) {
+                        Ok(amp_core::coordination::AnalysisResult::Prepared(p)) => Ok(*p),
+                        Ok(amp_core::coordination::AnalysisResult::Skipped(_)) => {
+                            skipped = true;
+                            preparation::load(&root.join(&track.path))
                         }
-                        preparation::save_if_unchanged(
-                            &root,
-                            &track.path,
-                            &result,
-                            sidecar_before.as_deref(),
-                        )?;
+                        Err(e) => Err(e),
                     }
-                    Ok(result)
-                })();
+                };
                 tx.send(Update {
                     root: root.clone(),
                     path: track.path.clone(),
                     result,
                     selected,
+                    skipped,
                 })
                 .is_ok()
             });
@@ -130,6 +124,7 @@ impl Preparer {
         let mut library = library;
         for update in updates {
             self.done += 1;
+            self.skipped += usize::from(update.skipped);
             match update.result {
                 Ok(p) => {
                     if update.selected {
@@ -145,7 +140,12 @@ impl Preparer {
                             t.preparation = p;
                         }
                         self.status = format!(
-                            "Prepared {}/{} ({} workers): {}",
+                            "{} {}/{} ({} workers): {}",
+                            if update.skipped {
+                                "Reused / claimed elsewhere"
+                            } else {
+                                "Prepared"
+                            },
                             self.done,
                             self.total,
                             self.active_workers,
@@ -162,8 +162,9 @@ impl Preparer {
         if finished {
             if self.total > 1 {
                 self.status = format!(
-                    "Finished: {} prepared, {} failed ({} tracks)",
-                    self.done.saturating_sub(self.failures),
+                    "Finished: {} prepared, {} reused/claimed, {} failed ({} tracks)",
+                    self.done.saturating_sub(self.failures + self.skipped),
+                    self.skipped,
                     self.failures,
                     self.total
                 );
@@ -187,8 +188,10 @@ impl Preparer {
         ui.add_enabled_ui(!self.busy(),|ui|{ui.horizontal(|ui|{
             if ui.button("Analyze track").clicked(){self.total=1;self.done=0;self.failures=0;let track=Track{path:self.path.clone(),title:self.title.clone(),preparation:self.draft.clone()};self.status="Analyzing decoded audio...".into();self.start(self.root.clone(),vec![track],true);}
             if ui.button("Save approved metadata").clicked(){
-            if preparation::revision(&self.root.join(&self.path))!=self.editing_revision {self.status="Metadata changed on disk; reopen this track before saving".into();return;}
-self.draft.schema_version=Some(1);self.draft.manual_override=true;if let Some(a)=&mut self.draft.analysis{a.reviewed=true;}match preparation::save_if_unchanged(&self.root,&self.path,&self.draft,self.editing_revision.as_deref()){Ok(())=>{if self.root==root&&let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|t.path==self.path){t.preparation=self.draft.clone();if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.editing_revision=preparation::revision(&self.root.join(&self.path));self.status="Approved metadata saved in .ampverse. Original audio unchanged.".into();},Err(e)=>self.status=e}}
+self.draft.schema_version=Some(1);self.draft.manual_override=true;if let Some(a)=&mut self.draft.analysis{a.reviewed=true;}match preparation::save_if_unchanged(&self.root,&self.path,&self.draft,self.editing_revision.as_deref()){Ok(())=>{if let Ok(fresh)=preparation::load(&self.root.join(&self.path)){self.draft=fresh;}
+if self.root==root&&let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|t.path==self.path){t.preparation=self.draft.clone();if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.editing_revision=preparation::revision(&self.root.join(&self.path));self.status="Approved metadata saved in .ampverse. Original audio unchanged.".into();},Err(e)=>{
+let queued=(||{let base=if let Some(bytes)=&self.editing_revision{serde_json::from_slice(bytes).map_err(|e:serde_json::Error|e.to_string())?}else{Preparation::default()};amp_core::offline::Edit::new(self.library_id.clone(),self.path.clone(),base,self.draft.clone())?.queue()})();
+self.status=match queued{Ok(path)=>format!("{e}. Draft kept locally at {}. Reconnection will not publish it automatically.",path.display()),Err(_)=>format!("{e}. Unsaved draft remains open; local queue unavailable.")};}}}
         });});
         let changes=amp_core::review::changes(&self.draft);
         if !changes.is_empty() {
