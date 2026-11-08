@@ -215,3 +215,6 @@ Rust 1.89 headless compatibility check and static ARMv7-musl server/analyzer cro
 A short Windows idle sample (16 logical CPUs, one generated track, station/analysis disabled, two-second sample) measured 6,934,528 bytes working set, 1,904,640 bytes private memory and no measurable process CPU increase. This is a small workstation observation, not a NAS benchmark or endurance claim. Local evidence lives in ignored test-output logs/artifacts.
 
 No production NAS services, real music, network isolation or Android APK were changed. Remaining server/client features and deployment gates are explicit in SERVER_DEPLOYMENT.md and SHARED_LIBRARY_COORDINATION.md.
+
+
+CI follow-up: headless Linux unit/native smoke checks and the static ARM32 QEMU health check passed in [Headless Cast candidates](https://github.com/gitwide-cloud/amp-verse/actions/runs/42522092082). The first GNU ARM container builds lacked cross-libc startup objects because recommended packages were intentionally disabled; the Dockerfile now explicitly installs the ARM64/ARMhf development runtime packages. Container publication remains gated on each image passing health checks. These checks do not replace LAG hardware validation.

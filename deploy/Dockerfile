@@ -10,8 +10,8 @@ COPY apps ./apps
 COPY assets ./assets
 RUN set -eu; case "$TARGETARCH" in \
       amd64) target=x86_64-unknown-linux-gnu ;; \
-      arm64) target=aarch64-unknown-linux-gnu; apt-get update; apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu ;; \
-      arm) test "$TARGETVARIANT" = v7; target=armv7-unknown-linux-gnueabihf; apt-get update; apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf ;; \
+      arm64) target=aarch64-unknown-linux-gnu; apt-get update; apt-get install -y --no-install-recommends gcc-aarch64-linux-gnu libc6-dev-arm64-cross ;; \
+      arm) test "$TARGETVARIANT" = v7; target=armv7-unknown-linux-gnueabihf; apt-get update; apt-get install -y --no-install-recommends gcc-arm-linux-gnueabihf libc6-dev-armhf-cross ;; \
       *) echo 'Unsupported architecture'; exit 1 ;; esac; \
     rustup target add "$target"; \
     CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc \
