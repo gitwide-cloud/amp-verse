@@ -18,3 +18,9 @@ Implemented in the native Rust shell and embedded Cast UI, with drawn geometry a
 ## Selectable appearance
 
 Classic, Modern Light and Modern Dark are implemented across the native Player, Library, DJ and Plugin Manager, and the Cast browser console. Classic preserves the module finishes described above; modern themes use flat light or charcoal panels with readable text and gold accents. The top-bar dropdown includes Appearance, and the base player also exposes a visible selector. See [theme preferences and Android target](THEMES.md). CI captures all four native surfaces in all three themes using `AMP_THEME`.
+
+## Cast playback web references
+
+The supplied light/mobile and dark/desktop Cast references now guide the web UI: a prominent now-broadcasting card, playlist source, playback and synchronization cards, Auto DJ status, and playlist-editing guidance. Modern Light/Dark use purple accents; Classic retains retro purple/gold/green. Appearance and the optional admin password are under the top-right menu. The layout stacks cards on narrow screens.
+
+The page uses the actual station icon and live server/track/listener state. Broadcast Start/Stop and this-device listen/pause/disconnect are functional. Listening and station transport are separate. No fabricated album artwork, spectrum, track duration, timeline, paired-device count or synchronized badge is displayed. The source is explicitly the single configured folder; named playlist switching, server soundcard routing and track-time sync remain future milestones. App setup links to the repository guide; no unsupported app-launch URL is invented.
