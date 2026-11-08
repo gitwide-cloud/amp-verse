@@ -28,6 +28,7 @@ import java.util.concurrent.Executors;
 @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
 public final class MainActivity extends Activity {
     private MediaController player;
+    private CastPanel castPanel;
     private ListenableFuture<MediaController> connection;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
@@ -78,6 +79,7 @@ public final class MainActivity extends Activity {
         handler.post(tick);
     }
     @Override public void onStop() {
+        if(castPanel!=null){castPanel.close();castPanel=null;}
         handler.removeCallbacks(tick);
         if (connection != null) MediaController.releaseFuture(connection);
         connection = null;
@@ -100,6 +102,7 @@ public final class MainActivity extends Activity {
     private void selectModule(String name) { if(name.equals("AMP Lab")){if(player!=null)player.pause();startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;library=name.equals("AMP Library");draw(); }
     private void openSettings(){startActivity(new Intent(this,SettingsActivity.class));}
     private void draw() {
+        if(castPanel!=null){castPanel.close();castPanel=null;}
         appearance=new Appearance(this);bg=appearance.background;panel=appearance.surface;text=appearance.text;muted=appearance.muted;accent=appearance.accent;
         title=null;clock=null;durationLabel=null;details=null;artwork=null;artworkKey="";displayedArtwork=null;playerRows.clear();seek=null;play=null;status=null;shuffleButton=null;repeatButton=null;
         getWindow().setStatusBarColor(bg);getWindow().setNavigationBarColor(bg);
@@ -120,9 +123,18 @@ public final class MainActivity extends Activity {
             dj.addView(label("Local sequential queue playback is available. Mixing decks, cue editing, beat sync and stems are not implemented yet.",14,muted));
             CheckBox repeat=new CheckBox(this);repeat.setText("Repeat local queue");repeat.setTextColor(text);repeat.setChecked(prefs.getBoolean("repeat",false));repeat.setOnCheckedChangeListener((v,value)->{prefs.edit().putBoolean("repeat",value).apply();if(player!=null)player.setRepeatMode(value?Player.REPEAT_MODE_ALL:Player.REPEAT_MODE_OFF);});dj.addView(repeat);
             dj.addView(button("Open player",()->selectModule("AMP Player")));drawQueue(false);
+        }else if(module.equals("AMP Cast")){
+            castPanel=new CastPanel(this,appearance,new CastPanel.Listener(){
+                public void listen(String url,String name){
+                    if(player==null){message="Playback service is still connecting. Try Listen again.";refresh();return;}
+                    player.setMediaItem(new MediaItem.Builder().setMediaId("amp-radio").setUri(url).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle(name).build()).build());
+                    player.setRepeatMode(Player.REPEAT_MODE_OFF);player.setShuffleModeEnabled(false);player.prepare();player.play();message="Listening to "+name;refresh();
+                }
+                public void stopListening(){if(player!=null&&isRadio()){player.stop();message="Phone listening stopped. Server station remains independent.";refresh();}}
+            });page.addView(castPanel);
         }else{
             LinearLayout info=card();
-            String detail=module.equals("AMP Remote")?"Connect to the desktop library, browse songs or playlists, listen on this phone, then Save offline for Cast. This Remote workflow is not implemented in this preview yet.":module.equals("AMP Lab")?"AMP Lab uses the existing MP3 Lab editor foundation on desktop. Android audio editing and preparation tools are not implemented yet.":"AMP Cast is an independent radio server. Native Android station control is planned; the phone does not host a radio server in this preview.";
+            String detail=module.equals("AMP Remote")?"Connect to the desktop library, browse songs or playlists, listen on this phone, then Save offline for Cast. This Remote workflow is not implemented in this preview yet.":module.equals("AMP Lab")?"AMP Lab uses the existing MP3 Lab editor foundation on desktop. Android audio editing and preparation tools are not implemented yet.":"Choose AMP Cast from the module dropdown to connect to a running radio station.";
             info.addView(label(detail,16,text));info.addView(button("Settings",this::openSettings));
         }
         status=label(message,12,muted);page.addView(status);if(!module.equals("AMP Player"))page.addView(label("AMP VERSE  "+BuildConfig.VERSION_NAME+" · LOCAL / OFFLINE",11,muted));refresh();

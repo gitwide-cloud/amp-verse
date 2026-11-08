@@ -130,3 +130,5 @@ Desktop magnetic windows: drag the title rail beside the AMP VERSE dropdown to d
 Desktop preparation is now an implemented first milestone: select a track in Library and choose **Prepare selected / cues...**, or use **Analyze library and save metadata**. The engine writes versioned key/BPM/grid/cue metadata beside the audio, preserves manual edits and provides DJ cue buttons. See [portable preparation](docs/PREPARATION.md) for the schema and accuracy/platform limits. Android sidecar consumption is still pending.
 
 Desktop analysis is now an optional executable add-on. Build `amp-engine` separately and install it through Plugin Manager; prepared playback and manual edits remain available without it. See [optional analysis architecture](docs/OPTIONAL_ANALYSIS.md) for packaging, limitations and the cancelled QNAP deployment scope.
+
+Android 0.1.10 adds an integrated AMP Cast client: selected-server connection, station start/stop, actual status/read-only queue and independent phone listening through the media service. See [Android Cast usage and limits](docs/ANDROID.md#integrated-amp-cast-client-0110). Google Cast receivers and offline downloads remain pending.
