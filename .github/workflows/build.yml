@@ -52,7 +52,7 @@ jobs:
           mkdir -p test-output/music
           ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 test-output/music/Tone.wav
           for theme in classic modern-light modern-dark; do
-            for view in player combined library preparation dj lab addons cast; do
+            for view in player combined library preparation dj sampler lab addons cast; do
               timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_THEME="$theme" AMP_VERSE_CONFIG_DIR=test-output/theme-config AMP_SCREENSHOT_VIEW="$view" AMP_SCREENSHOT="test-output/$theme-$view.png" target/release/amp-player test-output/music
               test -s "test-output/$theme-$view.png"
             done

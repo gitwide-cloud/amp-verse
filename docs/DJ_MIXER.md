@@ -19,3 +19,12 @@ A CPAL output callback mixes both voices into one stream. Separate FFmpeg worker
 Deterministic PCM tests cover continuous automatic fades, waiting for incoming audio, outgoing pause on completion, pause position, pitch, loop position and manual takeover. An opt-in Windows native-device test uses two real FFmpeg decoder workers and a muted CPAL device stream to check A-to-B and B-to-A completion, pause stability and zero buffer underruns. The native test does not replace subjective listening or long-duration NAS/device-loss testing.
 
 The desktop Player uses this same mixer; independent Cast encoding is unchanged. Android is unchanged.
+
+
+## Nine-pad sampler
+
+AMP DJ has a collapsible 3×3 sampler above the deck controls. Load a short effect onto any pad; clicking a loaded pad plays/restarts it as a one-shot. Pads can overlap, including all nine simultaneously, while both decks play. Number keys 1–9 trigger ready pads while the DJ surface is focused and a text input is not active. Each pad has Load, Stop and Clear; right-click its main button for pad volume. The bank has its own volume and Stop All button. The crossfader affects the two decks only. Player master volume controls both decks and the sampler.
+
+File assignments and volumes are saved in `sampler.json` beside the theme settings and reloaded in the background when DJ opens. Files stay at their chosen paths; they are not copied into the library or bundled with the app. Missing/unreadable files are reported. FFmpeg decodes stereo PCM to the actual output device rate before a pad is ready. Limits are 30 seconds and 12 MiB decoded PCM per pad; longer effects are rejected rather than silently cut. Nine buffers can use up to 108 MiB plus decoding overhead. The shared output has existing headroom and final clipping protection; set sampler/pad levels appropriately when layering loud effects.
+
+The CPAL callback mixes the nine resident voices alongside the decks, with 5 ms file-edge attack/release, no file access or sample allocation on trigger. Retrigger restarts that pad; it does not add another voice for the same pad. Acknowledged buffer retirement keeps large sample-buffer deallocation on the UI thread. A sampler does not replace the deck loops: tempo sync, sample looping, recording, slicing and MIDI triggering are not implemented.

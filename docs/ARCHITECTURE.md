@@ -100,3 +100,8 @@ Desktop Player/DJ now use a shared CPAL stream and bounded FFmpeg decoder worker
 `amp-core::smart` owns deterministic energy-anchored playlist ordering and bounded recommendation expansion. Inputs are portable Preparation records; there is no GUI dependency. Rating, energy, playback rate and library tag overrides use validated/forward-compatible sidecar extensions. Audio analysis seeds missing energy from measured RMS; it preserves existing values.
 
 `amp-player::window_layout` owns an acyclic module-to-host graph. Native edge snapping remains in docking.rs. A lit magnet button explicitly changes ownership; the group renderer reuses each module's existing UI under one native host, suppressing child native controls. Detach restores a native viewport and carries descendants with it. Layout is session-only and stacked; external MP3 Lab stays separate.
+
+
+## DJ sampler
+
+`amp-player::sampler` owns the nine-pad UI, saved file assignments/levels and a serialized background FFmpeg loading queue. PCM buffers are bounded to 30 seconds / 12 MiB per pad. `mixer::Engine` owns the resident buffers and sends load/trigger/stop commands to the same CPAL callback used by the decks. The sampler uses nine independent one-shot cursors, per-pad and bank gain, then the shared master. Its bus bypasses the deck crossfader and deck EQ. Generation acknowledgements release replaced PCM allocations on the UI thread after callback ownership ends. Sampler settings are local device configuration, not portable song preparation metadata.

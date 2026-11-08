@@ -1,0 +1,362 @@
+//! Nine preloaded one-shot pads. File decoding and settings writes stay off the audio callback.
+use crate::mixer::Engine;
+use eframe::egui::{self, RichText};
+use serde::{Deserialize, Serialize};
+use std::{
+    collections::VecDeque,
+    io::{BufReader, Read},
+    path::{Path, PathBuf},
+    process::Stdio,
+    sync::{Arc, mpsc},
+};
+pub type Frames = Arc<[[f32; 2]]>;
+#[derive(Serialize, Deserialize)]
+#[serde(default)]
+struct Bank {
+    paths: [Option<PathBuf>; 9],
+    gains: [f32; 9],
+    master: f32,
+}
+impl Default for Bank {
+    fn default() -> Self {
+        Self {
+            paths: Default::default(),
+            gains: [1.; 9],
+            master: 0.7,
+        }
+    }
+}
+fn settings() -> Option<PathBuf> {
+    crate::theme::settings_path().map(|p| p.with_file_name("sampler.json"))
+}
+fn load_bank() -> Bank {
+    let bank = settings()
+        .and_then(|p| std::fs::read(p).ok())
+        .and_then(|b| serde_json::from_slice::<Bank>(&b).ok())
+        .unwrap_or_default();
+    if std::iter::once(bank.master)
+        .chain(bank.gains)
+        .all(|g| g.is_finite() && (0. ..=1.).contains(&g))
+    {
+        bank
+    } else {
+        Bank::default()
+    }
+}
+fn decode(path: &Path, rate: u32) -> Result<Frames, String> {
+    let max = (rate as usize * 30).min(12 * 1024 * 1024 / 8);
+    let mut child = amp_core::command("ffmpeg")
+        .args(["-nostdin", "-v", "error", "-i"])
+        .arg(path)
+        .args([
+            "-vn",
+            "-ac",
+            "2",
+            "-ar",
+            &rate.to_string(),
+            "-t",
+            "31",
+            "-f",
+            "f32le",
+            "pipe:1",
+        ])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+        .map_err(|e| e.to_string())?;
+    let result = (|| {
+        let mut input = BufReader::new(child.stdout.take().ok_or("No sampler decoder output")?);
+        let mut frames = Vec::new();
+        let mut bytes = [0; 8];
+        loop {
+            match input.read_exact(&mut bytes) {
+                Ok(()) => {
+                    if frames.len() >= max {
+                        return Err("Effect exceeds the 30-second / 12 MiB per-pad limit".into());
+                    }
+                    let a = f32::from_le_bytes(bytes[..4].try_into().unwrap());
+                    let b = f32::from_le_bytes(bytes[4..].try_into().unwrap());
+                    if !a.is_finite() || !b.is_finite() {
+                        return Err("Effect contains invalid audio samples".into());
+                    }
+                    frames.push([a, b]);
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        if frames.is_empty() {
+            return Err("No playable audio in this effect".into());
+        }
+        Ok(Arc::from(frames))
+    })();
+    if result.is_err() {
+        let _ = child.kill();
+    }
+    let status = child.wait().map_err(|e| e.to_string())?;
+    if result.is_ok() && !status.success() {
+        return Err("Unable to decode this sound effect".into());
+    }
+    result
+}
+struct Loaded {
+    pad: usize,
+    path: PathBuf,
+    result: Result<Frames, String>,
+}
+pub enum Action {
+    Load(usize),
+    Trigger(usize),
+    Stop(usize),
+    Clear(usize),
+    StopAll,
+}
+pub struct Sampler {
+    bank: Bank,
+    ready: [bool; 9],
+    queue: VecDeque<(usize, PathBuf)>,
+    job: Option<mpsc::Receiver<Loaded>>,
+    loading: Option<usize>,
+    pub started: bool,
+    pub status: String,
+}
+impl Default for Sampler {
+    fn default() -> Self {
+        Self {
+            bank: load_bank(),
+            ready: [false; 9],
+            queue: VecDeque::new(),
+            job: None,
+            loading: None,
+            started: false,
+            status: "Load sound effects into the nine pads. Shortcuts: 1–9 while DJ is focused."
+                .into(),
+        }
+    }
+}
+impl Sampler {
+    pub fn has_saved(&self) -> bool {
+        self.bank.paths.iter().any(Option::is_some)
+    }
+    fn save(&mut self) {
+        let result = (|| -> Result<(), String> {
+            let path = settings().ok_or("Settings folder unavailable")?;
+            std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
+            let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
+            std::fs::write(
+                &temp,
+                serde_json::to_vec_pretty(&self.bank).map_err(|e| e.to_string())?,
+            )
+            .map_err(|e| e.to_string())?;
+            std::fs::rename(temp, path).map_err(|e| e.to_string())
+        })();
+        if let Err(e) = result {
+            self.status = format!("Sampler settings were not saved: {e}");
+        }
+    }
+    pub fn restore(&mut self) {
+        self.started = true;
+        for (pad, path) in self.bank.paths.iter().enumerate() {
+            if let Some(path) = path {
+                self.queue.push_back((pad, path.clone()));
+            }
+        }
+    }
+    pub fn request_load(&mut self, pad: usize, path: PathBuf) {
+        self.queue.push_back((pad, path));
+        self.status = format!("Loading pad {}…", pad + 1);
+    }
+    pub fn poll(&mut self, engine: &mut Engine) {
+        engine.sample_maintenance();
+        engine.sample_levels(self.bank.master, self.bank.gains);
+        if let Some(rx) = &self.job {
+            match rx.try_recv() {
+                Ok(loaded) => {
+                    match loaded
+                        .result
+                        .and_then(|frames| engine.sample_load(loaded.pad, Some(frames)))
+                    {
+                        Ok(()) => {
+                            self.bank.paths[loaded.pad] = Some(loaded.path);
+                            self.ready[loaded.pad] = true;
+                            self.status = format!("Pad {} ready", loaded.pad + 1);
+                            self.save();
+                        }
+                        Err(e) => self.status = format!("Pad {}: {e}", loaded.pad + 1),
+                    }
+                    self.job = None;
+                    self.loading = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.status = "Sampler loader stopped unexpectedly".into();
+                    self.job = None;
+                    self.loading = None;
+                }
+                Err(mpsc::TryRecvError::Empty) => (),
+            }
+        }
+        if self.job.is_none()
+            && let Some((pad, path)) = self.queue.pop_front()
+        {
+            let rate = engine.sample_rate;
+            let (tx, rx) = mpsc::channel();
+            self.loading = Some(pad);
+            self.job = Some(rx);
+            std::thread::spawn(move || {
+                let result = decode(&path, rate);
+                let _ = tx.send(Loaded { pad, path, result });
+            });
+        }
+    }
+    pub fn clear(&mut self, pad: usize, engine: &mut Engine) -> Result<(), String> {
+        engine.sample_load(pad, None)?;
+        self.ready[pad] = false;
+        self.bank.paths[pad] = None;
+        self.status = format!("Pad {} cleared", pad + 1);
+        self.save();
+        Ok(())
+    }
+    pub fn show(&mut self, ui: &mut egui::Ui, engine: Option<&Engine>) -> Vec<Action> {
+        crate::skin::panel(ui, true, |ui| self.content(ui, engine))
+    }
+    fn content(&mut self, ui: &mut egui::Ui, engine: Option<&Engine>) -> Vec<Action> {
+        let mut actions = Vec::new();
+        let busy = self.job.is_some() || !self.queue.is_empty();
+        egui::CollapsingHeader::new("SAMPLER · 9 SOUND EFFECT PADS").id_salt("sampler-bank").default_open(true).show(ui,|ui|{
+            ui.horizontal(|ui|{
+                if ui.add(egui::Slider::new(&mut self.bank.master,0. ..=1.).text("Sampler volume")).changed() {self.save();}
+                if ui.button("Stop all pads").clicked() {actions.push(Action::StopAll);}
+                ui.weak("One-shot · 1–9 · independent of crossfader");
+            });
+            let pad_width=((ui.available_width()-16.)/3.).clamp(150.,310.);
+            egui::Grid::new("sampler-pads").num_columns(3).spacing([8.,5.]).show(ui,|ui|{
+                for pad in 0..9 {
+                    ui.push_id(pad,|ui|ui.vertical(|ui|{
+                        let playing=engine.is_some_and(|e|e.controls.sample_playing[pad].load(std::sync::atomic::Ordering::Relaxed));
+                        let name=self.bank.paths[pad].as_ref().and_then(|p|p.file_stem()).map(|s|s.to_string_lossy().into_owned()).unwrap_or_else(||"Load effect…".into());
+                        let loading=self.loading==Some(pad)||self.queue.iter().any(|(p,_)|*p==pad);
+                        let short:String=name.chars().take(28).collect();
+                        let label=format!("{} · {}{}",pad+1,if loading {"Loading…"} else {&short},if playing {"  ▶"} else {""});
+                        ui.set_width(pad_width);
+                        let text=RichText::new(label).color(if playing {crate::skin::signal(ui)} else {crate::skin::accent(ui)});
+                        let response=ui.add_enabled(!loading,egui::Button::new(text).selected(playing).min_size(egui::vec2(pad_width,36.))).on_hover_text(self.bank.paths[pad].as_ref().map(|p|format!("{}\nClick to play/restart. Key {}. Right-click for pad volume.",p.display(),pad+1)).unwrap_or_else(||"Load a short sound effect (up to 30 seconds / 12 MiB decoded).".into()));
+                        response.context_menu(|ui|{
+                            if ui.add(egui::Slider::new(&mut self.bank.gains[pad],0. ..=1.).text("Pad volume")).changed() {self.save();}
+                        });
+                        if response.clicked() {
+                            if self.ready[pad] {actions.push(Action::Trigger(pad));} else {actions.push(Action::Load(pad));}
+                        }
+                        ui.horizontal(|ui|{
+                            if ui.add_enabled(!busy,egui::Button::new("Load")).clicked(){actions.push(Action::Load(pad));}
+                            if ui.add_enabled(playing,egui::Button::new("Stop")).clicked(){actions.push(Action::Stop(pad));}
+                            if ui.add_enabled(!busy&&self.bank.paths[pad].is_some(),egui::Button::new("Clear")).clicked(){actions.push(Action::Clear(pad));}
+                        });
+                    }));
+                    if pad%3==2 {ui.end_row();}
+                }
+            });
+            ui.weak(&self.status);
+        });
+        if !ui.ctx().egui_wants_keyboard_input() && ui.input(|i| i.focused) {
+            for event in ui.input(|i| i.events.clone()) {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } = event
+                    && modifiers == egui::Modifiers::NONE
+                    && let Some(pad) = shortcut(key)
+                    && self.ready[pad]
+                {
+                    actions.push(Action::Trigger(pad));
+                }
+            }
+        }
+        if let Some(engine) = engine {
+            engine.sample_levels(self.bank.master, self.bank.gains);
+        }
+        actions
+    }
+}
+fn shortcut(key: egui::Key) -> Option<usize> {
+    [
+        egui::Key::Num1,
+        egui::Key::Num2,
+        egui::Key::Num3,
+        egui::Key::Num4,
+        egui::Key::Num5,
+        egui::Key::Num6,
+        egui::Key::Num7,
+        egui::Key::Num8,
+        egui::Key::Num9,
+    ]
+    .iter()
+    .position(|k| *k == key)
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn all_nine_shortcuts_and_bank_paths_round_trip() {
+        assert_eq!(shortcut(egui::Key::Num1), Some(0));
+        assert_eq!(shortcut(egui::Key::Num9), Some(8));
+        assert_eq!(shortcut(egui::Key::Num0), None);
+        let mut b = Bank::default();
+        b.paths[8] = Some(PathBuf::from("effects/air horn.wav"));
+        b.gains[8] = 0.4;
+        let restored: Bank = serde_json::from_slice(&serde_json::to_vec(&b).unwrap()).unwrap();
+        assert_eq!(restored.paths, b.paths);
+        assert_eq!(restored.gains, b.gains);
+    }
+    #[test]
+    #[ignore = "requires native audio, ffmpeg and AMP_WAVEFORM_FIXTURE; muted"]
+    fn native_nine_pad_playback_and_stop() {
+        let path = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
+        let mut engine = Engine::new().unwrap();
+        engine.set_master(0.);
+        let frames = decode(Path::new(&path), engine.sample_rate).unwrap();
+        for pad in 0..9 {
+            engine.sample_load(pad, Some(frames.clone())).unwrap();
+            engine.sample_trigger(pad).unwrap();
+        }
+        let wait = |predicate: &dyn Fn() -> bool| {
+            let until = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while !predicate() {
+                assert!(std::time::Instant::now() < until);
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            }
+        };
+        wait(&|| {
+            engine
+                .controls
+                .sample_playing
+                .iter()
+                .all(|p| p.load(std::sync::atomic::Ordering::Relaxed))
+        });
+        engine.sample_stop(Some(8)).unwrap();
+        wait(&|| !engine.controls.sample_playing[8].load(std::sync::atomic::Ordering::Relaxed));
+        assert!(engine.controls.sample_playing[0].load(std::sync::atomic::Ordering::Relaxed));
+        engine.sample_stop(None).unwrap();
+        wait(&|| {
+            engine
+                .controls
+                .sample_playing
+                .iter()
+                .all(|p| !p.load(std::sync::atomic::Ordering::Relaxed))
+        });
+        assert!(engine.take_error().is_none());
+        engine.sample_maintenance();
+    }
+    #[test]
+    #[ignore = "requires ffmpeg and AMP_WAVEFORM_FIXTURE"]
+    fn actual_effect_decoder_produces_device_rate_stereo() {
+        let path = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
+        let frames = decode(Path::new(&path), 48000).unwrap();
+        assert!((479990..=480010).contains(&frames.len()));
+        assert!(frames[48000..].iter().any(|f| f[0].abs() > 0.01));
+        assert!(decode(Path::new("missing-effect.wav"), 48000).is_err());
+    }
+}

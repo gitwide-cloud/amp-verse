@@ -22,6 +22,10 @@ fn set(v: &AtomicU32, x: f32) {
     v.store(x.to_bits(), Relaxed);
 }
 pub struct Controls {
+    pub sample_playing: [AtomicBool; 9],
+    sample_generation: [AtomicU64; 9],
+    sample_gain: [AtomicU32; 9],
+    sample_master: AtomicU32,
     pub play: [AtomicBool; 2],
     pub loaded: [AtomicBool; 2],
     pub ready: [AtomicBool; 2],
@@ -45,6 +49,10 @@ pub struct Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            sample_playing: std::array::from_fn(|_| AtomicBool::new(false)),
+            sample_generation: std::array::from_fn(|_| AtomicU64::new(0)),
+            sample_gain: std::array::from_fn(|_| atom(1.)),
+            sample_master: atom(0.7),
             play: std::array::from_fn(|_| AtomicBool::new(false)),
             loaded: std::array::from_fn(|_| AtomicBool::new(false)),
             ready: std::array::from_fn(|_| AtomicBool::new(false)),
@@ -130,7 +138,16 @@ struct Fade {
     incoming: usize,
     started: bool,
 }
+#[derive(Default)]
+struct SampleVoice {
+    frames: Option<Arc<[Frame]>>,
+    position: usize,
+    playing: bool,
+}
 enum Command {
+    SampleLoad(usize, u64, Option<Arc<[Frame]>>),
+    SampleTrigger(usize),
+    SampleStop(Option<usize>),
     Load(usize, Source, bool),
     Stop(usize),
     Fader(f32),
@@ -140,6 +157,7 @@ enum Command {
 }
 struct Mixer {
     voices: [Voice; 2],
+    samples: [SampleVoice; 9],
     commands: mpsc::Receiver<Command>,
     pub controls: Arc<Controls>,
     rate: u32,
@@ -149,6 +167,7 @@ impl Mixer {
     fn new(rate: u32, commands: mpsc::Receiver<Command>, controls: Arc<Controls>) -> Self {
         Self {
             voices: Default::default(),
+            samples: Default::default(),
             commands,
             controls,
             rate,
@@ -158,6 +177,32 @@ impl Mixer {
     fn process_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
             match command {
+                Command::SampleLoad(pad, generation, frames) => {
+                    self.samples[pad] = SampleVoice {
+                        frames,
+                        ..Default::default()
+                    };
+                    self.controls.sample_playing[pad].store(false, Relaxed);
+                    // Old buffers remain owned by Engine until this acknowledgement.
+                    self.controls.sample_generation[pad]
+                        .store(generation, std::sync::atomic::Ordering::Release);
+                }
+                Command::SampleTrigger(pad) => {
+                    let v = &mut self.samples[pad];
+                    v.position = 0;
+                    v.playing = v.frames.as_ref().is_some_and(|s| !s.is_empty());
+                    self.controls.sample_playing[pad].store(v.playing, Relaxed);
+                }
+                Command::SampleStop(pad) => {
+                    for (i, v) in self.samples.iter_mut().enumerate() {
+                        if pad.is_none_or(|p| p == i) {
+                            v.playing = false;
+                            v.position = 0;
+                            self.controls.sample_playing[i].store(false, Relaxed);
+                        }
+                    }
+                }
+
                 Command::Load(d, s, play) => {
                     self.controls.play[d].store(play, Relaxed);
                     self.voices[d] = Voice {
@@ -352,6 +397,28 @@ impl Mixer {
                 let bin = i * 96 / frames.max(1);
                 waves[d][bin] = waves[d][bin].max((frame[0] + frame[1]).abs() * 0.5);
             }
+            for (pad, v) in self.samples.iter_mut().enumerate() {
+                if !v.playing {
+                    continue;
+                }
+                let frames = v.frames.as_ref().unwrap();
+                let fade = (self.rate as usize / 200).max(1); // 5 ms attack/release for file edges.
+                let envelope = (v.position as f32 / fade as f32)
+                    .min(1.)
+                    .min((frames.len() - v.position) as f32 / fade as f32);
+                let gain = get(&c.sample_gain[pad])
+                    * get(&c.sample_master)
+                    * envelope
+                    * std::f32::consts::FRAC_1_SQRT_2;
+                for (ch, value) in mix.iter_mut().enumerate() {
+                    *value += frames[v.position][ch] * gain;
+                }
+                v.position += 1;
+                if v.position >= frames.len() {
+                    v.playing = false;
+                    c.sample_playing[pad].store(false, Relaxed);
+                }
+            }
             output(
                 i,
                 [
@@ -380,6 +447,9 @@ pub struct Engine {
     pub device: String,
     cancel: [Option<Arc<AtomicBool>>; 2],
     source_start: [f64; 2],
+    sample_buffers: [Option<Arc<[Frame]>>; 9],
+    sample_retired: Vec<(usize, u64, Arc<[Frame]>)>,
+    sample_generation: u64,
 }
 impl Engine {
     pub fn new() -> Result<Self, String> {
@@ -412,6 +482,9 @@ impl Engine {
             device: name,
             cancel: Default::default(),
             source_start: [0.; 2],
+            sample_buffers: Default::default(),
+            sample_retired: Vec::new(),
+            sample_generation: 0,
         })
     }
     pub fn load(
@@ -570,6 +643,47 @@ impl Engine {
         ))?;
         self.controls.play[deck].store(play, Relaxed);
         Ok(())
+    }
+    pub fn sample_maintenance(&mut self) {
+        self.sample_retired.retain(|(pad, generation, _)| {
+            self.controls.sample_generation[*pad].load(std::sync::atomic::Ordering::Acquire)
+                < *generation
+        });
+    }
+    pub fn sample_load(
+        &mut self,
+        pad: usize,
+        frames: Option<Arc<[[f32; 2]]>>,
+    ) -> Result<(), String> {
+        if pad >= 9 {
+            return Err("Unknown sampler pad".into());
+        }
+        self.sample_maintenance();
+        let generation = self.sample_generation + 1;
+        self.send(Command::SampleLoad(pad, generation, frames.clone()))?;
+        if let Some(old) = std::mem::replace(&mut self.sample_buffers[pad], frames) {
+            self.sample_retired.push((pad, generation, old));
+        }
+        self.sample_generation = generation;
+        Ok(())
+    }
+    pub fn sample_trigger(&self, pad: usize) -> Result<(), String> {
+        if pad >= 9 || self.sample_buffers[pad].is_none() {
+            return Err("Load a sound effect into this pad first".into());
+        }
+        self.send(Command::SampleTrigger(pad))
+    }
+    pub fn sample_stop(&self, pad: Option<usize>) -> Result<(), String> {
+        if pad.is_some_and(|p| p >= 9) {
+            return Err("Unknown sampler pad".into());
+        }
+        self.send(Command::SampleStop(pad))
+    }
+    pub fn sample_levels(&self, master: f32, gains: [f32; 9]) {
+        set(&self.controls.sample_master, master.clamp(0., 1.));
+        for (pad, gain) in gains.iter().enumerate() {
+            set(&self.controls.sample_gain[pad], gain.clamp(0., 1.));
+        }
     }
     fn send(&self, command: Command) -> Result<(), String> {
         self.commands
@@ -742,6 +856,100 @@ mod tests {
             position: 0.,
             primed: false,
         }
+    }
+    #[test]
+    fn nine_sampler_voices_mix_retrigger_stop_and_follow_master() {
+        let controls = Arc::new(Controls::default());
+        set(&controls.master, 1.);
+        let (tx, rx) = mpsc::sync_channel(64);
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        let sample: Arc<[Frame]> = Arc::from(vec![[0.1, 0.1]; 100]);
+        for pad in 0..9 {
+            tx.send(Command::SampleLoad(
+                pad,
+                pad as u64 + 1,
+                Some(sample.clone()),
+            ))
+            .unwrap();
+            tx.send(Command::SampleTrigger(pad)).unwrap();
+        }
+        let mut output = Vec::new();
+        mixer.render(20, |_, f| output.push(f));
+        assert!(controls.sample_playing.iter().all(|p| p.load(Relaxed)));
+        assert!((output[19][0] - 9. * 0.1 * 0.7 * std::f32::consts::FRAC_1_SQRT_2).abs() < 0.001);
+        tx.send(Command::Fader(1.)).unwrap();
+        let mut after = 0.;
+        mixer.render(1, |_, f| after = f[0]);
+        assert!((after - output[19][0]).abs() < 0.001);
+        tx.send(Command::SampleStop(Some(8))).unwrap();
+        mixer.render(1, |_, _| {});
+        assert!(!controls.sample_playing[8].load(Relaxed));
+        assert!(controls.sample_playing[0].load(Relaxed));
+        tx.send(Command::SampleStop(None)).unwrap();
+        tx.send(Command::SampleTrigger(0)).unwrap();
+        let mut restarted = Vec::new();
+        mixer.render(2, |_, f| restarted.push(f));
+        assert_eq!(restarted[0], [0., 0.]);
+        assert!(restarted[1][0] > 0.);
+        set(&controls.master, 0.);
+        mixer.render(10, |_, f| assert_eq!(f, [0., 0.]));
+        set(&controls.master, 1.);
+        mixer.render(120, |_, _| {});
+        assert!(controls.sample_playing.iter().all(|p| !p.load(Relaxed)));
+        mixer.render(10, |_, f| assert_eq!(f, [0., 0.]));
+    }
+    #[test]
+    fn sampler_layers_over_both_decks_without_stopping_them() {
+        let controls = Arc::new(Controls::default());
+        set(&controls.master, 1.);
+        set(&controls.sample_master, 1.);
+        let (tx, rx) = mpsc::sync_channel(64);
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        for d in 0..2 {
+            tx.send(Command::Load(d, source(0.1, 1000), true)).unwrap();
+        }
+        tx.send(Command::Fader(0.5)).unwrap();
+        let frames: Arc<[Frame]> = Arc::from(vec![[0.01, 0.01]; 1000]);
+        for pad in 0..9 {
+            tx.send(Command::SampleLoad(
+                pad,
+                pad as u64 + 1,
+                Some(frames.clone()),
+            ))
+            .unwrap();
+            tx.send(Command::SampleTrigger(pad)).unwrap();
+        }
+        let mut with = 0.;
+        mixer.render(200, |_, f| with = f[0]);
+        assert!(controls.play.iter().all(|p| p.load(Relaxed)));
+        assert!(controls.sample_playing.iter().all(|p| p.load(Relaxed)));
+        tx.send(Command::SampleStop(None)).unwrap();
+        let mut without = 0.;
+        mixer.render(1, |_, f| without = f[0]);
+        assert!(without > 0.);
+        assert!(with - without > 0.06);
+        assert!(controls.play.iter().all(|p| p.load(Relaxed)));
+    }
+    #[test]
+    fn replacement_acknowledges_after_callback_releases_old_buffer() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        let old: Arc<[Frame]> = Arc::from(vec![[0.1, 0.1]; 10]);
+        let weak = Arc::downgrade(&old);
+        tx.send(Command::SampleLoad(0, 1, Some(old.clone())))
+            .unwrap();
+        mixer.render(1, |_, _| {});
+        assert_eq!(Arc::strong_count(&old), 2);
+        tx.send(Command::SampleLoad(0, 2, None)).unwrap();
+        mixer.render(1, |_, _| {});
+        assert_eq!(
+            controls.sample_generation[0].load(std::sync::atomic::Ordering::Acquire),
+            2
+        );
+        assert_eq!(Arc::strong_count(&old), 1);
+        drop(old);
+        assert!(weak.upgrade().is_none());
     }
     #[test]
     #[ignore = "requires a native output device and ffmpeg on PATH; output muted"]

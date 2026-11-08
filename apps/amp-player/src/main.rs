@@ -12,6 +12,7 @@ mod docking;
 mod lab;
 mod mixer;
 mod preparer;
+mod sampler;
 mod skin;
 mod theme;
 mod waveform;
@@ -65,6 +66,7 @@ struct Player {
     folder: PathBuf,
     search: String,
     audio: Option<mixer::Engine>,
+    sampler: sampler::Sampler,
     waveforms: [waveform::Lane; 2],
     wave_span: f64,
     pitch: [f32; 2],
@@ -117,6 +119,7 @@ impl Default for Player {
             folder: PathBuf::new(),
             search: String::new(),
             audio: None,
+            sampler: Default::default(),
             waveforms: Default::default(),
             wave_span: 16.,
             pitch: [0.; 2],
@@ -253,6 +256,9 @@ impl Player {
         });
     }
     fn poll(&mut self) {
+        if let Some(engine) = &mut self.audio {
+            self.sampler.poll(engine);
+        }
         self.preparer.poll(&self.root, self.library.as_mut());
         if let Some(rx) = &self.scan {
             match rx.try_recv() {
@@ -274,6 +280,14 @@ impl Player {
                             self.auto = false;
                             self.status = format!("{} tracks / offline ready", lib.tracks.len());
                             self.library = Some(lib);
+                            if let Some(path) = std::env::var_os("AMP_SAMPLER_SMOKE") {
+                                self.volume = 0;
+                                if self.ensure_audio().is_ok() {
+                                    self.sampler.started = true;
+                                    self.sampler.request_load(0, PathBuf::from(path));
+                                }
+                            }
+
                             if std::env::var_os("AMP_WAVEFORM_SMOKE").is_some() {
                                 self.selected = Some(0);
                                 self.volume = 0;
@@ -1211,6 +1225,46 @@ impl Player {
             });
         });
     }
+    fn sampler_ui(&mut self, ui: &mut egui::Ui) {
+        if !self.sampler.started {
+            self.sampler.started = true;
+            if self.sampler.has_saved() {
+                match self.ensure_audio() {
+                    Ok(()) => self.sampler.restore(),
+                    Err(e) => self.sampler.status = e,
+                }
+            }
+        }
+        let actions = self.sampler.show(ui, self.audio.as_ref());
+        for action in actions {
+            if let Err(e) = self.ensure_audio() {
+                self.sampler.status = e;
+                continue;
+            }
+            let engine = self.audio.as_mut().unwrap();
+            let result = match action {
+                sampler::Action::Load(pad) => {
+                    if let Some(path) = rfd::FileDialog::new()
+                        .add_filter(
+                            "Sound effects",
+                            &["wav", "mp3", "flac", "ogg", "opus", "m4a", "aac"],
+                        )
+                        .pick_file()
+                    {
+                        self.sampler.request_load(pad, path);
+                    }
+                    Ok(())
+                }
+                sampler::Action::Trigger(pad) => engine.sample_trigger(pad),
+                sampler::Action::Stop(pad) => engine.sample_stop(Some(pad)),
+                sampler::Action::Clear(pad) => self.sampler.clear(pad, engine),
+                sampler::Action::StopAll => engine.sample_stop(None),
+            };
+            if let Err(e) = result {
+                self.sampler.status = e;
+            }
+        }
+    }
     fn dj_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
@@ -1225,6 +1279,7 @@ impl Player {
                 self.waveforms[d].show(ui, &self.root, track, position, self.wave_span, d);
             }
             egui::ScrollArea::vertical().id_salt("dj-controls-body").show(ui,|ui|{
+                self.sampler_ui(ui);
                 let deck_width=((ui.available_width()-198.)/2.).max(260.);
                 ui.horizontal_top(|ui|{
                     self.deck_ui(ui,0,deck_width);
@@ -1353,6 +1408,7 @@ impl eframe::App for Player {
         match self.screenshot_view.as_str() {
             "library" | "preparation" => self.library_ui(ui),
             "dj" => self.dj_ui(ui),
+            "sampler" => self.sampler_ui(ui),
             "addons" => self.addons_ui(ui),
             "cast" => self.cast_ui(ui),
             "lab" => {
@@ -1422,6 +1478,7 @@ fn main() -> eframe::Result {
         "library" => [1100., 830.],
         "preparation" => [1200., 830.],
         "dj" => [1000., 920.],
+        "sampler" => [1000., 400.],
         "lab" => [1100., 760.],
         "addons" => [1120., 760.],
         "cast" => [1120., 800.],
