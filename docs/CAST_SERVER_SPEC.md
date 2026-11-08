@@ -1,10 +1,10 @@
 # AMP⚡VERSE — AMP Cast Server, QNAP Edition & Google Cast
 **Detailed Implementation Specification — Codex**
 
-**Project:** AMP⚡VERSE  
-**Platforms:** Windows, Linux, Android, QNAP Container Station, Docker  
-**Primary language:** Rust  
-**Distribution:** GitHub Releases / GitHub Container Registry  
+**Project:** AMP⚡VERSE<br>
+**Platforms:** Windows, Linux, Android, QNAP Container Station, Docker<br>
+**Primary language:** Rust<br>
+**Distribution:** GitHub Releases / GitHub Container Registry<br>
 **Design principles:** Lightweight, modular, LAN-first, offline-capable, KISS
 
 ---
