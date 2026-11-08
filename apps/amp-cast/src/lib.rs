@@ -81,6 +81,18 @@ pub fn router(cast: Arc<Cast>) -> Router {
             get(|| async { Html(include_str!("../web/index.html")) }),
         )
         .route("/api/status", get(status))
+        .route(
+            "/app-icon.png",
+            get(|| async {
+                (
+                    [
+                        ("content-type", "image/png"),
+                        ("cache-control", "public, max-age=86400"),
+                    ],
+                    include_bytes!("../../../assets/amp-verse-icon.png").as_slice(),
+                )
+            }),
+        )
         .route("/api/playlist", get(playlist))
         .route("/api/start", post(start))
         .route("/api/stop", post(stop))

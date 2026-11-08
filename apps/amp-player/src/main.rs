@@ -9,6 +9,17 @@ use std::{
 mod skin;
 use skin::{CYAN, GOLD, GREEN, ORANGE};
 
+fn app_icon() -> std::sync::Arc<egui::IconData> {
+    static ICON: std::sync::OnceLock<std::sync::Arc<egui::IconData>> = std::sync::OnceLock::new();
+    ICON.get_or_init(|| {
+        std::sync::Arc::new(
+            eframe::icon_data::from_png_bytes(include_bytes!("../../../assets/amp-verse-icon.png"))
+                .expect("Bundled AMP Verse icon must be valid PNG"),
+        )
+    })
+    .clone()
+}
+
 fn capture(ctx: &egui::Context, path: PathBuf) {
     use eframe::icon_data::IconDataExt;
     let context = ctx.clone();
@@ -603,6 +614,7 @@ impl eframe::App for Player {
                 egui::ViewportId::from_hash_of("amp-library"),
                 egui::ViewportBuilder::default()
                     .with_title("AMP VERSE / Library")
+                    .with_icon(app_icon())
                     .with_inner_size([1100., 730.])
                     .with_min_inner_size([900., 680.]),
                 |ui, _| {
@@ -618,6 +630,7 @@ impl eframe::App for Player {
                 egui::ViewportId::from_hash_of("amp-dj"),
                 egui::ViewportBuilder::default()
                     .with_title("AMP VERSE / DJ")
+                    .with_icon(app_icon())
                     .with_inner_size([820., 660.])
                     .with_min_inner_size([730., 620.]),
                 |ui, _| {
@@ -657,6 +670,7 @@ fn main() -> eframe::Result {
         "AMP VERSE",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
+                .with_icon(app_icon())
                 .with_inner_size(size)
                 .with_min_inner_size(size),
             ..Default::default()

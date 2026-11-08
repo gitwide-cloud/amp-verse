@@ -2,7 +2,7 @@
 
 The six user-supplied images establish two related finishes: black/gold station-console and folder-browser chrome, and purple/silver classic-player chrome with green displays and orange/cyan DJ decks.
 
-Implemented in the native Rust shell and embedded Cast UI, with drawn geometry and CSS gradients rather than screenshots pasted over controls. No new raster assets, web frameworks, remote fonts or runtime downloads are required.
+Implemented in the native Rust shell and embedded Cast UI, with drawn geometry and CSS gradients rather than screenshots pasted over controls. The subsequently supplied A/lightning/V icon is preserved in `assets/amp-verse-icon.png` and embedded in desktop window icons and Cast's browser/touch icon. No web frameworks, remote fonts or runtime downloads are required.
 
 - **Player:** compact purple metal chassis, silver/gold title bar, green text display and working transport/module buttons. Library and DJ remain separate native windows.
 - **Library:** black/gold folder tree at left, searchable file table above the playlist panel at right, real preparation fields and file type. The user's folder/playlist requirement takes precedence over the older mockups' Crates entries. No integrated player strip in this window.
