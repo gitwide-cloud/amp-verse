@@ -164,3 +164,10 @@ Deterministic mixer tests passed for continuity/no silent transition frames, inc
 ## Scrolling DJ waveforms (2026-11-08)
 
 Replaced live top envelopes with source-decoded 20 ms min/max waveforms, fixed playheads, saved cue overlays, prepared beat grid and shared zoom. Absolute playback position includes the decoder cue-in offset. Tests cover cue movement past the playhead and a real FFmpeg fixture with silence followed by signed audio; cancellation is also exercised. Workspace tests and strict Clippy pass. Native screenshot: `test-output/desktop-dj-scrolling-waveforms.png` (muted fixture loaded into both decks). Analysis of the user's NAS library continues independently.
+
+
+## Attached Library, explicit merge and Smart Lists (2026-11-08)
+
+Workspace tests and strict Clippy pass with energy/key/tempo ordering, unknown/repeated input handling, similar-track filtering, sidecar extension validation/round-trip and title rescan tests. A UI test sends pointer press/release events to the real magnet and detach buttons and checks ownership changes. Layout tests reject cycles and preserve descendants on detach. Native Windows snapping/group movement smoke reports all three checks true after adapting to the compact transport height. Captured the actual combined Player/Library in Classic, Modern Light and Modern Dark with real fixture audio; reviewed Classic and Light for layout and contrast. CI now captures the combined view in all themes as well.
+
+The loaded fixture is muted during screenshots. No generated artwork or invented songs/measurements are placed in the production library. Existing NAS batch process PID 5980 was left running; a Player-only install does not replace it. See LIBRARY.md for explicit limits: stacked/session-only composition, external MP3 Lab excluded from merging, portable tag edits rather than embedded-tag rewrite, energy as an RMS proxy, speed without key lock, heuristic recommendations rather than guaranteed transitions.

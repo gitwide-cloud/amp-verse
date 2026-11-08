@@ -26,6 +26,25 @@ pub fn validate(p: &Preparation) -> Result<(), String> {
     if p.schema_version.is_some_and(|v| v != 1) {
         return Err("Unsupported preparation schema".into());
     }
+    if let Some(v) = p.extensions.get("energy")
+        && !v
+            .as_f64()
+            .is_some_and(|v| v.is_finite() && (0. ..=1.).contains(&v))
+    {
+        return Err("Energy must be between 0 and 1".into());
+    }
+    if let Some(v) = p.extensions.get("rating")
+        && !v.as_u64().is_some_and(|v| v <= 5)
+    {
+        return Err("Rating must be 0 to 5".into());
+    }
+    if let Some(v) = p.extensions.get("playback_rate")
+        && !v
+            .as_f64()
+            .is_some_and(|v| v.is_finite() && (0.84..=1.16).contains(&v))
+    {
+        return Err("Playback rate must be between 0.84 and 1.16".into());
+    }
     let mut ids = std::collections::HashSet::new();
     for cue in p.cues.iter().chain(&p.manual_cues) {
         if cue.id.is_empty() || !ids.insert(&cue.id) || !cue.seconds.is_finite() || cue.seconds < 0.
@@ -138,11 +157,34 @@ mod tests {
             seconds: 3.,
             kind: "hotcue".into(),
         });
+        p.extensions
+            .insert("energy".into(), serde_json::json!(0.65));
+        p.extensions.insert("rating".into(), serde_json::json!(4));
+        p.extensions
+            .insert("playback_rate".into(), serde_json::json!(1.02));
+        p.extensions
+            .insert("title".into(), serde_json::json!("Reviewed title"));
         save(d.path(), Path::new("song.wav"), &p).unwrap();
         assert_eq!(load(&d.path().join("song.wav")).unwrap(), p);
+        assert_eq!(
+            crate::scan(d.path()).unwrap().tracks[0].title,
+            "Reviewed title"
+        );
         save(d.path(), Path::new("song.wav"), &p).unwrap();
         fs::write(d.path().join("song.wav"), b"changed").unwrap();
         assert!(save(d.path(), Path::new("song.wav"), &p).is_err());
+    }
+    #[test]
+    fn library_values_reject_out_of_range_data() {
+        for (field, value) in [
+            ("energy", serde_json::json!(1.5)),
+            ("rating", serde_json::json!(6)),
+            ("playback_rate", serde_json::json!(2.)),
+        ] {
+            let mut p = Preparation::default();
+            p.extensions.insert(field.into(), value);
+            assert!(p.validate().is_err());
+        }
     }
     #[test]
     fn bad_cues_and_versions_rejected() {

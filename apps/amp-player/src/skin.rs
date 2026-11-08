@@ -133,7 +133,10 @@ pub enum Module {
     LabSetup,
 }
 
-pub fn heading(ui: &mut egui::Ui, title: &str, _purple: bool) -> Option<Module> {
+pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
+    heading_mode(ui, title, purple, !crate::window_layout::embedded(ui.ctx()))
+}
+pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool) -> Option<Module> {
     let theme = crate::theme::current(ui.ctx());
     let p = theme.palette();
     let (rect, _) =
@@ -267,8 +270,10 @@ pub fn heading(ui: &mut egui::Ui, title: &str, _purple: bool) -> Option<Module> 
         egui::Sense::click_and_drag(),
     );
     let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
-    crate::docking::title_drag(ui, &drag);
-    if drag.double_clicked() {
+    if native {
+        crate::docking::title_drag(ui, &drag);
+    }
+    if native && drag.double_clicked() {
         ui.ctx()
             .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
     }
@@ -276,7 +281,10 @@ pub fn heading(ui: &mut egui::Ui, title: &str, _purple: bool) -> Option<Module> 
         (0., "_", egui::ViewportCommand::Minimized(true)),
         (35., "[]", egui::ViewportCommand::Maximized(!maximized)),
         (70., "X", egui::ViewportCommand::Close),
-    ] {
+    ]
+    .into_iter()
+    .filter(|_| native)
+    {
         let button_rect = Rect::from_min_size(
             egui::pos2(controls_left + offset, rect.top() + 5.),
             egui::vec2(31., 31.),

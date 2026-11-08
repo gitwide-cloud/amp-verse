@@ -239,7 +239,10 @@ pub fn smoke(ctx: &egui::Context, frame: u32, path: &std::path::Path) {
         );
         ctx.send_viewport_cmd_to(
             library,
-            egui::ViewportCommand::OuterPosition(egui::pos2(47., 288.)),
+            egui::ViewportCommand::OuterPosition(egui::pos2(
+                47.,
+                49. + rects.get(&root).map_or(170., |r| r.height()),
+            )),
         );
     }
     if frame == 15

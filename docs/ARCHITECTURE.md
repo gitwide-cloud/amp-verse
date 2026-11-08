@@ -93,3 +93,10 @@ Portable preparation now has a concrete version-1 implementation in amp-core::pr
 
 
 Desktop Player/DJ now use a shared CPAL stream and bounded FFmpeg decoder workers rather than separate FFplay outputs. Sample-clock crossfades and playback controls live in apps/amp-player/src/mixer.rs. Cast remains an independent encoder/server. See DJ_MIXER.md for controls, buffering, DSP and verification limits.
+
+
+## Shared curation and explicit module composition
+
+`amp-core::smart` owns deterministic energy-anchored playlist ordering and bounded recommendation expansion. Inputs are portable Preparation records; there is no GUI dependency. Rating, energy, playback rate and library tag overrides use validated/forward-compatible sidecar extensions. Audio analysis seeds missing energy from measured RMS; it preserves existing values.
+
+`amp-player::window_layout` owns an acyclic module-to-host graph. Native edge snapping remains in docking.rs. A lit magnet button explicitly changes ownership; the group renderer reuses each module's existing UI under one native host, suppressing child native controls. Detach restores a native viewport and carries descendants with it. Layout is session-only and stacked; external MP3 Lab stays separate.

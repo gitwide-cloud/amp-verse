@@ -2,6 +2,7 @@
 pub mod analysis;
 pub mod arrangement;
 pub mod preparation;
+pub mod smart;
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -116,11 +117,18 @@ pub fn scan(root: &Path) -> io::Result<Library> {
                 folder.tracks.push(tracks.len());
                 tracks.push(Track {
                     path: path.strip_prefix(root).unwrap().into(),
-                    title: path
-                        .file_stem()
-                        .unwrap_or_default()
-                        .to_string_lossy()
-                        .into(),
+                    title: preparation
+                        .extensions
+                        .get("title")
+                        .and_then(|v| v.as_str())
+                        .filter(|v| !v.trim().is_empty())
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| {
+                            path.file_stem()
+                                .unwrap_or_default()
+                                .to_string_lossy()
+                                .into()
+                        }),
                     preparation,
                 });
             }

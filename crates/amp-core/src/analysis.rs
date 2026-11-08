@@ -175,6 +175,14 @@ fn result(
     let cue_out = ((last + 1) as f64 * BLOCK as f64 / RATE).min(duration);
     let mut p = existing.clone();
     p.schema_version = Some(1);
+    // Relative loudness/activity proxy, not a calibrated perceptual energy detector.
+    if !p.extensions.contains_key("energy") {
+        let rms = (energy.iter().map(|x| x * x).sum::<f64>() / energy.len().max(1) as f64).sqrt();
+        let energy_score = ((20. * rms.max(1e-6).log10() + 48.) / 42.).clamp(0., 1.);
+        p.extensions
+            .insert("energy".into(), serde_json::json!(energy_score));
+    }
+
     // Legacy hand-authored preparation is treated as manual rather than silently replaced.
     let locked = existing.manual_override
         || (existing.analysis.is_none()

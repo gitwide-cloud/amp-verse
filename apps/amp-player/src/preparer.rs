@@ -160,13 +160,44 @@ impl Preparer {
         ui.strong(&self.title);ui.label("Independent heuristic analyzer: review estimates before using them in a DJ set.");
         ui.add_enabled_ui(!self.busy(),|ui|{ui.horizontal(|ui|{
             if ui.button("Analyze track").clicked(){self.total=1;self.done=0;self.failures=0;let track=Track{path:self.path.clone(),title:self.title.clone(),preparation:self.draft.clone()};self.status="Analyzing decoded audio...".into();self.start(self.root.clone(),vec![track],true);}
-            if ui.button("Save metadata beside audio").clicked(){self.draft.schema_version=Some(1);if let Some(a)=&mut self.draft.analysis{a.reviewed=true;}match preparation::save(&self.root,&self.path,&self.draft){Ok(())=>{if self.root==root&&let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|t.path==self.path){t.preparation=self.draft.clone();}self.status="Portable metadata saved beside audio. Original audio unchanged.".into();},Err(e)=>self.status=e}}
+            if ui.button("Save metadata beside audio").clicked(){self.draft.schema_version=Some(1);if let Some(a)=&mut self.draft.analysis{a.reviewed=true;}match preparation::save(&self.root,&self.path,&self.draft){Ok(())=>{if self.root==root&&let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|t.path==self.path){t.preparation=self.draft.clone();if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.status="Portable metadata saved beside audio. Original audio unchanged.".into();},Err(e)=>self.status=e}}
         });});
         ui.add_enabled_ui(!self.busy(),|ui|{
+        egui::CollapsingHeader::new("Library tags (portable metadata)").show(ui,|ui| {
+            for field in ["title","artist","album","genre","comment"] {
+                ui.horizontal(|ui| {
+                    ui.label(field);
+                    let mut value=self.draft.extensions.get(field).and_then(|v|v.as_str()).unwrap_or(if field=="title" {&self.title} else {""}).to_owned();
+                    if ui.text_edit_singleline(&mut value).changed() {
+                        if value.trim().is_empty() {self.draft.extensions.remove(field);} else {self.draft.extensions.insert(field.into(),serde_json::json!(value));}
+                    }
+                });
+            }
+        });
         ui.checkbox(&mut self.draft.manual_override,"Protect my cue IN/OUT, BPM, key and grid from re-analysis");
         ui.horizontal(|ui|{ui.label("Cue IN (s)");if ui.add(egui::DragValue::new(&mut self.draft.cue_in).speed(0.01).range(0. ..=21600.)).changed(){self.draft.manual_override=true;}ui.label("Cue OUT (s)");let mut end=self.draft.cue_out.unwrap_or(0.);if ui.add(egui::DragValue::new(&mut end).speed(0.01).range(0. ..=21600.)).changed(){self.draft.cue_out=if end>0.{Some(end)}else{None};self.draft.manual_override=true;}});
         ui.horizontal(|ui|{ui.label("BPM");let mut bpm=self.draft.bpm.unwrap_or(0.);if ui.add(egui::DragValue::new(&mut bpm).speed(0.1).range(0. ..=300.)).changed(){self.draft.bpm=if bpm>0.{Some(bpm)}else{None};self.draft.manual_override=true;}ui.label("Grid offset (s)");let mut offset=self.draft.beat_offset.unwrap_or(0.);if ui.add(egui::DragValue::new(&mut offset).speed(0.01).range(0. ..=21600.)).changed(){self.draft.beat_offset=Some(offset);self.draft.manual_override=true;}});
         ui.horizontal(|ui|{ui.label("Key");let mut key=self.draft.key.clone().unwrap_or_default();if ui.add(egui::TextEdit::singleline(&mut key).desired_width(140.)).changed(){self.draft.key=if key.is_empty(){None}else{Some(key)};self.draft.manual_override=true;}ui.label("Harmonic code");let mut code=self.draft.harmonic_key.clone().unwrap_or_default();if ui.add(egui::TextEdit::singleline(&mut code).desired_width(70.)).changed(){self.draft.harmonic_key=if code.is_empty(){None}else{Some(code)};self.draft.manual_override=true;}});
+        ui.horizontal(|ui| {
+            ui.label("Rating");
+            let mut rating = self.draft.extensions.get("rating").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
+            if ui.add(egui::Slider::new(&mut rating, 0..=5)).changed() { self.draft.extensions.insert("rating".into(), serde_json::json!(rating)); }
+            let mut known = amp_core::smart::energy(&self.draft).is_some();
+            if ui.checkbox(&mut known, "Energy known").changed() {
+                if known { self.draft.extensions.insert("energy".into(), serde_json::json!(0.5)); }
+                else { self.draft.extensions.remove("energy"); }
+            }
+            if known {
+                let mut energy = amp_core::smart::energy(&self.draft).unwrap_or(0.5);
+                if ui.add(egui::Slider::new(&mut energy, 0. ..=1.).text("Energy")).changed() { self.draft.extensions.insert("energy".into(), serde_json::json!(energy)); }
+            }
+        });
+        ui.horizontal(|ui|{
+            let mut rate=self.draft.extensions.get("playback_rate").and_then(|v|v.as_f64()).unwrap_or(1.);
+            if ui.add(egui::Slider::new(&mut rate,0.84..=1.16).text("Playback rate")).changed() {self.draft.extensions.insert("playback_rate".into(),serde_json::json!(rate));}
+            ui.weak("Applied when loaded; changing speed also changes audible pitch (no key lock).");
+        });
+        ui.weak("Key edits correct saved metadata; they do not transpose the audio. Energy is a relative level estimate or your manual value.");
         if let Some(a)=&self.draft.analysis{ui.label(format!("{:.2}s / tempo score {:.2} / key margin {:.2} / {}",a.duration,a.tempo_confidence,a.key_confidence,a.engine));}
         ui.separator();ui.strong("Manual cues (preserved across re-analysis)");
         let mut remove=None;egui::ScrollArea::vertical().id_salt("manual-cues").max_height(160.).show(ui,|ui|{for(i,cue)in self.draft.manual_cues.iter_mut().enumerate(){ui.push_id(i,|ui|{ui.horizontal(|ui|{ui.add(egui::TextEdit::singleline(&mut cue.label).desired_width(220.));ui.add(egui::DragValue::new(&mut cue.seconds).speed(0.01).range(0. ..=21600.).suffix(" s"));if ui.button("Remove").clicked(){remove=Some(i);}});});}});if let Some(i)=remove{self.draft.manual_cues.remove(i);}

@@ -15,6 +15,7 @@ mod preparer;
 mod skin;
 mod theme;
 mod waveform;
+mod window_layout;
 use skin::{CYAN, GOLD, ORANGE};
 
 fn library_preference() -> PathBuf {
@@ -80,7 +81,11 @@ struct Player {
     queue: Vec<usize>,
     queue_selected: Option<usize>,
     auto: bool,
+    shuffle: bool,
+    repeat_one: bool,
     library_open: bool,
+    layout: window_layout::Layout,
+    preview_wave: waveform::Lane,
     dj_open: bool,
     lab_open: bool,
     lab: lab::Arrangement,
@@ -128,7 +133,16 @@ impl Default for Player {
             queue: vec![],
             queue_selected: None,
             auto: false,
-            library_open: std::env::var_os("AMP_DOCK_SMOKE").is_some(),
+            shuffle: false,
+            repeat_one: false,
+            layout: if std::env::var_os("AMP_DOCK_SMOKE").is_some() {
+                window_layout::Layout { parent: [None; 6] }
+            } else {
+                Default::default()
+            },
+            preview_wave: Default::default(),
+            library_open: std::env::var_os("AMP_DOCK_SMOKE").is_some()
+                || std::env::var("AMP_SCREENSHOT_VIEW").is_ok_and(|s| s == "combined"),
             dj_open: false,
             lab_open: false,
             lab: lab::Arrangement::default(),
@@ -150,16 +164,49 @@ impl Player {
         self.activate(ui, action);
     }
     fn activate(&mut self, ui: &mut egui::Ui, module: Option<skin::Module>) {
+        let pane = match &module {
+            Some(skin::Module::Library) => Some(1),
+            Some(skin::Module::Dj) => Some(2),
+            Some(skin::Module::LabSetup) => Some(3),
+            Some(skin::Module::Cast) => Some(4),
+            Some(skin::Module::Addons) => Some(5),
+            _ => None,
+        };
+        if let Some(pane) = pane {
+            let mut host = pane;
+            let mut hidden = false;
+            while let Some(parent) = self.layout.parent[host] {
+                host = parent;
+                hidden |= !self.open_panes()[host];
+            }
+            if hidden {
+                self.layout.parent[pane] = Some(0);
+                self.resize_player(ui.ctx(), true);
+            } else if host == 0 {
+                self.resize_player(ui.ctx(), true);
+            }
+        }
         match module {
             Some(skin::Module::Verse) => ui
                 .ctx()
                 .send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus),
             Some(skin::Module::Library) => {
                 self.library_open = true;
-                ui.ctx().send_viewport_cmd_to(
-                    egui::ViewportId::from_hash_of("amp-library"),
-                    egui::ViewportCommand::Focus,
-                );
+                if self.layout.parent[1] == Some(0) {
+                    ui.ctx().send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::MinInnerSize(egui::vec2(1000., 800.)),
+                    );
+                    ui.ctx().send_viewport_cmd_to(
+                        egui::ViewportId::ROOT,
+                        egui::ViewportCommand::InnerSize(egui::vec2(1100., 900.)),
+                    );
+                } else {
+                    ui.ctx().send_viewport_cmd_to(
+                        egui::ViewportId::from_hash_of("amp-library"),
+                        egui::ViewportCommand::Focus,
+                    );
+                }
             }
             Some(skin::Module::Dj) => {
                 self.dj_open = true;
@@ -187,6 +234,14 @@ impl Player {
             }
             None => (),
         }
+        if let Some(pane) = pane {
+            let mut host = pane;
+            while let Some(parent) = self.layout.parent[host] {
+                host = parent;
+            }
+            ui.ctx()
+                .send_viewport_cmd_to(window_layout::viewport(host), egui::ViewportCommand::Focus);
+        }
     }
     fn scan(&mut self) {
         let root = self.root.clone();
@@ -208,6 +263,8 @@ impl Player {
                                 audio.stop(0);
                                 audio.stop(1);
                             }
+                            self.preview_wave = Default::default();
+                            self.waveforms = Default::default();
                             self.loaded = [None; 2];
                             self.playing = [false; 2];
                             self.selected = None;
@@ -218,6 +275,7 @@ impl Player {
                             self.status = format!("{} tracks / offline ready", lib.tracks.len());
                             self.library = Some(lib);
                             if std::env::var_os("AMP_WAVEFORM_SMOKE").is_some() {
+                                self.selected = Some(0);
                                 self.volume = 0;
                                 self.load_deck(0, 0, false);
                                 self.load_deck(1, 0, false);
@@ -251,7 +309,12 @@ impl Player {
         } else {
             self.playing = [false; 2];
         }
-        if self.auto && !self.playing[0] {
+        if self.auto
+            && (self.loaded[0].is_none()
+                || self.audio.as_ref().is_some_and(|a| {
+                    a.controls.finished[0].load(std::sync::atomic::Ordering::Relaxed)
+                }))
+        {
             self.next();
         }
     }
@@ -289,6 +352,17 @@ impl Player {
             });
             match result {
                 Ok(()) => {
+                    if let Some(rate) = track
+                        .preparation
+                        .extensions
+                        .get("playback_rate")
+                        .and_then(|v| v.as_f64())
+                    {
+                        self.pitch[deck] = ((rate as f32 - 1.) * 100.).clamp(-16., 16.);
+                        if let Some(a) = &self.audio {
+                            a.set_rate(deck, 1. + self.pitch[deck] / 100.);
+                        }
+                    }
                     self.loaded[deck] = Some(index);
                     self.playing[deck] = play;
                     self.status = format!("Deck {} / {}", deck + 1, track.title);
@@ -387,8 +461,23 @@ impl Player {
         }
     }
     fn next(&mut self) {
+        if self.repeat_one
+            && let Some(i) = self.loaded[0]
+        {
+            self.play(0, i);
+            return;
+        }
         if !self.queue.is_empty() {
-            let index = self.queue.remove(0);
+            let at = if self.shuffle {
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos() as usize
+                    % self.queue.len()
+            } else {
+                0
+            };
+            let index = self.queue.remove(at);
             self.queue_selected = None;
             self.play(0, index);
         } else {
@@ -488,9 +577,118 @@ impl Player {
             *selected = path.to_path_buf();
         }
     }
+    fn open_panes(&self) -> [bool; 6] {
+        [
+            true,
+            self.library_open,
+            self.dj_open,
+            self.lab_open,
+            self.cast_open,
+            self.addons_open,
+        ]
+    }
+    fn pane_ui(&mut self, ui: &mut egui::Ui, pane: usize) {
+        match pane {
+            0 => self.player_ui(ui),
+            1 => self.library_ui(ui),
+            2 => self.dj_ui(ui),
+            3 => {
+                let action = self.lab.show(ui, &self.root, self.library.as_ref());
+                self.activate(ui, action);
+            }
+            4 => self.cast_ui(ui),
+            _ => self.addons_ui(ui),
+        }
+    }
+    fn group_ui(&mut self, ui: &mut egui::Ui, host: usize) {
+        let ctx = ui.ctx().clone();
+        if self.layout.parent[host].is_none() {
+            ui.painter()
+                .rect_filled(ui.max_rect(), 0., theme::current(&ctx).palette().background);
+        }
+        let children: Vec<_> = (1..6)
+            .filter(|&p| self.open_panes()[p] && self.layout.parent[p] == Some(host))
+            .collect();
+        egui::ScrollArea::vertical()
+            .id_salt(("merged-window", host))
+            .show(ui, |ui| {
+                let target = self.layout.target(&ctx, host, self.open_panes());
+                if host != 0 {
+                    ui.horizontal(|ui| {
+                        if self.layout.parent[host].is_some() {
+                            if ui
+                                .button(format!("Detach {}", window_layout::NAMES[host]))
+                                .clicked()
+                            {
+                                self.layout.parent[host] = None;
+                                if !self.layout.parent.contains(&Some(0)) {
+                                    self.resize_player(&ctx, false);
+                                }
+                            }
+                        } else if ui
+                            .add_enabled(
+                                target.is_some(),
+                                egui::Button::new(
+                                    RichText::new(
+                                        target
+                                            .map(|p| {
+                                                format!(
+                                                    "MAGNET · Merge with {}",
+                                                    window_layout::NAMES[p]
+                                                )
+                                            })
+                                            .unwrap_or_else(|| {
+                                                "MAGNET · move against another window".into()
+                                            }),
+                                    )
+                                    .color(
+                                        if target.is_some() {
+                                            GOLD
+                                        } else {
+                                            egui::Color32::GRAY
+                                        },
+                                    ),
+                                ),
+                            )
+                            .clicked()
+                            && let Some(target) = target
+                            && self.layout.join(host, target)
+                        {
+                            ctx.send_viewport_cmd_to(
+                                window_layout::viewport(target),
+                                egui::ViewportCommand::MinInnerSize(egui::vec2(1000., 800.)),
+                            );
+                            ctx.send_viewport_cmd_to(
+                                window_layout::viewport(target),
+                                egui::ViewportCommand::InnerSize(egui::vec2(1100., 900.)),
+                            );
+                        }
+                    });
+                }
+                let embedded = self.layout.parent[host].is_some();
+                window_layout::set_embedded(&ctx, embedded);
+                ui.push_id(("pane", host), |ui| {
+                    let height = if host == 0 {
+                        135.
+                    } else if host == 2 {
+                        920.
+                    } else {
+                        680.
+                    };
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| self.pane_ui(ui, host),
+                    );
+                });
+                window_layout::set_embedded(&ctx, false);
+                for child in children {
+                    self.group_ui(ui, child);
+                }
+            });
+    }
     fn player_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, true, |ui| {
-            ui.set_min_size(ui.available_size());
             self.header(ui, "AMP VERSE", true);
             ui.horizontal(|ui| {
                 for (caption, action) in [
@@ -499,7 +697,13 @@ impl Player {
                     ("STOP", 2),
                     (">|", 3),
                 ] {
-                    if skin::button(ui, caption, GOLD).clicked() {
+                    if ui
+                        .add_sized(
+                            [58., 48.],
+                            egui::Button::new(RichText::new(caption).color(skin::accent(ui))),
+                        )
+                        .clicked()
+                    {
                         match action {
                             0 => {
                                 if let Some(i) = self.loaded[0] {
@@ -514,8 +718,8 @@ impl Player {
                                 } else {
                                     self.toggle_deck(0);
                                 }
-                                if let Some(audio) = &self.audio {
-                                    audio.set_fader(0.);
+                                if let Some(a) = &self.audio {
+                                    a.set_fader(0.);
                                 }
                             }
                             2 => self.stop(0),
@@ -523,67 +727,192 @@ impl Player {
                         }
                     }
                 }
-                ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Master volume"));
-            });
-            skin::display(ui, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.horizontal(|ui| {
-                    let elapsed = self
-                        .audio
-                        .as_ref()
-                        .map_or(0, |audio| audio.position(0) as u64);
-                    ui.label(
-                        RichText::new(format!("{:02}:{:02}", elapsed / 60, elapsed % 60))
-                            .monospace()
-                            .size(32.)
-                            .color(skin::signal(ui)),
-                    );
-                    ui.separator();
-                    ui.vertical(|ui| {
+                skin::display(ui, |ui| {
+                    let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
+                    let duration = self.loaded[0]
+                        .and_then(|i| self.library.as_ref()?.tracks.get(i))
+                        .and_then(|t| t.preparation.analysis.as_ref().map(|a| a.duration));
+                    ui.horizontal(|ui| {
                         ui.label(
-                            RichText::new(self.title(0))
-                                .strong()
-                                .size(19.)
-                                .color(skin::signal(ui)),
+                            RichText::new(format!(
+                                "{:02}:{:02} / {}",
+                                position as u64 / 60,
+                                position as u64 % 60,
+                                duration
+                                    .map(|d| format!("{:02}:{:02}", d as u64 / 60, d as u64 % 60))
+                                    .unwrap_or_else(|| "--:--".into())
+                            ))
+                            .monospace()
+                            .size(23.)
+                            .color(skin::accent(ui)),
                         );
-                        let info = self.loaded[0]
-                            .and_then(|i| self.library.as_ref()?.tracks.get(i))
-                            .map(|t| {
-                                format!(
-                                    "{}   ·   Cue IN {:.2}s   ·   Cue OUT {}",
-                                    t.path
-                                        .extension()
-                                        .unwrap_or_default()
-                                        .to_string_lossy()
-                                        .to_uppercase(),
-                                    t.preparation.cue_in,
-                                    t.preparation
-                                        .cue_out
-                                        .map(|s| format!("{s:.2}s"))
-                                        .unwrap_or_else(|| "End".into())
-                                )
-                            })
-                            .unwrap_or_else(|| {
-                                "Open AMP Library from the title dropdown to choose music".into()
-                            });
-                        ui.label(info);
+                        ui.vertical(|ui| {
+                            ui.set_max_width(235.);
+                            ui.add(
+                                egui::Label::new(RichText::new(self.title(0)).strong()).truncate(),
+                            );
+                            ui.weak(
+                                self.loaded[0]
+                                    .and_then(|i| self.library.as_ref()?.tracks.get(i))
+                                    .map(|t| {
+                                        format!(
+                                            "{} · {} BPM · {}",
+                                            t.path
+                                                .extension()
+                                                .unwrap_or_default()
+                                                .to_string_lossy()
+                                                .to_uppercase(),
+                                            t.preparation
+                                                .bpm
+                                                .map(|b| format!("{b:.1}"))
+                                                .unwrap_or_else(|| "--".into()),
+                                            t.preparation.harmonic_key.as_deref().unwrap_or("--")
+                                        )
+                                    })
+                                    .unwrap_or_else(|| "Local / network library".into()),
+                            );
+                        });
                     });
                 });
+                let (rect, response) =
+                    ui.allocate_exact_size(egui::vec2(105., 42.), egui::Sense::hover());
+                ui.painter().rect_filled(rect, 2., egui::Color32::BLACK);
+                if let Some(audio) = &self.audio {
+                    for i in 0..48 {
+                        let value = f32::from_bits(
+                            audio.controls.scope[0][i * 2]
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                        )
+                        .clamp(0., 1.);
+                        let x = rect.left() + i as f32 * rect.width() / 48.;
+                        ui.painter().line_segment(
+                            [
+                                egui::pos2(x, rect.bottom() - 3.),
+                                egui::pos2(x, rect.bottom() - 3. - value * 36.),
+                            ],
+                            egui::Stroke::new(1.5, GOLD),
+                        );
+                    }
+                }
+                response.on_hover_text("Live measured output amplitude history");
+                ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Vol"));
             });
             ui.horizontal(|ui| {
-                ui.label(
-                    RichText::new(if self.playing[0] {
-                        "PLAYING"
+                if ui
+                    .button(if self.library_open && (self.layout.parent[1] == Some(0)) {
+                        "Collapse Library"
                     } else {
-                        "STOPPED"
+                        "Expand Library"
                     })
-                    .monospace()
-                    .color(skin::accent(ui)),
-                );
-                ui.separator();
-                ui.label(&self.status);
+                    .clicked()
+                {
+                    if self.library_open && self.layout.parent[1] == Some(0) {
+                        self.library_open = false;
+                        self.resize_player(ui.ctx(), false);
+                    } else {
+                        self.library_open = true;
+                        self.layout.parent[1] = Some(0);
+                        self.resize_player(ui.ctx(), true);
+                    }
+                }
+                let target = self.layout.target(ui.ctx(), 0, self.open_panes());
+                if ui
+                    .add_enabled(
+                        target.is_some(),
+                        egui::Button::new(RichText::new("MAGNET").color(if target.is_some() {
+                            GOLD
+                        } else {
+                            egui::Color32::GRAY
+                        })),
+                    )
+                    .on_hover_text(
+                        target
+                            .map(|p| format!("Merge {} into the Player", window_layout::NAMES[p]))
+                            .unwrap_or_else(|| "Move another AMP window against the Player".into()),
+                    )
+                    .clicked()
+                    && let Some(target) = target
+                {
+                    self.layout.join(target, 0);
+                    self.resize_player(ui.ctx(), true);
+                }
+                ui.checkbox(&mut self.auto, "Play queue");
+                ui.toggle_value(&mut self.shuffle, "Shuffle");
+                ui.toggle_value(&mut self.repeat_one, "Repeat one");
+                if ui.button("EQ").clicked() {
+                    self.eq_open = true;
+                }
+
+                ui.weak(&self.status);
             });
         });
+    }
+    fn resize_player(&self, ctx: &egui::Context, expanded: bool) {
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::MinInnerSize(if expanded {
+                egui::vec2(1000., 800.)
+            } else {
+                egui::vec2(980., 160.)
+            }),
+        );
+        ctx.send_viewport_cmd_to(
+            egui::ViewportId::ROOT,
+            egui::ViewportCommand::InnerSize(if expanded {
+                egui::vec2(1100., 900.)
+            } else {
+                egui::vec2(1100., 170.)
+            }),
+        );
+    }
+    fn expand_smart_list(&mut self) {
+        if self.queue.len() > 1000 {
+            self.status = "Smart Lists support up to 1,000 songs at a time".into();
+            return;
+        }
+        if let Some(lib) = &self.library {
+            let songs: Vec<_> = lib.tracks.iter().map(|t| &t.preparation).collect();
+            match amp_core::smart::curate(&songs, &self.queue, self.queue.len().saturating_add(20))
+            {
+                Ok(queue) => {
+                    let added = queue.len().saturating_sub(self.queue.len());
+                    self.queue = queue;
+                    self.queue_selected = None;
+                    self.status = format!(
+                        "Smart List added {added} prepared neighbors within ±6% BPM and ±20% energy; review and Save the playlist"
+                    );
+                }
+                Err(e) => self.status = e,
+            }
+        }
+    }
+    fn curate_playlist(&mut self) {
+        if self.queue.len() > 1000 {
+            self.status = "Smart Lists support up to 1,000 songs at a time".into();
+            return;
+        }
+        if let Some(lib) = &self.library {
+            let songs: Vec<_> = self
+                .queue
+                .iter()
+                .map(|&i| &lib.tracks[i].preparation)
+                .collect();
+            let unknown = songs
+                .iter()
+                .filter(|p| {
+                    p.bpm.is_none()
+                        || p.harmonic_key.is_none()
+                        || amp_core::smart::energy(p).is_none()
+                })
+                .count();
+            let order = amp_core::smart::order(&songs);
+            self.queue = order.iter().map(|&i| self.queue[i]).collect();
+            self.queue_selected = None;
+            self.status = format!(
+                "Smart List ordered {} songs · first song anchors energy · {unknown} missing BPM/key/energy; review before mixing",
+                self.queue.len()
+            );
+        }
     }
     fn library_ui(&mut self, ui: &mut egui::Ui) {
         self.preparer
@@ -620,7 +949,7 @@ impl Player {
                 if ui
                     .add_enabled(
                         !self.preparer.busy() && self.selected.is_some(),
-                        egui::Button::new("Prepare selected / cues..."),
+                        egui::Button::new("Edit cues / BPM / key / rating / energy..."),
                     )
                     .clicked()
                     && let Some(t) = self
@@ -641,7 +970,7 @@ impl Player {
                 }
                 ui.label(&self.preparer.status);
             });
-            let content_height = (ui.available_height() - 120.).max(340.);
+            let content_height = (ui.available_height() - 150.).max(300.);
             ui.horizontal_top(|ui| {
                 let sidebar_width = 210.;
                 skin::panel(ui, false, |ui| {
@@ -686,7 +1015,7 @@ impl Player {
                                     .min_col_width(64.)
                                     .show(ui, |ui| {
                                         for h in [
-                                            "Name", "BPM", "Key", "Cues", "Cue IN", "Cue OUT",
+                                            "Mix", "Name", "BPM", "Key", "Cues", "Cue IN", "Cue OUT", "Rating", "Energy",
                                             "Type",
                                         ] {
                                             ui.label(
@@ -704,6 +1033,8 @@ impl Player {
                                                 {
                                                     continue;
                                                 }
+                                                let mut included=self.queue.contains(&i);
+                                                if ui.checkbox(&mut included, "").changed() {if included {self.queue.push(i);} else {self.queue.retain(|&q|q!=i);self.queue_selected=None;}}
                                                 let response = ui.selectable_label(
                                                     self.selected == Some(i),
                                                     &track.title,
@@ -746,6 +1077,8 @@ impl Player {
                                                         .map(|x| format!("{x:.2}s"))
                                                         .unwrap_or_else(|| "End".into()),
                                                 );
+                                                ui.label(track.preparation.extensions.get("rating").and_then(|v|v.as_u64()).map(|n|format!("{n}/5")).unwrap_or_else(||"--".into()));
+                                                ui.label(amp_core::smart::energy(&track.preparation).map(|e|format!("{:.0}%",e*100.)).unwrap_or_else(||"--".into()));
                                                 ui.label(
                                                     track
                                                         .path
@@ -766,6 +1099,9 @@ impl Player {
                             }
                         }
                         ui.horizontal(|ui| {
+                            if ui.button("Add folder to playlist").clicked() && let Some(lib)=&self.library {
+                                for (i,t) in lib.tracks.iter().enumerate() {if t.path.starts_with(&self.folder) && !self.queue.contains(&i) {self.queue.push(i);}}
+                            }
                             if ui
                                 .add_enabled(
                                     self.selected.is_some(),
@@ -791,7 +1127,7 @@ impl Player {
                     skin::panel(ui, false, |ui| {
                         ui.set_min_width(ui.available_width());
                         skin::label(ui, &format!("Playlist / {} queued", self.queue.len()));
-                        ui.horizontal(|ui| {
+                        ui.horizontal_wrapped(|ui| {
                             if ui.button("Load...").clicked() {
                                 self.load_playlist();
                             }
@@ -800,6 +1136,14 @@ impl Player {
                                 .clicked()
                             {
                                 self.save_playlist();
+                            }
+                            if ui.add_enabled(!self.queue.is_empty(),egui::Button::new("Find similar songs")).on_hover_text("Add up to 20 analyzed neighbors from the current library, keeping the first song's energy range.").clicked() {self.expand_smart_list();}
+                            if ui.add_enabled(self.queue.len()>1,egui::Button::new("Smart List · order for mixing")).on_hover_text("Keeps the first song as the energy anchor; orders by harmonic key, BPM and energy. Save as a normal playlist.").clicked() {self.curate_playlist();}
+                            for (caption,up) in [("Up",true),("Down",false)] {
+                                if ui.add_enabled(self.queue_selected.is_some(),egui::Button::new(caption)).clicked() && let Some(i)=self.queue_selected {
+                                    let next=if up {i.saturating_sub(1)} else {(i+1).min(self.queue.len().saturating_sub(1))};
+                                    if i<self.queue.len() {self.queue.swap(i,next);self.queue_selected=Some(next);}
+                                }
                             }
                             if ui.button("Clear").clicked() {
                                 self.queue.clear();
@@ -843,6 +1187,16 @@ impl Player {
                     });
                 });
             });
+            let track = self
+                .selected
+                .and_then(|i| self.library.as_ref()?.tracks.get(i));
+            let position = if self.selected == self.loaded[0] {
+                self.audio.as_ref().map_or(0., |a| a.source_position(0))
+            } else {
+                track.map_or(0., |t| t.preparation.cue_in)
+            };
+            self.preview_wave
+                .show(ui, &self.root, track, position, 32., 0);
             ui.separator();
             ui.horizontal(|ui| {
                 ui.label(
@@ -906,7 +1260,6 @@ if ui.button("Load B").clicked(){load=Some((1,i));}});
                 if let Some(a)=&self.audio{let under=a.controls.underruns.iter().map(|x|x.load(std::sync::atomic::Ordering::Relaxed)).sum::<u64>();if under>0{ui.label(format!("Audio buffer underruns: {under} frames"));}}
             });
         });
-        self.dj_effects(ui.ctx());
     }
     fn deck_ui(&mut self, ui: &mut egui::Ui, deck: usize, width: f32) {
         let accent = if deck == 0 { ORANGE } else { CYAN };
@@ -988,17 +1341,12 @@ impl eframe::App for Player {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         self.poll();
         self.cast.poll();
+        self.dj_effects(ui.ctx());
         let ctx = ui.ctx().clone();
         let mut active = vec![egui::ViewportId::ROOT];
-        for (open, name) in [
-            (self.library_open, "amp-library"),
-            (self.dj_open, "amp-dj"),
-            (self.lab_open, "amp-lab-arrangement"),
-            (self.cast_open, "amp-cast"),
-            (self.addons_open, "amp-addons"),
-        ] {
-            if open {
-                active.push(egui::ViewportId::from_hash_of(name));
+        for pane in 1..6 {
+            if self.open_panes()[pane] && self.layout.parent[pane].is_none() {
+                active.push(window_layout::viewport(pane));
             }
         }
         docking::retain(&ctx, &active);
@@ -1011,90 +1359,37 @@ impl eframe::App for Player {
                 let action = self.lab.show(ui, &self.root, self.library.as_ref());
                 self.activate(ui, action);
             }
-            _ => self.player_ui(ui),
+            _ => self.group_ui(ui, 0),
         }
-        if self.library_open {
+        let open = self.open_panes();
+        for (pane, is_open) in open.iter().enumerate().skip(1) {
+            if !is_open || self.layout.parent[pane].is_some() {
+                continue;
+            }
+            let size = if pane == 2 {
+                [1000., 960.]
+            } else {
+                [1100., 800.]
+            };
             ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("amp-library"),
+                window_layout::viewport(pane),
                 egui::ViewportBuilder::default()
-                    .with_title("AMP VERSE / Library")
+                    .with_title(window_layout::NAMES[pane])
                     .with_decorations(false)
                     .with_icon(app_icon())
-                    .with_inner_size([1100., 730.])
+                    .with_inner_size(size)
                     .with_min_inner_size([900., 680.]),
                 |ui, _| {
                     if ui.ctx().input(|i| i.viewport().close_requested()) {
-                        self.library_open = false;
+                        match pane {
+                            1 => self.library_open = false,
+                            2 => self.dj_open = false,
+                            3 => self.lab_open = false,
+                            4 => self.cast_open = false,
+                            _ => self.addons_open = false,
+                        }
                     }
-                    self.library_ui(ui);
-                },
-            );
-        }
-        if self.dj_open {
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("amp-dj"),
-                egui::ViewportBuilder::default()
-                    .with_title("AMP VERSE / DJ")
-                    .with_decorations(false)
-                    .with_icon(app_icon())
-                    .with_inner_size([1000., 920.])
-                    .with_min_inner_size([730., 620.]),
-                |ui, _| {
-                    if ui.ctx().input(|i| i.viewport().close_requested()) {
-                        self.dj_open = false;
-                    }
-                    self.dj_ui(ui);
-                },
-            );
-        }
-        if self.lab_open {
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("amp-lab-arrangement"),
-                egui::ViewportBuilder::default()
-                    .with_title("AMP Lab / Mix arrangement")
-                    .with_decorations(false)
-                    .with_icon(app_icon())
-                    .with_inner_size([1100., 760.]),
-                |ui, _| {
-                    if ui.ctx().input(|i| i.viewport().close_requested()) {
-                        self.lab_open = false;
-                    }
-                    let action = self.lab.show(ui, &self.root, self.library.as_ref());
-                    self.activate(ui, action);
-                },
-            );
-        }
-        if self.cast_open {
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("amp-cast"),
-                egui::ViewportBuilder::default()
-                    .with_title("AMP VERSE / Cast")
-                    .with_decorations(false)
-                    .with_icon(app_icon())
-                    .with_inner_size([1120., 800.])
-                    .with_min_inner_size([1020., 760.]),
-                |ui, _| {
-                    if ui.ctx().input(|i| i.viewport().close_requested()) {
-                        self.cast_open = false;
-                    }
-                    self.cast_ui(ui);
-                },
-            );
-        }
-        if self.addons_open {
-            ctx.show_viewport_immediate(
-                egui::ViewportId::from_hash_of("amp-addons"),
-                egui::ViewportBuilder::default()
-                    .with_title("AMP VERSE / Plugin Manager")
-                    .with_decorations(false)
-                    .with_icon(app_icon())
-                    .with_inner_size([1120., 760.])
-                    .with_min_inner_size([1050., 720.]),
-                |ui, _| {
-                    if ui.ctx().input(|i| i.viewport().close_requested()) {
-                        self.addons_open = false;
-                    }
-                    self.addons_ui(ui);
+                    self.group_ui(ui, pane);
                 },
             );
         }
@@ -1123,13 +1418,14 @@ fn main() -> eframe::Result {
         player.scan();
     }
     let size = match player.screenshot_view.as_str() {
-        "library" => [1100., 730.],
+        "combined" => [1100., 900.],
+        "library" => [1100., 830.],
         "preparation" => [1200., 830.],
         "dj" => [1000., 920.],
         "lab" => [1100., 760.],
         "addons" => [1120., 760.],
         "cast" => [1120., 800.],
-        _ => [760., 238.],
+        _ => [1100., 170.],
     };
     eframe::run_native(
         "AMP VERSE",
@@ -1146,4 +1442,109 @@ fn main() -> eframe::Result {
             Ok(Box::new(player))
         }),
     )
+}
+
+#[cfg(test)]
+mod window_tests {
+    use super::*;
+    fn frame(ctx: &egui::Context, player: &mut Player, pressed: Option<bool>) {
+        frame_neighbor(ctx, player, pressed, 0);
+    }
+    fn frame_neighbor(
+        ctx: &egui::Context,
+        player: &mut Player,
+        pressed: Option<bool>,
+        neighbor: usize,
+    ) {
+        let mut raw = egui::RawInput::default();
+        let info = raw.viewports.get_mut(&egui::ViewportId::ROOT).unwrap();
+        info.inner_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100., 800.),
+        ));
+        info.outer_rect = Some(egui::Rect::from_min_size(
+            egui::Pos2::ZERO,
+            egui::vec2(1100., 170.),
+        ));
+        raw.viewports.insert(
+            window_layout::viewport(1),
+            egui::ViewportInfo {
+                inner_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0., 170.),
+                    egui::vec2(1100., 800.),
+                )),
+                outer_rect: Some(egui::Rect::from_min_size(
+                    egui::pos2(0., 170.),
+                    egui::vec2(1100., 800.),
+                )),
+                ..Default::default()
+            },
+        );
+        if neighbor == 2 {
+            raw.viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .outer_rect = Some(egui::Rect::from_min_size(
+                egui::pos2(5000., 0.),
+                egui::vec2(1100., 170.),
+            ));
+            raw.viewports.insert(
+                window_layout::viewport(2),
+                egui::ViewportInfo {
+                    outer_rect: Some(egui::Rect::from_min_size(
+                        egui::pos2(0., 970.),
+                        egui::vec2(1100., 800.),
+                    )),
+                    ..Default::default()
+                },
+            );
+        }
+        let pos = egui::pos2(50., 10.);
+        raw.events.push(egui::Event::PointerMoved(pos));
+        if let Some(pressed) = pressed {
+            raw.events.push(egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed,
+                modifiers: Default::default(),
+            });
+        }
+        let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 1));
+        output.textures_delta.clear();
+    }
+    #[test]
+    fn library_can_merge_into_dj_instead_of_player() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            library_open: true,
+            dj_open: true,
+            ..Default::default()
+        };
+        player.layout.parent[1] = None;
+        for press in [None, Some(true), Some(false)] {
+            frame_neighbor(&ctx, &mut player, press, 2);
+        }
+        assert_eq!(player.layout.parent[1], Some(2));
+        for press in [None, Some(true), Some(false)] {
+            frame_neighbor(&ctx, &mut player, press, 2);
+        }
+        assert_eq!(player.layout.parent[1], None);
+    }
+    #[test]
+    fn actual_magnet_and_detach_buttons_change_window_ownership() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            library_open: true,
+            ..Default::default()
+        };
+        player.layout.parent[1] = None;
+        for press in [None, Some(true), Some(false)] {
+            frame(&ctx, &mut player, press);
+        }
+        assert_eq!(player.layout.parent[1], Some(0));
+        for press in [None, Some(true), Some(false)] {
+            frame(&ctx, &mut player, press);
+        }
+        assert_eq!(player.layout.parent[1], None);
+    }
 }

@@ -2,15 +2,23 @@
 
 An independent, modular audio project for Windows/Linux, with an integrated Android app planned. Inspired by compact classic players; not affiliated with Winamp. This repository is separate from MP3 Lab.
 
-The supplied AMP Verse references now guide the drawn desktop chrome and embedded Cast UI: purple/silver Player and orange/cyan DJ decks, black/gold folder Library and Cast console. See [visual direction](docs/DESIGN.md). The Library uses folders and playlists; older mockups' crates and integrated player strip are not included.
+The supplied AMP Verse references now guide the drawn desktop chrome and embedded Cast UI: purple/silver Player and orange/cyan DJ decks, black/gold folder Library and Cast console. See [visual direction](docs/DESIGN.md). The Library uses folders and playlists; the player expands into an attached Library, with explicit magnetic merge and detach controls. Crates are excluded.
 
 **Themes:** Classic, Modern Light and Modern Dark are selectable in the desktop top-bar dropdown (Appearance), and in Cast's navigation bar. Choices persist locally. See [theme settings](docs/THEMES.md).
 
+## Library and Smart Lists
+
+Expand Library below the compact player, or detach it into a native window. Move an AMP window against another window: the magnet button lights up and merges the sections when pressed. Each attached section has a Detach button. This works between the Rust Player, Library, DJ, Lab arrangement, Cast and Plugin Manager windows; the separately launched MP3 Lab editor stays independent. Merged groups scroll when needed, and layout currently resets on restart.
+
+Library edits cue points, BPM/grid, key labels, ratings, energy, saved playback rate and portable text tags through **Edit cues / BPM / key / rating / energy**. Save writes `song.ext.amp.json` beside the original audio; original audio and embedded tags are unchanged. Playback rate applies when the song is loaded and changes pitch; key edits correct metadata and do not transpose audio.
+
+Build a playlist with the Mix checkboxes or **Add folder to playlist**. **Smart List · order for mixing** keeps the first song as anchor and orders the selected songs using prepared harmonic codes, tempo and energy. **Find similar songs** adds up to 20 analyzed library neighbors within ±6% BPM and ±0.2 energy, favoring compatible harmonic steps. Review, reorder and Save as a regular playlist. Missing metadata is reported; unknown candidates are excluded from expansion. Energy is a relative audio-level estimate or manual value, not a calibrated perceptual measurement. Recommendations do not guarantee a seamless mix. See [Library and Smart Lists](docs/LIBRARY.md).
+
 ## Runnable milestone 0.1
 
-- **AMP Player:** native Rust/egui compact player, play/pause, stop/next, live master volume, a separate folder-library window and JSON playlists. Desktop playback uses the shared CPAL mixer with background FFmpeg decoding.
+- **AMP Player:** native Rust/egui compact player, play/pause, stop/next, live master volume, an attached or detached folder Library, Shuffle, Repeat One, EQ and JSON playlists. Desktop playback uses the shared CPAL mixer with background FFmpeg decoding.
 - **AMP Library:** shared Rust folder scanner, deterministic file tree, supported audio extensions, playlist persistence, validated prepared cue/BPM/beatgrid/stem-reference sidecars, root-confined file resolution. No crates.
-- **AMP DJ:** shared-stream two-deck mixer, prepared cues, play/pause, pitch/speed, channel faders, manual and one-touch equal-power crossfade, live meters/envelopes, captured loops, three-band EQ and low-pass FX. SYNC matches prepared BPM within the pitch range; beat-phase sync, key lock, live stems and broader effects remain unbuilt.
+- **AMP DJ:** shared-stream two-deck mixer, prepared cues, play/pause, pitch/speed, channel faders, manual and one-touch equal-power crossfade, live meters and scrolling source waveforms with cue markers, captured loops, three-band EQ and low-pass FX. SYNC matches prepared BPM within the pitch range; beat-phase sync, key lock, live stems and broader effects remain unbuilt.
 - **AMP Cast:** independent headless Rust server, embedded web UI, station launch/stop, sequential looping Auto DJ, one real-time MP3 encoder shared by browser listeners, optional simple admin password. Plays while the desktop app is closed.
 - **Plugin Manager:** searchable offline component catalog, real included build versions, companion-binary detection and module launch actions. Open it from the top-bar dropdown.
 - **AMP Lab:** manual links to MP3 Lab Releases and an explicit connection to a separately installed editor. Pick its executable in Plugin Manager, or set `AMP_LAB_EXE` to its full path before launch. Picker connections last for the session. **Open editor** launches it separately, without file handoff or modifying MP3 Lab. No editor code copied, automatic downloader, installer or native plugin loader yet.
