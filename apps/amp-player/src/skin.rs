@@ -124,6 +124,13 @@ pub fn display<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R
         .inner
 }
 
+#[derive(Clone, Copy)]
+pub struct Magnet {
+    pub enabled: bool,
+    pub attached: bool,
+    pub clicked: bool,
+}
+
 pub enum Module {
     Verse,
     Library,
@@ -171,7 +178,7 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     );
     let menu_rect = Rect::from_min_max(rect.min, egui::pos2(rect.left() + 220., rect.bottom()));
     let center_left = rect.left() + 235.;
-    let center_right = rect.right() - 120.;
+    let center_right = rect.right() - 155.;
     if center_right - center_left > 140. {
         let mid = (center_left + center_right) / 2.;
         let label = if title == "AMP VERSE" {
@@ -262,7 +269,7 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     let controls_left = rect.right() - 110.;
     let drag_rect = Rect::from_min_max(
         egui::pos2(menu_rect.right(), rect.top()),
-        egui::pos2(controls_left, rect.bottom()),
+        egui::pos2(controls_left - 35., rect.bottom()),
     );
     let drag = ui.interact(
         drag_rect,
@@ -276,6 +283,52 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     if native && drag.double_clicked() {
         ui.ctx()
             .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
+    let magnet_id = egui::Id::unique("pane-magnet");
+    if let Some(mut magnet) = ui.ctx().data(|d| d.get_temp::<Magnet>(magnet_id)) {
+        let r = Rect::from_min_size(
+            egui::pos2(controls_left - 35., rect.top() + 5.),
+            egui::vec2(31., 31.),
+        );
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::unique("magnet-button-rect"), r));
+        let response = ui.put(
+            r,
+            egui::Button::new("")
+                .selected(magnet.attached)
+                .sense(if magnet.enabled {
+                    egui::Sense::click()
+                } else {
+                    egui::Sense::hover()
+                }),
+        );
+        let color = if magnet.enabled {
+            p.accent
+        } else {
+            p.text.gamma_multiply(0.3)
+        };
+        // Draw a small horseshoe magnet without depending on emoji fonts.
+        let c = r.center();
+        ui.painter().add(egui::Shape::line(
+            vec![
+                c + Vec2::new(-7., -7.),
+                c + Vec2::new(-7., 4.),
+                c + Vec2::new(-4., 8.),
+                c + Vec2::new(4., 8.),
+                c + Vec2::new(7., 4.),
+                c + Vec2::new(7., -7.),
+            ],
+            Stroke::new(3., color),
+        ));
+        response.clone().on_hover_text(if magnet.attached {
+            "Detach window"
+        } else if magnet.enabled {
+            "Attach to touching window"
+        } else {
+            "Move against another window to attach"
+        });
+        magnet.clicked = magnet.enabled && response.clicked();
+        ui.ctx().data_mut(|d| d.insert_temp(magnet_id, magnet));
     }
     for (offset, text, command) in [
         (0., "_", egui::ViewportCommand::Minimized(true)),

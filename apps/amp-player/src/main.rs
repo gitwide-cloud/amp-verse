@@ -662,91 +662,82 @@ impl Player {
         }
     }
     fn group_ui(&mut self, ui: &mut egui::Ui, host: usize) {
-        let ctx = ui.ctx().clone();
         if self.layout.parent[host].is_none() {
-            ui.painter()
-                .rect_filled(ui.max_rect(), 0., theme::current(&ctx).palette().background);
+            ui.painter().rect_filled(
+                ui.max_rect(),
+                0.,
+                theme::current(ui.ctx()).palette().background,
+            );
+            egui::ScrollArea::vertical()
+                .id_salt(("merged-window", host))
+                .show(ui, |ui| self.group_contents(ui, host));
+        } else {
+            self.group_contents(ui, host);
         }
+    }
+    fn group_contents(&mut self, ui: &mut egui::Ui, host: usize) {
+        let ctx = ui.ctx().clone();
         let children: Vec<_> = (1..6)
             .filter(|&p| self.open_panes()[p] && self.layout.parent[p] == Some(host))
             .collect();
-        egui::ScrollArea::vertical()
-            .id_salt(("merged-window", host))
-            .show(ui, |ui| {
-                let target = self.layout.target(&ctx, host, self.open_panes());
-                if host != 0 {
-                    ui.horizontal(|ui| {
-                        if self.layout.parent[host].is_some() {
-                            if ui
-                                .button(format!("Detach {}", window_layout::NAMES[host]))
-                                .clicked()
-                            {
-                                self.layout.parent[host] = None;
-                                if !self.layout.parent.contains(&Some(0)) {
-                                    self.resize_player(&ctx, false);
-                                }
-                            }
-                        } else if ui
-                            .add_enabled(
-                                target.is_some(),
-                                egui::Button::new(
-                                    RichText::new(
-                                        target
-                                            .map(|p| {
-                                                format!(
-                                                    "MAGNET · Merge with {}",
-                                                    window_layout::NAMES[p]
-                                                )
-                                            })
-                                            .unwrap_or_else(|| {
-                                                "MAGNET · move against another window".into()
-                                            }),
-                                    )
-                                    .color(
-                                        if target.is_some() {
-                                            GOLD
-                                        } else {
-                                            egui::Color32::GRAY
-                                        },
-                                    ),
-                                ),
-                            )
-                            .clicked()
-                            && let Some(target) = target
-                            && self.layout.join(host, target)
-                        {
-                            ctx.send_viewport_cmd_to(
-                                window_layout::viewport(target),
-                                egui::ViewportCommand::MinInnerSize(egui::vec2(1000., 800.)),
-                            );
-                            ctx.send_viewport_cmd_to(
-                                window_layout::viewport(target),
-                                egui::ViewportCommand::InnerSize(egui::vec2(1100., 900.)),
-                            );
-                        }
+        let target = self.layout.target(&ctx, host, self.open_panes());
+        let embedded = self.layout.parent[host].is_some();
+        ctx.data_mut(|d| {
+            d.insert_temp(
+                egui::Id::unique("pane-magnet"),
+                skin::Magnet {
+                    enabled: embedded || target.is_some(),
+                    attached: embedded,
+                    clicked: false,
+                },
+            )
+        });
+        window_layout::set_embedded(&ctx, embedded);
+        ui.push_id(("pane", host), |ui| {
+            let height = if host == 0 {
+                135.
+            } else if host == 2 {
+                920.
+            } else {
+                680.
+            };
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    // Bound each pane before rendering: an outer scroll area otherwise gives
+                    // Library infinite remaining height and pushes attached children away.
+                    ui.set_max_height(height);
+                    self.pane_ui(ui, host);
+                    ctx.data_mut(|d| {
+                        d.insert_temp(egui::Id::unique(("pane-bounds", host)), ui.min_rect())
                     });
+                },
+            );
+        });
+        let clicked = ctx.data(|d| {
+            d.get_temp::<skin::Magnet>(egui::Id::unique("pane-magnet"))
+                .is_some_and(|m| m.clicked)
+        });
+        if clicked && host == 0 {
+            if let Some(target) = target {
+                self.layout.join(target, 0);
+                self.resize_player(&ctx, true);
+            }
+        } else if clicked {
+            if embedded {
+                self.layout.parent[host] = None;
+                if !self.layout.parent.contains(&Some(0)) {
+                    self.resize_player(&ctx, false);
                 }
-                let embedded = self.layout.parent[host].is_some();
-                window_layout::set_embedded(&ctx, embedded);
-                ui.push_id(("pane", host), |ui| {
-                    let height = if host == 0 {
-                        135.
-                    } else if host == 2 {
-                        920.
-                    } else {
-                        680.
-                    };
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(ui.available_width(), height),
-                        egui::Layout::top_down(egui::Align::Min),
-                        |ui| self.pane_ui(ui, host),
-                    );
-                });
-                window_layout::set_embedded(&ctx, false);
-                for child in children {
-                    self.group_ui(ui, child);
-                }
-            });
+            } else if let Some(target) = target {
+                self.layout.join(host, target);
+            }
+        }
+        window_layout::set_embedded(&ctx, false);
+        for child in children {
+            self.group_ui(ui, child);
+        }
     }
     fn player_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, true, |ui| {
@@ -875,27 +866,6 @@ impl Player {
                         self.layout.parent[1] = Some(0);
                         self.resize_player(ui.ctx(), true);
                     }
-                }
-                let target = self.layout.target(ui.ctx(), 0, self.open_panes());
-                if ui
-                    .add_enabled(
-                        target.is_some(),
-                        egui::Button::new(RichText::new("MAGNET").color(if target.is_some() {
-                            GOLD
-                        } else {
-                            egui::Color32::GRAY
-                        })),
-                    )
-                    .on_hover_text(
-                        target
-                            .map(|p| format!("Merge {} into the Player", window_layout::NAMES[p]))
-                            .unwrap_or_else(|| "Move another AMP window against the Player".into()),
-                    )
-                    .clicked()
-                    && let Some(target) = target
-                {
-                    self.layout.join(target, 0);
-                    self.resize_player(ui.ctx(), true);
                 }
                 if ui.checkbox(&mut self.auto, "Play queue").changed() && self.auto {
                     self.run.cancel_automation();
@@ -1810,7 +1780,9 @@ mod window_tests {
                 },
             );
         }
-        let pos = egui::pos2(50., 10.);
+        let pos = ctx
+            .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("magnet-button-rect")))
+            .map_or(egui::pos2(978., 29.), |r| r.center());
         raw.events.push(egui::Event::PointerMoved(pos));
         if let Some(pressed) = pressed {
             raw.events.push(egui::Event::PointerButton {
@@ -1822,6 +1794,40 @@ mod window_tests {
         }
         let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 1));
         output.textures_delta.clear();
+    }
+    #[test]
+    fn dj_below_attached_library_has_finite_reachable_bounds() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            library_open: true,
+            dj_open: true,
+            ..Default::default()
+        };
+        assert!(player.layout.join(2, 1));
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(1100., 900.),
+            )),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 0));
+        output.textures_delta.clear();
+        let library = ctx
+            .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique(("pane-bounds", 1usize))))
+            .unwrap();
+        let dj = ctx
+            .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique(("pane-bounds", 2usize))))
+            .unwrap();
+        assert!(
+            library.height() < 800.,
+            "Library must not consume the scroll area's infinite height: {library:?}"
+        );
+        assert!(
+            dj.top().is_finite() && dj.top() < 1200.,
+            "DJ must follow Library within reachable scrolling distance: {dj:?}"
+        );
+        assert!(dj.top() >= library.bottom());
     }
     #[test]
     fn library_can_merge_into_dj_instead_of_player() {
