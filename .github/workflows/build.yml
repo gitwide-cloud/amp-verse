@@ -46,13 +46,19 @@ jobs:
       - name: Test portable preparation with generated audio
         if: runner.os == 'Linux'
         run: python3 tools/smoke_preparation.py target/release/amp-prepare
+      - name: Test desktop HTTP and WebSocket show control
+        if: runner.os == 'Linux'
+        run: xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 python3 tools/smoke_show_control.py target/release/amp-player
       - name: Capture actual desktop UI
         if: runner.os == 'Linux'
         run: |
           mkdir -p test-output/music
           ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 test-output/music/Tone.wav
+          target/release/amp-prepare test-output/music
+          python3 -c "import json,pathlib; p=pathlib.Path('test-output/music/.ampverse/tracks/Tone.wav.json'); d=json.loads(p.read_text()); d['cue_in']=0.2; d['manual_override']=True; p.write_text(json.dumps(d))"
+          target/release/amp-prepare test-output/music
           for theme in classic modern-light modern-dark; do
-            for view in player combined library preparation dj sampler lab addons cast; do
+            for view in player combined library preparation rules dj sampler lab addons cast; do
               timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_THEME="$theme" AMP_VERSE_CONFIG_DIR=test-output/theme-config AMP_SCREENSHOT_VIEW="$view" AMP_SCREENSHOT="test-output/$theme-$view.png" target/release/amp-player test-output/music
               test -s "test-output/$theme-$view.png"
             done

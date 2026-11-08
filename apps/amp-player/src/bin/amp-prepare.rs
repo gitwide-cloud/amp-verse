@@ -15,12 +15,12 @@ fn run() -> Result<(), String> {
     for track in &library.tracks {
         let result: Result<amp_core::Preparation, String> = (|| {
             let path = amp_core::resolve(&root, &track.path).map_err(|e| e.to_string())?;
-            let before = std::fs::read(amp_core::sidecar(&path)).ok();
-            let p = amp_core::analysis::analyze(&path, &track.preparation)?;
-            if before != std::fs::read(amp_core::sidecar(&path)).ok() {
+            let (existing, before) = amp_core::preparation::load_with_revision(&path)?;
+            let p = amp_core::analysis::analyze(&path, &existing)?;
+            if before != amp_core::preparation::revision(&path) {
                 return Err("Metadata was edited during analysis; newer metadata retained".into());
             }
-            amp_core::preparation::save(&root, &track.path, &p)?;
+            amp_core::preparation::save_if_unchanged(&root, &track.path, &p, before.as_deref())?;
             Ok(p)
         })();
         match result {

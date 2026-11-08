@@ -8,11 +8,14 @@ use std::{
 };
 mod addons;
 mod cast;
+mod control;
 mod docking;
 mod lab;
 mod mixer;
+mod performance;
 mod preparer;
 mod sampler;
+mod show_editor;
 mod skin;
 mod theme;
 mod waveform;
@@ -67,6 +70,16 @@ struct Player {
     search: String,
     audio: Option<mixer::Engine>,
     sampler: sampler::Sampler,
+    run: performance::Run,
+    show_editor: show_editor::Editor,
+    control: Option<control::Control>,
+    control_attempted: bool,
+    control_restart: Option<std::time::Instant>,
+    control_status: String,
+    control_bind: String,
+    control_password: String,
+    catalog_updated: std::time::Instant,
+    last_master: u8,
     waveforms: [waveform::Lane; 2],
     wave_span: f64,
     pitch: [f32; 2],
@@ -120,6 +133,17 @@ impl Default for Player {
             search: String::new(),
             audio: None,
             sampler: Default::default(),
+            run: Default::default(),
+            show_editor: Default::default(),
+            control: None,
+            control_attempted: false,
+            control_restart: None,
+            control_status: "Show control starting…".into(),
+            control_bind: std::env::var("AMP_CONTROL_BIND")
+                .unwrap_or_else(|_| "127.0.0.1:8790".into()),
+            control_password: std::env::var("AMP_CONTROL_PASSWORD").unwrap_or_default(),
+            catalog_updated: std::time::Instant::now() - std::time::Duration::from_secs(3),
+            last_master: 75,
             waveforms: Default::default(),
             wave_span: 16.,
             pitch: [0.; 2],
@@ -280,6 +304,14 @@ impl Player {
                             self.auto = false;
                             self.status = format!("{} tracks / offline ready", lib.tracks.len());
                             self.library = Some(lib);
+                            self.run.cancel_automation();
+                            match amp_core::show::Settings::load(&self.root) {
+                                Ok(settings) => self.run.settings = settings,
+                                Err(e) => self.status = e,
+                            }
+                            self.catalog_updated =
+                                std::time::Instant::now() - std::time::Duration::from_secs(3);
+
                             if let Some(path) = std::env::var_os("AMP_SAMPLER_SMOKE") {
                                 self.volume = 0;
                                 if self.ensure_audio().is_ok() {
@@ -316,8 +348,15 @@ impl Player {
         if let Some(audio) = &self.audio {
             self.playing = [audio.playing(0), audio.playing(1)];
             self.fader = audio.fader();
-            audio.set_master(self.volume as f32 / 100.);
+            if self.volume != self.last_master {
+                audio.set_master(self.volume as f32 / 100.);
+            } else {
+                self.volume = (audio.master_level() * 100.).round().clamp(0., 100.) as u8;
+            }
+            self.last_master = self.volume;
+            self.channel_gain = [audio.channel_level(0), audio.channel_level(1)];
             if let Some(error) = audio.take_error() {
+                self.run.cancel_automation();
                 self.status = error;
             }
         } else {
@@ -349,6 +388,7 @@ impl Player {
         Ok(())
     }
     fn load_deck(&mut self, deck: usize, index: usize, play: bool) {
+        self.run.cancel_automation();
         if deck == 0 && !play {
             self.auto = false;
         }
@@ -377,6 +417,9 @@ impl Player {
                             a.set_rate(deck, 1. + self.pitch[deck] / 100.);
                         }
                     }
+                    if !play {
+                        self.run.preloaded = Some((deck, index));
+                    }
                     self.loaded[deck] = Some(index);
                     self.playing[deck] = play;
                     self.status = format!("Deck {} / {}", deck + 1, track.title);
@@ -389,6 +432,7 @@ impl Player {
         self.load_deck(deck, index, true);
     }
     fn play_cue(&mut self, deck: usize, index: usize, seconds: f64) {
+        self.run.cancel_automation();
         if let Some(mut track) = self
             .library
             .as_ref()
@@ -415,6 +459,7 @@ impl Player {
         }
     }
     fn stop(&mut self, deck: usize) {
+        self.run.cancel_automation();
         if let Some(audio) = &mut self.audio {
             audio.stop(deck);
         }
@@ -425,6 +470,7 @@ impl Player {
         self.status = format!("Deck {} stopped", deck + 1);
     }
     fn toggle_deck(&mut self, deck: usize) {
+        self.run.cancel_automation();
         if let Some(audio) = &self.audio
             && audio.loaded(deck)
             && !audio.controls.finished[deck].load(std::sync::atomic::Ordering::Relaxed)
@@ -518,6 +564,7 @@ impl Player {
             self.queue.clear();
             self.queue_selected = None;
             self.library = None;
+            self.show_editor.open = false;
             self.root = root;
             let pref = library_preference();
             if let Some(parent) = pref.parent() {
@@ -850,7 +897,9 @@ impl Player {
                     self.layout.join(target, 0);
                     self.resize_player(ui.ctx(), true);
                 }
-                ui.checkbox(&mut self.auto, "Play queue");
+                if ui.checkbox(&mut self.auto, "Play queue").changed() && self.auto {
+                    self.run.cancel_automation();
+                }
                 ui.toggle_value(&mut self.shuffle, "Shuffle");
                 ui.toggle_value(&mut self.repeat_one, "Repeat one");
                 if ui.button("EQ").clicked() {
@@ -929,11 +978,44 @@ impl Player {
         }
     }
     fn library_ui(&mut self, ui: &mut egui::Ui) {
+        self.show_editor.show(
+            ui.ctx(),
+            &self.root,
+            &mut self.run.settings,
+            self.library.as_ref(),
+        );
+
         self.preparer
             .show(ui.ctx(), &self.root, self.library.as_mut());
         skin::panel(ui, false, |ui| {
             ui.set_min_size(ui.available_size());
             self.header(ui, "AMP Library", false);
+            ui.horizontal(|ui| {
+                if ui.button("Smart Playlist rules / defaults…").clicked() {
+                    self.show_editor.open = true;
+                }
+                ui.weak(&self.control_status);
+            });
+            egui::CollapsingHeader::new("Companion / show-control connection").show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label("Listen address");
+                    ui.text_edit_singleline(&mut self.control_bind);
+                    ui.label("Optional password");
+                    ui.add(egui::TextEdit::singleline(&mut self.control_password).password(true));
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("Start / restart control").clicked() {
+                        self.start_control(ui.ctx());
+                    }
+                    if ui.button("Stop control connection").clicked() {
+                        self.control = None;
+                        self.control_restart = None;
+                        self.control_status =
+                            "Show control stopped; audio continues locally".into();
+                    }
+                });
+            });
+
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
@@ -1225,6 +1307,128 @@ impl Player {
             });
         });
     }
+    fn start_control(&mut self, ctx: &egui::Context) {
+        if self.control.take().is_some() {
+            self.control_restart = Some(std::time::Instant::now() + Duration::from_millis(200));
+            self.control_status = "Restarting show control; audio continues".into();
+            return;
+        }
+        self.control_restart = None;
+        self.control = None;
+        match control::Control::start(
+            ctx,
+            &self.control_bind,
+            if self.control_password.is_empty() {
+                None
+            } else {
+                Some(self.control_password.clone())
+            },
+        ) {
+            Ok(c) => {
+                self.control_status = format!("Companion HTTP / WebSocket · {}", c.address);
+                c.catalog(self.control_catalog());
+                self.control = Some(c);
+            }
+            Err(e) => self.control_status = format!("Show control unavailable: {e}"),
+        }
+    }
+    fn poll_control(&mut self) {
+        let mut commands = Vec::new();
+        if let Some(c) = &self.control {
+            for _ in 0..8 {
+                match c.commands.try_recv() {
+                    Ok(command) => commands.push(command),
+                    Err(_) => break,
+                }
+            }
+        }
+        for command in commands {
+            let result = if std::time::Instant::now() > command.deadline {
+                Err("Command expired before execution".into())
+            } else {
+                self.execute_control(command.request.command)
+            };
+            let reply = control::Reply {
+                id: command.request.id,
+                ok: result.is_ok(),
+                status: if result.is_ok() {
+                    "accepted"
+                } else {
+                    "rejected"
+                }
+                .into(),
+                error: result.err(),
+            };
+            let _ = command.reply.send(reply);
+        }
+    }
+    fn performance_controls(&mut self, ui: &mut egui::Ui) {
+        let mut selected = self.run.choice.clone();
+        ui.horizontal_wrapped(|ui| {
+            egui::ComboBox::from_id_salt("performance-playlist")
+                .selected_text(
+                    self.run
+                        .settings
+                        .playlists
+                        .iter()
+                        .find(|p| p.id == selected)
+                        .map_or("Select Smart Playlist", |p| p.name.as_str()),
+                )
+                .show_ui(ui, |ui| {
+                    for p in &self.run.settings.playlists {
+                        ui.selectable_value(&mut selected, p.id.clone(), &p.name);
+                    }
+                });
+            if ui.button("Load").clicked()
+                && let Err(e) = self.execute_control(control::Action::LoadSmartPlaylist {
+                    playlist: selected.clone(),
+                    execution: control::Execution::LoadOnly,
+                    style: None,
+                    energy: None,
+                })
+            {
+                self.status = e;
+            }
+            if ui.button("Start Auto DJ").clicked() {
+                let result = self.execute_control(control::Action::LoadSmartPlaylist {
+                    playlist: selected.clone(),
+                    execution: control::Execution::PlayNow,
+                    style: None,
+                    energy: None,
+                });
+                if let Err(e) = result {
+                    self.status = e;
+                }
+            }
+            if ui.button("Mix Next").clicked()
+                && let Err(e) = self.execute_control(control::Action::MixNext { immediate: true })
+            {
+                self.status = e;
+            }
+            ui.checkbox(&mut self.run.crossfade, "Auto crossfade");
+            if ui
+                .checkbox(&mut self.run.locked, "Manual DJ Lock")
+                .changed()
+                && self.run.locked
+            {
+                self.run.cancel_automation();
+            }
+            ui.label(format!(
+                "{:?} · energy {} · {}",
+                self.run.style,
+                self.run
+                    .target
+                    .map(|e| format!("{e:.1}"))
+                    .unwrap_or_else(|| "follow current".into()),
+                if self.run.auto {
+                    "AUTO DJ"
+                } else {
+                    "Manual / loaded"
+                }
+            ));
+        });
+        self.run.choice = selected;
+    }
     fn sampler_ui(&mut self, ui: &mut egui::Ui) {
         if !self.sampler.started {
             self.sampler.started = true;
@@ -1269,6 +1473,7 @@ impl Player {
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
             self.header(ui, "AMP DJ", true);
+            self.performance_controls(ui);
             ui.horizontal(|ui| {
                 ui.weak("SCROLLING WAVEFORMS · cue markers / source time");
                 ui.add(egui::Slider::new(&mut self.wave_span, 4. ..=64.).text("seconds visible"));
@@ -1293,16 +1498,16 @@ if ui.button("FX").clicked(){self.fx_open=true;}});
                             let fading=self.audio.as_ref().is_some_and(|a|a.fading());
                             let label=if fading{"CANCEL FADE"}else{"AUTO CROSSFADER"};
                             if ui.add_sized([160.,44.],egui::Button::new(RichText::new(label).strong().color(skin::accent(ui)))).on_hover_text("One-touch transition to the opposite deck; incoming audio starts when buffered. Press again to cancel.").clicked(){self.auto=false;self.auto_crossfade();}
-                            ui.horizontal(|ui|{ui.label("A");if ui.add(egui::Slider::new(&mut self.fader,0. ..=1.).show_value(false)).changed()&&let Some(a)=&self.audio{a.set_fader(self.fader);}ui.label("B");});
+                            ui.horizontal(|ui|{ui.label("A");if ui.add(egui::Slider::new(&mut self.fader,0. ..=1.).show_value(false)).changed()&&let Some(a)=&self.audio{self.run.cancel_automation();a.set_fader(self.fader);}ui.label("B");});
                             ui.add(egui::DragValue::new(&mut self.fade_seconds).range(0.5..=30.).speed(0.5).prefix("Mix ").suffix(" s"));
                             ui.label(if fading{"MIXING"}else{"Manual / auto"});
                         });
                     });
                     self.deck_ui(ui,1,deck_width);
                 });
-                ui.horizontal(|ui|{ui.checkbox(&mut self.auto,"Queue Auto Play · Deck A");ui.add(egui::Slider::new(&mut self.volume,0..=100).text("Master"));if let Some(a)=&self.audio{ui.weak(format!("{} · {} Hz",a.device,a.sample_rate));}});
+                ui.horizontal(|ui|{ui.add(egui::Slider::new(&mut self.volume,0..=100).text("Master"));if let Some(a)=&self.audio{ui.weak(format!("{} · {} Hz",a.device,a.sample_rate));}});
                 ui.separator();
-                ui.horizontal(|ui|{skin::label(ui,"LIBRARY");if ui.button("Choose folder...").clicked(){self.choose_folder();}ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search music"));if ui.button("Load playlist...").clicked(){self.load_playlist();}});
+                ui.horizontal(|ui|{skin::label(ui,"LIBRARY");ui.weak("Manage sources in AMP Library");ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search music"));if ui.button("Load playlist...").clicked(){self.load_playlist();}});
                 let mut load=None;
                 egui::ScrollArea::vertical().id_salt("dj-library").max_height(180.).min_scrolled_height(120.).show(ui,|ui|{
                     if let Some(lib)=&self.library{for(i,t)in lib.tracks.iter().enumerate(){if !t.title.to_lowercase().contains(&self.search.to_lowercase()){continue;}
@@ -1394,7 +1599,52 @@ if ui.button(format!("Bypass {}",d+1)).clicked(){self.filter[d]=22000.;if let So
 }
 impl eframe::App for Player {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        if !self.control_attempted && self.screenshot_view.is_empty() {
+            self.control_attempted = true;
+            if std::env::var_os("AMP_CONTROL_DISABLE").is_none() {
+                self.start_control(ui.ctx());
+            }
+        }
+        if self
+            .control_restart
+            .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.start_control(ui.ctx());
+        }
         self.poll();
+        self.poll_control();
+        self.performance_tick();
+        if let Some(c) = &self.control {
+            c.publish(self.control_snapshot());
+            if self.catalog_updated.elapsed() > Duration::from_secs(2) {
+                c.catalog(self.control_catalog());
+                self.catalog_updated = std::time::Instant::now();
+            }
+        }
+        if let Some((path, seconds)) = self.preparer.preview.take() {
+            if self.run.locked
+                || self.run.auto
+                || self.audio.as_ref().is_some_and(|a| {
+                    a.playing(0)
+                        || a.playing(1)
+                        || a.controls
+                            .sample_playing
+                            .iter()
+                            .any(|p| p.load(std::sync::atomic::Ordering::Relaxed))
+                })
+            {
+                self.status =
+                    "Stop deck playback before auditioning a Library recommendation".into();
+            } else if let Some(i) = self
+                .library
+                .as_ref()
+                .and_then(|l| l.tracks.iter().position(|t| t.path == path))
+            {
+                self.auto = false;
+                self.run.cancel_automation();
+                self.play_cue(0, i, seconds);
+            }
+        }
         self.cast.poll();
         self.dj_effects(ui.ctx());
         let ctx = ui.ctx().clone();
@@ -1407,6 +1657,10 @@ impl eframe::App for Player {
         docking::retain(&ctx, &active);
         match self.screenshot_view.as_str() {
             "library" | "preparation" => self.library_ui(ui),
+            "rules" => {
+                self.show_editor.open = true;
+                self.library_ui(ui);
+            }
             "dj" => self.dj_ui(ui),
             "sampler" => self.sampler_ui(ui),
             "addons" => self.addons_ui(ui),
@@ -1476,7 +1730,7 @@ fn main() -> eframe::Result {
     let size = match player.screenshot_view.as_str() {
         "combined" => [1100., 900.],
         "library" => [1100., 830.],
-        "preparation" => [1200., 830.],
+        "preparation" | "rules" => [1200., 830.],
         "dj" => [1000., 920.],
         "sampler" => [1000., 400.],
         "lab" => [1100., 760.],

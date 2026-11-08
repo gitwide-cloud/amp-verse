@@ -2,6 +2,8 @@
 pub mod analysis;
 pub mod arrangement;
 pub mod preparation;
+pub mod review;
+pub mod show;
 pub mod smart;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -103,17 +105,13 @@ pub fn scan(root: &Path) -> io::Result<Library> {
                 continue;
             }
             let path = entry.path();
+            if ty.is_dir() && entry.file_name() == ".ampverse" {
+                continue;
+            }
             if ty.is_dir() {
                 folder.folders.push(visit(&path, root, tracks)?);
             } else if ty.is_file() && supported(&path) {
-                let preparation = match fs::read(sidecar(&path)) {
-                    Ok(bytes) => {
-                        serde_json::from_slice::<Preparation>(&bytes).map_err(io::Error::other)?
-                    }
-                    Err(e) if e.kind() == io::ErrorKind::NotFound => Preparation::default(),
-                    Err(e) => return Err(e),
-                };
-                preparation.validate().map_err(io::Error::other)?;
+                let preparation = preparation::load(&path).map_err(io::Error::other)?;
                 folder.tracks.push(tracks.len());
                 tracks.push(Track {
                     path: path.strip_prefix(root).unwrap().into(),

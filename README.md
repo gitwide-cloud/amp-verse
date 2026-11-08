@@ -6,11 +6,17 @@ The supplied AMP Verse references now guide the drawn desktop chrome and embedde
 
 **Themes:** Classic, Modern Light and Modern Dark are selectable in the desktop top-bar dropdown (Appearance), and in Cast's navigation bar. Choices persist locally. See [theme settings](docs/THEMES.md).
 
+## Companion and protected preparation
+
+The desktop now exposes HTTP commands and passive WebSocket feedback for show control, with safe Load Only defaults, saved cue calls, preloading, fades, Duck/Restore, Manual DJ Lock and bounded retry deduplication. Library configures Smart Playlist rules; DJ performs a runtime copy, including prepared energy selection and progression. See [Companion setup and API](docs/COMPANION.md) and the [revised spec status](docs/SPEC_STATUS.md).
+
+New preparation saves use a `.ampverse/tracks/` directory in the audio file's containing folder. Existing `song.ext.amp.json` records remain readable and unchanged; the portable record takes precedence. Reanalysis of approved/manual data stores a recommendation while preserving the existing values. Library shows exact before/after data, individual/bulk field decisions and audition, followed by explicit Save. Runtime DJ decisions do not save cues or rules.
+
 ## Library and Smart Lists
 
 Expand Library below the compact player, or detach it into a native window. Move an AMP window against another window: the magnet button lights up and merges the sections when pressed. Each attached section has a Detach button. This works between the Rust Player, Library, DJ, Lab arrangement, Cast and Plugin Manager windows; the separately launched MP3 Lab editor stays independent. Merged groups scroll when needed, and layout currently resets on restart.
 
-Library edits cue points, BPM/grid, key labels, ratings, energy, saved playback rate and portable text tags through **Edit cues / BPM / key / rating / energy**. Save writes `song.ext.amp.json` beside the original audio; original audio and embedded tags are unchanged. Playback rate applies when the song is loaded and changes pitch; key edits correct metadata and do not transpose audio.
+Library edits cue points, BPM/grid, key labels, ratings, energy, saved playback rate and portable text tags through **Edit cues / BPM / key / rating / energy**. Save writes `.ampverse/tracks/song.ext.json` beside the original audio; original audio and embedded tags are unchanged. Playback rate applies when the song is loaded and changes pitch; key edits correct metadata and do not transpose audio.
 
 Build a playlist with the Mix checkboxes or **Add folder to playlist**. **Smart List · order for mixing** keeps the first song as anchor and orders the selected songs using prepared harmonic codes, tempo and energy. **Find similar songs** adds up to 20 analyzed library neighbors within ±6% BPM and ±0.2 energy, favoring compatible harmonic steps. Review, reorder and Save as a regular playlist. Missing metadata is reported; unknown candidates are excluded from expansion. Energy is a relative audio-level estimate or manual value, not a calibrated perceptual measurement. Recommendations do not guarantee a seamless mix. See [Library and Smart Lists](docs/LIBRARY.md).
 

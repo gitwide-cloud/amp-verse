@@ -15,7 +15,7 @@ fn harmonic(s: &str) -> Option<(i32, u8)> {
     let n = s[..s.len() - 1].parse::<i32>().ok()?;
     (1..=12).contains(&n).then_some((n, mode))
 }
-fn cost(a: &Preparation, b: &Preparation, target: Option<f64>) -> f64 {
+pub(crate) fn cost(a: &Preparation, b: &Preparation, target: Option<f64>) -> f64 {
     let tempo = match (a.bpm, b.bpm) {
         (Some(a), Some(b)) if a > 0. && b > 0. => ((a / b).ln().abs() * 12.).min(4.),
         _ => 2.,

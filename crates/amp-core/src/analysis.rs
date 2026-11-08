@@ -185,6 +185,7 @@ fn result(
 
     // Legacy hand-authored preparation is treated as manual rather than silently replaced.
     let locked = existing.manual_override
+        || existing.analysis.as_ref().is_some_and(|a| a.reviewed)
         || (existing.analysis.is_none()
             && (existing.cue_in > 0. || existing.cue_out.is_some() || existing.bpm.is_some()));
     p.manual_override = locked;
@@ -193,8 +194,8 @@ fn result(
         p.cue_out = Some(cue_out);
         p.bpm = bpm;
         p.beat_offset = offset;
-        p.key = key;
-        p.harmonic_key = harmonic_key;
+        p.key = key.clone();
+        p.harmonic_key = harmonic_key.clone();
     }
     p.cues = vec![
         Cue {
@@ -202,12 +203,14 @@ fn result(
             label: "Audio start".into(),
             seconds: cue_in,
             kind: "boundary".into(),
+            ..Default::default()
         },
         Cue {
             id: "auto-out".into(),
             label: "Audio end".into(),
             seconds: cue_out,
             kind: "boundary".into(),
+            ..Default::default()
         },
     ];
     if let (Some(bpm), Some(offset)) = (bpm, offset) {
@@ -221,6 +224,7 @@ fn result(
                     label: format!("64-beat marker {i}"),
                     seconds: at,
                     kind: "grid".into(),
+                    ..Default::default()
                 });
             }
             at += phrase;
@@ -234,6 +238,23 @@ fn result(
         key_confidence,
         reviewed: false,
     });
+    if locked {
+        let mut suggested = p;
+        suggested.cue_in = cue_in;
+        suggested.cue_out = Some(cue_out);
+        suggested.bpm = bpm;
+        suggested.beat_offset = offset;
+        suggested.key = key;
+        suggested.harmonic_key = harmonic_key;
+        suggested.manual_override = false;
+        suggested.extensions.remove("analysis_recommendation");
+        p = existing.clone();
+        p.extensions.remove("analysis_recommendation");
+        p.extensions.insert(
+            "analysis_recommendation".into(),
+            serde_json::to_value(suggested).map_err(|e| e.to_string())?,
+        );
+    }
     p.validate()?;
     Ok(p)
 }
@@ -364,11 +385,50 @@ mod tests {
             label: "My drop".into(),
             seconds: 10.,
             kind: "hotcue".into(),
+            ..Default::default()
         });
         let p = result(&energy, &energy, &[0.; 12], 30., &existing).unwrap();
         assert_eq!(p.cue_in, 2.);
         assert_eq!(p.manual_cues, existing.manual_cues);
         assert_eq!(p.key, None);
+    }
+    #[test]
+    fn approved_cues_grid_and_analysis_survive_with_a_reviewable_proposal() {
+        let mut existing = Preparation {
+            cue_in: 2.,
+            cue_out: Some(8.),
+            bpm: Some(123.),
+            beat_offset: Some(0.123),
+            analysis: Some(AnalysisInfo {
+                engine: "reviewed".into(),
+                duration: 10.,
+                tempo_confidence: 1.,
+                key_confidence: 1.,
+                reviewed: true,
+            }),
+            ..Default::default()
+        };
+        existing.cues.push(Cue {
+            id: "approved-drop".into(),
+            label: "Approved".into(),
+            seconds: 3.,
+            kind: "transition".into(),
+            ..Default::default()
+        });
+        existing
+            .extensions
+            .insert("loops".into(), serde_json::json!([{"start":3.,"end":5.}]));
+        let mut energy = vec![0.; 1000];
+        energy[100..900].fill(0.5);
+        let p = result(&energy, &energy, &[0.; 12], 10., &existing).unwrap();
+        assert_eq!(p.cue_in, existing.cue_in);
+        assert_eq!(p.bpm, existing.bpm);
+        assert_eq!(p.beat_offset, existing.beat_offset);
+        assert_eq!(p.cues, existing.cues);
+        assert_eq!(p.analysis, existing.analysis);
+        assert_eq!(p.extensions["loops"], existing.extensions["loops"]);
+        assert!(crate::review::proposal(&p).is_some());
+        assert!(!crate::review::changes(&p).is_empty());
     }
     #[test]
     fn tonal_fixture_and_silence() {

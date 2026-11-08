@@ -16,3 +16,8 @@ Android source-flow correction: build desktop library/playlist read and streamin
 
 
 2026-11-08 update: first desktop key/tempo/cue analysis, cue collection editor, batch metadata writing and portable versioned sidecars are now implemented. Broader real-song accuracy validation, Android sidecar import/local overrides and network metadata transfer remain outstanding.
+
+
+## Revised Companion / Smart Playlist direction
+
+The revised specification is preserved in REVISED_BUILD_SPEC.md. Delivered desktop show-control and protected-preparation behavior, evidence and remaining Phase 2/3 work are tracked explicitly in SPEC_STATUS.md. Library owns preparation and approvals; DJ owns session-only performance; Companion requests high-level actions; Cast remains the independent station server. No Node-RED or OnTime configuration is rewritten.

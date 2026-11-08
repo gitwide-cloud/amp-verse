@@ -176,3 +176,12 @@ The loaded fixture is muted during screenshots. No generated artwork or invented
 ## Nine-pad sampler (2026-11-08)
 
 Workspace tests and strict Clippy pass. Deterministic mixer tests trigger all nine voices, verify summed output, crossfader independence, retrigger, individual/all stop, one-shot completion, master mute and acknowledged buffer reclamation. Saved bank paths/levels round-trip. A real FFmpeg fixture decodes to device-rate stereo; a missing file is rejected. A muted native CPAL test loads and triggers all nine pads and verifies individual/all stop through the running device callback. CI includes sampler screenshots in all three themes. Installation updates only Player and leaves the running NAS analyzer unchanged.
+
+
+## Revised show-control and protected-preparation milestone (2026-11-08)
+
+Workspace tests, strict Clippy and release builds cover the new control gateway, saved show rules, metadata store, review decisions and per-sample fades. Native muted tests exercise Call Song + Cue, idle-deck Load Only while the outgoing song continues, Auto Fade, Manual DJ Lock, Duck/Restore and a real 9 → 7 → 5 → 3 sequence through completed transitions. The runtime test compares preparation files byte-for-byte before/after. Source audio is copied from a generated fixture and no personal library is used in these tests.
+
+The protection regression preserves reviewed generated cues, grid, BPM, analysis and loop extensions while producing a separate candidate. Field review rejects the grid independently of accepting another field. Explicit hot-cue numbers and unknown cue fields survive. A canonical `.ampverse` record wins over a legacy adjacent sidecar without modifying that legacy file. Guarded saves hold a cross-process file lock and compare the exact revision snapshot; a stale background write is refused after newer approved metadata appears. Both the Library editor and batch worker read a fresh single snapshot rather than trusting the old library scan cache.
+
+`tools/smoke_show_control.py` tests the actual desktop HTTP endpoint, catalog, password rejection, accepted commands versus observed feedback, duplicate retry without state replay, ID conflict, Manual DJ Lock and two passive WebSocket connections. It generates a silent local library and terminates only its own helper desktop process. CI runs it under Xvfb and captures Rules and recommendation views in all themes. Native hardware tests remain opt-in where no device is available. Full revised-spec acceptance status and unbuilt areas are listed in SPEC_STATUS.md.

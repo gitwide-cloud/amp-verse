@@ -105,3 +105,14 @@ Desktop Player/DJ now use a shared CPAL stream and bounded FFmpeg decoder worker
 ## DJ sampler
 
 `amp-player::sampler` owns the nine-pad UI, saved file assignments/levels and a serialized background FFmpeg loading queue. PCM buffers are bounded to 30 seconds / 12 MiB per pad. `mixer::Engine` owns the resident buffers and sends load/trigger/stop commands to the same CPAL callback used by the decks. The sampler uses nine independent one-shot cursors, per-pad and bank gain, then the shared master. Its bus bypasses the deck crossfader and deck EQ. Generation acknowledgements release replaced PCM allocations on the UI thread after callback ownership ends. Sampler settings are local device configuration, not portable song preparation metadata.
+
+
+## Show-control and approval milestone
+
+`amp-player::control` runs a bounded HTTP/WS gateway on a background Tokio runtime. Commands carry retry IDs, deadlines and per-command reply channels; the UI thread owns execution and publishes observed CPAL-backed state. Networking never owns or stops the local audio stream. The last 512 results are cached per gateway session. WS subscription and reconnection are passive. Default bind is loopback with explicit trusted-LAN opt-in.
+
+`amp-player::performance` owns session-only Smart Playlist copies, prepared track/cue loading, incoming-buffer waits, automatic crossfades, repeat history, manual lock, volume duck/restore and progression that advances on completed transitions. The shared callback runs level ramps per sample. Deck load generations prevent feedback from announcing a requested track before the callback has installed it.
+
+`amp-core::show` holds portable saved rules, IDs and selection logic. `amp-core::review` applies explicit field-level recommendation decisions. `amp-core::preparation` prefers `.ampverse/tracks` records and falls back to legacy adjacent sidecars; only explicit/automatic unconfirmed preparation writes use the new store. Runtime playback has no write path. Approved values are held unchanged when analysis creates a candidate. Manual hot-cue numbers and unknown per-cue extensions are preserved. Saved show-rule folder paths normalize across Windows/Linux separators.
+
+Detailed implementation boundaries and unmet revised-spec items are recorded in SPEC_STATUS.md.

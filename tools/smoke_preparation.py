@@ -18,7 +18,7 @@ with tempfile.TemporaryDirectory() as tmp:
     source_hash = hashlib.sha256(audio.read_bytes()).hexdigest()
     subprocess.run([binary, str(folder)], check=True)
     assert hashlib.sha256(audio.read_bytes()).hexdigest() == source_hash
-    sidecar = Path(str(audio) + ".amp.json")
+    sidecar = folder / ".ampverse" / "tracks" / (audio.name + ".json")
     prep = json.loads(sidecar.read_text())
     assert abs(prep["bpm"] - 120) < 2, prep
     assert prep["harmonic_key"] == "8B", prep
@@ -32,7 +32,7 @@ with tempfile.TemporaryDirectory() as tmp:
     assert prep["cue_in"] == 2 and prep["cue_out"] == 8
     assert prep["manual_cues"][0]["id"] == "my-drop" and prep["vendor_extension"]["preserved"]
     moved = Path(tmp) / "relocated"; moved.mkdir()
-    shutil.copyfile(audio, moved / audio.name); shutil.copyfile(sidecar, moved / sidecar.name)
+    shutil.copyfile(audio, moved / audio.name); shutil.copytree(folder / ".ampverse", moved / ".ampverse")
     subprocess.run([binary, str(moved)], check=True)
-    assert json.loads((moved / sidecar.name).read_text())["source_sha256"] == prep["source_sha256"]
+    assert json.loads((moved / ".ampverse" / "tracks" / sidecar.name).read_text())["source_sha256"] == prep["source_sha256"]
 print("PASS: tempo/key, silence trim, manual cues, extensions and relocated metadata")
