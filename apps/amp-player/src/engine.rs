@@ -46,6 +46,21 @@ fn analyze_with(
     })
     .map_err(|e| e.to_string())?;
     let mut command = Command::new(executable);
+    // Share the player's bundled audio tools with an engine installed in addons/.
+    if let Some(directory) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(Path::to_path_buf))
+    {
+        let mut paths = vec![directory];
+        if let Some(existing) = std::env::var_os("PATH") {
+            paths.extend(std::env::split_paths(&existing));
+        }
+        command.env(
+            "PATH",
+            std::env::join_paths(paths).map_err(|e| e.to_string())?,
+        );
+    }
+
     #[cfg(windows)]
     {
         use std::os::windows::process::CommandExt;
