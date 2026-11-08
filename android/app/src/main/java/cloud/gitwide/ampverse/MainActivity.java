@@ -32,7 +32,11 @@ public final class MainActivity extends Activity {
     private final Handler handler = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
     private LinearLayout root, page;
-    private TextView title, clock, status;
+    private TextView title, clock, durationLabel, details, status;
+    private ImageView artwork;
+    private final List<TextView> playerRows = new ArrayList<>();
+    private String artworkKey = "";
+    private byte[] displayedArtwork;
     private SeekBar seek;
     private Button play, shuffleButton, repeatButton;
     private boolean library, dragging, importing;
@@ -97,7 +101,7 @@ public final class MainActivity extends Activity {
     private void openSettings(){startActivity(new Intent(this,SettingsActivity.class));}
     private void draw() {
         appearance=new Appearance(this);bg=appearance.background;panel=appearance.surface;text=appearance.text;muted=appearance.muted;accent=appearance.accent;
-        title=null;clock=null;seek=null;play=null;status=null;shuffleButton=null;repeatButton=null;
+        title=null;clock=null;durationLabel=null;details=null;artwork=null;artworkKey="";displayedArtwork=null;playerRows.clear();seek=null;play=null;status=null;shuffleButton=null;repeatButton=null;
         getWindow().setStatusBarColor(bg);getWindow().setNavigationBarColor(bg);
         root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackground(Chrome.panel(appearance,false));
         root.setOnApplyWindowInsetsListener((view,insets)->{view.setPadding(dp(6)+insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),dp(6)+insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;});setContentView(root);
@@ -105,13 +109,16 @@ public final class MainActivity extends Activity {
             PopupMenu menu=new PopupMenu(this,root.getChildAt(0));
             for(String name:new String[]{"AMP Player","AMP Library","AMP DJ","AMP Remote","AMP Lab","AMP Cast","Settings"})menu.getMenu().add(name);
             menu.setOnMenuItemClickListener(item->{String name=item.getTitle().toString();if(name.equals("Settings"))openSettings();else selectModule(name);return true;});menu.show();
-        });brand.setTag("module-menu");brand.setTextSize(21);brand.setTypeface(null,Typeface.BOLD_ITALIC);brand.setContentDescription("AMP Verse module dropdown");root.addView(brand,new LinearLayout.LayoutParams(-1,dp(44)));
+        });brand.setTag("module-menu");brand.setTextSize(18);brand.setGravity(android.view.Gravity.START|android.view.Gravity.CENTER_VERTICAL);if(appearance.classic){brand.setBackground(Chrome.panel(appearance,false));brand.setTextColor(Color.WHITE);}brand.setTypeface(null,Typeface.BOLD_ITALIC);brand.setContentDescription("AMP Verse module dropdown");root.addView(brand,new LinearLayout.LayoutParams(-1,dp(36)));
+        if(!module.equals("AMP Player")){
         HorizontalScrollView nav=new HorizontalScrollView(this);nav.setHorizontalScrollBarEnabled(false);LinearLayout tabs=new LinearLayout(this);
         for(String name:new String[]{"AMP Player","AMP Library","AMP DJ","AMP Remote","AMP Lab","AMP Cast"}){
             Button tab=button(name.replace("AMP ",""),()->selectModule(name));tab.setBackground(Chrome.button(appearance,module.equals(name)));if(module.equals(name))tab.setTextColor(Color.BLACK);LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(dp(79),dp(44));params.setMargins(1,dp(3),1,dp(3));tabs.addView(tab,params);
         }nav.addView(tabs);root.addView(nav);
-        ScrollView scroll=new ScrollView(this);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));page=new LinearLayout(this);page.setOrientation(LinearLayout.VERTICAL);scroll.addView(page);
-        LinearLayout caption=card();caption.addView(label(module,18,accent));
+        }
+        page=new LinearLayout(this);page.setOrientation(LinearLayout.VERTICAL);
+        if(module.equals("AMP Player"))root.addView(page,new LinearLayout.LayoutParams(-1,0,1));
+        else {ScrollView scroll=new ScrollView(this);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));scroll.addView(page);LinearLayout caption=card();caption.addView(label(module,18,accent));}
         if(module.equals("AMP Player"))drawPlayer();
         else if(library)drawLibrary();
         else if(module.equals("AMP DJ")){
@@ -124,25 +131,36 @@ public final class MainActivity extends Activity {
             String detail=module.equals("AMP Remote")?"Connect to the desktop library, browse songs or playlists, listen on this phone, then Save offline for Cast. This Remote workflow is not implemented in this preview yet.":module.equals("AMP Lab")?"AMP Lab uses the existing MP3 Lab editor foundation on desktop. Android audio editing and preparation tools are not implemented yet.":"AMP Cast is an independent radio server. Native Android station control is planned; the phone does not host a radio server in this preview.";
             info.addView(label(detail,16,text));info.addView(button("Settings",this::openSettings));
         }
-        status=label(message,12,muted);page.addView(status);page.addView(label("AMP VERSE  "+BuildConfig.VERSION_NAME+" · LOCAL / OFFLINE",11,muted));refresh();
+        status=label(message,12,muted);page.addView(status);if(!module.equals("AMP Player"))page.addView(label("AMP VERSE  "+BuildConfig.VERSION_NAME+" · LOCAL / OFFLINE",11,muted));refresh();
     }
     private void drawPlayer(){
-        LinearLayout spectrum=card();spectrum.addView(new SpectrumView(this),new LinearLayout.LayoutParams(-1,dp(70)));
-        LinearLayout now=card();
-        LinearLayout display=new LinearLayout(this);display.setOrientation(LinearLayout.HORIZONTAL);display.setPadding(dp(8),dp(10),dp(8),dp(10));display.setBackground(Chrome.panel(appearance,true));
-        ImageView art=new ImageView(this);art.setImageResource(cloud.gitwide.ampverse.R.drawable.app_icon);art.setContentDescription("AMP Verse icon");display.addView(art,new LinearLayout.LayoutParams(dp(88),dp(88)));
-        LinearLayout copy=new LinearLayout(this);copy.setOrientation(LinearLayout.VERTICAL);copy.setPadding(dp(10),0,0,0);display.addView(copy,new LinearLayout.LayoutParams(0,-2,1));
-        title=label("Choose a song",19,appearance.classic?Color.rgb(163,255,37):text);title.setTypeface(null,Typeface.BOLD);title.setMaxLines(3);copy.addView(title);copy.addView(label(isRadio()?"Internet radio · network stream":"Local audio · saved on device",12,muted));clock=label("00:00 / --:--",20,appearance.classic?Color.rgb(163,255,37):accent);clock.setTypeface(Typeface.MONOSPACE);copy.addView(clock);now.addView(display);
-        seek=new SeekBar(this);seek.setMax(1000);seek.setProgressTintList(android.content.res.ColorStateList.valueOf(accent));seek.setThumbTintList(android.content.res.ColorStateList.valueOf(accent));now.addView(seek);
+        LinearLayout spectrum=card();spectrum.setPadding(dp(6),dp(5),dp(6),dp(5));spectrum.addView(new SpectrumView(this),new LinearLayout.LayoutParams(-1,dp(62)));
+        LinearLayout now=card();now.setPadding(dp(5),dp(5),dp(5),dp(3));
+        LinearLayout display=new LinearLayout(this);display.setPadding(dp(4),dp(4),dp(4),dp(4));display.setBackground(Chrome.panel(appearance,true));
+        artwork=new ImageView(this);artwork.setImageResource(R.drawable.app_icon);artwork.setScaleType(ImageView.ScaleType.CENTER_CROP);artwork.setContentDescription("Album artwork, AMP Verse icon when unavailable");display.addView(artwork,new LinearLayout.LayoutParams(dp(112),dp(112)));
+        LinearLayout copy=new LinearLayout(this);copy.setOrientation(LinearLayout.VERTICAL);copy.setPadding(dp(8),0,0,0);display.addView(copy,new LinearLayout.LayoutParams(0,dp(112),1));
+        title=label("Choose a song",16,appearance.classic?Color.rgb(163,255,37):text);title.setTypeface(null,Typeface.BOLD);title.setMaxLines(2);title.setEllipsize(android.text.TextUtils.TruncateAt.END);copy.addView(title);
+        details=label("Phone audio",12,text);details.setMaxLines(4);copy.addView(details);now.addView(display);
+        seek=new SeekBar(this);seek.setMax(1000);seek.setProgressTintList(android.content.res.ColorStateList.valueOf(accent));seek.setThumbTintList(android.content.res.ColorStateList.valueOf(accent));seek.setContentDescription("Playback position");now.addView(seek,new LinearLayout.LayoutParams(-1,dp(32)));
         seek.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){dragging=true;}public void onStopTrackingTouch(SeekBar b){if(player!=null&&player.getDuration()>0)player.seekTo(player.getDuration()*b.getProgress()/1000);dragging=false;}public void onProgressChanged(SeekBar b,int v,boolean u){}});
+        LinearLayout times=new LinearLayout(this);clock=label("00:00",12,text);durationLabel=label("--:--",12,text);durationLabel.setGravity(android.view.Gravity.END);times.addView(clock,new LinearLayout.LayoutParams(0,-2,1));times.addView(durationLabel,new LinearLayout.LayoutParams(0,-2,1));now.addView(times);
         LinearLayout controls=new LinearLayout(this);rowButton(controls,"|◀",()->{if(player!=null)player.seekToPreviousMediaItem();});controls.getChildAt(0).setContentDescription("Previous track");
         play=button("▶",()->{if(player==null||player.getMediaItemCount()==0)return;if(player.isPlaying())player.pause();else{if(player.getPlaybackState()==Player.STATE_ENDED)player.seekToDefaultPosition();player.prepare();player.play();}refresh();});play.setContentDescription("Play or pause");controls.addView(play,new LinearLayout.LayoutParams(0,dp(46),1));
-        rowButton(controls,"■",()->{if(player!=null){player.pause();player.seekToDefaultPosition();}refresh();});controls.getChildAt(2).setContentDescription("Stop playback");rowButton(controls,"▶|",()->{if(player!=null)player.seekToNextMediaItem();});controls.getChildAt(3).setContentDescription("Next track");now.addView(controls);
-        LinearLayout modes=new LinearLayout(this);
-        shuffleButton=button("Shuffle",()->{if(player==null)return;boolean value=!player.getShuffleModeEnabled();player.setShuffleModeEnabled(value);prefs.edit().putBoolean("shuffle",value).apply();refresh();});shuffleButton.setContentDescription("Toggle shuffle");modes.addView(shuffleButton,new LinearLayout.LayoutParams(0,dp(44),1));
-        repeatButton=button("Repeat",()->{if(player==null)return;boolean value=player.getRepeatMode()!=Player.REPEAT_MODE_ALL;player.setRepeatMode(value?Player.REPEAT_MODE_ALL:Player.REPEAT_MODE_OFF);prefs.edit().putBoolean("repeat",value).apply();refresh();});repeatButton.setContentDescription("Toggle repeat queue");modes.addView(repeatButton,new LinearLayout.LayoutParams(0,dp(44),1));now.addView(modes);
-        LinearLayout tools=new LinearLayout(this);rowButton(tools,"EQ",this::equalizer);rowButton(tools,"PL",()->selectModule("AMP Library"));rowButton(tools,"Radio",this::radio);now.addView(tools);
-        LinearLayout actions=new LinearLayout(this);rowButton(actions,"Library",()->selectModule("AMP Library"));rowButton(actions,"+ Music",()->{PopupMenu menu=new PopupMenu(this,root.getChildAt(0));menu.getMenu().add("Scan folder");menu.getMenu().add("Select songs");menu.setOnMenuItemClickListener(item->{if(item.getTitle().toString().equals("Scan folder"))scanFolder();else importSongs();return true;});menu.show();});rowButton(actions,"Settings",this::openSettings);now.addView(actions);drawQueue(false);
+        rowButton(controls,"■",()->{if(player!=null){player.pause();player.seekToDefaultPosition();}refresh();});controls.getChildAt(2).setContentDescription("Stop playback");rowButton(controls,"▶|",()->{if(player!=null)player.seekToNextMediaItem();});controls.getChildAt(3).setContentDescription("Next track");
+        shuffleButton=button("⇄",()->{if(player==null)return;boolean value=!player.getShuffleModeEnabled();player.setShuffleModeEnabled(value);prefs.edit().putBoolean("shuffle",value).apply();refresh();});shuffleButton.setContentDescription("Toggle shuffle");controls.addView(shuffleButton,new LinearLayout.LayoutParams(0,dp(46),1));
+        repeatButton=button("↻",()->{if(player==null)return;boolean value=player.getRepeatMode()!=Player.REPEAT_MODE_ALL;player.setRepeatMode(value?Player.REPEAT_MODE_ALL:Player.REPEAT_MODE_OFF);prefs.edit().putBoolean("repeat",value).apply();refresh();});repeatButton.setContentDescription("Toggle repeat queue");controls.addView(repeatButton,new LinearLayout.LayoutParams(0,dp(46),1));now.addView(controls);
+        LinearLayout tools=new LinearLayout(this);rowButton(tools,"EQ",this::equalizer);rowButton(tools,"PL",()->selectModule("AMP Library"));rowButton(tools,"+",this::addMusic);tools.getChildAt(2).setContentDescription("Add music: scan folder or select songs");rowButton(tools,"((•))",this::radio);tools.getChildAt(3).setContentDescription("Internet radio or AMP Cast stream");now.addView(tools);
+        drawPlayerQueue();
+    }
+    private void addMusic(){PopupMenu menu=new PopupMenu(this,root.getChildAt(0));menu.getMenu().add("Scan folder");menu.getMenu().add("Select songs");menu.setOnMenuItemClickListener(item->{if(item.getTitle().toString().equals("Scan folder"))scanFolder();else importSongs();return true;});menu.show();}
+    private void drawPlayerQueue(){
+        LinearLayout queue=card();queue.setPadding(dp(4),dp(3),dp(4),dp(4));LinearLayout.LayoutParams layout=(LinearLayout.LayoutParams)queue.getLayoutParams();layout.height=0;layout.weight=1;
+        TextView heading=label("▵  Now Playing (Queue)",14,appearance.classic?Color.BLACK:text);heading.setTypeface(null,Typeface.BOLD);heading.setPadding(dp(5),dp(4),dp(5),dp(4));heading.setBackground(Chrome.button(appearance,false));queue.addView(heading);
+        ScrollView scroll=new ScrollView(this);scroll.setBackground(Chrome.panel(appearance,true));queue.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));LinearLayout rows=new LinearLayout(this);rows.setOrientation(LinearLayout.VERTICAL);scroll.addView(rows);
+        final boolean radio=isRadio();final List<MediaItem> items=new ArrayList<>();try{if(radio)items.addAll(LibraryStore.read(this));else if(player!=null)for(int i=0;i<player.getMediaItemCount();i++)items.add(player.getMediaItemAt(i));}catch(Exception error){message="Cannot read local library: "+error.getMessage();}
+        if(items.isEmpty()){TextView empty=label("Tap + to scan a music folder",14,muted);empty.setPadding(dp(8),dp(10),dp(8),dp(10));rows.addView(empty);}
+        for(int i=0;i<Math.min(queueLimit,items.size());i++){final int index=i;MediaItem item=items.get(i);TextView song=label((i+1)+".  "+item.mediaMetadata.title,14,text);song.setSingleLine(true);song.setEllipsize(android.text.TextUtils.TruncateAt.END);song.setGravity(android.view.Gravity.CENTER_VERTICAL);song.setPadding(dp(8),0,dp(6),0);song.setContentDescription("Play "+item.mediaMetadata.title);song.setOnClickListener(v->{if(player==null)return;if(radio)player.setMediaItems(items);player.seekTo(index,0);player.prepare();player.play();refresh();});rows.addView(song,new LinearLayout.LayoutParams(-1,dp(44)));playerRows.add(song);}
+        if(items.size()>queueLimit)rows.addView(button("Show 100 more songs",()->{queueLimit+=100;draw();}));
     }
     private void drawLibrary(){
         LinearLayout source=card();source.addView(label("Desktop library",17,accent));source.addView(label("Browse and listen through AMP Remote. Saving songs or playlists offline for Cast is coming with that connection.",14,muted));source.addView(button("AMP Remote",()->selectModule("AMP Remote")));
@@ -161,16 +179,22 @@ public final class MainActivity extends Activity {
         if(localItems.size()>queueLimit)queue.addView(button("Show 100 more songs",()->{queueLimit+=100;draw();}));
     }
     private void refresh() {
-        if (status == null) return; status.setText(message);
+        if (status == null) return; status.setText(message);status.setVisibility(module.equals("AMP Player")&&!importing&&!message.startsWith("Cannot")&&!message.startsWith("Could not")?View.GONE:View.VISIBLE);
         if (player == null || title == null || clock == null || seek == null || play == null) return;
         MediaItem item = player.getCurrentMediaItem(); title.setText(item == null ? "Choose a song" : item.mediaMetadata.title);
         long duration = player.getDuration(), position = player.getCurrentPosition();
-        clock.setText(time(position) + " / " + (duration == C.TIME_UNSET ? "--:--" : time(duration)));
+        clock.setText(time(position));durationLabel.setText(duration <= 0 ? "--:--" : time(duration));
+        androidx.media3.common.MediaMetadata metadata=player.getMediaMetadata();
+        String artist=metadata.artist==null?"Phone audio":metadata.artist.toString();String album=metadata.albumTitle==null?"":metadata.albumTitle.toString();
+        details.setText(artist+(album.isEmpty()?"":"\n"+album)+"\n"+(isRadio()?"Network stream":"Saved on this phone"));
+        String key=item==null?"":item.mediaId; if(!key.equals(artworkKey)){artworkKey=key;displayedArtwork=null;artwork.setImageResource(R.drawable.app_icon);}
+        if(metadata.artworkData!=null&&!Arrays.equals(displayedArtwork,metadata.artworkData)){displayedArtwork=metadata.artworkData;android.graphics.Bitmap bitmap=android.graphics.BitmapFactory.decodeByteArray(metadata.artworkData,0,metadata.artworkData.length);if(bitmap!=null)artwork.setImageBitmap(bitmap);}
+        for(int i=0;i<playerRows.size();i++){boolean selected=!isRadio()&&i==player.getCurrentMediaItemIndex();TextView row=playerRows.get(i);row.setBackgroundColor(selected?accent:Color.TRANSPARENT);row.setTextColor(selected?Color.BLACK:appearance.classic?Color.rgb(163,255,37):text);row.setSelected(selected);}
         if (!dragging) seek.setProgress(duration > 0 ? (int)(position * 1000 / duration) : 0);
         play.setText(player.isPlaying() ? "Ⅱ" : "▶");
         play.setBackground(Chrome.button(appearance,player.isPlaying()));
-        if(shuffleButton!=null){shuffleButton.setText(player.getShuffleModeEnabled()?"Shuffle ON":"Shuffle");shuffleButton.setBackground(Chrome.button(appearance,player.getShuffleModeEnabled()));}
-        if(repeatButton!=null){boolean repeat=player.getRepeatMode()==Player.REPEAT_MODE_ALL;repeatButton.setText(repeat?"Repeat ON":"Repeat");repeatButton.setBackground(Chrome.button(appearance,repeat));}
+        if(shuffleButton!=null){shuffleButton.setSelected(player.getShuffleModeEnabled());shuffleButton.setBackground(Chrome.button(appearance,player.getShuffleModeEnabled()));}
+        if(repeatButton!=null){boolean repeat=player.getRepeatMode()==Player.REPEAT_MODE_ALL;repeatButton.setSelected(repeat);repeatButton.setBackground(Chrome.button(appearance,repeat));}
     }
     static String time(long millis) { return String.format(Locale.ROOT, "%02d:%02d", Math.max(0,millis)/60000, Math.max(0,millis)/1000%60); }
     private void syncSavedLibrary() {

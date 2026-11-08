@@ -53,3 +53,6 @@ Keep AMP VERSE as the topmost dropdown brand. List AMP Player, AMP Library, AMP 
 ## AMP Lab integrated editor status
 
 Android 0.1.6 replaces the Lab placeholder with the existing MP3 Lab Android editor foundation, not a second newly created editor. Its proven waveform/trim/fades/gain/normalize/preview/export/session behavior is retained. The AMP VERSE dropdown and shared app theme preference integrate navigation/appearance. Desktop Lab still launches the existing independent installation. Earlier Android Lab-unbuilt notes are superseded for these editor features; multichannel/stems/analysis remain future work.
+
+
+Android Player uses the compact reference layout as of 0.1.7. Module navigation and Settings live in the AMP VERSE title dropdown. Playback occupies one six-button transport row and one EQ / PL / add / radio row; the remaining space belongs to the queue. Theme selection stays in Settings and changes the shared views rather than creating separate screens.
