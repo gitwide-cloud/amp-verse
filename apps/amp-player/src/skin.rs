@@ -6,21 +6,33 @@ pub const CYAN: C = C::from_rgb(36, 208, 235);
 pub const BLACK: C = C::from_rgb(7, 8, 12);
 
 pub fn configure(ctx: &egui::Context) {
-    let mut style = (*ctx.style_of(egui::Theme::Dark)).clone();
-    style.visuals = egui::Visuals::dark();
-    style.visuals.panel_fill = BLACK;
-    style.visuals.window_fill = C::from_rgb(18, 19, 27);
-    style.visuals.selection.bg_fill = C::from_rgb(110, 74, 0);
-    style.visuals.selection.stroke = Stroke::new(1., GOLD);
-    style.visuals.override_text_color = Some(C::from_rgb(224, 225, 232));
-    style.visuals.widgets.inactive.bg_fill = C::from_rgb(35, 35, 47);
-    style.visuals.widgets.inactive.bg_stroke = Stroke::new(1., C::from_rgb(89, 87, 109));
-    style.visuals.widgets.hovered.bg_fill = C::from_rgb(80, 62, 25);
-    style.visuals.widgets.hovered.bg_stroke = Stroke::new(1., GOLD);
-    style.spacing.button_padding = egui::vec2(10., 6.);
-    style.spacing.item_spacing = egui::vec2(8., 7.);
-    ctx.set_style_of(egui::Theme::Dark, style);
-    ctx.set_theme(egui::ThemePreference::Dark);
+    crate::theme::apply(ctx, crate::theme::load());
+}
+pub fn accent(ui: &egui::Ui) -> C {
+    crate::theme::current(ui.ctx()).palette().accent
+}
+pub fn signal(ui: &egui::Ui) -> C {
+    crate::theme::current(ui.ctx()).palette().signal
+}
+pub fn foreground(ui: &egui::Ui) -> C {
+    crate::theme::current(ui.ctx()).palette().text
+}
+pub fn color(ui: &egui::Ui, value: C) -> C {
+    if value == GOLD {
+        return accent(ui);
+    }
+    if value == GREEN {
+        return signal(ui);
+    }
+    if crate::theme::current(ui.ctx()) == crate::theme::Theme::ModernLight {
+        if value == ORANGE {
+            return C::from_rgb(150, 75, 0);
+        }
+        if value == CYAN {
+            return C::from_rgb(0, 105, 128);
+        }
+    }
+    value
 }
 
 fn gradient(painter: &egui::Painter, rect: Rect, top: C, bottom: C) -> egui::Shape {
@@ -39,16 +51,20 @@ fn gradient(painter: &egui::Painter, rect: Rect, top: C, bottom: C) -> egui::Sha
 }
 
 pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let theme = crate::theme::current(ui.ctx());
+    let p = theme.palette();
     let bg = ui.painter().add(egui::Shape::Noop);
     let response = egui::Frame::new()
         .inner_margin(12)
-        .stroke(Stroke::new(1., C::from_rgb(93, 91, 109)))
+        .stroke(Stroke::new(1., p.border))
         .show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), body)
                 .inner
         });
     let rect = response.response.rect;
-    let (top, bottom) = if purple {
+    let (top, bottom) = if theme != crate::theme::Theme::Classic {
+        (p.surface, p.surface)
+    } else if purple {
         (C::from_rgb(48, 41, 70), C::from_rgb(23, 20, 37))
     } else {
         (C::from_rgb(31, 32, 42), C::from_rgb(12, 13, 19))
@@ -58,7 +74,7 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
     ui.painter().rect_stroke(
         rect.shrink(2.),
         2.,
-        Stroke::new(1., C::from_rgb(10, 10, 16)),
+        Stroke::new(1., p.border.gamma_multiply(0.5)),
         egui::StrokeKind::Inside,
     );
     ui.painter().line_segment(
@@ -66,7 +82,7 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
             rect.left_top() + Vec2::new(3., 2.),
             rect.right_top() + Vec2::new(-3., 2.),
         ],
-        Stroke::new(1., C::from_rgb(136, 132, 153)),
+        Stroke::new(1., p.border),
     );
     response.inner
 }
@@ -80,35 +96,43 @@ pub enum Module {
 }
 
 pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
+    let theme = crate::theme::current(ui.ctx());
+    let p = theme.palette();
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 42.), egui::Sense::hover());
     ui.painter().add(gradient(
         ui.painter(),
         rect,
-        if purple {
+        if theme != crate::theme::Theme::Classic {
+            p.elevated
+        } else if purple {
             C::from_rgb(75, 63, 99)
         } else {
             C::from_rgb(59, 60, 72)
         },
-        BLACK,
+        if theme == crate::theme::Theme::Classic {
+            BLACK
+        } else {
+            p.surface
+        },
     ));
     ui.painter().rect_stroke(
         rect,
         3.,
-        Stroke::new(1., C::from_rgb(112, 107, 129)),
+        Stroke::new(1., p.border),
         egui::StrokeKind::Inside,
     );
     bolt(
         ui.painter(),
         Rect::from_min_size(rect.min + Vec2::new(12., 7.), Vec2::new(19., 28.)),
-        GOLD,
+        p.accent,
     );
     ui.painter().text(
         rect.min + Vec2::new(43., 21.),
         egui::Align2::LEFT_CENTER,
         title,
         FontId::proportional(23.),
-        C::from_rgb(235, 235, 242),
+        p.text,
     );
     let menu_rect = Rect::from_min_max(rect.min, egui::pos2(rect.left() + 285., rect.bottom()));
     let response = ui.interact(
@@ -130,14 +154,14 @@ pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
             arrow + Vec2::new(5., -3.),
             arrow + Vec2::new(0., 4.),
         ],
-        GOLD,
+        p.accent,
         Stroke::NONE,
     ));
     if response.hovered() {
         ui.painter().rect_stroke(
             menu_rect.shrink(2.),
             2.,
-            Stroke::new(1., GOLD),
+            Stroke::new(1., p.accent),
             egui::StrokeKind::Inside,
         );
     }
@@ -156,6 +180,9 @@ pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
                 ui.close();
             }
         }
+        ui.separator();
+        ui.label("Appearance");
+        crate::theme::selector(ui);
         ui.separator();
         ui.hyperlink_to(
             "AMP Lab downloads",
@@ -193,7 +220,7 @@ pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
         if ui
             .put(
                 button_rect,
-                egui::Button::new(RichText::new(text).color(GOLD)),
+                egui::Button::new(RichText::new(text).color(p.accent)),
             )
             .clicked()
         {
@@ -202,30 +229,37 @@ pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
     }
     ui.painter().line_segment(
         [rect.left_bottom(), rect.right_bottom()],
-        Stroke::new(2., GOLD.gamma_multiply(0.7)),
+        Stroke::new(2., p.accent.gamma_multiply(0.7)),
     );
     selected
 }
 pub fn label(ui: &mut egui::Ui, text: &str) {
-    ui.label(RichText::new(text).strong().size(17.).color(GOLD));
+    ui.label(RichText::new(text).strong().size(17.).color(accent(ui)));
 }
 
 pub fn button(ui: &mut egui::Ui, text: &str, accent: C) -> egui::Response {
+    let theme = crate::theme::current(ui.ctx());
+    let p = theme.palette();
+    let accent = color(ui, accent);
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(text.len() as f32 * 7.4 + 24., 32.),
         egui::Sense::click(),
     );
     let active = response.is_pointer_button_down_on();
-    ui.painter().rect_filled(rect, 3., BLACK);
+    ui.painter().rect_filled(rect, 3., p.background);
     ui.painter().add(gradient(
         ui.painter(),
         rect.shrink(2.),
-        if active {
+        if theme != crate::theme::Theme::Classic {
+            p.elevated
+        } else if active {
             C::from_rgb(85, 65, 20)
         } else {
             C::from_rgb(68, 67, 81)
         },
-        if active {
+        if theme != crate::theme::Theme::Classic {
+            p.elevated
+        } else if active {
             C::from_rgb(43, 30, 9)
         } else {
             C::from_rgb(14, 15, 22)
@@ -234,14 +268,7 @@ pub fn button(ui: &mut egui::Ui, text: &str, accent: C) -> egui::Response {
     ui.painter().rect_stroke(
         rect,
         3.,
-        Stroke::new(
-            1.,
-            if response.hovered() {
-                accent
-            } else {
-                C::from_rgb(123, 117, 139)
-            },
-        ),
+        Stroke::new(1., if response.hovered() { accent } else { p.border }),
         egui::StrokeKind::Inside,
     );
     ui.painter().text(

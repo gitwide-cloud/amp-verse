@@ -8,3 +8,6 @@ license.workspace = true
 amp-core.workspace = true
 eframe = { version = "=0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 rfd = "0.15"
+
+[dev-dependencies]
+tempfile = "3"

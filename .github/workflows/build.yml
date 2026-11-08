@@ -48,9 +48,11 @@ jobs:
         run: |
           mkdir -p test-output/music
           ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 test-output/music/Tone.wav
-          for view in player library dj addons; do
-            timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_SCREENSHOT_VIEW="$view" AMP_SCREENSHOT="test-output/$view.png" target/release/amp-player test-output/music
-            test -s "test-output/$view.png"
+          for theme in classic modern-light modern-dark; do
+            for view in player library dj addons; do
+              timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_THEME="$theme" AMP_VERSE_CONFIG_DIR=test-output/theme-config AMP_SCREENSHOT_VIEW="$view" AMP_SCREENSHOT="test-output/$theme-$view.png" target/release/amp-player test-output/music
+              test -s "test-output/$theme-$view.png"
+            done
           done
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'

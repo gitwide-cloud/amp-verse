@@ -37,3 +37,9 @@ Visual pass source: `17457efb0effc901370cfeaf85abbf6ea8a79930`. [Windows/Linux C
 Added an offline Plugin Manager with real included build versions, component search/filtering, module open actions, Cast companion-file presence detection, manual download links and explicit external-editor connection/launch. The supplied icon is shown in its detail panel. No network install/update system or multichannel AMP Lab editor is claimed. The existing editor repository was only read; no editor code was copied or changed.
 
 Local optimized build and strict linting passed. Captured and inspected `test-output/plugin-manager.png`, including the AMP Lab optional/unconnected state. The external-editor launch/file-picker flow has not been manually exercised. CI now also captures the manager with `AMP_SCREENSHOT_VIEW=addons`.
+
+## Three selectable themes
+
+Local workspace tests (including preference replacement/round-trip), strict linting and optimized builds passed. Captured and visually inspected all three native player themes and the Modern Light Library, DJ and Plugin Manager. All twelve native theme/view screenshots were generated successfully in `test-output/{classic,modern-light,modern-dark}-{player,library,dj,addons}.png`.
+
+In the live Cast browser UI, selected all three options and captured each appearance. Modern Light remained selected after a reload, verifying browser preference persistence. The station remained stopped throughout appearance QA. Evidence: `test-output/cast-{classic,modern-light,modern-dark}.png`. The temporary QA server was stopped afterward. No Android APK or device installation is claimed. Windows/Linux CI now captures all twelve native combinations; its result is separate from local verification.

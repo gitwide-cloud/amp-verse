@@ -8,7 +8,8 @@ use std::{
 };
 mod addons;
 mod skin;
-use skin::{CYAN, GOLD, GREEN, ORANGE};
+mod theme;
+use skin::{CYAN, GOLD, ORANGE};
 
 fn app_icon() -> std::sync::Arc<egui::IconData> {
     static ICON: std::sync::OnceLock<std::sync::Arc<egui::IconData>> = std::sync::OnceLock::new();
@@ -274,17 +275,18 @@ impl Player {
         }
     }
     fn folder_tree(ui: &mut egui::Ui, folder: &Folder, path: &Path, selected: &mut PathBuf) {
-        let response = egui::CollapsingHeader::new(RichText::new(&folder.name).color(GOLD))
-            .id_salt(path)
-            .default_open(path.as_os_str().is_empty())
-            .show(ui, |ui| {
-                for child in &folder.folders {
-                    Self::folder_tree(ui, child, &path.join(&child.name), selected);
-                }
-                if folder.folders.is_empty() {
-                    ui.weak(format!("{} audio files", folder.tracks.len()));
-                }
-            });
+        let response =
+            egui::CollapsingHeader::new(RichText::new(&folder.name).color(skin::accent(ui)))
+                .id_salt(path)
+                .default_open(path.as_os_str().is_empty())
+                .show(ui, |ui| {
+                    for child in &folder.folders {
+                        Self::folder_tree(ui, child, &path.join(&child.name), selected);
+                    }
+                    if folder.folders.is_empty() {
+                        ui.weak(format!("{} audio files", folder.tracks.len()));
+                    }
+                });
         if response.header_response.clicked() {
             *selected = path.to_path_buf();
         }
@@ -301,11 +303,20 @@ impl Player {
                     } else {
                         "STOPPED"
                     };
-                    ui.label(RichText::new(state).monospace().size(25.).color(GREEN));
+                    ui.label(
+                        RichText::new(state)
+                            .monospace()
+                            .size(25.)
+                            .color(skin::signal(ui)),
+                    );
                     ui.separator();
-                    ui.label(RichText::new(self.title(0)).size(18.).color(GREEN));
+                    ui.label(
+                        RichText::new(self.title(0))
+                            .size(18.)
+                            .color(skin::signal(ui)),
+                    );
                 });
-                ui.label(RichText::new(&self.status).color(egui::Color32::LIGHT_GRAY));
+                ui.label(RichText::new(&self.status).color(skin::foreground(ui)));
             });
             ui.horizontal(|ui| {
                 if skin::button(ui, "PLAY", GOLD).clicked()
@@ -336,7 +347,7 @@ impl Player {
                     "https://github.com/gitwide-cloud/mp3-lab/releases",
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.weak("0.1 / LOCAL AUDIO");
+                    theme::selector(ui);
                 });
             });
         });
@@ -389,7 +400,7 @@ impl Player {
                             }
                         });
                     ui.separator();
-                    ui.label(RichText::new("FOLDERS + PLAYLISTS").color(GOLD));
+                    ui.label(RichText::new("FOLDERS + PLAYLISTS").color(skin::accent(ui)));
                 });
                 ui.vertical(|ui| {
                     ui.set_width(ui.available_width());
@@ -415,7 +426,9 @@ impl Player {
                                     .min_col_width(64.)
                                     .show(ui, |ui| {
                                         for h in ["Name", "BPM", "Cue IN", "Cue OUT", "Type"] {
-                                            ui.label(RichText::new(h).strong().color(GOLD));
+                                            ui.label(
+                                                RichText::new(h).strong().color(skin::accent(ui)),
+                                            );
                                         }
                                         ui.end_row();
                                         if let Some(lib) = &self.library {
@@ -558,7 +571,7 @@ impl Player {
                         "{} files",
                         self.library.as_ref().map_or(0, |l| l.tracks.len())
                     ))
-                    .color(GOLD),
+                    .color(skin::accent(ui)),
                 );
                 ui.separator();
                 ui.label(self.root.display().to_string());
@@ -573,10 +586,13 @@ impl Player {
                 ui.label(
                     RichText::new("PREPARED AUDIO / TWO DECKS")
                         .monospace()
-                        .color(GREEN),
+                        .color(skin::signal(ui)),
                 );
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                    ui.label(RichText::new(format!("{} QUEUED", self.queue.len())).color(GOLD));
+                    ui.label(
+                        RichText::new(format!("{} QUEUED", self.queue.len()))
+                            .color(skin::accent(ui)),
+                    );
                 });
             });
             let width = ((ui.available_width() - 45.) / 2.).max(210.);
@@ -590,9 +606,9 @@ impl Player {
                             RichText::new(if deck == 0 { "DECK A" } else { "DECK B" })
                                 .strong()
                                 .size(22.)
-                                .color(accent),
+                                .color(skin::color(ui, accent)),
                         );
-                        ui.label(RichText::new(self.title(deck)).color(GREEN));
+                        ui.label(RichText::new(self.title(deck)).color(skin::signal(ui)));
                         ui.label(if self.playing[deck] {
                             "PLAYING"
                         } else {
@@ -624,7 +640,11 @@ impl Player {
                                 )
                             })
                             .unwrap_or_else(|| "Select a track in Library".into());
-                        ui.label(RichText::new(cues).monospace().color(accent));
+                        ui.label(
+                            RichText::new(cues)
+                                .monospace()
+                                .color(skin::color(ui, accent)),
+                        );
                         ui.horizontal(|ui| {
                             if skin::button(ui, "PLAY / CUE", accent).clicked()
                                 && let Some(i) = self.selected.or(self.loaded[deck])
@@ -645,7 +665,7 @@ impl Player {
                 );
                 ui.label("Prepared cue IN/OUT is active. Crossfade, sync, pitch and FX are future milestones.");
             });
-            ui.label(RichText::new(&self.status).color(GOLD));
+            ui.label(RichText::new(&self.status).color(skin::accent(ui)));
         });
     }
     fn addons_ui(&mut self, ui: &mut egui::Ui) {

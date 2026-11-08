@@ -61,6 +61,7 @@ dependencies = [
  "amp-core",
  "eframe",
  "rfd",
+ "tempfile",
 ]
 
 [[package]]

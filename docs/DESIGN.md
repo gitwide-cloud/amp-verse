@@ -14,3 +14,7 @@ Implemented in the native Rust shell and embedded Cast UI, with drawn geometry a
 - **AMP Lab target:** preserve the silver/graphite editor layout, visible AMP Lab label, green decoded waveform, original/processed preview, cue/trim bounds, processing controls and export panel. The multichannel section must eventually show real loaded audio channels/stems, with functional mute/solo/gain and rendered-audio validation. The existing MP3 Lab editor supplies a separate-process starting point, not proof that the new target controls, analysis, configurable normalization or multichannel engine exist. Its repository stays read-only in this project. No new AMP Lab editor window is shipped by this change.
 
 `AMP_SCREENSHOT` captures the real native UI. Set `AMP_SCREENSHOT_VIEW=player`, `library`, `dj`, or `addons` to render one surface as the root window for deterministic visual QA; ordinary launches use independent module viewports. CI captures all four surfaces. Screenshot mode never starts audio or fabricates a loaded song.
+
+## Selectable appearance
+
+Classic, Modern Light and Modern Dark are implemented across the native Player, Library, DJ and Plugin Manager, and the Cast browser console. Classic preserves the module finishes described above; modern themes use flat light or charcoal panels with readable text and gold accents. The top-bar dropdown includes Appearance, and the base player also exposes a visible selector. See [theme preferences and Android target](THEMES.md). CI captures all four native surfaces in all three themes using `AMP_THEME`.

@@ -4,6 +4,8 @@ An independent, modular audio project for Windows/Linux, with an integrated Andr
 
 The supplied AMP Verse references now guide the drawn desktop chrome and embedded Cast UI: purple/silver Player and orange/cyan DJ decks, black/gold folder Library and Cast console. See [visual direction](docs/DESIGN.md). The Library uses folders and playlists; older mockups' crates and integrated player strip are not included.
 
+**Themes:** Classic, Modern Light and Modern Dark are selectable in the desktop top-bar dropdown (Appearance) and main player selector, and in Cast's navigation bar. Choices persist locally. See [theme settings](docs/THEMES.md).
+
 ## Runnable milestone 0.1
 
 - **AMP Player:** native Rust/egui compact player, Play/Stop/Next, next-play volume, a separate folder-library window and JSON playlists. FFplay performs local playback.

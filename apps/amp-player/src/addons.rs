@@ -1,5 +1,5 @@
 //! Built-in component catalog and explicit external-editor connection. No remote code loading.
-use crate::skin::{self, GOLD, GREEN, Module};
+use crate::skin::{self, GOLD, Module};
 use eframe::egui::{self, RichText};
 use std::{
     path::PathBuf,
@@ -117,7 +117,7 @@ impl Manager {
             ));
         }
         ui.horizontal(|ui| {
-            ui.label(RichText::new("GitHub / gitwide-cloud").color(GOLD));
+            ui.label(RichText::new("GitHub / gitwide-cloud").color(skin::accent(ui)));
             ui.add(
                 egui::TextEdit::singleline(&mut self.search)
                     .hint_text("Search components...")
@@ -167,14 +167,14 @@ impl Manager {
                 let entry=&ENTRIES[self.selected];
                 ui.horizontal(|ui| {
                     if let Some(icon)=&self.icon { ui.image((icon.id(),egui::vec2(58.,58.))); }
-                    ui.vertical(|ui| {ui.label(RichText::new(entry.name).strong().size(25.).color(GOLD));ui.label(entry.kind);});
+                    ui.vertical(|ui| {ui.label(RichText::new(entry.name).strong().size(25.).color(skin::accent(ui)));ui.label(entry.kind);});
                 });
                 ui.separator(); ui.label(entry.summary); ui.add_space(7.);
                 for feature in entry.features { ui.label(format!("- {feature}")); }
                 ui.add_space(12.);
                 match self.selected {
                     0..=2=>{
-                        ui.label(RichText::new(format!("Included in this build / {}",env!("CARGO_PKG_VERSION"))).color(GREEN));
+                        ui.label(RichText::new(format!("Included in this build / {}",env!("CARGO_PKG_VERSION"))).color(skin::signal(ui)));
                         if skin::button(ui,"OPEN",GOLD).clicked() { action=Some(match self.selected {0=>Module::Verse,1=>Module::Library,_=>Module::Dj}); }
                     },
                     3=>{
@@ -201,13 +201,13 @@ impl Manager {
                 for name in ["AMP VERSE", "AMP Library", "AMP DJ"] {
                     ui.label(
                         RichText::new(format!("{name} / {}", env!("CARGO_PKG_VERSION")))
-                            .color(GREEN),
+                            .color(skin::signal(ui)),
                     );
                     ui.separator();
                 }
             });
         });
-        ui.label(RichText::new(&self.status).color(GOLD));
+        ui.label(RichText::new(&self.status).color(skin::accent(ui)));
         action
     }
 }
