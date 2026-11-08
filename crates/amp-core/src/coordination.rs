@@ -43,7 +43,19 @@ pub struct Lock {
 }
 impl Lock {
     pub fn acquire(record: &Path) -> Result<Self, String> {
-        Self::try_acquire(record)?.ok_or_else(|| "Shared record busy; retry after reloading".into())
+        // Short record maintenance may briefly overlap another writer/process handoff.
+        // Retry only contention; filesystem errors still fail immediately, and callers
+        // must still perform their revision/ownership checks after obtaining the lock.
+        let deadline = std::time::Instant::now() + Duration::from_millis(250);
+        loop {
+            if let Some(lock) = Self::try_acquire(record)? {
+                return Ok(lock);
+            }
+            if std::time::Instant::now() >= deadline {
+                return Err("Shared record busy; retry after reloading".into());
+            }
+            std::thread::sleep(Duration::from_millis(2));
+        }
     }
     fn try_acquire(record: &Path) -> Result<Option<Self>, String> {
         let path = PathBuf::from(format!("{}.lock", record.display()));
@@ -730,6 +742,21 @@ mod tests {
         let mut c: Claim = read(&lease.path).unwrap().unwrap();
         c.expires_ms = 0;
         atomic_write(&lease.path, &c).unwrap();
+    }
+    #[test]
+    fn short_record_contention_retries_without_bypassing_the_lock() {
+        let root = fixture();
+        let record = root.path().join("record.json");
+        let owner = Lock::acquire(&record).unwrap();
+        assert!(Lock::try_acquire(&record).unwrap().is_none());
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(Duration::from_millis(15));
+            drop(owner);
+        });
+        let acquired = Lock::acquire(&record).unwrap();
+        assert!(Lock::try_acquire(&record).unwrap().is_none());
+        drop(acquired);
+        release.join().unwrap();
     }
     #[test]
     fn unrelated_descriptor_close_does_not_release_another_workers_lock() {
