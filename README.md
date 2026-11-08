@@ -4,22 +4,22 @@ An independent, modular audio project for Windows/Linux, with an integrated Andr
 
 The supplied AMP Verse references now guide the drawn desktop chrome and embedded Cast UI: purple/silver Player and orange/cyan DJ decks, black/gold folder Library and Cast console. See [visual direction](docs/DESIGN.md). The Library uses folders and playlists; older mockups' crates and integrated player strip are not included.
 
-**Themes:** Classic, Modern Light and Modern Dark are selectable in the desktop top-bar dropdown (Appearance) and main player selector, and in Cast's navigation bar. Choices persist locally. See [theme settings](docs/THEMES.md).
+**Themes:** Classic, Modern Light and Modern Dark are selectable in the desktop top-bar dropdown (Appearance), and in Cast's navigation bar. Choices persist locally. See [theme settings](docs/THEMES.md).
 
 ## Runnable milestone 0.1
 
-- **AMP Player:** native Rust/egui compact player, Play/Stop/Next, next-play volume, a separate folder-library window and JSON playlists. FFplay performs local playback.
+- **AMP Player:** native Rust/egui compact player, play/pause, stop/next, live master volume, a separate folder-library window and JSON playlists. Desktop playback uses the shared CPAL mixer with background FFmpeg decoding.
 - **AMP Library:** shared Rust folder scanner, deterministic file tree, supported audio extensions, playlist persistence, validated prepared cue/BPM/beatgrid/stem-reference sidecars, root-confined file resolution. No crates.
-- **AMP DJ prototype:** two independently playable decks, prepared cue IN/OUT playback, sequential Auto DJ from the queued playlist. No crossfade, beat sync, waveform editor, live stems or mixer yet.
+- **AMP DJ:** shared-stream two-deck mixer, prepared cues, play/pause, pitch/speed, channel faders, manual and one-touch equal-power crossfade, live meters/envelopes, captured loops, three-band EQ and low-pass FX. SYNC matches prepared BPM within the pitch range; beat-phase sync, key lock, live stems and broader effects remain unbuilt.
 - **AMP Cast:** independent headless Rust server, embedded web UI, station launch/stop, sequential looping Auto DJ, one real-time MP3 encoder shared by browser listeners, optional simple admin password. Plays while the desktop app is closed.
-- **Plugin Manager:** searchable offline component catalog, real included build versions, companion-binary detection and module launch actions. Open it from the top-bar dropdown or **ADD-ONS** button.
+- **Plugin Manager:** searchable offline component catalog, real included build versions, companion-binary detection and module launch actions. Open it from the top-bar dropdown.
 - **AMP Lab:** manual links to MP3 Lab Releases and an explicit connection to a separately installed editor. Pick its executable in Plugin Manager, or set `AMP_LAB_EXE` to its full path before launch. Picker connections last for the session. **Open editor** launches it separately, without file handoff or modifying MP3 Lab. No editor code copied, automatic downloader, installer or native plugin loader yet.
 
-**Not built yet:** Android prepared cues/stems, folder-tree import and LAN remote control; desktop/Cast LAN discovery and Android remote-control client; metadata tag extraction; local cue-editing UI; persisted queues/session recovery; Cast local soundcard output, scheduling and station playlist selection; native in-process audio engine; advanced DJ controls; automatic updates or add-on installation. See [architecture](docs/ARCHITECTURE.md) and [roadmap](docs/ROADMAP.md). The UI reports prototype status; it does not display fictitious waveforms, meters or listener counts.
+**Not built yet:** Android prepared cues/stems, folder-tree import and LAN remote control; desktop/Cast LAN discovery and Android remote-control client; metadata tag extraction; persisted queues/session recovery; Cast local soundcard output, scheduling and station playlist selection; advanced DJ effects/routing; automatic updates or add-on installation. See [architecture](docs/ARCHITECTURE.md) and [roadmap](docs/ROADMAP.md). The UI reports prototype status; it does not display fictitious waveforms, meters or listener counts.
 
 ## Run from source
 
-Requires stable Rust (edition 2024), FFmpeg with `ffmpeg` and `ffplay` on PATH, and a desktop OpenGL session for Player. These initial binaries **do not bundle audio tools**. Install FFmpeg separately. Linux build: `sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev ffmpeg`.
+Requires stable Rust (edition 2024), FFmpeg with `ffmpeg` and `ffplay` on PATH, and a desktop OpenGL session for Player. These initial binaries **do not bundle audio tools**. Install FFmpeg separately. Linux build: `sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev ffmpeg`.
 
 ```sh
 cargo run -p amp-player -- /path/to/music
@@ -93,7 +93,7 @@ Android **AMP Lab** is now the integrated MP3 Lab editor foundation: open audio,
 
 ### Desktop DJ and Lab arrangement
 
-AMP DJ has two deck platters and an embedded searchable library. Choose a music folder (including a mounted NAS folder), select Load A or Load B, then Play / Cue. Each deck uses the track's prepared cue IN/OUT. Live crossfade, tempo sync, pitch and FX remain future work. The chosen library folder is remembered for the next launch.
+AMP DJ has two deck platters and an embedded searchable library. Choose a music folder (including a mounted NAS folder), select Load A or Load B, then Play / Cue. Each deck uses the track's prepared cue IN/OUT. Live manual/auto crossfade, pitch, prepared-BPM tempo matching, EQ and low-pass FX are now implemented; see [DJ mixer](docs/DJ_MIXER.md). The chosen library folder is remembered for the next launch.
 
 AMP Lab opens a mix arrangement with one lane per song. Add tracks from the scanned library, set timeline starts, cue IN/OUT and gain, then export one combined 320 kbps MP3 or individual trimmed MP3 files. Overlapping lanes mix together with a final limiter. Save/load arrangements as JSON. The existing installed MP3 Lab opens separately for waveform editing; arrangement bars indicate clip positions rather than audio waveforms. Arrangement fades, audition transport and automatic beat alignment are not implemented yet.
 

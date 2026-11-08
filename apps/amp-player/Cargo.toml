@@ -7,6 +7,8 @@ license.workspace = true
 
 [dependencies]
 amp-core.workspace = true
+cpal = "=0.18.2"
+rtrb = "0.3"
 eframe = { version = "=0.37.0", default-features = false, features = ["glow", "default_fonts", "x11", "wayland"] }
 rfd = "0.15"
 serde.workspace = true

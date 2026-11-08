@@ -1,13 +1,15 @@
 param(
     [string]$Destination = "$env:LOCALAPPDATA/Programs/AMP Verse",
-    [string]$AudioTools = ""
+    [string]$AudioTools = "",
+    [switch]$PlayerOnly
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot -Parent
 $binary = Join-Path $repo 'target/release/amp-player.exe'
 if (!(Test-Path -LiteralPath $binary)) { throw 'Build the release desktop binaries first.' }
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-foreach ($name in @('amp-player.exe','amp-cast.exe','amp-prepare.exe')) {
+$binaries=if($PlayerOnly){@('amp-player.exe')}else{@('amp-player.exe','amp-cast.exe','amp-prepare.exe')}
+foreach ($name in $binaries) {
     Copy-Item -LiteralPath (Join-Path $repo "target/release/$name") -Destination $Destination -Force
 }
 foreach ($name in @('README.md','LICENSE','THIRD_PARTY_NOTICES.md')) {

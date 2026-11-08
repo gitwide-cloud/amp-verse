@@ -90,3 +90,6 @@ Lab mix arrangements live in `amp-core::arrangement`: clips reference library-re
 
 
 Portable preparation now has a concrete version-1 implementation in amp-core::preparation/analysis. Desktop Library and amp-prepare use the same decoder/analyzer and adjacent metadata writer. See PREPARATION.md for persisted fields, manual protection, concurrency limits and unfinished Android consumption.
+
+
+Desktop Player/DJ now use a shared CPAL stream and bounded FFmpeg decoder workers rather than separate FFplay outputs. Sample-clock crossfades and playback controls live in apps/amp-player/src/mixer.rs. Cast remains an independent encoder/server. See DJ_MIXER.md for controls, buffering, DSP and verification limits.

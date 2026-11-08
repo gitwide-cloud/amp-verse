@@ -408,3 +408,55 @@ pub fn platter(ui: &mut egui::Ui, size: f32, accent: C, playing: bool, phase: f3
         GOLD,
     );
 }
+
+/// Live post-EQ envelope from the actual mixer callback; no synthesized spectrum.
+pub fn scope(ui: &mut egui::Ui, wave: &[f32; 96], accent: C) {
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), 58.), egui::Sense::hover());
+    ui.painter().rect_filled(rect, 2., BLACK);
+    for (i, value) in wave.iter().enumerate() {
+        let x = rect.left() + i as f32 * rect.width() / 96.;
+        let h = value.clamp(0., 1.) * rect.height() * 0.45;
+        ui.painter().line_segment(
+            [
+                egui::pos2(x, rect.center().y - h),
+                egui::pos2(x, rect.center().y + h),
+            ],
+            Stroke::new(2., accent),
+        );
+    }
+    ui.painter().rect_stroke(
+        rect,
+        2.,
+        Stroke::new(1., accent.gamma_multiply(0.5)),
+        egui::StrokeKind::Inside,
+    );
+}
+pub fn meter(ui: &mut egui::Ui, peak: f32, size: Vec2) {
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    ui.painter().rect_filled(rect, 1., BLACK);
+    for i in 0..20 {
+        let level = i as f32 / 20.;
+        let y = rect.bottom() - (i + 1) as f32 * rect.height() / 20.;
+        let active = peak.clamp(0., 1.) > level;
+        let color = if i > 16 {
+            C::from_rgb(250, 55, 20)
+        } else if i > 12 {
+            GOLD
+        } else {
+            GREEN
+        };
+        ui.painter().rect_filled(
+            Rect::from_min_size(
+                egui::pos2(rect.left() + 3., y + 1.),
+                egui::vec2(rect.width() - 6., rect.height() / 20. - 2.),
+            ),
+            0.,
+            if active {
+                color
+            } else {
+                color.gamma_multiply(0.12)
+            },
+        );
+    }
+}
