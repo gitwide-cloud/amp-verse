@@ -71,7 +71,13 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
     response.inner
 }
 
-pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) {
+pub enum Module {
+    Verse,
+    Library,
+    Dj,
+}
+
+pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 42.), egui::Sense::hover());
     ui.painter().add(gradient(
@@ -98,21 +104,103 @@ pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) {
     ui.painter().text(
         rect.min + Vec2::new(43., 21.),
         egui::Align2::LEFT_CENTER,
-        "AMP VERSE",
+        title,
         FontId::proportional(23.),
         C::from_rgb(235, 235, 242),
     );
-    ui.painter().text(
-        rect.min + Vec2::new(211., 21.),
-        egui::Align2::LEFT_CENTER,
-        title,
-        FontId::proportional(22.),
-        GOLD,
+    let menu_rect = Rect::from_min_max(rect.min, egui::pos2(rect.left() + 285., rect.bottom()));
+    let response = ui.interact(
+        menu_rect,
+        ui.scope_id().with("module-menu"),
+        egui::Sense::click(),
     );
+    response.widget_info(|| {
+        egui::WidgetInfo::labeled(
+            egui::Role::Button,
+            true,
+            format!("{title} / Open module menu"),
+        )
+    });
+    let arrow = rect.min + Vec2::new(266., 20.);
+    ui.painter().add(egui::Shape::convex_polygon(
+        vec![
+            arrow + Vec2::new(-5., -3.),
+            arrow + Vec2::new(5., -3.),
+            arrow + Vec2::new(0., 4.),
+        ],
+        GOLD,
+        Stroke::NONE,
+    ));
+    if response.hovered() {
+        ui.painter().rect_stroke(
+            menu_rect.shrink(2.),
+            2.,
+            Stroke::new(1., GOLD),
+            egui::StrokeKind::Inside,
+        );
+    }
+    let mut selected = None;
+    egui::Popup::menu(&response).show(|ui| {
+        ui.set_min_width(220.);
+        for (label, module) in [
+            ("AMP VERSE", Module::Verse),
+            ("AMP Library", Module::Library),
+            ("AMP DJ", Module::Dj),
+        ] {
+            if ui.button(label).clicked() {
+                selected = Some(module);
+                ui.close();
+            }
+        }
+        ui.separator();
+        ui.hyperlink_to(
+            "AMP Lab downloads",
+            "https://github.com/gitwide-cloud/mp3-lab/releases",
+        );
+        ui.hyperlink_to("AMP Cast / local web UI", "http://127.0.0.1:8787");
+    });
+    let controls_left = rect.right() - 110.;
+    let drag_rect = Rect::from_min_max(
+        egui::pos2(menu_rect.right(), rect.top()),
+        egui::pos2(controls_left, rect.bottom()),
+    );
+    let drag = ui.interact(
+        drag_rect,
+        ui.scope_id().with("title-drag"),
+        egui::Sense::click_and_drag(),
+    );
+    let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+    if drag.drag_started() {
+        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+    }
+    if drag.double_clicked() {
+        ui.ctx()
+            .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
+    for (offset, text, command) in [
+        (0., "_", egui::ViewportCommand::Minimized(true)),
+        (35., "[]", egui::ViewportCommand::Maximized(!maximized)),
+        (70., "X", egui::ViewportCommand::Close),
+    ] {
+        let button_rect = Rect::from_min_size(
+            egui::pos2(controls_left + offset, rect.top() + 5.),
+            egui::vec2(31., 31.),
+        );
+        if ui
+            .put(
+                button_rect,
+                egui::Button::new(RichText::new(text).color(GOLD)),
+            )
+            .clicked()
+        {
+            ui.ctx().send_viewport_cmd(command);
+        }
+    }
     ui.painter().line_segment(
         [rect.left_bottom(), rect.right_bottom()],
         Stroke::new(2., GOLD.gamma_multiply(0.7)),
     );
+    selected
 }
 pub fn label(ui: &mut egui::Ui, text: &str) {
     ui.label(RichText::new(text).strong().size(17.).color(GOLD));

@@ -84,6 +84,28 @@ impl Default for Player {
     }
 }
 impl Player {
+    fn header(&mut self, ui: &mut egui::Ui, title: &str, purple: bool) {
+        match skin::heading(ui, title, purple) {
+            Some(skin::Module::Verse) => ui
+                .ctx()
+                .send_viewport_cmd_to(egui::ViewportId::ROOT, egui::ViewportCommand::Focus),
+            Some(skin::Module::Library) => {
+                self.library_open = true;
+                ui.ctx().send_viewport_cmd_to(
+                    egui::ViewportId::from_hash_of("amp-library"),
+                    egui::ViewportCommand::Focus,
+                );
+            }
+            Some(skin::Module::Dj) => {
+                self.dj_open = true;
+                ui.ctx().send_viewport_cmd_to(
+                    egui::ViewportId::from_hash_of("amp-dj"),
+                    egui::ViewportCommand::Focus,
+                );
+            }
+            None => (),
+        }
+    }
     fn scan(&mut self) {
         let root = self.root.clone();
         let (tx, rx) = mpsc::channel();
@@ -246,7 +268,7 @@ impl Player {
     fn player_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
-            skin::heading(ui, "Player", true);
+            self.header(ui, "AMP VERSE", true);
             skin::panel(ui, false, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
@@ -295,7 +317,7 @@ impl Player {
     fn library_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, false, |ui| {
             ui.set_min_size(ui.available_size());
-            skin::heading(ui, "Library", false);
+            self.header(ui, "AMP Library", false);
             ui.horizontal(|ui| {
                 if ui
                     .add_enabled(
@@ -519,7 +541,7 @@ impl Player {
     fn dj_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
-            skin::heading(ui, "AMP DJ", true);
+            self.header(ui, "AMP DJ", true);
             ui.horizontal(|ui| {
                 ui.label(
                     RichText::new("PREPARED AUDIO / TWO DECKS")
@@ -614,6 +636,7 @@ impl eframe::App for Player {
                 egui::ViewportId::from_hash_of("amp-library"),
                 egui::ViewportBuilder::default()
                     .with_title("AMP VERSE / Library")
+                    .with_decorations(false)
                     .with_icon(app_icon())
                     .with_inner_size([1100., 730.])
                     .with_min_inner_size([900., 680.]),
@@ -630,6 +653,7 @@ impl eframe::App for Player {
                 egui::ViewportId::from_hash_of("amp-dj"),
                 egui::ViewportBuilder::default()
                     .with_title("AMP VERSE / DJ")
+                    .with_decorations(false)
                     .with_icon(app_icon())
                     .with_inner_size([820., 660.])
                     .with_min_inner_size([730., 620.]),
@@ -670,6 +694,7 @@ fn main() -> eframe::Result {
         "AMP VERSE",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
+                .with_decorations(false)
                 .with_icon(app_icon())
                 .with_inner_size(size)
                 .with_min_inner_size(size),
