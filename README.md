@@ -14,7 +14,7 @@ An independent, modular audio project for Windows/Linux, with an integrated Andr
 
 ## Run from source
 
-Requires stable Rust (edition 2024), FFmpeg with `ffmpeg` and `ffplay` on PATH, and a desktop OpenGL session for Player. These initial binaries **do not bundle audio tools**. Install FFmpeg separately. Linux build: `sudo apt install build-essential pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev ffmpeg`.
+Requires stable Rust (edition 2024), FFmpeg with `ffmpeg` and `ffplay` on PATH, and a desktop OpenGL session for Player. These initial binaries **do not bundle audio tools**. Install FFmpeg separately. Linux build: `sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev ffmpeg`.
 
 ```sh
 cargo run -p amp-player -- /path/to/music
