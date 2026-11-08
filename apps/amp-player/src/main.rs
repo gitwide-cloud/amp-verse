@@ -343,9 +343,7 @@ impl eframe::App for Player {
                             self.queue.clear();
                         }
                     });
-                    if self.screenshot_frames == 10
-                        && let Some(path) = std::env::var_os("AMP_SCREENSHOT")
-                    {
+                    if let Some(path) = std::env::var_os("AMP_SCREENSHOT") {
                         capture(
                             ui.ctx(),
                             PathBuf::from(path).with_extension("library.png"),
@@ -389,7 +387,7 @@ impl eframe::App for Player {
                 );
                 ui.label("Uses cue IN/OUT from .amp.json sidecars. No beat sync or crossfade yet.");
                 });
-                if self.screenshot_frames == 10 && let Some(path) = std::env::var_os("AMP_SCREENSHOT") { capture(ui.ctx(),PathBuf::from(path).with_extension("dj.png"),false); }
+                if let Some(path) = std::env::var_os("AMP_SCREENSHOT") { capture(ui.ctx(),PathBuf::from(path).with_extension("dj.png"),false); }
             });
         }
         if let Some(path) = std::env::var_os("AMP_SCREENSHOT")

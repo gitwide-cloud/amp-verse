@@ -34,6 +34,11 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Test actual deck playback with silent audio device
+        if: runner.os == 'Linux'
+        env:
+          SDL_AUDIODRIVER: dummy
+        run: cargo test -p amp-core --locked -- --include-ignored
       - run: cargo build --workspace --release --locked
       - name: Test live radio with generated audio
         if: runner.os == 'Linux'

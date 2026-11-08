@@ -230,6 +230,56 @@ impl Drop for Deck {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires ffplay and SDL_AUDIODRIVER=dummy; enabled by Linux CI"]
+    fn deck_plays_prepared_cues_and_cleans_up() {
+        use std::time::{Duration, Instant};
+        let dir = tempfile::tempdir().unwrap();
+        let samples = 44100u32 * 8;
+        let mut wav = Vec::new();
+        wav.extend(b"RIFF");
+        wav.extend((36 + samples * 2).to_le_bytes());
+        wav.extend(b"WAVEfmt ");
+        wav.extend(16u32.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(1u16.to_le_bytes());
+        wav.extend(44100u32.to_le_bytes());
+        wav.extend(88200u32.to_le_bytes());
+        wav.extend(2u16.to_le_bytes());
+        wav.extend(16u16.to_le_bytes());
+        wav.extend(b"data");
+        wav.extend((samples * 2).to_le_bytes());
+        wav.resize(wav.len() + samples as usize * 2, 0);
+        fs::write(dir.path().join("silence.wav"), wav).unwrap();
+        let track = Track {
+            path: "silence.wav".into(),
+            title: "silence".into(),
+            preparation: Preparation {
+                cue_in: 2.,
+                cue_out: Some(3.),
+                ..Default::default()
+            },
+        };
+        let mut deck = Deck::default();
+        deck.play(dir.path(), &track, 0).unwrap();
+        std::thread::sleep(Duration::from_millis(200));
+        assert!(deck.playing(), "FFplay exited before audio playback");
+        deck.stop();
+        assert!(!deck.playing());
+        let started = Instant::now();
+        deck.play(dir.path(), &track, 0).unwrap();
+        while deck.playing() {
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "Cue OUT was not applied"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        assert!(
+            started.elapsed() >= Duration::from_millis(500),
+            "Decoder exited too early"
+        );
+    }
+    #[test]
     fn cues_reject_bad_ranges_and_numbers() {
         for p in [
             Preparation {
