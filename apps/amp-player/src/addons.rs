@@ -47,12 +47,12 @@ const ENTRIES: [Entry; 5] = [
     Entry {
         name: "AMP Cast",
         kind: "Companion",
-        summary: "Independent headless radio server with a web UI.",
+        summary: "Native Cast dashboard and independent headless server.",
         features: &[
-            "Station launch/stop and optional password",
+            "Native dashboard: connect, queue, listeners, start/stop",
             "One MP3 encoder shared by listeners",
             "Runs independently from the base player",
-            "Requires separate server startup and FFmpeg",
+            "Server requires separate startup and FFmpeg",
         ],
     },
     Entry {
@@ -180,7 +180,8 @@ impl Manager {
                     3=>{
                         let companion=std::env::current_exe().ok().and_then(|p|p.parent().map(|p|p.join(if cfg!(windows){"amp-cast.exe"}else{"amp-cast"}))).is_some_and(|p|p.is_file());
                         ui.label(if companion{"Companion executable present beside AMP Verse"}else{"Companion executable not found beside AMP Verse"});
-                        ui.hyperlink_to("Open local Cast UI","http://127.0.0.1:8787");
+                        if skin::button(ui,"OPEN NATIVE CAST",GOLD).clicked() { action=Some(Module::Cast); }
+                        ui.hyperlink_to("Open browser listener","http://127.0.0.1:8787");
                         ui.hyperlink_to("Download AMP Verse builds","https://github.com/gitwide-cloud/amp-verse/actions");
                         ui.weak("The server must already be running. Presence does not imply an active station.");
                     },

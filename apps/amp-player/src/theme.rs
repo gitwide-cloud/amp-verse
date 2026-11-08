@@ -165,6 +165,7 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
         egui::ViewportId::from_hash_of("amp-library"),
         egui::ViewportId::from_hash_of("amp-dj"),
         egui::ViewportId::from_hash_of("amp-addons"),
+        egui::ViewportId::from_hash_of("amp-cast"),
     ] {
         ctx.request_repaint_of(id);
     }

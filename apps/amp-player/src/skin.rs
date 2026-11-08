@@ -91,6 +91,7 @@ pub enum Module {
     Verse,
     Library,
     Dj,
+    Cast,
     Addons,
     LabSetup,
 }
@@ -172,6 +173,7 @@ pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
             ("AMP VERSE", Module::Verse),
             ("AMP Library", Module::Library),
             ("AMP DJ", Module::Dj),
+            ("AMP Cast", Module::Cast),
             ("AMP Lab / setup", Module::LabSetup),
             ("Plugin Manager", Module::Addons),
         ] {

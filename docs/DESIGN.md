@@ -24,3 +24,8 @@ Classic, Modern Light and Modern Dark are implemented across the native Player, 
 The supplied light/mobile and dark/desktop Cast references now guide the web UI: a prominent now-broadcasting card, playlist source, playback and synchronization cards, Auto DJ status, and playlist-editing guidance. Modern Light/Dark use purple accents; Classic retains retro purple/gold/green. Appearance and the optional admin password are under the top-right menu. The layout stacks cards on narrow screens.
 
 The page uses the actual station icon and live server/track/listener state. Broadcast Start/Stop and this-device listen/pause/disconnect are functional. Listening and station transport are separate. No fabricated album artwork, spectrum, track duration, timeline, paired-device count or synchronized badge is displayed. The source is explicitly the single configured folder; named playlist switching, server soundcard routing and track-time sync remain future milestones. App setup links to the repository guide; no unsupported app-launch URL is invented.
+
+
+## Native Cast reference
+
+The latest dashboard reference is explicitly assigned to the built-in desktop AMP Cast module, regardless of the image's embedded "Web UI" caption. It is a native egui window opened through the topmost module dropdown, with left navigation, Now Broadcasting and Streaming Status panels, real server queue/cue data and Auto DJ status. It shares the three desktop themes. The separate browser playback page remains a different surface. Detailed listener geography, CPU/memory/uptime, track waveforms/artwork, seek, crossfade/rules, editable station profiles and native soundcard playback are unbuilt and are not fabricated.

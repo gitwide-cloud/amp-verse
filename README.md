@@ -15,7 +15,7 @@ The supplied AMP Verse references now guide the drawn desktop chrome and embedde
 - **Plugin Manager:** searchable offline component catalog, real included build versions, companion-binary detection and module launch actions. Open it from the top-bar dropdown or **ADD-ONS** button.
 - **AMP Lab:** manual links to MP3 Lab Releases and an explicit connection to a separately installed editor. Pick its executable in Plugin Manager, or set `AMP_LAB_EXE` to its full path before launch. Picker connections last for the session. **Open editor** launches it separately, without file handoff or modifying MP3 Lab. No editor code copied, automatic downloader, installer or native plugin loader yet.
 
-**Not built yet:** Android application; desktop/Cast LAN discovery and remote-control client; metadata tag extraction; local cue-editing UI; persisted queues/session recovery; Cast local soundcard output, scheduling and station playlist selection; native in-process audio engine; advanced DJ controls; automatic updates or add-on installation. See [architecture](docs/ARCHITECTURE.md) and [roadmap](docs/ROADMAP.md). The UI reports prototype status; it does not display fictitious waveforms, meters or listener counts.
+**Not built yet:** Android application; desktop/Cast LAN discovery and Android remote-control client; metadata tag extraction; local cue-editing UI; persisted queues/session recovery; Cast local soundcard output, scheduling and station playlist selection; native in-process audio engine; advanced DJ controls; automatic updates or add-on installation. See [architecture](docs/ARCHITECTURE.md) and [roadmap](docs/ROADMAP.md). The UI reports prototype status; it does not display fictitious waveforms, meters or listener counts.
 
 ## Run from source
 
@@ -35,7 +35,7 @@ $env:AMP_CAST_PASSWORD = 'your-local-password' # optional, never stored in sourc
 cargo run -p amp-cast -- 'D:\Music'
 ```
 
-Open [Cast on this computer](http://127.0.0.1:8787). On another LAN device, use the server's IP and port 8787. Start the station, then click **Connect listener**. The browser's audio controls manage listener volume. Cast scans its root at startup and loops all indexed tracks in folder order; restart after adding files. No internet is required after dependencies and audio tools are installed.
+Open [Cast on this computer](http://127.0.0.1:8787). On another LAN device, use the server's IP and port 8787. Start the station, then click **Listen here**. The browser's audio controls manage listener volume. Cast scans its root at startup and loops all indexed tracks in folder order; restart after adding files. No internet is required after dependencies and audio tools are installed.
 
 Cast defaults to loopback. A LAN bind exposes public listening and status; the optional password protects start/stop only. HTTP is for a trusted LAN: passwords are sent in a header over HTTP. For untrusted networks use a TLS reverse proxy and access controls; do not expose the bare server to the internet. No CORS is enabled, and browser cross-site control requests are rejected. Public status exposes track titles, never absolute paths. FFmpeg errors are shown in station status. Stop kills the encoder; slow listeners are disconnected rather than buffered indefinitely. Browser buffering can make stop audible later.
 
@@ -74,3 +74,8 @@ GitHub Releases are the intended distribution channel for updates and optional a
 ## Licensing and provenance
 
 MIT for AMP Verse code. MP3 Lab was inspected read-only for editor architecture, asynchronous jobs, subprocess cleanup and visual direction; see [reuse review](docs/MP3_LAB_REVIEW.md). No existing repositories are changed or runtime-coupled. Dependencies and external audio tools retain their own licenses; see [notices](THIRD_PARTY_NOTICES.md).
+
+
+### Native AMP Cast dashboard
+
+In AMP Verse, open the top-bar dropdown and choose **AMP Cast**. This opens a separate native window inside the desktop software, with Dashboard, Queue, Streaming and Settings sections. Enter the running server's `host:port` (default `127.0.0.1:8787`) and optional admin password, then **Connect / apply**. Start/Stop controls the independent server broadcast; the dashboard displays real track, cue, listener and station status. Closing the window does not stop the server. Passwords are kept in memory only. Start the `amp-cast` companion separately using the instructions above. Native soundcard listening and queue editing remain planned; the browser listener remains separately available.

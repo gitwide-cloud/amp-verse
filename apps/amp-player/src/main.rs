@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 mod addons;
+mod cast;
 mod skin;
 mod theme;
 use skin::{CYAN, GOLD, ORANGE};
@@ -55,6 +56,8 @@ struct Player {
     library_open: bool,
     dj_open: bool,
     addons_open: bool,
+    cast_open: bool,
+    cast: cast::Dashboard,
     addons: addons::Manager,
     status: String,
     screenshot_frames: u32,
@@ -82,6 +85,8 @@ impl Default for Player {
             library_open: false,
             dj_open: false,
             addons_open: false,
+            cast_open: false,
+            cast: cast::Dashboard::default(),
             addons: addons::Manager::default(),
             status: "Choose your music folder in Library".into(),
             screenshot_frames: 0,
@@ -110,6 +115,13 @@ impl Player {
                 self.dj_open = true;
                 ui.ctx().send_viewport_cmd_to(
                     egui::ViewportId::from_hash_of("amp-dj"),
+                    egui::ViewportCommand::Focus,
+                );
+            }
+            Some(skin::Module::Cast) => {
+                self.cast_open = true;
+                ui.ctx().send_viewport_cmd_to(
+                    egui::ViewportId::from_hash_of("amp-cast"),
                     egui::ViewportCommand::Focus,
                 );
             }
@@ -668,6 +680,13 @@ impl Player {
             ui.label(RichText::new(&self.status).color(skin::accent(ui)));
         });
     }
+    fn cast_ui(&mut self, ui: &mut egui::Ui) {
+        skin::panel(ui, true, |ui| {
+            ui.set_min_size(ui.available_size());
+            self.header(ui, "AMP Cast", true);
+            self.cast.show(ui);
+        });
+    }
     fn addons_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, false, |ui| {
             ui.set_min_size(ui.available_size());
@@ -680,11 +699,13 @@ impl Player {
 impl eframe::App for Player {
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         self.poll();
+        self.cast.poll();
         let ctx = ui.ctx().clone();
         match self.screenshot_view.as_str() {
             "library" => self.library_ui(ui),
             "dj" => self.dj_ui(ui),
             "addons" => self.addons_ui(ui),
+            "cast" => self.cast_ui(ui),
             _ => self.player_ui(ui),
         }
         if self.library_open {
@@ -718,6 +739,23 @@ impl eframe::App for Player {
                         self.dj_open = false;
                     }
                     self.dj_ui(ui);
+                },
+            );
+        }
+        if self.cast_open {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("amp-cast"),
+                egui::ViewportBuilder::default()
+                    .with_title("AMP VERSE / Cast")
+                    .with_decorations(false)
+                    .with_icon(app_icon())
+                    .with_inner_size([1120., 800.])
+                    .with_min_inner_size([1020., 760.]),
+                |ui, _| {
+                    if ui.ctx().input(|i| i.viewport().close_requested()) {
+                        self.cast_open = false;
+                    }
+                    self.cast_ui(ui);
                 },
             );
         }
@@ -762,6 +800,7 @@ fn main() -> eframe::Result {
         "library" => [1100., 730.],
         "dj" => [820., 660.],
         "addons" => [1120., 760.],
+        "cast" => [1120., 800.],
         _ => [700., 255.],
     };
     eframe::run_native(

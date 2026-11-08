@@ -36,3 +36,10 @@ Current sidecars store floating-point seconds, optional BPM/beat offset, and res
 Network-first means NAS/server catalog, preparation sharing and remote control are first-class directions; it never means mandatory online startup. A mounted NAS root works now as ordinary filesystem access. Native network catalog/cache/sync is future work. Split optional crates so core and Cast remain small. Measure release size/startup/RSS before claiming a numerical footprint target.
 
 GitHub Releases distribute platform builds and future add-ons. Release gating requires both platforms to build and tests to pass. Current ZIPs require external FFmpeg and use manual update installation. No self-updater or Android APK exists in 0.1.
+
+
+## Native Cast control surface
+
+`amp-player/src/cast.rs` supplies an egui viewport, separate from the browser UI and independent headless service. A dedicated worker owns a minimal ureq HTTP client and serializes status/queue polling and Start/Stop requests; UI/audio threads do not perform network I/O. Requests have a three-second timeout, do not redirect, and bypass ambient proxies for direct trusted-LAN access. Passwords are kept only in worker/UI memory and are sent solely on explicit control requests. This milestone accepts HTTP `host:port` endpoints. Disconnects invalidate displayed live state and disable broadcast controls; reconnect attempts continue every two seconds. The dashboard never owns the server or encoder lifetime.
+
+Native tests use the actual Cast TCP router to verify JSON/status/queue compatibility, rejected passwords, empty-folder control errors, authorized stop and server disconnects. `AMP_CAST_ADDRESS=host:port` sets the initial address; `AMP_CAST_AUTOCONNECT=1` explicitly opts into connection on startup (no saved password). `AMP_SCREENSHOT_VIEW=cast` renders the actual dashboard for QA. The three desktop themes apply to this viewport, independently from browser preferences.
