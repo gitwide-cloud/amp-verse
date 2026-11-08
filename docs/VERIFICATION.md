@@ -133,3 +133,8 @@ Installed release Player and Cast binaries at C:/Users/pfgpe/AppData/Local/Progr
 ### Dropdown-only module navigation (2026-11-08)
 
 Removed the redundant Android module tab strip on every main module screen, not just Player. All six module destinations plus Settings remain in the AMP VERSE dropdown; Android Lab already uses that dropdown. Removed desktop Player module shortcut buttons; the title dropdown remains the desktop module navigator. Android 0.1.8 assemble and lint passed.
+
+
+### Android updater test release 0.1.9 (2026-11-08)
+
+Version 0.1.9 (code 10) builds and passes lint. Prepared for GitHub Releases without installing over the phone's 0.1.8 (code 9), so its updater has a newer version to detect. Uses the existing local preview signing certificate. Published releases use plain vMAJOR.MINOR.PATCH tags and GitHub latest-release eligibility because the installed updater queries /releases/latest. Preview status is described in release notes. Repository visibility changed to public at the user's explicit request.
