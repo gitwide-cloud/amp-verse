@@ -54,6 +54,11 @@ jobs:
               test -s "test-output/$theme-$view.png"
             done
           done
+      - name: Verify magnetic native windows on X11
+        if: runner.os == 'Linux'
+        run: |
+          timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_DOCK_SMOKE=test-output/native-docking.json target/release/amp-player
+          python3 -c "import json; r=json.load(open('test-output/native-docking.json')); assert all(r.values()), r"
       - uses: actions/upload-artifact@v4
         if: runner.os == 'Linux'
         with:

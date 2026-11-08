@@ -14,11 +14,18 @@ pub struct Arrangement {
     job: Option<mpsc::Receiver<Result<String, String>>>,
 }
 impl Arrangement {
-    pub fn show(&mut self, ui: &mut egui::Ui, root: &Path, library: Option<&Library>) {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &Path,
+        library: Option<&Library>,
+    ) -> Option<crate::skin::Module> {
         crate::skin::panel(ui, false, |ui| {
             ui.set_min_size(ui.available_size());
+            let action = crate::skin::heading(ui, "AMP Lab", true);
             self.content(ui, root, library);
-        });
+            action
+        })
     }
     fn content(&mut self, ui: &mut egui::Ui, root: &Path, library: Option<&Library>) {
         if let Some(rx) = &self.job

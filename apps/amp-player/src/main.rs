@@ -8,6 +8,7 @@ use std::{
 };
 mod addons;
 mod cast;
+mod docking;
 mod lab;
 mod skin;
 mod theme;
@@ -62,6 +63,7 @@ struct Player {
     decks: [Deck; 2],
     loaded: [Option<usize>; 2],
     playing: [bool; 2],
+    started: [Option<std::time::Instant>; 2],
     volume: u8,
     queue: Vec<usize>,
     queue_selected: Option<usize>,
@@ -76,6 +78,7 @@ struct Player {
     addons: addons::Manager,
     status: String,
     screenshot_frames: u32,
+    dock_frames: u32,
     screenshot_view: String,
 }
 impl Default for Player {
@@ -98,11 +101,12 @@ impl Default for Player {
             decks: Default::default(),
             loaded: [None; 2],
             playing: [false; 2],
+            started: [None; 2],
             volume: 75,
             queue: vec![],
             queue_selected: None,
             auto: false,
-            library_open: false,
+            library_open: std::env::var_os("AMP_DOCK_SMOKE").is_some(),
             dj_open: false,
             lab_open: false,
             lab: lab::Arrangement::default(),
@@ -112,6 +116,7 @@ impl Default for Player {
             addons: addons::Manager::default(),
             status: "Choose your music folder in Library".into(),
             screenshot_frames: 0,
+            dock_frames: 0,
             screenshot_view: std::env::var("AMP_SCREENSHOT_VIEW").unwrap_or_default(),
         }
     }
@@ -210,6 +215,7 @@ impl Player {
                 Ok(()) => {
                     self.loaded[deck] = Some(index);
                     self.playing[deck] = true;
+                    self.started[deck] = Some(std::time::Instant::now());
                     self.status = format!("Deck {} / {}", deck + 1, track.title);
                 }
                 Err(e) => self.status = e,
@@ -219,6 +225,7 @@ impl Player {
     fn stop(&mut self, deck: usize) {
         self.decks[deck].stop();
         self.playing[deck] = false;
+        self.started[deck] = None;
         if deck == 0 {
             self.auto = false;
         }
@@ -329,42 +336,85 @@ impl Player {
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
             self.header(ui, "AMP VERSE", true);
-            skin::panel(ui, false, |ui| {
+            ui.horizontal(|ui| {
+                for (caption, action) in [("|<", 0), ("PLAY", 1), ("STOP", 2), (">|", 3)] {
+                    if skin::button(ui, caption, GOLD).clicked() {
+                        match action {
+                            0 => {
+                                if let Some(i) = self.loaded[0] {
+                                    self.play(0, i.saturating_sub(1));
+                                }
+                            }
+                            1 => {
+                                if let Some(i) = self.selected.or(self.loaded[0]) {
+                                    self.play(0, i);
+                                }
+                            }
+                            2 => self.stop(0),
+                            _ => self.next(),
+                        }
+                    }
+                }
+                ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Next play volume"));
+            });
+            skin::display(ui, |ui| {
                 ui.set_min_width(ui.available_width());
                 ui.horizontal(|ui| {
-                    let state = if self.playing[0] {
-                        "PLAYING"
+                    let elapsed = if self.playing[0] {
+                        self.started[0].map(|t| t.elapsed().as_secs()).unwrap_or(0)
                     } else {
-                        "STOPPED"
+                        0
                     };
                     ui.label(
-                        RichText::new(state)
+                        RichText::new(format!("{:02}:{:02}", elapsed / 60, elapsed % 60))
                             .monospace()
-                            .size(25.)
+                            .size(32.)
                             .color(skin::signal(ui)),
                     );
                     ui.separator();
-                    ui.label(
-                        RichText::new(self.title(0))
-                            .size(18.)
-                            .color(skin::signal(ui)),
-                    );
+                    ui.vertical(|ui| {
+                        ui.label(
+                            RichText::new(self.title(0))
+                                .strong()
+                                .size(19.)
+                                .color(skin::signal(ui)),
+                        );
+                        let info = self.loaded[0]
+                            .and_then(|i| self.library.as_ref()?.tracks.get(i))
+                            .map(|t| {
+                                format!(
+                                    "{}   ·   Cue IN {:.2}s   ·   Cue OUT {}",
+                                    t.path
+                                        .extension()
+                                        .unwrap_or_default()
+                                        .to_string_lossy()
+                                        .to_uppercase(),
+                                    t.preparation.cue_in,
+                                    t.preparation
+                                        .cue_out
+                                        .map(|s| format!("{s:.2}s"))
+                                        .unwrap_or_else(|| "End".into())
+                                )
+                            })
+                            .unwrap_or_else(|| {
+                                "Open AMP Library from the title dropdown to choose music".into()
+                            });
+                        ui.label(info);
+                    });
                 });
-                ui.label(RichText::new(&self.status).color(skin::foreground(ui)));
             });
             ui.horizontal(|ui| {
-                if skin::button(ui, "PLAY", GOLD).clicked()
-                    && let Some(i) = self.selected.or(self.loaded[0])
-                {
-                    self.play(0, i);
-                }
-                if skin::button(ui, "STOP", GOLD).clicked() {
-                    self.stop(0);
-                }
-                if skin::button(ui, "NEXT", GOLD).clicked() {
-                    self.next();
-                }
-                ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Next play volume"));
+                ui.label(
+                    RichText::new(if self.playing[0] {
+                        "PLAYING"
+                    } else {
+                        "STOPPED"
+                    })
+                    .monospace()
+                    .color(skin::accent(ui)),
+                );
+                ui.separator();
+                ui.label(&self.status);
             });
         });
     }
@@ -632,7 +682,7 @@ impl Player {
                         });
                         skin::platter(
                             ui,
-                            (width - 32.).min(300.),
+                            (width - 32.).min(340.),
                             accent,
                             self.playing[deck],
                             phase,
@@ -731,12 +781,28 @@ impl eframe::App for Player {
         self.poll();
         self.cast.poll();
         let ctx = ui.ctx().clone();
+        let mut active = vec![egui::ViewportId::ROOT];
+        for (open, name) in [
+            (self.library_open, "amp-library"),
+            (self.dj_open, "amp-dj"),
+            (self.lab_open, "amp-lab-arrangement"),
+            (self.cast_open, "amp-cast"),
+            (self.addons_open, "amp-addons"),
+        ] {
+            if open {
+                active.push(egui::ViewportId::from_hash_of(name));
+            }
+        }
+        docking::retain(&ctx, &active);
         match self.screenshot_view.as_str() {
             "library" => self.library_ui(ui),
             "dj" => self.dj_ui(ui),
             "addons" => self.addons_ui(ui),
             "cast" => self.cast_ui(ui),
-            "lab" => self.lab.show(ui, &self.root, self.library.as_ref()),
+            "lab" => {
+                let action = self.lab.show(ui, &self.root, self.library.as_ref());
+                self.activate(ui, action);
+            }
             _ => self.player_ui(ui),
         }
         if self.library_open {
@@ -778,13 +844,15 @@ impl eframe::App for Player {
                 egui::ViewportId::from_hash_of("amp-lab-arrangement"),
                 egui::ViewportBuilder::default()
                     .with_title("AMP Lab / Mix arrangement")
+                    .with_decorations(false)
                     .with_icon(app_icon())
                     .with_inner_size([1100., 760.]),
                 |ui, _| {
                     if ui.ctx().input(|i| i.viewport().close_requested()) {
                         self.lab_open = false;
                     }
-                    self.lab.show(ui, &self.root, self.library.as_ref());
+                    let action = self.lab.show(ui, &self.root, self.library.as_ref());
+                    self.activate(ui, action);
                 },
             );
         }
@@ -822,6 +890,10 @@ impl eframe::App for Player {
                 },
             );
         }
+        if let Some(path) = std::env::var_os("AMP_DOCK_SMOKE") {
+            self.dock_frames += 1;
+            docking::smoke(&ctx, self.dock_frames, &PathBuf::from(path));
+        }
         if let Some(path) = std::env::var_os("AMP_SCREENSHOT")
             && self.scan.is_none()
         {
@@ -848,7 +920,7 @@ fn main() -> eframe::Result {
         "lab" => [1100., 760.],
         "addons" => [1120., 760.],
         "cast" => [1120., 800.],
-        _ => [700., 255.],
+        _ => [760., 238.],
     };
     eframe::run_native(
         "AMP VERSE",

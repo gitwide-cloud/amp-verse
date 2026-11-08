@@ -106,3 +106,6 @@ Cue metadata is read from adjacent AMP preparation files, such as `song.mp3.amp.
 Times are seconds in the original file. This is AMP sidecar metadata; arbitrary DJ vendor cue tags embedded in ID3 are not imported yet. Without cue OUT, DJ plays to the end; Lab probes duration when adding a track.
 
 Windows local installation after a release build: `./tools/install-desktop.ps1`. Optional `-AudioTools` points to an existing audio runtime directory containing ffmpeg/ffplay/ffprobe and its notices. Installation uses LocalAppData/Programs/AMP Verse and creates Desktop and Start menu shortcuts, without changing other applications. Installed audio tools are resolved beside AMP Verse; development can use PATH.
+
+
+Desktop magnetic windows: drag the title rail beside the AMP VERSE dropdown to dock nearby native AMP windows. Attached windows move as a group; hold Shift while starting a drag to pull one free. Windows and X11 provide the required absolute positions; Wayland uses its compositor drag. The external MP3 Lab editor runs separately.

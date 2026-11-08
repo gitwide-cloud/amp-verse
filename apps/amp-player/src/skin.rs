@@ -55,7 +55,7 @@ pub fn panel<R>(ui: &mut egui::Ui, _purple: bool, body: impl FnOnce(&mut egui::U
     let p = theme.palette();
     let bg = ui.painter().add(egui::Shape::Noop);
     let response = egui::Frame::new()
-        .inner_margin(12)
+        .inner_margin(8)
         .stroke(Stroke::new(1., p.border))
         .show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), body)
@@ -75,14 +75,53 @@ pub fn panel<R>(ui: &mut egui::Ui, _purple: bool, body: impl FnOnce(&mut egui::U
         Stroke::new(1., p.border.gamma_multiply(0.5)),
         egui::StrokeKind::Inside,
     );
-    ui.painter().line_segment(
-        [
-            rect.left_top() + Vec2::new(3., 2.),
-            rect.right_top() + Vec2::new(-3., 2.),
-        ],
-        Stroke::new(1., p.border),
-    );
+    if theme == crate::theme::Theme::Classic {
+        let frame = rect.shrink(2.);
+        ui.painter().rect_stroke(
+            frame,
+            2.,
+            Stroke::new(2., C::from_rgb(12, 10, 21)),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().rect_stroke(
+            rect.shrink(4.),
+            1.,
+            Stroke::new(1., p.border),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().line_segment(
+            [
+                rect.left_top() + Vec2::splat(2.),
+                rect.right_top() + Vec2::new(-2., 2.),
+            ],
+            Stroke::new(2., C::from_rgb(195, 189, 208)),
+        );
+        ui.painter().line_segment(
+            [
+                rect.left_bottom() + Vec2::new(3., -2.),
+                rect.right_bottom() + Vec2::new(-3., -2.),
+            ],
+            Stroke::new(2., C::from_rgb(9, 8, 16)),
+        );
+    }
     response.inner
+}
+
+/// Recessed audio display, shared by the Classic player and modern palettes.
+pub fn display<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+    let p = crate::theme::current(ui.ctx()).palette();
+    egui::Frame::new()
+        .fill(
+            if crate::theme::current(ui.ctx()) == crate::theme::Theme::Classic {
+                BLACK
+            } else {
+                p.background
+            },
+        )
+        .stroke(Stroke::new(2., p.border))
+        .inner_margin(10)
+        .show(ui, body)
+        .inner
 }
 
 pub enum Module {
@@ -121,13 +160,46 @@ pub fn heading(ui: &mut egui::Ui, title: &str, _purple: bool) -> Option<Module> 
         p.accent,
     );
     ui.painter().text(
-        rect.min + Vec2::new(43., 21.),
+        rect.min + Vec2::new(38., 21.),
         egui::Align2::LEFT_CENTER,
-        title,
-        FontId::proportional(23.),
+        "AMP VERSE",
+        FontId::proportional(21.),
         p.text,
     );
-    let menu_rect = Rect::from_min_max(rect.min, egui::pos2(rect.left() + 285., rect.bottom()));
+    let menu_rect = Rect::from_min_max(rect.min, egui::pos2(rect.left() + 220., rect.bottom()));
+    let center_left = rect.left() + 235.;
+    let center_right = rect.right() - 120.;
+    if center_right - center_left > 140. {
+        let mid = (center_left + center_right) / 2.;
+        let label = if title == "AMP VERSE" {
+            "PLAYER"
+        } else {
+            title
+        };
+        let text_width = label.len() as f32 * 9.;
+        if theme == crate::theme::Theme::Classic {
+            for y in [14., 19., 24.] {
+                for (a, b) in [
+                    (center_left, mid - text_width / 2. - 12.),
+                    (mid + text_width / 2. + 12., center_right),
+                ] {
+                    if b > a {
+                        ui.painter().line_segment(
+                            [egui::pos2(a, rect.top() + y), egui::pos2(b, rect.top() + y)],
+                            Stroke::new(2., p.accent),
+                        );
+                    }
+                }
+            }
+        }
+        ui.painter().text(
+            egui::pos2(mid, rect.center().y),
+            egui::Align2::CENTER_CENTER,
+            label,
+            FontId::proportional(20.),
+            p.text,
+        );
+    }
     let response = ui.interact(
         menu_rect,
         ui.scope_id().with("module-menu"),
@@ -140,7 +212,7 @@ pub fn heading(ui: &mut egui::Ui, title: &str, _purple: bool) -> Option<Module> 
             format!("{title} / Open module menu"),
         )
     });
-    let arrow = rect.min + Vec2::new(266., 20.);
+    let arrow = rect.min + Vec2::new(204., 20.);
     ui.painter().add(egui::Shape::convex_polygon(
         vec![
             arrow + Vec2::new(-5., -3.),
@@ -195,9 +267,7 @@ pub fn heading(ui: &mut egui::Ui, title: &str, _purple: bool) -> Option<Module> 
         egui::Sense::click_and_drag(),
     );
     let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
-    if drag.drag_started() {
-        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-    }
+    crate::docking::title_drag(ui, &drag);
     if drag.double_clicked() {
         ui.ctx()
             .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
@@ -294,7 +364,8 @@ pub fn bolt(painter: &egui::Painter, rect: Rect, color: C) {
 
 /// Decorative vinyl grooves; no fabricated meter or waveform data.
 pub fn platter(ui: &mut egui::Ui, size: f32, accent: C, playing: bool, phase: f32) {
-    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+    let (rect, _) =
+        ui.allocate_exact_size(egui::vec2(ui.available_width(), size), egui::Sense::hover());
     let center = rect.center();
     let radius = size * 0.46;
     ui.painter()

@@ -138,3 +138,10 @@ Removed the redundant Android module tab strip on every main module screen, not 
 ### Android updater test release 0.1.9 (2026-11-08)
 
 Version 0.1.9 (code 10) builds and passes lint. Prepared for GitHub Releases without installing over the phone's 0.1.8 (code 9), so its updater has a newer version to detect. Uses the existing local preview signing certificate. Published releases use plain vMAJOR.MINOR.PATCH tags and GitHub latest-release eligibility because the installed updater queries /releases/latest. Preview status is described in release notes. Repository visibility changed to public at the user's explicit request.
+
+
+### Desktop Classic chrome and magnetic windows (2026-11-08)
+
+Replaced the flat gray desktop surfaces with darker purple gunmetal, inset displays, double bevels and gold title rails. Revised compact Player transport/display and centered DJ platters. Title dropdowns remain the module navigator. Native Lab arrangement now has the shared title/dropdown/window controls too.
+
+Docking geometry tests cover edge/corner snapping, distant windows, connected groups and snapping from any group member. Synthetic title-drag input verifies group selection and Shift detachment. The actual Windows native-viewport smoke test observed Player/Library edge snap, moving both windows by 30 x 20 logical points, and preserved attachment; all three assertions passed. UI captures were inspected locally. Workspace tests and Clippy with warnings denied passed. Windows installation updated after verification. External MP3 Lab remains a separate process and is not magnetically grouped; Wayland lacks global positioning, so native compositor drag is the fallback. Android 0.1.9 is unchanged.

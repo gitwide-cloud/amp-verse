@@ -44,9 +44,9 @@ impl Theme {
         match self {
             Self::Classic => Palette {
                 background: C::from_rgb(7, 8, 12),
-                surface: C::from_rgb(45, 47, 50),
-                elevated: C::from_rgb(98, 101, 106),
-                border: C::from_rgb(153, 157, 163),
+                surface: C::from_rgb(27, 25, 39),
+                elevated: C::from_rgb(63, 59, 78),
+                border: C::from_rgb(143, 138, 161),
                 text: C::from_rgb(235, 235, 242),
                 accent: C::from_rgb(255, 194, 26),
                 signal: C::from_rgb(130, 245, 61),
@@ -158,7 +158,7 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
     style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1., p.accent);
     style.visuals.hyperlink_color = p.accent;
     style.spacing.button_padding = egui::vec2(10., 6.);
-    style.spacing.item_spacing = egui::vec2(8., 7.);
+    style.spacing.item_spacing = egui::vec2(6., 5.);
     ctx.set_global_style(style);
     for id in [
         egui::ViewportId::ROOT,

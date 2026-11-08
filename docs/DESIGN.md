@@ -56,3 +56,8 @@ Android 0.1.6 replaces the Lab placeholder with the existing MP3 Lab Android edi
 
 
 Android Player uses the compact reference layout as of 0.1.7. Module navigation and Settings live in the AMP VERSE title dropdown. Playback occupies one six-button transport row and one EQ / PL / add / radio row; the remaining space belongs to the queue. Theme selection stays in Settings and changes the shared views rather than creating separate screens.
+
+
+Desktop Classic uses recessed black audio displays, purple gunmetal surfaces, double beveled frames and gold title rails. The AMP VERSE brand remains the module dropdown at the left; the module title is centered in the draggable header. Modern themes use the same windows and layouts with their own palette. DJ retains its two platters and loadable library; no dummy crossfader or meters are shown for unimplemented audio features.
+
+All native AMP Verse module windows share magnetic title-bar dragging. Nearby edges attract within 16 logical desktop points; touching windows form a connected group that moves together. Hold Shift while starting a drag to detach one window; Shift also suppresses edge attraction. Closed and minimized windows are excluded. The separately launched MP3 Lab editor is outside this native viewport group. Global positioning is supported on Windows and X11; Wayland uses compositor dragging because it does not expose absolute window positions.
