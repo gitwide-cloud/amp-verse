@@ -25,4 +25,9 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: amp-verse-android-preview
-          path: android/app/build/outputs/apk/debug/*.apk
+          path: |
+            android/app/build/outputs/apk/debug/*.apk
+            third-party/mp3-lab/android-third-party-sources.zip
+            third-party/mp3-lab/LICENSE
+            third-party/mp3-lab/THIRD_PARTY_NOTICES.md
+            third-party/mp3-lab/PROVENANCE.md

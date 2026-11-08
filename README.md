@@ -86,3 +86,6 @@ The **web UI stays simple**: listen, see current status, start/stop broadcasting
 ### Android preview
 
 `android/` now builds a compact integrated app (`cloud.gitwide.ampverse`) with Player/Library, three saved themes, file-picker imports copied to private local storage, a saved queue, seek/pause/previous/next, sequential queue playback/repeat and a Media3 foreground media service. See [Android build and device verification](docs/ANDROID.md). This is a first preview, not the complete Android milestone. No desktop plugins are loaded on Android.
+
+
+Android **AMP Lab** is now the integrated MP3 Lab editor foundation: open audio, waveform/trim/fades/gain/normalize, original/edited preview, 256 kbps MP3 export and session restore. Open it from the top module dropdown. [Integration and source provenance](third-party/mp3-lab/PROVENANCE.md) includes upstream licensing and the corresponding codec source bundle. Desktop still uses the separately installed editor connection.

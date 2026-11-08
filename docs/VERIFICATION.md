@@ -107,3 +107,10 @@ Visually inspected actual player with the new spectrum and controls on-device; `
 ## Android source ownership clarification (0.1.5)
 
 User confirmed direct phone-folder playback stays separate. Desktop AMP Verse owns shared libraries/playlists; Android Remote is the intended browsing/listen-on-phone path, with Save offline creating the radio collection. Added explicit source labels and Remote workflow explanation to Android Library/Settings. Existing phone imports and local playback remain intact; no entries were deleted or converted to radio downloads. Desktop browsing/streaming/Save offline are not claimed built. Android APK/lint passed. Installed this wording/source-navigation update on the connected Pixel 10 Pro XL; app data retained. No audio-engine or transport changes were made in this clarification.
+
+
+## Integrated AMP Lab from MP3 Lab (0.1.6)
+
+Located the existing `mp3-lab/dist/v0.2.2-preview.27/mp3-lab.apk` and matching editor source family. Reused its four Android editor files under MIT inside AMP Verse, with package/navigation/theme adapters and isolated session storage. Original MP3 Lab checkout remained clean/read-only. Added its pinned FFmpegKit audio runtime, bundled notices and unchanged corresponding-source archive with provenance/hashes; Android CI artifacts include that source bundle. ARM64 APK is about 33.9 MB.
+
+APK/test APK build and Android lint passed. Installed 0.1.6 on the Pixel 7 and left installed. Adapted upstream AudioEngineTest passed (**OK (1 test)**, 3.662 s): real trim/fades/gain/normalize, MP3 bitrate/duration/decode, document export, preview and relative seek. Adapted EditingSessionTest passed (**OK (2 tests)**, 51.78 s): rotation/recreation/background session state, waveform zoom/pan/tap and millisecond nudge. Native Lab navigation was exercised from the module strip and the actual editor inspected in Classic; evidence `test-output/pixel-016-lab.png`. Modern palettes are adapted but have not received the same full manual Lab visual/device matrix. MP3 Lab's multichannel/stems and advanced DJ preparation remain unbuilt. Pixel 10 was not connected for this update.

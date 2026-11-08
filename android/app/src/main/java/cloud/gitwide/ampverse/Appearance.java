@@ -4,10 +4,10 @@ import android.content.Context;
 import android.graphics.Color;
 
 /** One application palette shared by Player, Library and Settings. */
-final class Appearance {
-    final int background, surface, text, muted, accent;
-    final boolean classic;
-    Appearance(Context context) {
+public final class Appearance {
+    public final int background, surface, text, muted, accent;
+    public final boolean classic;
+    public Appearance(Context context) {
         String theme = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("theme", "classic");
         boolean light = theme.equals("modern-light"); classic = theme.equals("classic");
         background = Color.parseColor(light ? "#f1f3f9" : classic ? "#222426" : "#10141d");

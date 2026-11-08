@@ -40,16 +40,18 @@ public final class MainActivity extends Activity {
     private Appearance appearance;
     private int queueLimit=100;
     private int bg, panel, text, muted, accent;
-    private String message = "Phone files are a separate local source. Desktop library browsing and radio downloads will come through AMP Remote.";
+    private String message = "Phone files are a separate local source. Desktop library browsing and Cast downloads will come through AMP Remote.";
     private final Runnable tick = new Runnable() { public void run() { refresh(); handler.postDelayed(this, 500); } };
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         prefs = getSharedPreferences("settings", MODE_PRIVATE);
         if (state != null) { module=state.getString("module","AMP Player"); library=module.equals("AMP Library"); }
+        if(state==null&&getIntent().hasExtra("module")){module=getIntent().getStringExtra("module");library=module.equals("AMP Library");}
         draw();
         if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 2);
     }
+    @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);if(intent.hasExtra("module"))selectModule(intent.getStringExtra("module"));}
     @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state); state.putString("module", module); }
     @Override public void onStart() {
         super.onStart();
@@ -91,7 +93,7 @@ public final class MainActivity extends Activity {
         view.setTextColor(appearance.classic?Color.rgb(15,18,27):text);view.setBackgroundTintList(null);view.setBackground(Chrome.button(appearance,false));view.setOnClickListener(v->action.run());return view;
     }
     private void rowButton(LinearLayout row,String caption,Runnable action) { LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,dp(46),1);params.setMargins(dp(1),dp(2),dp(1),dp(2));row.addView(button(caption,action),params); }
-    private void selectModule(String name) { module=name;library=name.equals("AMP Library");draw(); }
+    private void selectModule(String name) { if(name.equals("AMP Lab")){if(player!=null)player.pause();startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;library=name.equals("AMP Library");draw(); }
     private void openSettings(){startActivity(new Intent(this,SettingsActivity.class));}
     private void draw() {
         appearance=new Appearance(this);bg=appearance.background;panel=appearance.surface;text=appearance.text;muted=appearance.muted;accent=appearance.accent;
@@ -119,7 +121,7 @@ public final class MainActivity extends Activity {
             dj.addView(button("Open player",()->selectModule("AMP Player")));drawQueue(false);
         }else{
             LinearLayout info=card();
-            String detail=module.equals("AMP Remote")?"Connect to the desktop library, browse songs or playlists, listen on this phone, then Save offline for radio. This Remote workflow is not implemented in this preview yet.":module.equals("AMP Lab")?"AMP Lab uses the existing MP3 Lab editor foundation on desktop. Android audio editing and preparation tools are not implemented yet.":"AMP Cast is an independent radio server. Native Android station control is planned; the phone does not host a radio server in this preview.";
+            String detail=module.equals("AMP Remote")?"Connect to the desktop library, browse songs or playlists, listen on this phone, then Save offline for Cast. This Remote workflow is not implemented in this preview yet.":module.equals("AMP Lab")?"AMP Lab uses the existing MP3 Lab editor foundation on desktop. Android audio editing and preparation tools are not implemented yet.":"AMP Cast is an independent radio server. Native Android station control is planned; the phone does not host a radio server in this preview.";
             info.addView(label(detail,16,text));info.addView(button("Settings",this::openSettings));
         }
         status=label(message,12,muted);page.addView(status);page.addView(label("AMP VERSE  "+BuildConfig.VERSION_NAME+" · LOCAL / OFFLINE",11,muted));refresh();
@@ -143,7 +145,7 @@ public final class MainActivity extends Activity {
         LinearLayout actions=new LinearLayout(this);rowButton(actions,"Library",()->selectModule("AMP Library"));rowButton(actions,"+ Music",()->{PopupMenu menu=new PopupMenu(this,root.getChildAt(0));menu.getMenu().add("Scan folder");menu.getMenu().add("Select songs");menu.setOnMenuItemClickListener(item->{if(item.getTitle().toString().equals("Scan folder"))scanFolder();else importSongs();return true;});menu.show();});rowButton(actions,"Settings",this::openSettings);now.addView(actions);drawQueue(false);
     }
     private void drawLibrary(){
-        LinearLayout source=card();source.addView(label("Desktop library",17,accent));source.addView(label("Browse and listen through AMP Remote. Saving songs or playlists offline for radio is coming with that connection.",14,muted));source.addView(button("AMP Remote",()->selectModule("AMP Remote")));
+        LinearLayout source=card();source.addView(label("Desktop library",17,accent));source.addView(label("Browse and listen through AMP Remote. Saving songs or playlists offline for Cast is coming with that connection.",14,muted));source.addView(button("AMP Remote",()->selectModule("AMP Remote")));
         LinearLayout files=card();files.addView(label("Phone files · separate local source",16,accent));files.addView(button(importing?"Importing…":"Scan music folder",this::scanFolder));files.addView(button("+ Select individual songs",this::importSongs));files.addView(label("▾ Phone imports",17,accent));files.addView(label("    ▾ Imported ("+(player==null?0:player.getMediaItemCount())+")",15,text));drawQueue(true);
     }
     private void drawQueue(boolean editable){
@@ -192,7 +194,7 @@ public final class MainActivity extends Activity {
     private boolean isRadio(){return player!=null&&player.getCurrentMediaItem()!=null&&player.getCurrentMediaItem().mediaId.equals("amp-radio");}
     private void radio(){
         EditText url=new EditText(this);url.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_URI);url.setSingleLine(true);url.setHint("https://station.example/stream.mp3");url.setText(prefs.getString("radio-url",""));
-        new android.app.AlertDialog.Builder(this).setTitle("Internet radio / AMP Cast stream").setMessage("Direct stream playback only. Desktop-library browsing and Save offline for radio are not implemented yet. Uses your network connection.").setView(url).setNegativeButton("Cancel",null).setPositiveButton("Play stream",(dialog,which)->{
+        new android.app.AlertDialog.Builder(this).setTitle("Internet radio / AMP Cast stream").setMessage("Direct stream playback only. Desktop-library browsing and Save offline for Cast are not implemented yet. Uses your network connection.").setView(url).setNegativeButton("Cancel",null).setPositiveButton("Play stream",(dialog,which)->{
             Uri uri=Uri.parse(url.getText().toString().trim());if(!("http".equals(uri.getScheme())||"https".equals(uri.getScheme()))||uri.getHost()==null){message="Enter a valid HTTP or HTTPS stream URL.";refresh();return;}
             if(player==null)return;prefs.edit().putString("radio-url",uri.toString()).apply();player.setMediaItem(new MediaItem.Builder().setMediaId("amp-radio").setUri(uri).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle("Radio · "+uri.getHost()).build()).build());player.prepare();player.play();draw();
         }).show();

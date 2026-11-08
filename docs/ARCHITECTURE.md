@@ -3,11 +3,11 @@
 
 ## Desktop library and Android Remote ownership (current direction)
 
-Desktop AMP Verse owns the music libraries, folder roots and playlists. Android Remote connects to that desktop/server, browses its songs/playlists and streams selected content to the phone. From that remote source, the user can explicitly Save offline; that downloaded collection belongs to the radio portion. A phone-folder import is a separate local-player source, not the definition of the radio offline library.
+Desktop AMP Verse owns the music libraries, folder roots and playlists. Android Remote connects to that desktop/server, browses its songs/playlists and streams selected content to the phone. From that remote source, the user can explicitly Save offline; that downloaded collection belongs to the radio portion. A phone-folder import is a separate local-player source, not the definition of the Cast offline library.
 
-Target flow: desktop adds library → Android Remote connects → browse songs/playlists → listen on phone → Save offline for radio. Downloading a song or playlist must copy the actual audio and portable preparation to a managed radio cache, persist membership/source identity and report completion only once playback is available without the desktop. Offline radio items must remain usable when the source is unavailable; refresh must preserve local cue overrides. Do not cache a live station stream and label it as downloaded playlist songs. No desktop playback command should be sent when the user chooses to listen on the phone.
+Target flow: desktop adds library → Android Remote connects → browse songs/playlists → listen on phone → Save offline for Cast. Downloading a song or playlist must copy the actual audio and portable preparation to a managed radio cache, persist membership/source identity and report completion only once playback is available without the desktop. Offline radio items must remain usable when the source is unavailable; refresh must preserve local cue overrides. Do not cache a live station stream and label it as downloaded playlist songs. No desktop playback command should be sent when the user chooses to listen on the phone.
 
-Current limitations: the Android build supports independent phone-file imports and direct radio-stream URLs. Desktop library browsing/streaming APIs, Remote browsing and Save offline from that source are not implemented. Retain existing imported phone audio; do not silently move, delete or relabel it as radio downloads. Direct phone-folder playback remains available as a separate local-player source, as confirmed by the user.
+Current limitations: the Android build supports independent phone-file imports and direct radio-stream URLs. Desktop library browsing/streaming APIs, Remote browsing and Save offline from that source are not implemented. Retain existing imported phone audio; do not silently move, delete or relabel it as Cast downloads. Direct phone-folder playback remains available as a separate local-player source, as confirmed by the user.
 
 
 ## Boundaries implemented now
@@ -79,3 +79,8 @@ This preview has sequential queue playback and optional repeat; prepared cue ove
 ## Android audio processing
 
 PlaybackService uses a custom DefaultAudioSink PCM chain with a five-band peaking EQ and a post-EQ spectral measurement tap (AudioDsp). The tap does not modify samples while EQ is bypassed. A foreground SpectrumView reads immutable volatile level snapshots and decays stale frames. No Android Visualizer/microphone permission, downloaded DSP or simulated spectrum is used. Settings preferences update EQ coefficients in the audio thread without letting the UI call decoder methods. Native Radio temporarily loads an explicit HTTP(S) stream into the same media session, while LibraryStore remains the persistent local queue authority.
+
+
+## AMP Lab Android editor foundation
+
+Android AMP Lab now integrates MP3 Lab's existing Android Java editor and pinned FFmpegKit audio dependency. It runs as a native activity in the integrated AMP Verse app; it is not an Android plugin or second independent editor engine. `lab/MainActivity`, `RetroLayout`, `Retro` and `SessionStore` retain upstream implementation with package/resource/navigation/shared-palette adapters and isolated session storage. The desktop Plugin Manager's external editor connection is unchanged. Source is inspected/copied read-only from the MP3 Lab checkout; future editor improvements should rebase/share that foundation, not drift into a separately redesigned processing engine. Provenance, MIT attribution, bundled codec notices and the exact corresponding-source archive are preserved under `third-party/mp3-lab/` and included with Android CI artifacts.
