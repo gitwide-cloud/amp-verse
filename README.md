@@ -79,3 +79,5 @@ MIT for AMP Verse code. MP3 Lab was inspected read-only for editor architecture,
 ### Native AMP Cast dashboard
 
 In AMP Verse, open the top-bar dropdown and choose **AMP Cast**. This opens a separate native window inside the desktop software, with Dashboard, Queue, Streaming and Settings sections. Enter the running server's `host:port` (default `127.0.0.1:8787`) and optional admin password, then **Connect / apply**. Start/Stop controls the independent server broadcast; the dashboard displays real track, cue, listener and station status. Closing the window does not stop the server. Passwords are kept in memory only. Start the `amp-cast` companion separately using the instructions above. Native soundcard listening and queue editing remain planned; the browser listener remains separately available.
+
+The **web UI stays simple**: listen, see current status, start/stop broadcasting, and view the read-only queue. Real editing and advanced control belong to AMP Verse desktop and the Android app (Android remains in development).

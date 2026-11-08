@@ -29,3 +29,8 @@ The page uses the actual station icon and live server/track/listener state. Broa
 ## Native Cast reference
 
 The latest dashboard reference is explicitly assigned to the built-in desktop AMP Cast module, regardless of the image's embedded "Web UI" caption. It is a native egui window opened through the topmost module dropdown, with left navigation, Now Broadcasting and Streaming Status panels, real server queue/cue data and Auto DJ status. It shares the three desktop themes. The separate browser playback page remains a different surface. Detailed listener geography, CPU/memory/uptime, track waveforms/artwork, seek, crossfade/rules, editable station profiles and native soundcard playback are unbuilt and are not fabricated.
+
+
+## Interface ownership
+
+The web UI is intentionally basic: live station/track status, listening on this device, basic broadcast Start/Stop, a collapsed read-only queue and local theme selection. It is not the full Cast management dashboard. Playlist creation/reordering, library management, cue editing, Auto DJ rules/mixing, schedules, routing and detailed station controls belong in AMP Verse desktop and the integrated Android app as implemented. The server owns execution and prepared state so it remains independent of both clients. Android is still unbuilt; this ownership does not imply its controls already exist. Do not mirror advanced desktop mockups or placeholder future-feature panels into the simple browser page.
