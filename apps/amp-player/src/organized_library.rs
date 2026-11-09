@@ -45,7 +45,8 @@ impl Player {
             ui.vertical(|ui| {ui.set_width(ui.available_width()-8.);
                 match self.library_page {
                     0 => self.organized_music(ui,height),
-                    1 => {ui.heading("Smart Playlists");ui.weak("Choose sources and mixing rules; keep your preferred energy.");if ui.button("Edit Smart Playlist rules").clicked(){self.show_editor.open=true;}let mut edit=None;for list in &self.run.settings.playlists {let row=ui.selectable_label(false,&list.name);if row.clicked()||show_editor::edit_menu(&row){edit=Some(list.id.clone());}}if let Some(id)=edit{self.edit_smart_in_library(ui,&id);}},
+                    1 => {ui.heading("Smart Playlists");ui.weak("Choose sources and mixing rules; keep your preferred energy.");if ui.button("Edit Smart Playlist rules").clicked(){self.show_editor.open=true;}let mut edit=None;for list in &self.run.settings.playlists {let row=ui.selectable_label(false,&list.name);if row.clicked(){edit=Some((list.id.clone(),show_editor::PlaylistAction::Edit));}
+if let Some(action)=show_editor::playlist_menu(&row){edit=Some((list.id.clone(),action));}}if let Some((id,action))=edit{self.smart_playlist_action(ui,&id,action);}},
                     2 => self.organized_playlists(ui,height),
                     3 => {ui.heading("Devices");ui.weak("Find AMP Cast servers on your LAN or connect by address.");self.cast.show(ui);},
                     4 => {ui.heading("Playback history");ui.weak("Tracks started by this desktop session. A start does not mean the full track was played.");egui::ScrollArea::vertical().max_height(height-80.).show(ui,|ui|{for (deck,title) in self.playback_history.iter().rev(){ui.label(format!("Deck {}    {title}",deck+1));}if self.playback_history.is_empty(){ui.weak("Play a song to begin your session history.");}});},

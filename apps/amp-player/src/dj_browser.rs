@@ -16,6 +16,12 @@ pub struct Browser {
     pub(super) playlists: Vec<(PathBuf, Playlist)>,
     playlist: Option<usize>,
 }
+impl Browser {
+    pub(super) fn select_smart(&mut self, id: &str) {
+        self.source = Source::Smart;
+        self.smart = id.into();
+    }
+}
 fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
     playlist
         .tracks
@@ -25,6 +31,7 @@ fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
 }
 impl Player {
     pub(super) fn dj_library_ui(&mut self, ui: &mut egui::Ui) {
+        let height = ui.available_height().clamp(240., 420.);
         skin::label(ui, "DJ LIBRARY");
         let mut auto = self.run.auto;
         let mut toggle = false;
@@ -35,7 +42,7 @@ impl Player {
         let mut context_edit = None;
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2(195., 320.),
+                egui::vec2(195., height - 30.),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_width(195.);
@@ -55,7 +62,7 @@ impl Player {
                     ui.separator();
                     egui::ScrollArea::vertical()
                         .id_salt("dj-source-sidebar")
-                        .max_height(240.)
+                        .max_height((height - 160.).max(70.))
                         .show(ui, |ui| match self.dj_browser.source {
                             Source::Smart => {
                                 for profile in &self.run.settings.playlists {
@@ -64,8 +71,8 @@ impl Player {
                                         profile.id.clone(),
                                         &profile.name,
                                     );
-                                    if show_editor::edit_menu(&row) {
-                                        context_edit = Some(profile.id.clone());
+                                    if let Some(action) = show_editor::playlist_menu(&row) {
+                                        context_edit = Some((profile.id.clone(), action));
                                     }
                                 }
                             }
@@ -119,6 +126,7 @@ impl Player {
                 ui.set_width(ui.available_width());
                 ui.add(
                     egui::TextEdit::singleline(&mut self.dj_browser.search)
+                        .desired_width(ui.available_width())
                         .hint_text("Search this source"),
                 );
                 let Some(lib) = &self.library else {
@@ -176,15 +184,23 @@ impl Player {
                 ui.weak(format!("{} tracks", indices.len()));
                 egui::ScrollArea::vertical()
                     .id_salt("dj-source-tracks")
-                    .max_height(280.)
-                    .min_scrolled_height(220.)
+                    .max_height((height - 125.).max(80.))
+                    .min_scrolled_height((height - 125.).max(80.))
                     .show_rows(ui, 28., indices.len(), |ui, range| {
                         for row in range {
                             let i = indices[row];
                             let t = &lib.tracks[i];
                             ui.horizontal(|ui| {
                                 if ui
-                                    .selectable_label(self.selected == Some(i), &t.title)
+                                    .add_sized(
+                                        [(ui.available_width() - 330.).max(160.), 24.],
+                                        egui::Button::selectable(
+                                            self.selected == Some(i),
+                                            &t.title,
+                                        )
+                                        .right_text("")
+                                        .truncate(),
+                                    )
                                     .clicked()
                                 {
                                     self.selected = Some(i);
@@ -235,10 +251,13 @@ impl Player {
             }
         }
         if edit_smart {
-            context_edit = Some(self.dj_browser.smart.clone());
+            context_edit = Some((
+                self.dj_browser.smart.clone(),
+                show_editor::PlaylistAction::Edit,
+            ));
         }
-        if let Some(id) = context_edit {
-            self.edit_smart_in_library(ui, &id);
+        if let Some((id, action)) = context_edit {
+            self.smart_playlist_action(ui, &id, action);
         }
         if load_smart {
             self.run.choice = self.dj_browser.smart.clone();

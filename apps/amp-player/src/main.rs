@@ -21,6 +21,7 @@ mod preparer;
 mod sampler;
 mod show_editor;
 mod skin;
+mod smart_actions;
 mod theme;
 mod waveform;
 mod window_layout;
@@ -819,7 +820,7 @@ impl Player {
                 if p == 0 {
                     135.
                 } else if p == 2 {
-                    600.
+                    920.
                 } else {
                     680.
                 }
@@ -880,7 +881,8 @@ impl Player {
                     ui.set_max_height(height);
                     self.pane_ui(ui, host);
                     ctx.data_mut(|d| {
-                        d.insert_temp(egui::Id::unique(("pane-bounds", host)), ui.min_rect())
+                        d.insert_temp(egui::Id::unique(("pane-bounds", host)), ui.min_rect());
+                        d.insert_temp(egui::Id::unique(("pane-layer", host)), ui.layer_id())
                     });
                 },
             );
@@ -1386,13 +1388,15 @@ impl Player {
                 .show_ui(ui, |ui| {
                     for p in &self.run.settings.playlists {
                         let row = ui.selectable_value(&mut selected, p.id.clone(), &p.name);
-                        if show_editor::edit_menu(&row) {
-                            context_edit = Some(p.id.clone());
+                        if let Some(action) = show_editor::playlist_menu(&row) {
+                            context_edit = Some((p.id.clone(), action));
                         }
                     }
                 });
-            if !selected.is_empty() && show_editor::edit_menu(&selector.response) {
-                context_edit = Some(selected.clone());
+            if !selected.is_empty()
+                && let Some(action) = show_editor::playlist_menu(&selector.response)
+            {
+                context_edit = Some((selected.clone(), action));
             }
             if ui.button("Load").clicked()
                 && let Err(e) = self.execute_control(control::Action::LoadSmartPlaylist {
@@ -1442,9 +1446,12 @@ impl Player {
                     }
                 ));
         });
+        if self.run.choice != selected {
+            self.dj_browser.select_smart(&selected);
+        }
         self.run.choice = selected;
-        if let Some(id) = context_edit {
-            self.edit_smart_in_library(ui, &id);
+        if let Some((id, action)) = context_edit {
+            self.smart_playlist_action(ui, &id, action);
         }
     }
     fn sampler_ui(&mut self, ui: &mut egui::Ui) {
@@ -1492,10 +1499,7 @@ impl Player {
             ui.set_min_width(ui.available_width());
             self.header(ui, "AMP DJ", true);
             ui.horizontal(|ui| {
-                for (tab, label) in ["Mixer", "Music library", "Sampler"]
-                    .into_iter()
-                    .enumerate()
-                {
+                for (tab, label) in [(0, "Mixer + library"), (2, "Sampler")] {
                     ui.selectable_value(&mut self.dj_tab, tab, label);
                 }
             });
@@ -1519,7 +1523,8 @@ impl Player {
                 self.waveforms[d].height = Some(40.);
                 self.waveforms[d].show(ui, &self.root, track.as_ref(), position, self.wave_span, d);
             }
-            let height = (ui.available_height() - 34.).max(230.);
+            let browser_height = (ui.available_height() * 0.34).clamp(280., 360.);
+            let height = (ui.available_height() - browser_height - 50.).max(230.);
             let deck_width = ((ui.available_width() - 178.) / 2.).max(250.);
             ui.horizontal_top(|ui| {
                 self.deck_ui(ui, 0, deck_width, height);
@@ -1632,6 +1637,20 @@ impl Player {
                     );
                 ui.add(egui::Label::new(&self.status).truncate());
             });
+            ui.separator();
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), browser_height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    self.dj_library_ui(ui);
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(
+                            egui::Id::unique("dj-browser-screen").with("screen"),
+                            (ui.min_rect(), ui.layer_id()),
+                        )
+                    });
+                },
+            );
         });
     }
     fn deck_ui(&mut self, ui: &mut egui::Ui, deck: usize, width: f32, height: f32) {
@@ -2075,6 +2094,7 @@ mod window_tests {
                 egui::Id::unique(("dj-transport", 0usize)),
                 egui::Id::unique(("dj-transport", 1usize)),
                 egui::Id::unique("dj-auto-fade-bounds"),
+                egui::Id::unique("dj-browser-screen"),
             ] {
                 let (rect, layer) = ctx
                     .data(|d| d.get_temp::<(egui::Rect, egui::LayerId)>(id.with("screen")))
@@ -2106,21 +2126,26 @@ mod window_tests {
         let dj = ctx
             .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique(("pane-bounds", 2usize))))
             .unwrap();
+        let layer = ctx
+            .data(|d| d.get_temp::<egui::LayerId>(egui::Id::unique(("pane-layer", 2usize))))
+            .unwrap();
+        let screen = ctx.layer_transform_to_global(layer).unwrap_or_default() * dj;
         assert!(
-            dj.height() <= 600.,
-            "DJ container must fit the native viewport: {dj:?}"
+            screen.bottom() <= 600. && screen.right() <= 900.,
+            "DJ must fit viewport: {screen:?}"
         );
-        for id in [
-            egui::Id::unique(("dj-transport", 0usize)),
-            egui::Id::unique(("dj-transport", 1usize)),
-            egui::Id::unique("dj-auto-fade-bounds"),
-        ] {
-            let control = ctx.data(|d| d.get_temp::<egui::Rect>(id)).unwrap();
-            assert!(
-                control.bottom() <= 600. && control.right() <= 900.,
-                "Core DJ controls must remain visible: {control:?}"
-            );
-        }
+        let (browser, layer) = ctx
+            .data(|d| {
+                d.get_temp::<(egui::Rect, egui::LayerId)>(
+                    egui::Id::unique("dj-browser-screen").with("screen"),
+                )
+            })
+            .unwrap();
+        let screen = ctx.layer_transform_to_global(layer).unwrap_or_default() * browser;
+        assert!(
+            screen.height() > 100. && screen.bottom() <= 600.,
+            "Song browser must remain visible below decks: {screen:?}"
+        );
     }
     #[test]
     fn dj_below_attached_library_has_finite_reachable_bounds() {

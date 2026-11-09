@@ -1,15 +1,36 @@
 //! AMP Library edits a draft; only explicit Save publishes rules for future performances.
 use amp_core::show::{EnergyPlan, Fallback, Settings, Style};
 use eframe::egui;
-pub fn edit_menu(response: &egui::Response) -> bool {
-    let mut edit = false;
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum PlaylistAction {
+    Edit,
+    Duplicate,
+    Resync,
+    Delete,
+}
+pub fn playlist_menu(response: &egui::Response) -> Option<PlaylistAction> {
+    let mut action = None;
     response.context_menu(|ui| {
-        if ui.button("Edit in Library").clicked() {
-            edit = true;
-            ui.close();
+        for (label, value) in [
+            ("Edit in Library", PlaylistAction::Edit),
+            ("Duplicate", PlaylistAction::Duplicate),
+            ("Resync sources / rules", PlaylistAction::Resync),
+        ] {
+            if ui.button(label).clicked() {
+                action = Some(value);
+                ui.close();
+            }
         }
+        ui.separator();
+        ui.menu_button("Delete...", |ui| {
+            ui.weak("Remove this Smart Playlist, keeping music files.");
+            if ui.button("Delete this Smart Playlist").clicked() {
+                action = Some(PlaylistAction::Delete);
+                ui.close();
+            }
+        });
     });
-    edit
+    action
 }
 #[derive(Default)]
 pub struct Editor {
