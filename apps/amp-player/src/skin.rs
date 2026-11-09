@@ -488,9 +488,14 @@ pub fn bolt(painter: &egui::Painter, rect: Rect, color: C) {
 }
 
 /// Decorative vinyl grooves; no fabricated meter or waveform data.
-pub fn platter(ui: &mut egui::Ui, size: f32, accent: C, playing: bool, phase: f32) {
-    let (rect, _) =
-        ui.allocate_exact_size(egui::vec2(ui.available_width(), size), egui::Sense::hover());
+pub fn platter(
+    ui: &mut egui::Ui,
+    size: f32,
+    accent: C,
+    _playing: bool,
+    phase: f32,
+) -> egui::Response {
+    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::drag());
     let center = rect.center();
     let radius = size * 0.46;
     ui.painter()
@@ -512,7 +517,7 @@ pub fn platter(ui: &mut egui::Ui, size: f32, accent: C, playing: bool, phase: f3
             ),
         );
     }
-    let angle = if playing { phase * 1.8 } else { -2.1 };
+    let angle = phase * 1.8;
     ui.painter().line_segment(
         [
             center,
@@ -532,6 +537,7 @@ pub fn platter(ui: &mut egui::Ui, size: f32, accent: C, playing: bool, phase: f3
         Rect::from_center_size(center, egui::vec2(size * 0.08, size * 0.13)),
         GOLD,
     );
+    response.on_hover_cursor(egui::CursorIcon::Grab)
 }
 
 pub fn meter(ui: &mut egui::Ui, peak: f32, size: Vec2) {

@@ -312,3 +312,9 @@ Optimized Lab screenshots were checked in Classic, Modern Light and Modern Dark 
 
 The previous control was a release-page hyperlink, browser integration was disabled in the desktop feature set, and the current release lacked a standalone engine asset. Enabled browser integration, added an explicit background HTTPS download/install action with timeout, bounded file size, SHA-256 verification and temporary-file replacement. Published a Windows x86-64 engine plus its checksum to the existing public release. Future tagged builds publish raw platform-specific engine assets alongside the existing packages. Checksum rejection regression preserves existing installed bytes. Player suite: 43 passed, 9 ignored; strict Clippy passed.
 The explicit public-release download regression also passed against the newly published Windows asset, using a temporary destination and the production HTTPS/checksum/install path. No analysis was started and no user library was changed.
+
+## Interactive DJ jog wheels
+
+Replaced decorative platters with pointer-driven scratch controls, source-position rotation, wheel scrolling and Seek -/+ (Shift: five seconds). Added an eight-second preallocated PCM history per deck and signed interpolated playback; decoding stays off the real-time callback. The scratch speed is separate from normal pitch. Gestures restore prior play/pause on release/focus loss and respect their owning native viewport. Manual gestures cancel automation; seek reloads a playback-only preparation clone and preserves saved cues.
+
+Player tests: 46 passed, 9 ignored. New PCM tests verify reverse and fractional interpolation, fixed history capacity/boundaries, stationary hold, other-deck continuity and return to forward playback. Existing resize, loop, fade, EQ, sampler and playback-snapshot tests passed. Strict Clippy passed. These are deterministic mixer tests, not a claim of manual soundcard audition.

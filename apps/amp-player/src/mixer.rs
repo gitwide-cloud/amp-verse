@@ -2,6 +2,7 @@
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Consumer, PushError, RingBuffer};
 use std::{
+    collections::VecDeque,
     io::Read,
     path::Path,
     sync::{
@@ -35,6 +36,8 @@ pub struct Controls {
     pub finished: [AtomicBool; 2],
     pub gain: [AtomicU32; 2],
     pub rate: [AtomicU32; 2],
+    pub scratching: [AtomicBool; 2],
+    pub scratch_rate: [AtomicU32; 2],
     pub eq: [[AtomicU32; 3]; 2],
     pub cutoff: [AtomicU32; 2],
     pub position: [AtomicU64; 2],
@@ -65,6 +68,8 @@ impl Default for Controls {
             finished: std::array::from_fn(|_| AtomicBool::new(false)),
             gain: std::array::from_fn(|_| atom(1.)),
             rate: std::array::from_fn(|_| atom(1.)),
+            scratching: std::array::from_fn(|_| AtomicBool::new(false)),
+            scratch_rate: std::array::from_fn(|_| atom(0.)),
             eq: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             cutoff: std::array::from_fn(|_| atom(22000.)),
             position: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -85,9 +90,8 @@ struct Source {
     ring: Consumer<Frame>,
     duration: Arc<AtomicU64>,
     done: Arc<AtomicBool>,
-    a: Option<Frame>,
-    b: Option<Frame>,
-    phase: f64,
+    history: VecDeque<Frame>,
+    history_start: u64,
     position: f64,
     primed: bool,
 }
@@ -97,25 +101,27 @@ impl Source {
             || (self.done.load(std::sync::atomic::Ordering::Acquire) && self.ring.slots() > 1)
     }
     fn next(&mut self, rate: f32) -> Option<Frame> {
-        if self.a.is_none() {
-            self.a = self.ring.pop().ok();
+        if rate.abs() < 0.0001 {
+            return Some([0.; 2]);
         }
-        if self.b.is_none() {
-            self.b = self.ring.pop().ok();
-        }
-        let (a, b) = (self.a?, self.b?);
-        let f = self.phase as f32;
-        let frame = [a[0] + (b[0] - a[0]) * f, a[1] + (b[1] - a[1]) * f];
-        self.phase += rate as f64;
-        self.position += rate as f64;
-        while self.phase >= 1. {
-            self.phase -= 1.;
-            self.a = self.b.take();
-            self.b = self.ring.pop().ok();
-            if self.b.is_none() {
-                break;
+        self.position = self.position.max(self.history_start as f64);
+        let index = self.position.floor() as u64;
+        while self.history_start + self.history.len() as u64 <= index + 1 {
+            let frame = self.ring.pop().ok()?;
+            // Capacity is reserved on the decoder/UI thread, never in the callback.
+            if self.history.len() == self.history.capacity() {
+                self.history.pop_front();
+                self.history_start += 1;
             }
+            self.history.push_back(frame);
         }
+        let offset = (index - self.history_start) as usize;
+        let a = *self.history.get(offset)?;
+        let b = *self.history.get(offset + 1)?;
+        let fraction = self.position.fract() as f32;
+        let frame =
+            std::array::from_fn(|channel| a[channel] + (b[channel] - a[channel]) * fraction);
+        self.position = (self.position + rate as f64).max(self.history_start as f64);
         Some(frame)
     }
 }
@@ -244,6 +250,7 @@ impl Mixer {
                 }
                 Command::Load(d, s, play, generation) => {
                     self.levels[d] = None;
+                    self.controls.scratching[d].store(false, Relaxed);
                     self.controls.play[d].store(play, Relaxed);
                     self.voices[d] = Voice {
                         source: Some(s),
@@ -314,7 +321,13 @@ impl Mixer {
     fn render(&mut self, frames: usize, mut output: impl FnMut(usize, Frame)) {
         self.process_commands();
         let c = &self.controls;
-        let rates = std::array::from_fn::<_, 2, _>(|d| get(&c.rate[d]).clamp(0.5, 2.));
+        let rates = std::array::from_fn::<_, 2, _>(|d| {
+            if c.scratching[d].load(Relaxed) {
+                get(&c.scratch_rate[d]).clamp(-4., 4.)
+            } else {
+                get(&c.rate[d]).clamp(0.5, 2.)
+            }
+        });
 
         let eq = std::array::from_fn::<_, 2, _>(|d| {
             std::array::from_fn::<_, 3, _>(|b| 10f32.powf(get(&c.eq[d][b]) / 20.))
@@ -718,9 +731,8 @@ impl Engine {
                 ring: consumer,
                 duration,
                 done,
-                a: None,
-                b: None,
-                phase: 0.,
+                history: VecDeque::with_capacity(self.sample_rate as usize * 8),
+                history_start: 0,
                 position: 0.,
                 primed: false,
             },
@@ -889,6 +901,17 @@ impl Engine {
     pub fn set_gain(&self, deck: usize, value: f32) {
         let _ = self.send(Command::LevelSet(deck, value.clamp(0., 1.)));
     }
+    pub fn scratch(&self, deck: usize, active: bool, rate: f32) {
+        set(
+            &self.controls.scratch_rate[deck],
+            if rate.is_finite() {
+                rate.clamp(-4., 4.)
+            } else {
+                0.
+            },
+        );
+        self.controls.scratching[deck].store(active, Relaxed);
+    }
     pub fn set_rate(&self, deck: usize, value: f32) {
         set(&self.controls.rate[deck], value);
     }
@@ -964,12 +987,74 @@ mod tests {
             ring: c,
             duration: Arc::new(AtomicU64::new(frames as u64)),
             done: Arc::new(AtomicBool::new(true)),
-            a: None,
-            b: None,
-            phase: 0.,
+            history: VecDeque::with_capacity(frames.max(2)),
+            history_start: 0,
             position: 0.,
             primed: false,
         }
+    }
+    #[test]
+    fn scratch_reads_audio_in_both_directions_without_growing_history() {
+        let (mut producer, consumer) = RingBuffer::new(65);
+        for frame in 0..64 {
+            producer.push([frame as f32, -(frame as f32)]).unwrap();
+        }
+        let mut source = Source {
+            ring: consumer,
+            duration: Arc::new(AtomicU64::new(64)),
+            done: Arc::new(AtomicBool::new(true)),
+            history: VecDeque::with_capacity(16),
+            history_start: 0,
+            position: 0.,
+            primed: true,
+        };
+        for expected in 0..12 {
+            assert_eq!(source.next(1.).unwrap()[0], expected as f32);
+        }
+        assert_eq!(source.next(-1.).unwrap(), [12., -12.]);
+        assert_eq!(source.next(-1.).unwrap(), [11., -11.]);
+        assert_eq!(source.next(-1.).unwrap(), [10., -10.]);
+        assert_eq!(source.next(0.), Some([0.; 2]));
+        assert_eq!(source.position, 9.);
+        assert_eq!(source.next(0.5).unwrap()[0], 9.);
+        assert_eq!(source.next(0.5).unwrap()[0], 9.5);
+        for _ in 0..25 {
+            source.next(1.).unwrap();
+        }
+        let capacity = source.history.capacity();
+        assert_eq!(capacity, 16);
+        for _ in 0..100 {
+            source.next(-4.).unwrap();
+        }
+        assert_eq!(source.position, source.history_start as f64);
+        assert_eq!(source.history.capacity(), capacity);
+    }
+    #[test]
+    fn scratching_reverses_one_deck_and_restores_forward_playback() {
+        let controls = Arc::new(Controls::default());
+        let (sender, receiver) = mpsc::sync_channel(16);
+        let mut mixer = Mixer::new(1000, receiver, controls.clone());
+        sender
+            .send(Command::Load(0, source(0.2, 4000), true, 1))
+            .unwrap();
+        sender
+            .send(Command::Load(1, source(0.3, 4000), true, 1))
+            .unwrap();
+        mixer.render(1000, |_, _| {});
+        controls.scratching[0].store(true, Relaxed);
+        set(&controls.scratch_rate[0], -1.);
+        mixer.render(100, |_, frame| {
+            assert!(frame.iter().all(|sample| sample.is_finite()))
+        });
+        assert_eq!(controls.position[0].load(Relaxed), 900);
+        assert_eq!(controls.position[1].load(Relaxed), 1100);
+        set(&controls.scratch_rate[0], 0.);
+        mixer.render(100, |_, _| {});
+        assert_eq!(controls.position[0].load(Relaxed), 900);
+        controls.scratching[0].store(false, Relaxed);
+        mixer.render(100, |_, _| {});
+        assert_eq!(controls.position[0].load(Relaxed), 1000);
+        assert_eq!(controls.position[1].load(Relaxed), 1300);
     }
     #[test]
     fn level_fades_are_smooth_stop_separately_and_can_restore() {
@@ -1258,9 +1343,8 @@ mod tests {
                 ring: r,
                 duration: Arc::new(AtomicU64::new(0)),
                 done: Arc::new(AtomicBool::new(false)),
-                a: None,
-                b: None,
-                phase: 0.,
+                history: VecDeque::with_capacity(8000),
+                history_start: 0,
                 position: 0.,
                 primed: false,
             },

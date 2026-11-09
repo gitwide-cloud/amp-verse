@@ -120,6 +120,8 @@ struct Player {
     channel_gain: [f32; 2],
     fader: f32,
     fade_seconds: f32,
+    jog_resume: [Option<(bool, egui::ViewportId)>; 2],
+    jog_angle: [f32; 2],
     eq_open: bool,
     fx_open: bool,
     eq: [[f32; 3]; 2],
@@ -192,6 +194,8 @@ impl Default for Player {
             channel_gain: [1.; 2],
             fader: 0.,
             fade_seconds: 8.,
+            jog_resume: [None; 2],
+            jog_angle: [0.; 2],
             eq_open: false,
             fx_open: false,
             eq: [[0.; 3]; 2],
@@ -1593,6 +1597,7 @@ impl Player {
         }
     }
     fn dj_ui(&mut self, ui: &mut egui::Ui) {
+        self.release_jog_wheels(ui.ctx());
         skin::panel(ui, true, |ui| {
             ui.set_min_width(ui.available_width());
             self.header(ui, "AMP DJ", true);
@@ -1758,7 +1763,9 @@ impl Player {
             skin::panel(ui,true,|ui|{ui.set_width(width-18.);
                 ui.horizontal(|ui|{skin::label(ui,if deck==0{"DECK A"}else{"DECK B"});let position=self.audio.as_ref().map_or(0.,|a|a.position(deck));ui.label(RichText::new(format!("{:02}:{:02}",position as u64/60,position as u64%60)).monospace().color(skin::signal(ui)));});
                 skin::display(ui,|ui|{ui.set_min_width(ui.available_width());ui.add(egui::Label::new(RichText::new(self.title(deck)).strong().color(skin::signal(ui))).truncate());let track=self.loaded_track(deck);ui.label(track.map(|t|format!("{} BPM · {}",t.preparation.bpm.map(|b|format!("{:.1}",b*(1.+self.pitch[deck]as f64/100.))).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--"))).unwrap_or_else(||"Load a track from the library".into()));});
-                ui.horizontal(|ui|{ui.vertical(|ui|{ui.label("PITCH");ui.spacing_mut().slider_width=platter_side;if ui.add(egui::Slider::new(&mut self.pitch[deck],-16. ..=16.).vertical().show_value(false)).changed()&&let Some(a)=&self.audio{a.set_rate(deck,1.+self.pitch[deck]/100.);}ui.label(format!("{:+.1}%",self.pitch[deck]));});let phase=ui.ctx().input(|i|i.time)as f32;skin::platter(ui,platter_side,accent,self.playing[deck],phase);});
+                ui.horizontal(|ui|{ui.vertical(|ui|{ui.label("PITCH");ui.spacing_mut().slider_width=platter_side;if ui.add(egui::Slider::new(&mut self.pitch[deck],-16. ..=16.).vertical().show_value(false)).changed()&&let Some(a)=&self.audio{a.set_rate(deck,1.+self.pitch[deck]/100.);}ui.label(format!("{:+.1}%",self.pitch[deck]));});let phase=self.audio.as_ref().map_or(0.,|audio|audio.source_position(deck)) as f32;
+                    let wheel=skin::platter(ui,platter_side,accent,self.playing[deck] || self.jog_resume[deck].is_some(),phase).on_hover_text("Drag around the wheel to scratch forward/backward. Scroll to seek; Shift = 5 seconds.");
+                    self.jog_wheel(ui, deck, &wheel);});
                 let transport=ui.horizontal(|ui|{
                     if skin::button(ui,"CUE",accent).on_hover_text("Return to the prepared cue IN and pause").clicked()&&let Some(i)=self.loaded[deck]{self.load_deck(deck,i,false);}
                     if skin::button(ui,if self.playing[deck]{"PAUSE"}else{"PLAY"},accent).clicked(){if deck==0{self.auto=false;}self.toggle_deck(deck);}
@@ -1768,6 +1775,8 @@ impl Player {
                 ui.ctx().data_mut(|d|{d.insert_temp(egui::Id::unique(("dj-transport",deck)),transport.response.rect);d.insert_temp(egui::Id::unique(("dj-transport",deck)).with("screen"),(transport.response.rect,ui.layer_id()));});
                 let cues=self.loaded[deck].and_then(|index|self.loaded_track(deck).map(|t|(index,t.preparation.manual_cues.iter().chain(t.preparation.cues.iter().filter(|c|matches!(c.kind.as_str(),"drop"|"energy-start"|"mix-in"|"grid"))).take(16).cloned().collect::<Vec<_>>())));
                 ui.horizontal_wrapped(|ui| {
+                    if ui.button("Seek -").on_hover_text("Seek back 1 second; Shift: 5 seconds").clicked() { self.seek_deck_relative(deck, if ui.input(|i|i.modifiers.shift) {-5.} else {-1.}); }
+                    if ui.button("Seek +").on_hover_text("Seek forward 1 second; Shift: 5 seconds").clicked() { self.seek_deck_relative(deck, if ui.input(|i|i.modifiers.shift) {5.} else {1.}); }
                     let looping=self.audio.as_ref().is_some_and(|a|a.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed));
                     if ui.button(if looping{"Loop off"}else{"Loop"}).on_hover_text("Loop four prepared beats, or two seconds without BPM").clicked(){
                         let seconds=self.loaded_track(deck).and_then(|t|t.preparation.bpm).map_or(2.,|bpm|4.*60./(bpm*(1.+self.pitch[deck]as f64/100.)));
@@ -1781,6 +1790,108 @@ impl Player {
                 });
             });
         });
+    }
+    fn seek_deck_relative(&mut self, deck: usize, delta: f64) {
+        let Some(mut track) = self.loaded_track(deck).cloned() else {
+            self.status = "Load a track before seeking".into();
+            return;
+        };
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        let was_playing = audio.playing(deck);
+        let end = track.preparation.cue_out.or(track
+            .preparation
+            .analysis
+            .as_ref()
+            .map(|a| a.duration));
+        let position = (audio.source_position(deck) + delta).max(0.);
+        track.preparation.cue_in = end.map_or(position, |end| position.min((end - 0.02).max(0.)));
+        self.run.cancel_automation();
+        self.auto = false;
+        if let Some(audio) = &mut self.audio
+            && let Err(error) = audio.load(deck, &self.root, &track, was_playing)
+        {
+            self.status = error;
+        }
+    }
+    fn jog_wheel(&mut self, ui: &mut egui::Ui, deck: usize, wheel: &egui::Response) {
+        let Some(position) = wheel.interact_pointer_pos() else {
+            if wheel.hovered() {
+                let scroll: f32 = ui.input(|i| {
+                    i.raw
+                        .events
+                        .iter()
+                        .filter_map(|event| {
+                            if let egui::Event::MouseWheel { delta, .. } = event {
+                                Some(delta.y)
+                            } else {
+                                None
+                            }
+                        })
+                        .sum()
+                });
+                if scroll != 0. {
+                    self.seek_deck_relative(
+                        deck,
+                        scroll.signum() as f64
+                            * if ui.input(|i| i.modifiers.shift) {
+                                5.
+                            } else {
+                                1.
+                            },
+                    );
+                }
+            }
+            return;
+        };
+        let relative = position - wheel.rect.center();
+        let angle = relative.y.atan2(relative.x);
+        if wheel.drag_started()
+            && let Some(audio) = &self.audio
+        {
+            if !audio.loaded(deck) {
+                return;
+            }
+            self.jog_resume[deck] = Some((audio.playing(deck), ui.ctx().viewport_id()));
+            self.jog_angle[deck] = angle;
+            self.run.cancel_automation();
+            self.auto = false;
+            if audio.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = audio.loop_toggle(deck, 2.);
+            }
+            audio.set_fader(audio.fader());
+            audio.scratch(deck, true, 0.);
+            audio.controls.play[deck].store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if wheel.dragged() && self.jog_resume[deck].is_some() {
+            let delta = (angle - self.jog_angle[deck] + std::f32::consts::PI)
+                .rem_euclid(std::f32::consts::TAU)
+                - std::f32::consts::PI;
+            self.jog_angle[deck] = angle;
+            let dt = ui.input(|i| i.stable_dt).max(0.001);
+            if let Some(audio) = &self.audio {
+                audio.scratch(deck, true, delta / std::f32::consts::TAU * 2. / dt);
+            }
+        }
+    }
+    fn release_jog_wheels(&mut self, ctx: &egui::Context) {
+        if ctx.input(|i| i.pointer.primary_down() && i.viewport().focused.unwrap_or(true)) {
+            return;
+        }
+        for deck in 0..2 {
+            if self.jog_resume[deck].is_some_and(|(_, viewport)| viewport != ctx.viewport_id())
+                && self.dj_open
+            {
+                continue;
+            }
+            if let Some((resume, _)) = self.jog_resume[deck].take()
+                && let Some(audio) = &self.audio
+            {
+                audio.scratch(deck, false, 0.);
+                audio.controls.play[deck].store(resume, std::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
     fn library_equalizer(&mut self, ui: &mut egui::Ui) {
         ui.heading("Equalizer");
@@ -1971,6 +2082,7 @@ impl eframe::App for Player {
             self.start_control(ui.ctx());
         }
         self.poll();
+        self.release_jog_wheels(ui.ctx());
         self.poll_control();
         self.performance_tick();
         if let Some(c) = &self.control {

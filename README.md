@@ -157,3 +157,5 @@ Player view > Always on top keeps the full, compact or taskbar mini player above
 EQ and Filter FX open in independent resizable desktop windows, so full, compact and mini player heights do not clip their controls. Each has its own minimum size and vertical scrolling, and follows the player's Always on top preference.
 
 The full player includes compact Low/Mid/High EQ sliders in its spare right-hand space when there is room. The player's EQ button opens the expanded Equalizer page inside Library, with shared live controls for Player/Deck A and Deck B. Narrow player sizes retain access through the EQ button.
+
+DJ jog wheels: drag clockwise/counterclockwise to scratch buffered PCM in either direction (up to eight seconds of recent audio, at up to 4x speed). Holding still holds the playhead; releasing restores the deck's prior play/pause state and normal pitch. The wheel marker follows source position. Seek -/+ moves one second; Shift moves five seconds. Scrolling over the wheel also seeks. Manual wheel/seek interaction cancels Auto Mix. Seeking uses a temporary playback offset without saving changes to prepared cues or source files.
