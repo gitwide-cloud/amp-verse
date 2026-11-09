@@ -24,6 +24,7 @@ mod sampler;
 mod show_editor;
 mod skin;
 mod smart_actions;
+mod smart_preview;
 mod theme;
 mod waveform;
 mod window_layout;
@@ -106,6 +107,7 @@ struct Player {
     player_on_top: bool,
     run: performance::Run,
     show_editor: show_editor::Editor,
+    smart_preview: smart_preview::Preview,
     control: Option<control::Control>,
     control_attempted: bool,
     control_restart: Option<std::time::Instant>,
@@ -180,6 +182,7 @@ impl Default for Player {
             player_on_top: load_player_on_top(),
             run: Default::default(),
             show_editor: Default::default(),
+            smart_preview: Default::default(),
             control: None,
             control_attempted: false,
             control_restart: None,
@@ -407,6 +410,22 @@ impl Player {
         }
     }
     fn poll(&mut self) {
+        if self.smart_preview.active()
+            && (self.run.locked
+                || self.run.auto
+                || self.audio.as_ref().is_some_and(|audio| {
+                    audio.playing(0)
+                        || audio.playing(1)
+                        || audio
+                            .controls
+                            .sample_playing
+                            .iter()
+                            .any(|voice| voice.load(std::sync::atomic::Ordering::Relaxed))
+                }))
+        {
+            self.smart_preview.stop();
+        }
+        self.smart_preview.poll();
         if let Some(engine) = &mut self.audio {
             self.sampler.poll(engine);
         }

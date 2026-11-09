@@ -66,7 +66,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
     }
     fn organized_smart(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.heading("Smart Playlists");
-        ui.weak("Choose your music, set mixing rules and save your changes.");
+        ui.weak("Choose music. Choose a style. Save.");
         ui.add_space(12.);
         ui.horizontal_top(|ui| {
             let width = (ui.available_width() * 0.25).clamp(180., 260.);
@@ -75,13 +75,20 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
             skin::panel(ui, false, |ui| {
                 ui.set_width(width);
                 ui.set_min_height((height - 140.).max(200.));
-                ui.strong("Your Smart Playlists");
+                ui.strong("My Smart Playlists");
+                if ui
+                    .add_sized([width, 34.], egui::Button::new("+ New Playlist"))
+                    .clicked()
+                {
+                    self.show_editor
+                        .new_playlist(&self.root, &self.run.settings);
+                }
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .id_salt("smart-playlist-shelf")
                     .max_height((height - 200.).max(160.))
                     .show(ui, |ui| {
-                        for list in &self.run.settings.playlists {
+                        for list in self.show_editor.playlists(&self.run.settings) {
                             let row = ui.add_sized(
                                 [width, 36.],
                                 egui::Button::selectable(
@@ -92,7 +99,11 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                                 .truncate(),
                             );
                             if row.clicked() {
-                                action = Some((list.id.clone(), show_editor::PlaylistAction::Edit));
+                                self.show_editor.open_playlist(
+                                    &list.id,
+                                    &self.root,
+                                    &self.run.settings,
+                                );
                             }
                             if let Some(value) = show_editor::playlist_menu(&row) {
                                 action = Some((list.id.clone(), value));
@@ -112,6 +123,24 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 |ui| {
                     skin::panel(ui, false, |ui| {
                         ui.set_min_width(ui.available_width());
+                        self.show_editor.preview_active = self.smart_preview.active();
+                        self.show_editor.preview_status = self.smart_preview.status.clone();
+                        self.show_editor.audition_blocked = self.run.locked
+                            || self.run.auto
+                            || self.audio.as_ref().is_some_and(|audio| {
+                                audio.playing(0)
+                                    || audio.playing(1)
+                                    || audio.controls.sample_playing.iter().any(|voice| {
+                                        voice.load(std::sync::atomic::Ordering::Relaxed)
+                                    })
+                            });
+                        self.show_editor.set_existing_sources(
+                            self.dj_browser
+                                .playlists
+                                .iter()
+                                .map(|(_, list)| list.clone())
+                                .collect(),
+                        );
                         self.show_editor.show(
                             ui,
                             &self.root,
@@ -122,6 +151,33 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 },
             );
         });
+        if self.show_editor.stop_preview {
+            self.smart_preview.stop();
+            self.show_editor.stop_preview = false;
+        }
+        if let Some((profile, indices)) = self.show_editor.mix_request.take() {
+            if self.show_editor.audition_blocked {
+                self.status = "Stop live playback before previewing a mix".into();
+            } else if let Some(library) = &self.library {
+                let tracks = indices
+                    .iter()
+                    .filter_map(|&index| library.tracks.get(index))
+                    .cloned()
+                    .collect();
+                if let Err(error) = self.smart_preview.start(
+                    &self.root,
+                    tracks,
+                    &profile,
+                    self.volume as f32 / 100.,
+                ) {
+                    self.smart_preview.status = error;
+                }
+            }
+        }
+        if let Some(preview) = self.show_editor.preview.take() {
+            self.smart_preview.stop();
+            self.preparer.preview = Some(preview);
+        }
     }
     fn organized_playlists(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.heading("Playlists");

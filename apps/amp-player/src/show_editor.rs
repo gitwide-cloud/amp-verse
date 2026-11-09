@@ -38,9 +38,20 @@ pub struct Editor {
     selected: usize,
     status: String,
     search: String,
+    assignments_open: bool,
     draft: Option<Settings>,
     baseline: Option<Settings>,
     root: std::path::PathBuf,
+    pub audition_blocked: bool,
+    pub preview_active: bool,
+    pub stop_preview: bool,
+    pub mix_request: Option<(amp_core::show::SmartPlaylist, Vec<usize>)>,
+    pub preview_status: String,
+    pub preview: Option<(std::path::PathBuf, f64)>,
+    preview_order: Vec<String>,
+    source_labels: std::collections::HashMap<String, String>,
+    existing_sources: Vec<amp_core::Playlist>,
+    cache_bytes: Vec<u8>,
 }
 impl Editor {
     pub fn open_playlist(&mut self, id: &str, root: &std::path::Path, saved: &Settings) {
@@ -48,6 +59,26 @@ impl Editor {
             self.draft = Some(saved.clone());
             self.baseline = Some(saved.clone());
             self.root = root.into();
+            self.source_labels.clear();
+            self.preview_order.clear();
+            self.cache_bytes.clear();
+            if saved.sync.is_none() && !root.join(".ampverse/show.json").exists() {
+                for playlist in &mut self.draft.as_mut().unwrap().playlists {
+                    set_source_mode(playlist, SourceMode::Folders);
+                }
+            }
+            if let Some(path) = draft_path(root)
+                && let Ok(bytes) = std::fs::read(path)
+                && let Ok(cache) = serde_json::from_slice::<DraftCache>(&bytes)
+                && cache.draft.validate().is_ok()
+                && cache.baseline.validate().is_ok()
+            {
+                self.draft = Some(cache.draft);
+                self.baseline = Some(cache.baseline);
+                self.source_labels = cache.labels;
+                self.status =
+                    "Restored your local editing draft. Save Playlist publishes changes.".into();
+            }
         }
         self.selected = self
             .draft
@@ -84,6 +115,50 @@ impl Editor {
             .get(self.selected)
             .map(|p| p.id.as_str())
     }
+    fn cache_draft(&mut self) {
+        let (Some(draft), Some(baseline), Some(path)) =
+            (&self.draft, &self.baseline, draft_path(&self.root))
+        else {
+            return;
+        };
+        let cache = DraftCache {
+            draft: draft.clone(),
+            baseline: baseline.clone(),
+            labels: self.source_labels.clone(),
+        };
+        if let Ok(bytes) = serde_json::to_vec(&cache)
+            && bytes != self.cache_bytes
+        {
+            match save_draft_bytes(&path, &bytes) {
+                Ok(()) => self.cache_bytes = bytes,
+                Err(error) => {
+                    self.status = format!("Draft remains open; could not keep local copy: {error}")
+                }
+            }
+        }
+    }
+    pub fn new_playlist(&mut self, root: &std::path::Path, saved: &Settings) {
+        self.open_playlist("", root, saved);
+        let settings = self.draft.as_mut().unwrap();
+        let mut playlist = Settings::default().playlists.pop().unwrap();
+        playlist.id = format!(
+            "custom-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_nanos()
+        );
+        playlist.name = "New Smart Playlist".into();
+        set_source_mode(&mut playlist, SourceMode::Folders);
+        settings.playlists.push(playlist);
+        self.selected = settings.playlists.len() - 1;
+    }
+    pub fn playlists(&self, saved: &Settings) -> Vec<amp_core::show::SmartPlaylist> {
+        self.draft.as_ref().unwrap_or(saved).playlists.clone()
+    }
+    pub fn set_existing_sources(&mut self, lists: Vec<amp_core::Playlist>) {
+        self.existing_sources = lists;
+    }
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -93,102 +168,88 @@ impl Editor {
     ) {
         self.open = true;
         if self.draft.is_none() || self.root != root {
-            self.draft = Some(saved.clone());
-            self.baseline = Some(saved.clone());
-            self.root = root.into();
-            self.selected = 0;
+            self.open_playlist("", root, saved);
         }
+        let dirty = self.has_unsaved();
         let settings = self.draft.as_mut().unwrap();
         let height = ui.available_height().max(180.);
-        let area = egui::ScrollArea::vertical()
-            .id_salt("inline-smart-editor")
-            .max_height(height)
-            .auto_shrink([false, false])
-            .show(ui, |ui| {
-                ui.heading(
-                    settings
-                        .playlists
-                        .get(self.selected)
-                        .map_or("New Smart Playlist", |p| p.name.as_str()),
-                );
-                ui.weak("Edit sources and mixing rules. Save to apply to future loads.");
-                ui.horizontal_wrapped(|ui| {
-                    if ui
-                        .add_enabled(
-                            settings.playlists.len() < 1000,
-                            egui::Button::new("New Smart Playlist"),
-                        )
-                        .clicked()
-                    {
-                        let mut p = Settings::default().playlists.pop().unwrap();
-                        p.id = format!(
-                            "custom-{}",
-                            std::time::SystemTime::now()
-                                .duration_since(std::time::UNIX_EPOCH)
-                                .unwrap_or_default()
-                                .as_nanos()
-                        );
-                        p.name = "New Smart Playlist".into();
-                        settings.playlists.push(p);
-                        self.selected = settings.playlists.len() - 1;
-                    }
-                    if ui.button("Remove selected").clicked()
-                        && self.selected < settings.playlists.len()
-                    {
-                        settings.playlists.remove(self.selected);
-                        self.selected = self
-                            .selected
-                            .min(settings.playlists.len().saturating_sub(1));
-                    }
-                    if ui.button("Save rules").clicked() {
-                        self.status = save_rules(root, settings, saved);
-                        if self.status.starts_with("Saved.") {
-                            self.baseline = Some(saved.clone());
-                        }
-                    }
-                    if ui.button("Reload saved rules").clicked() {
-                        match Settings::load(root) {
-                            Ok(fresh) => {
-                                self.baseline = Some(fresh.clone());
-                                *saved = fresh.clone();
-                                *settings = fresh;
-                                self.selected = 0;
-                                self.status = "Reloaded current shared configuration".into();
+        let area = egui::ScrollArea::vertical().id_salt("inline-smart-editor").max_height(height).auto_shrink([false,false]).show(ui, |ui| {
+            let mut remove = false;
+            let mut duplicate = false;
+            let mut save = false;
+            let mut reload = false;
+            if let Some(p) = settings.playlists.get_mut(self.selected) {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut p.name).font(egui::TextStyle::Heading).desired_width((ui.available_width()-55.).max(100.)));
+                    ui.menu_button("...", |ui| {
+                        ui.weak("Rename using the name field");
+                        duplicate = ui.button("Duplicate").clicked();
+                        ui.menu_button("Delete...", |ui| { if ui.button("Remove from draft").clicked() { remove = true; ui.close(); } });
+                        ui.separator();
+                        reload = ui.button("Discard drafts / reload saved").clicked();
+                        if ui.button("Copy control ID").clicked() { ui.ctx().copy_text(p.id.clone()); ui.close(); }
+                    });
+                });
+                if dirty { ui.weak("Unsaved changes · draft kept locally"); }
+                ui.add_space(16.);
+                ui.strong("Music source");
+                let count = library.map(|lib| lib.tracks.iter().filter(|track|amp_core::show::eligible(p,track)).count());
+                let source = self.source_labels.get(&p.id).cloned().unwrap_or_else(|| source_summary(p));
+                ui.add(egui::Label::new(format!("{} — {}", source, count.map_or("waiting for library scan".into(), |count|format!("{count} songs")))).wrap());
+                ui.menu_button(if count == Some(0) {"Choose Music Source"} else {"Change Music Source"}, |ui| {
+                    if ui.button("Select Folder...").clicked() {
+                        if let Some(folder) = rfd::FileDialog::new().set_directory(root).pick_folder() && confirm_source_change(p) {
+                            match select_folder(root, &folder, p) {
+                                Ok(()) => { self.source_labels.insert(p.id.clone(),format!("Folder: {}",folder.display())); self.status = "Folder and all subfolders selected. Save Playlist to apply.".into(); }
+                                Err(error) => self.status = error,
                             }
-                            Err(e) => self.status = e,
                         }
+                        ui.close();
+                    }
+                    if ui.add_enabled(library.is_some(),egui::Button::new("Import Playlist (M3U / M3U8 / AMP)...")).clicked() {
+                        if let Some(file) = rfd::FileDialog::new().add_filter("Playlists", &["m3u","m3u8","json"]).pick_file() && let Some(lib) = library && confirm_source_change(p) {
+                            let result = if file.extension().is_some_and(|ext|ext.eq_ignore_ascii_case("json")) {
+                                amp_core::Playlist::load(&file,root).map_err(|e|e.to_string()).and_then(|list|import_source_playlist(p,&list,lib).map(|count|(count,0)))
+                            } else { import_m3u(&file,root,lib,p) };
+                            match result {
+                                Ok((count,missing)) => {self.source_labels.insert(p.id.clone(),format!("Imported: {}",file.file_name().unwrap_or_default().to_string_lossy()));self.status=format!("Imported {count} songs; {missing} missing or outside the indexed library. Save Playlist to apply.");}
+                                Err(error) => self.status = error,
+                            }
+                        }
+                        ui.close();
+                    }
+                    ui.menu_button("Choose Existing Playlist", |ui| {
+                        if self.existing_sources.is_empty() { ui.weak("Create or import a playlist in Library > Playlists first."); }
+                        for list in &self.existing_sources {
+                            if ui.button(format!("{} · {} songs",list.name,list.tracks.len())).clicked() && let Some(lib)=library && confirm_source_change(p) {
+                                match import_source_playlist(p,list,lib) {
+                                    Ok(count)=>{self.source_labels.insert(p.id.clone(),format!("Playlist: {}",list.name));self.status=format!("Selected {count} songs. Save Playlist to apply.");}
+                                    Err(error)=>self.status=error,
+                                }
+                                ui.close();
+                            }
+                        }
+                    });
+                    ui.separator();
+                    if ui.button("Use entire library").clicked() && confirm_source_change(p) { set_source_mode(p,SourceMode::All); self.source_labels.remove(&p.id); ui.close(); }
+                });
+                ui.add_space(18.);
+                ui.strong("Mixing style");
+                ui.horizontal(|ui| {
+                    let width = ((ui.available_width()-12.)/3.).max(45.);
+                    for (style,label,tip) in [(Style::Hype,"Hype","Prioritize builds and drops"),(Style::Steady,"Steady","Keep energy consistent"),(Style::Chill,"Chill","Gentle transitions and natural structure")] {
+                        if ui.add_sized([width,36.],egui::Button::selectable(p.style==style,label)).on_hover_text(tip).clicked() { p.style=style; }
                     }
                 });
-                if let Some(p) = settings.playlists.get_mut(self.selected) {
-                    ui.horizontal_wrapped(|ui| {
-                        ui.label("Name");
-                        ui.add(egui::TextEdit::singleline(&mut p.name).desired_width(220.));
-                        if ui.button("Copy control ID").clicked() {
-                            ui.ctx().copy_text(p.id.clone());
-                        }
-                    });
-                    ui.horizontal_wrapped(|ui| {
-                        egui::ComboBox::from_id_salt("mix-style")
-                            .selected_text(format!("{:?}", p.style))
-                            .show_ui(ui, |ui| {
-                                for style in [Style::Hype, Style::Steady, Style::Chill] {
-                                    ui.selectable_value(&mut p.style, style, format!("{style:?}"));
-                                }
-                            });
-                        let mut targeted = p.target_energy.is_some();
-                        if ui.checkbox(&mut targeted, "Target energy").changed() {
-                            p.target_energy = targeted.then_some(5.);
-                        }
-                        if let Some(e) = &mut p.target_energy {
-                            ui.add(egui::Slider::new(e, 1. ..=10.));
-                        }
-                        ui.add(
-                            egui::DragValue::new(&mut p.recent_repeat)
-                                .range(0..=1000)
-                                .prefix("Avoid last ")
-                                .suffix(" songs"),
-                        );
-                    });
+                ui.add_space(16.);
+                ui.strong("Target energy");
+                ui.horizontal(|ui| {
+                    if ui.selectable_label(p.target_energy.is_none(),"Auto").clicked() { p.target_energy=None; }
+                    if ui.selectable_label(p.target_energy.is_some(),"Manual").clicked() { p.target_energy.get_or_insert(5.); }
+                });
+                if let Some(energy)=&mut p.target_energy { ui.add(egui::Slider::new(energy,1. ..=10.).text("Energy")); }
+                ui.add_space(16.);
+                egui::CollapsingHeader::new("Advanced Options").id_salt("smart-advanced").show(ui, |ui| {
                     egui::ComboBox::from_id_salt("repeat-fallback")
                         .selected_text(match p.fallback {
                             Fallback::Stop => "Stop when all eligible songs are recent",
@@ -235,6 +296,12 @@ impl Editor {
                         "Prefer approved manual build/drop cues for Hype",
                     );
                     source_ui(ui, root, library, p, &mut self.status);
+                    if ui.button("Song exceptions / recognition...").clicked() {self.assignments_open=true;}
+                    if self.assignments_open {
+                        egui::Modal::new(egui::Id::unique("smart-song-assignments")).show(ui.ctx(), |ui| {
+                            ui.set_width((ui.ctx().viewport_rect().width()-50.).clamp(380.,700.));
+                            ui.horizontal(|ui| {ui.heading("Song exceptions & recognition");if ui.button("Close").clicked(){self.assignments_open=false;}});
+                            ui.weak("Your chosen source already includes its songs. Only change exceptions here.");
                     ui.add(
                         egui::TextEdit::singleline(&mut self.search)
                             .hint_text(
@@ -252,7 +319,7 @@ impl Editor {
                         if ui.button("Clear recognition assignment").clicked() {
                             p.recognition_song = None;
                         }
-                        egui::ScrollArea::both()
+                        egui::ScrollArea::vertical()
                             .id_salt("song-rules")
                             .max_height(220.)
                             .show_rows(ui, 25., tracks.len(), |ui, rows| {
@@ -262,7 +329,7 @@ impl Editor {
                                     ui.push_id(&id, |ui| {
                                         ui.horizontal(|ui| {
                                             ui.add_sized(
-                                                [260., 20.],
+                                                [(ui.available_width() - 380.).clamp(80., 260.), 20.],
                                                 egui::Label::new(&t.title).truncate(),
                                             )
                                             .on_hover_text(t.path.display().to_string());
@@ -303,6 +370,9 @@ impl Editor {
                                 }
                             });
                     }
+
+                        });
+                    }
                     egui::CollapsingHeader::new("Advanced selectors / stable IDs").show(ui, |ui| {
                         ui.weak(format!("Playlist ID: {}", p.id));
                         for (label, list) in [
@@ -333,18 +403,229 @@ impl Editor {
                             }
                         });
                     });
+
+                });
+                ui.add_space(18.);
+                ui.horizontal_wrapped(|ui| {
+                    save = ui.add_sized([180.,38.],egui::Button::new(egui::RichText::new("Save Playlist").color(egui::Color32::BLACK)).fill(crate::skin::accent(ui)).wrap()).clicked();
+                    if ui.add_enabled(self.preview_active || (library.is_some() && !self.audition_blocked),egui::Button::new(if self.preview_active {"Stop Preview"} else {"Preview Mix"}).min_size(egui::vec2(140.,38.))).on_hover_text("Short audio mix using this draft; available when live playback is stopped").clicked() {
+                        if self.preview_active { self.stop_preview=true; }
+                        else if let Some(lib)=library {
+                            let order=preview_mix(p,lib);
+                            self.preview_order=order.iter().map(|&index|lib.tracks[index].title.clone()).collect();
+                            self.mix_request=Some((p.clone(),order));
+                        }
+                    }
+                });
+                if !self.preview_order.is_empty() {
+                    ui.separator(); ui.strong("Mix preview · suggested order");
+                    for (index,title) in self.preview_order.iter().enumerate() { ui.add(egui::Label::new(format!("{}. {title}",index+1)).truncate()); }
+                    if ui.add_enabled(!self.audition_blocked,egui::Button::new("Audition first track")).on_hover_text("Available when player, DJ, sampler and Auto Mix are stopped").clicked() && let Some(lib)=library && let Some(index)=preview_mix(p,lib).first().copied() {
+                        self.preview=Some((lib.tracks[index].path.clone(),lib.tracks[index].preparation.cue_in));
+                    }
                 }
-                ui.weak(&self.status);
-            });
-        ui.ctx().data_mut(|d| {
-            d.insert_temp(egui::Id::unique("smart-editor-viewport"), area.inner_rect)
+            } else { ui.weak("Create a Smart Playlist to choose its music and mixing style."); }
+            if duplicate && let Some(original)=settings.playlists.get(self.selected).cloned() {
+                let mut copy=original;copy.id=format!("custom-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());copy.name.push_str(" (copy)");settings.playlists.push(copy);self.selected=settings.playlists.len()-1;
+            }
+            if remove && self.selected<settings.playlists.len() { settings.playlists.remove(self.selected); self.selected=self.selected.min(settings.playlists.len().saturating_sub(1)); }
+            if save { self.status=save_rules(root,settings,saved); if self.status.starts_with("Saved.") { self.baseline=Some(saved.clone()); } }
+            if reload { match Settings::load(root) { Ok(fresh)=>{*saved=fresh.clone();*settings=fresh.clone();self.baseline=Some(fresh);self.selected=0;self.preview_order.clear();},Err(error)=>self.status=error } }
+            if self.audition_blocked { ui.weak("Stop player / DJ playback before auditioning a mix. Saving and editing remain available."); }
+            ui.add_space(8.);ui.add(egui::Label::new(&self.status).wrap());
+            if !self.preview_status.is_empty() { ui.add(egui::Label::new(&self.preview_status).wrap()); }
         });
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::unique("smart-editor-viewport"), area.inner_rect)
+        });
+        self.cache_draft();
     }
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct DraftCache {
+    draft: Settings,
+    baseline: Settings,
+    #[serde(default)]
+    labels: std::collections::HashMap<String, String>,
+}
+fn draft_path(root: &std::path::Path) -> Option<std::path::PathBuf> {
+    if cfg!(test) {
+        return None;
+    }
+    use std::hash::{Hash, Hasher};
+    let mut hash = std::collections::hash_map::DefaultHasher::new();
+    root.hash(&mut hash);
+    crate::theme::settings_path().and_then(|path| {
+        path.parent()
+            .map(|parent| parent.join(format!("smart-draft-{:x}.json", hash.finish())))
+    })
+}
+fn save_draft_bytes(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let parent = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("Missing draft folder"))?;
+    std::fs::create_dir_all(parent)?;
+    let mut file = tempfile::NamedTempFile::new_in(parent)?;
+    file.write_all(bytes)?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+fn source_summary(p: &amp_core::show::SmartPlaylist) -> String {
+    if p.restrict_folders || !p.folders.is_empty() {
+        if p.folders.is_empty() {
+            "No music source selected".into()
+        } else {
+            format!(
+                "Folder: {}{}",
+                p.folders
+                    .first()
+                    .map(|path| if path.as_os_str().is_empty() {
+                        "Entire music root".into()
+                    } else {
+                        path.display().to_string()
+                    })
+                    .unwrap_or_default(),
+                if p.folders.len() > 1 {
+                    format!(" + {} folders", p.folders.len() - 1)
+                } else {
+                    String::new()
+                }
+            )
+        }
+    } else if p.restrict_allowed || !p.allowed.is_empty() {
+        "Playlist / selected songs".into()
+    } else {
+        "Entire library".into()
+    }
+}
+fn confirm_source_change(p: &amp_core::show::SmartPlaylist) -> bool {
+    p.allowed.is_empty() || rfd::MessageDialog::new().set_title("Change music source?").set_description("Replace the previous source song selection? Exclusions, preferred songs, recognition assignments and mixing settings will be kept.").set_buttons(rfd::MessageButtons::YesNo).show()==rfd::MessageDialogResult::Yes
+}
+fn select_folder(
+    root: &std::path::Path,
+    folder: &std::path::Path,
+    p: &mut amp_core::show::SmartPlaylist,
+) -> Result<(), String> {
+    let base = root.canonicalize().map_err(|error| error.to_string())?;
+    let selected = folder.canonicalize().map_err(|error| error.to_string())?;
+    if !selected.is_dir() {
+        return Err("Choose a music folder".into());
+    }
+    let relative=selected.strip_prefix(&base).map_err(|_|"That folder is outside this indexed music library. Add it as the music root in Library > Sources before using it here. Existing Smart Playlist rules were kept.".to_owned())?.to_path_buf();
+    set_source_mode(p, SourceMode::Folders);
+    p.folders = vec![relative];
+    p.restrict_allowed = false;
+    Ok(())
+}
+fn import_m3u(
+    file: &std::path::Path,
+    root: &std::path::Path,
+    library: &amp_core::Library,
+    p: &mut amp_core::show::SmartPlaylist,
+) -> Result<(usize, usize), String> {
+    if std::fs::metadata(file)
+        .map_err(|error| error.to_string())?
+        .len()
+        > 4 * 1024 * 1024
+    {
+        return Err("Playlist is larger than 4 MB".into());
+    }
+    let bytes = std::fs::read(file).map_err(|error| error.to_string())?;
+    if bytes.len() > 4 * 1024 * 1024 {
+        return Err("Playlist is larger than 4 MB".into());
+    }
+    let text = String::from_utf8(bytes).map_err(|_| "Use a UTF-8 M3U8 playlist".to_owned())?;
+    let base = root.canonicalize().map_err(|error| error.to_string())?;
+    let parent = file.parent().ok_or("Playlist folder missing")?;
+    let mut ids = Vec::new();
+    let mut missing = 0;
+    for entry in text
+        .trim_start_matches('\u{feff}')
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+    {
+        let portable = std::path::PathBuf::from(entry.replace('\\', "/"));
+        let candidate = if portable.is_absolute() {
+            portable
+        } else {
+            parent.join(portable)
+        };
+        let found = candidate
+            .canonicalize()
+            .ok()
+            .and_then(|absolute| {
+                absolute
+                    .strip_prefix(&base)
+                    .ok()
+                    .map(std::path::Path::to_path_buf)
+            })
+            .and_then(|relative| library.tracks.iter().find(|track| track.path == relative));
+        if let Some(track) = found {
+            ids.push(amp_core::show::song_id(track));
+        } else {
+            missing += 1;
+        }
+    }
+    if ids.is_empty() {
+        return Err(format!(
+            "No indexed songs found; {missing} missing or outside this library. Your current source was kept."
+        ));
+    }
+    set_source_mode(p, SourceMode::Songs);
+    p.allowed = ids;
+    Ok((p.allowed.len(), missing))
+}
+fn preview_mix(p: &amp_core::show::SmartPlaylist, library: &amp_core::Library) -> Vec<usize> {
+    let count = library
+        .tracks
+        .iter()
+        .filter(|track| amp_core::show::eligible(p, track))
+        .count()
+        .min(8);
+    let mut order = Vec::new();
+    let mut recent = Vec::new();
+    let mut profile = p.clone();
+    profile.recent_repeat = count.max(1);
+    profile.fallback = Fallback::Stop;
+    for _ in 0..count {
+        let current = order.last().copied();
+        if let Some(index) = amp_core::show::choose(
+            &profile,
+            &library.tracks,
+            current,
+            &recent,
+            p.target_energy,
+            0,
+        ) {
+            recent.push(amp_core::show::song_id(&library.tracks[index]));
+            order.push(index);
+        } else {
+            break;
+        }
+    }
+    order
 }
 
 fn save_rules(root: &std::path::Path, settings: &mut Settings, saved: &mut Settings) -> String {
     if root.as_os_str().is_empty() {
         return "Choose a music root first".into();
+    }
+    let current = root.join(".ampverse/show.json");
+    if current.is_file() {
+        let backup = root.join(".ampverse/backups");
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_nanos();
+        if let Err(error) = std::fs::create_dir_all(&backup).and_then(|()| {
+            std::fs::copy(&current, backup.join(format!("show-{stamp}.json"))).map(|_| ())
+        }) {
+            return format!("Could not back up existing rules: {error}");
+        }
     }
     match settings.save(root) {
         Ok(()) => {
@@ -374,10 +655,10 @@ fn import_source_playlist(
     list: &amp_core::Playlist,
     library: &amp_core::Library,
 ) -> Result<usize, String> {
-    let ids: Vec<_> = library
+    let ids: Vec<_> = list
         .tracks
         .iter()
-        .filter(|t| list.tracks.contains(&t.path))
+        .filter_map(|path| library.tracks.iter().find(|track| &track.path == path))
         .map(amp_core::show::song_id)
         .collect();
     if ids.is_empty() {
@@ -505,6 +786,99 @@ fn source_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn simple_folder_and_m3u_sources_include_music_without_song_checkboxes() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        std::fs::create_dir_all(root.join("Recognition/Subfolder")).unwrap();
+        std::fs::write(root.join("Recognition/a.mp3"), b"a").unwrap();
+        std::fs::write(root.join("Recognition/Subfolder/b.mp3"), b"b").unwrap();
+        std::fs::write(root.join("outside.mp3"), b"c").unwrap();
+        let library = amp_core::scan(root).unwrap();
+        let mut profile = Settings::default().playlists.remove(0);
+        let original_id = profile.id.clone();
+        profile.preferred = vec!["keep-preference".into()];
+        profile.recognition_song = Some("keep-assignment".into());
+        select_folder(root, &root.join("Recognition"), &mut profile).unwrap();
+        assert_eq!(
+            library
+                .tracks
+                .iter()
+                .filter(|track| amp_core::show::eligible(&profile, track))
+                .count(),
+            2
+        );
+        assert!(profile.allowed.is_empty());
+        assert!(!profile.restrict_allowed);
+        let playlist = root.join("Recognition/mix.m3u8");
+        std::fs::write(
+            &playlist,
+            "\u{feff}#EXTM3U\nSubfolder/b.mp3\nmissing.mp3\na.mp3\n",
+        )
+        .unwrap();
+        let (count, missing) = import_m3u(&playlist, root, &library, &mut profile).unwrap();
+        assert_eq!((count, missing), (2, 1));
+        let ordered: Vec<_> = profile
+            .allowed
+            .iter()
+            .map(|id| {
+                library
+                    .tracks
+                    .iter()
+                    .find(|track| amp_core::show::song_id(track) == *id)
+                    .unwrap()
+                    .path
+                    .clone()
+            })
+            .collect();
+        assert_eq!(
+            ordered,
+            vec![
+                std::path::PathBuf::from("Recognition/Subfolder/b.mp3"),
+                std::path::PathBuf::from("Recognition/a.mp3")
+            ]
+        );
+        assert_eq!(profile.id, original_id);
+        assert_eq!(profile.preferred, vec!["keep-preference"]);
+        assert_eq!(profile.recognition_song.as_deref(), Some("keep-assignment"));
+        let before = serde_json::to_value(&profile).unwrap();
+        let preview = preview_mix(&profile, &library);
+        assert!(!preview.is_empty());
+        assert_eq!(serde_json::to_value(&profile).unwrap(), before);
+        std::fs::write(&playlist, "missing.mp3").unwrap();
+        assert!(import_m3u(&playlist, root, &library, &mut profile).is_err());
+        assert_eq!(serde_json::to_value(&profile).unwrap(), before);
+    }
+    #[test]
+    fn local_draft_persistence_and_new_playlist_keep_ids_and_saved_rules() {
+        let dir = tempfile::tempdir().unwrap();
+        let saved = Settings::default();
+        let mut editor = Editor::default();
+        editor.new_playlist(dir.path(), &saved);
+        let new = editor.draft.as_ref().unwrap().playlists.last().unwrap();
+        assert!(new.restrict_folders && new.folders.is_empty());
+        assert!(new.restrict_allowed);
+        assert_eq!(saved.playlists.len(), 8);
+        let mut draft = saved.clone();
+        draft.playlists[0].name = "Local name".into();
+        draft.playlists[0].style = Style::Chill;
+        draft.playlists[0].target_energy = Some(3.);
+        let cache = DraftCache {
+            draft: draft.clone(),
+            baseline: saved.clone(),
+            labels: Default::default(),
+        };
+        let path = dir.path().join("local/draft.json");
+        save_draft_bytes(&path, &serde_json::to_vec(&cache).unwrap()).unwrap();
+        save_draft_bytes(&path, &serde_json::to_vec(&cache).unwrap()).unwrap();
+        let restored: DraftCache = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+        assert_eq!(restored.draft.playlists[0].id, saved.playlists[0].id);
+        assert_eq!(restored.draft.playlists[0].name, "Local name");
+        assert_eq!(restored.draft.playlists[0].style, Style::Chill);
+        assert_eq!(restored.draft.playlists[0].target_energy, Some(3.));
+        assert!(!dir.path().join(".ampverse/show.json").exists());
+    }
+
     #[test]
     fn empty_source_selection_never_expands_to_entire_library() {
         let track = amp_core::Track {
