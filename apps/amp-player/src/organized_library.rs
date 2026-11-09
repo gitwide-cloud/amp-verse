@@ -32,7 +32,7 @@ impl Player {
         self.header(ui, "AMP Library", false);
         let height = (ui.available_height() - 64.).max(350.);
         ui.horizontal_top(|ui| {
-            ui.allocate_ui_with_layout(egui::vec2(176.,height),egui::Layout::top_down(egui::Align::Min),|ui| {
+            ui.allocate_ui_with_layout(egui::vec2(176.,height - 70.),egui::Layout::top_down(egui::Align::Min),|ui| {
                 for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music")] {
                     if icons::button(ui,icon,title,self.library_page==page,egui::vec2(172.,46.)).clicked(){self.library_page=page;}
                 }
