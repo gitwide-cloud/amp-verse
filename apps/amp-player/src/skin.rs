@@ -247,28 +247,42 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     let mut selected = None;
     egui::Popup::menu(&response).show(|ui| {
         ui.set_min_width(220.);
-        for (label, module) in [
-            ("AMP Player", Module::Verse),
-            ("AMP Library", Module::Library),
-            ("AMP DJ", Module::Dj),
-            ("AMP Cast", Module::Cast),
-            ("AMP Lab", Module::LabSetup),
-            ("Plugin Manager", Module::Addons),
-        ] {
-            if ui.button(label).clicked() {
-                selected = Some(module);
-                ui.close();
-            }
-        }
-        ui.separator();
-        ui.label("Appearance");
-        crate::theme::selector(ui);
-        ui.separator();
-        ui.hyperlink_to(
-            "AMP Lab downloads",
-            "https://github.com/gitwide-cloud/mp3-lab/releases",
-        );
-        ui.hyperlink_to("AMP Cast / local web UI", "http://127.0.0.1:8787");
+        let height = (ui.ctx().viewport_rect().height() - 65.).max(55.);
+        egui::ScrollArea::vertical()
+            .id_salt("module-menu-scroll")
+            .max_height(height)
+            .show(ui, |ui| {
+                for (label, module) in [
+                    ("AMP Player", Module::Verse),
+                    ("AMP Library", Module::Library),
+                    ("AMP DJ", Module::Dj),
+                    ("AMP Cast", Module::Cast),
+                    ("AMP Lab", Module::LabSetup),
+                    ("Plugin Manager", Module::Addons),
+                ] {
+                    let button = ui.button(label);
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(
+                            egui::Id::unique(("module-menu-item", label)),
+                            (button.rect, ui.clip_rect(), ui.layer_id()),
+                        )
+                    });
+                    if button.clicked() {
+                        selected = Some(module);
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                ui.label("Appearance");
+                crate::theme::selector(ui);
+                ui.separator();
+                ui.hyperlink_to(
+                    "AMP Lab downloads",
+                    "https://github.com/gitwide-cloud/mp3-lab/releases",
+                );
+                ui.hyperlink_to("AMP Cast / local web UI", "http://127.0.0.1:8787");
+            });
     });
     let controls_left = rect.right() - 110.;
     let drag_rect = Rect::from_min_max(

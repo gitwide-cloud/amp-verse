@@ -91,6 +91,43 @@ pub fn embedded(ctx: &egui::Context) -> bool {
 pub fn set_embedded(ctx: &egui::Context, value: bool) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique("embedded-pane"), value));
 }
+/// Fixed layout scaling, with no scene camera or wheel-pan interaction.
+pub fn fitted_content(
+    ui: &mut egui::Ui,
+    id: &str,
+    logical: egui::Vec2,
+    scale: f32,
+    contents: impl FnOnce(&mut egui::Ui),
+) {
+    let (outer, _) = ui.allocate_exact_size(ui.available_size_before_wrap(), egui::Sense::hover());
+    let layer = egui::LayerId::new(ui.layer_id().order, ui.scope_id().with(id));
+    let transform = egui::emath::TSTransform::from_translation(outer.min.to_vec2())
+        * egui::emath::TSTransform::from_scaling(scale);
+    // Register the hit-test extent in the same coordinate space as the paint
+    // transform. A paint-only sublayer cannot receive inner list scrolling.
+    ui.ctx().memory_mut(|memory| {
+        memory.areas_mut().set_state(
+            layer,
+            egui::AreaState {
+                pivot_pos: Some(egui::Pos2::ZERO),
+                size: Some(logical),
+                ..Default::default()
+            },
+        )
+    });
+    ui.ctx().set_sublayer(ui.layer_id(), layer);
+    ui.ctx().set_transform_layer(layer, transform);
+    let mut child = ui.new_child(
+        egui::UiBuilder::new()
+            .layer_id(layer)
+            .max_rect(egui::Rect::from_min_size(egui::Pos2::ZERO, logical))
+            .sense(egui::Sense::hover()),
+    );
+    child.set_clip_rect(transform.inverse() * outer.intersect(ui.clip_rect()));
+    contents(&mut child);
+    child.expand_to_include_rect(transform.inverse() * outer);
+}
+
 /// Borderless native windows need explicit resize hit areas.
 pub fn resize_edges(ui: &mut egui::Ui) {
     if ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false)) {
@@ -210,6 +247,57 @@ pub fn resize_edges(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wheel_scrolls_content_without_panning_scaled_window() {
+        let ctx = egui::Context::default();
+        let mut offsets = Vec::new();
+        let mut transforms = Vec::new();
+        for frame in 0..4 {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400., 300.),
+                )),
+                ..Default::default()
+            };
+            raw.events
+                .push(egui::Event::PointerMoved(egui::pos2(15., 30.)));
+            if frame == 2 {
+                raw.events.push(egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
+                    delta: egui::vec2(0., -100.),
+                    modifiers: Default::default(),
+                });
+            }
+            let mut output = ctx.run_ui(raw, |ui| {
+                fitted_content(ui, "fixed-test", egui::vec2(800., 600.), 0.5, |ui| {
+                    transforms.push(ui.ctx().layer_transform_to_global(ui.layer_id()).unwrap());
+                    let result = egui::ScrollArea::vertical()
+                        .max_height(200.)
+                        .show(ui, |ui| {
+                            for row in 0..100 {
+                                ui.label(format!("Song {row}"));
+                            }
+                        });
+                    offsets.push(result.state.clamped_offset().y);
+                });
+            });
+            output.textures_delta.clear();
+        }
+        assert!(
+            transforms
+                .iter()
+                .all(|transform| *transform == transforms[0]),
+            "Wheel input must not move the window layout"
+        );
+        assert!(
+            offsets.iter().any(|offset| *offset > 0.),
+            "The inner song list must still receive scrolling"
+        );
+    }
+
     #[test]
     fn borderless_resize_handle_requests_native_resize() {
         let ctx = egui::Context::default();

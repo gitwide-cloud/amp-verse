@@ -957,12 +957,9 @@ impl Player {
                     )
                 });
             }
-            let mut bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, logical);
-            egui::Scene::new()
-                .sense(egui::Sense::hover())
-                .zoom_range(scale..=scale)
-                .max_inner_size(logical)
-                .show(ui, &mut bounds, |ui| self.group_contents(ui, host));
+            window_layout::fitted_content(ui, "magnetic-group", logical, scale, |ui| {
+                self.group_contents(ui, host)
+            });
             window_layout::resize_edges(ui);
         } else {
             self.group_contents(ui, host);
@@ -1246,35 +1243,41 @@ impl Player {
     }
     fn player_view_menu(&mut self, ui: &mut egui::Ui) {
         ui.menu_button("Player view", |ui| {
-            for (mode, name) in [
-                (0, "Full player"),
-                (1, "Compact player"),
-                (2, "Taskbar mini player"),
-            ] {
-                if ui
-                    .selectable_label(self.player_mode == mode, name)
-                    .clicked()
-                {
-                    self.set_player_mode(ui.ctx(), mode);
-                    ui.close();
-                }
-            }
-            if ui
-                .checkbox(&mut self.player_on_top, "Always on top")
-                .changed()
-            {
-                if let Err(error) = save_player_on_top(self.player_on_top) {
-                    self.status = format!("Always on top changed; could not save: {error}");
-                }
-                ui.ctx().send_viewport_cmd_to(
-                    egui::ViewportId::ROOT,
-                    egui::ViewportCommand::WindowLevel(if self.player_on_top {
-                        egui::WindowLevel::AlwaysOnTop
-                    } else {
-                        egui::WindowLevel::Normal
-                    }),
-                );
-            }
+            let height = (ui.ctx().viewport_rect().height() - 65.).max(55.);
+            egui::ScrollArea::vertical()
+                .id_salt("player-view-menu-scroll")
+                .max_height(height)
+                .show(ui, |ui| {
+                    for (mode, name) in [
+                        (0, "Full player"),
+                        (1, "Compact player"),
+                        (2, "Taskbar mini player"),
+                    ] {
+                        if ui
+                            .selectable_label(self.player_mode == mode, name)
+                            .clicked()
+                        {
+                            self.set_player_mode(ui.ctx(), mode);
+                            ui.close();
+                        }
+                    }
+                    if ui
+                        .checkbox(&mut self.player_on_top, "Always on top")
+                        .changed()
+                    {
+                        if let Err(error) = save_player_on_top(self.player_on_top) {
+                            self.status = format!("Always on top changed; could not save: {error}");
+                        }
+                        ui.ctx().send_viewport_cmd_to(
+                            egui::ViewportId::ROOT,
+                            egui::ViewportCommand::WindowLevel(if self.player_on_top {
+                                egui::WindowLevel::AlwaysOnTop
+                            } else {
+                                egui::WindowLevel::Normal
+                            }),
+                        );
+                    }
+                });
         });
     }
     fn small_player_ui(&mut self, ui: &mut egui::Ui) {
@@ -1287,113 +1290,107 @@ impl Player {
         let scale = (ui.available_width() / design.x)
             .min(ui.available_height() / design.y)
             .max(0.01);
-        let mut bounds = egui::Rect::from_min_size(egui::Pos2::ZERO, design);
-        egui::Scene::new()
-            .sense(egui::Sense::hover())
-            .zoom_range(scale..=scale)
-            .max_inner_size(design)
-            .show(ui, &mut bounds, |ui| {
-                skin::panel(ui, false, |ui| {
-                    ui.set_min_size(design - egui::vec2(20., 20.));
-                    ui.horizontal(|ui| {
-                        let title = ui.add(
-                            egui::Label::new(RichText::new("AMP VERSE").strong())
-                                .sense(egui::Sense::click_and_drag()),
+        window_layout::fitted_content(ui, "small-player", design, scale, |ui| {
+            skin::panel(ui, false, |ui| {
+                ui.set_min_size(design - egui::vec2(20., 20.));
+                ui.horizontal(|ui| {
+                    let title = ui.add(
+                        egui::Label::new(RichText::new("AMP VERSE").strong())
+                            .sense(egui::Sense::click_and_drag()),
+                    );
+                    if title.drag_started() {
+                        ui.ctx().send_viewport_cmd_to(
+                            egui::ViewportId::ROOT,
+                            egui::ViewportCommand::StartDrag,
                         );
-                        if title.drag_started() {
-                            ui.ctx().send_viewport_cmd_to(
-                                egui::ViewportId::ROOT,
-                                egui::ViewportCommand::StartDrag,
-                            );
-                        }
-                        self.player_view_menu(ui);
-                        if ui
-                            .button("Full")
-                            .on_hover_text("Restore full player and attached panels")
-                            .clicked()
-                        {
-                            self.set_player_mode(ui.ctx(), 0);
-                        }
-                        if ui
-                            .button("_")
-                            .on_hover_text("Minimize to taskbar")
-                            .clicked()
-                        {
-                            ui.ctx().send_viewport_cmd_to(
-                                egui::ViewportId::ROOT,
-                                egui::ViewportCommand::Minimized(true),
-                            );
-                        }
-                    });
-                    if !mini {
-                        ui.add_sized(
-                            [480., 30.],
-                            egui::Label::new(
-                                RichText::new(self.title(0))
-                                    .strong()
-                                    .color(skin::signal(ui)),
-                            )
-                            .truncate(),
-                        );
-                        let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
-                        ui.label(format!(
-                            "{:02}:{:02}",
-                            position as u64 / 60,
-                            position as u64 % 60
-                        ));
                     }
-                    ui.horizontal(|ui| {
-                        for (label, action) in [
-                            ("|<", 0),
-                            (if self.playing[0] { "Pause" } else { "Play" }, 1),
-                            ("Stop", 2),
-                            (">|", 3),
-                        ] {
-                            if ui.add_sized([46., 30.], egui::Button::new(label)).clicked() {
-                                match action {
-                                    0 => {
-                                        if let Some(i) = self.loaded[0] {
-                                            self.play(0, i.saturating_sub(1));
-                                        }
-                                    }
-                                    1 => {
-                                        if self.loaded[0].is_none() {
-                                            if let Some(i) = self
-                                                .selected
-                                                .or_else(|| self.queue.first().copied())
-                                            {
-                                                self.play(0, i);
-                                            }
-                                        } else {
-                                            self.toggle_deck(0);
-                                        }
-                                        if let Some(a) = &self.audio {
-                                            a.set_fader(0.);
-                                        }
-                                    }
-                                    2 => self.stop(0),
-                                    _ => self.next(),
-                                }
-                            }
-                        }
-                        if mini {
-                            ui.add_sized([170., 28.], egui::Label::new(self.title(0)).truncate());
-                        }
-                        ui.spacing_mut().slider_width = 90.;
-                        ui.add(egui::Slider::new(&mut self.volume, 0..=100).show_value(false))
-                            .on_hover_text("Master volume");
-                    });
-                    if !mini {
-                        ui.horizontal(|ui| {
-                            ui.toggle_value(&mut self.shuffle, "Shuffle");
-                            ui.toggle_value(&mut self.repeat_one, "Repeat one");
-                            if ui.button("EQ").clicked() {
-                                self.eq_open = true;
-                            }
-                        });
+                    self.player_view_menu(ui);
+                    if ui
+                        .button("Full")
+                        .on_hover_text("Restore full player and attached panels")
+                        .clicked()
+                    {
+                        self.set_player_mode(ui.ctx(), 0);
+                    }
+                    if ui
+                        .button("_")
+                        .on_hover_text("Minimize to taskbar")
+                        .clicked()
+                    {
+                        ui.ctx().send_viewport_cmd_to(
+                            egui::ViewportId::ROOT,
+                            egui::ViewportCommand::Minimized(true),
+                        );
                     }
                 });
+                if !mini {
+                    ui.add_sized(
+                        [480., 30.],
+                        egui::Label::new(
+                            RichText::new(self.title(0))
+                                .strong()
+                                .color(skin::signal(ui)),
+                        )
+                        .truncate(),
+                    );
+                    let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
+                    ui.label(format!(
+                        "{:02}:{:02}",
+                        position as u64 / 60,
+                        position as u64 % 60
+                    ));
+                }
+                ui.horizontal(|ui| {
+                    for (label, action) in [
+                        ("|<", 0),
+                        (if self.playing[0] { "Pause" } else { "Play" }, 1),
+                        ("Stop", 2),
+                        (">|", 3),
+                    ] {
+                        if ui.add_sized([46., 30.], egui::Button::new(label)).clicked() {
+                            match action {
+                                0 => {
+                                    if let Some(i) = self.loaded[0] {
+                                        self.play(0, i.saturating_sub(1));
+                                    }
+                                }
+                                1 => {
+                                    if self.loaded[0].is_none() {
+                                        if let Some(i) =
+                                            self.selected.or_else(|| self.queue.first().copied())
+                                        {
+                                            self.play(0, i);
+                                        }
+                                    } else {
+                                        self.toggle_deck(0);
+                                    }
+                                    if let Some(a) = &self.audio {
+                                        a.set_fader(0.);
+                                    }
+                                }
+                                2 => self.stop(0),
+                                _ => self.next(),
+                            }
+                        }
+                    }
+                    if mini {
+                        ui.add_sized([170., 28.], egui::Label::new(self.title(0)).truncate());
+                    }
+                    ui.spacing_mut().slider_width = 90.;
+                    ui.add(egui::Slider::new(&mut self.volume, 0..=100).show_value(false))
+                        .on_hover_text("Master volume");
+                });
+                if !mini {
+                    ui.horizontal(|ui| {
+                        ui.toggle_value(&mut self.shuffle, "Shuffle");
+                        ui.toggle_value(&mut self.repeat_one, "Repeat one");
+                        if ui.button("EQ").clicked() {
+                            self.eq_open = true;
+                        }
+                    });
+                }
             });
+        });
     }
     fn resize_player(&self, ctx: &egui::Context, expanded: bool) {
         ctx.send_viewport_cmd_to(
@@ -2345,6 +2342,60 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod window_tests {
     use super::*;
+    #[test]
+    fn short_player_module_menu_is_visible_and_clickable() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            library_open: false,
+            dj_open: false,
+            ..Default::default()
+        };
+        let mut draw = |position: egui::Pos2, pressed: Option<bool>| {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1100., 170.),
+                )),
+                ..Default::default()
+            };
+            raw.events.push(egui::Event::PointerMoved(position));
+            if let Some(pressed) = pressed {
+                raw.events.push(egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+            }
+            let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 0));
+            output.textures_delta.clear();
+        };
+        for press in [None, Some(true), Some(false), None] {
+            draw(egui::pos2(100., 25.), press);
+        }
+        let (rect, clip, layer) = ctx
+            .data(|data| {
+                data.get_temp::<(egui::Rect, egui::Rect, egui::LayerId)>(egui::Id::unique((
+                    "module-menu-item",
+                    "AMP DJ",
+                )))
+            })
+            .expect("Module menu must open");
+        let transform = ctx.layer_transform_to_global(layer).unwrap_or_default();
+        let target = transform * rect.intersect(clip);
+        assert!(
+            target.height() > 5. && target.top() >= 0. && target.bottom() <= 170.,
+            "Menu item must remain visible in the short player: {target:?}"
+        );
+        for press in [None, Some(true), Some(false)] {
+            draw(target.center(), press);
+        }
+        assert!(
+            player.dj_open,
+            "Clicking the visible menu item must open DJ"
+        );
+    }
+
     fn frame(ctx: &egui::Context, player: &mut Player, pressed: Option<bool>) {
         frame_neighbor(ctx, player, pressed, 0);
     }

@@ -322,3 +322,7 @@ Player tests: 46 passed, 9 ignored. New PCM tests verify reverse and fractional 
 ## Regular playlist creation repair
 
 New playlist previously only cleared the queue; both desktop and shared format rejected saving empty playlists. Added inline naming and explicit creation, empty version-1 playlist support, Add songs navigation, and revision-aware in-place saves. New creation rejects existing paths. Dedicated .ampverse/playlists files are rediscovered on scan without replacing a loaded draft. Regression verifies empty create, overwrite refusal, adding duplicate ordered tracks, saving/reloading, source-byte preservation and restart discovery. Core tests: 27 passed, 2 ignored. Player tests: 47 passed, 9 ignored. Strict Clippy passed.
+
+## Fixed desktop scrolling and short-player menus
+
+Removed the interactive Scene camera from full/compact/mini layout fitting. A fixed transform now registers matching hit-test bounds, so wheel input reaches inner lists without moving the window layout. The module dropdown and Player view menu use height-limited scroll areas in short native windows. Regression verifies wheel input changes the inner song-list offset while its screen transform remains unchanged; another opens the module menu in a 170-point player, checks a visible item stays inside the viewport, clicks it and confirms DJ opens. All resize/docking regressions remain passing. Player tests: 49 passed, 9 ignored.
