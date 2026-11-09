@@ -3,7 +3,7 @@ use crate::Preparation;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 pub const PROTOCOL: u32 = 1;
-pub const ENGINE_ID: &str = "amp-prep-heuristic-1";
+pub const ENGINE_ID: &str = "amp-prep-heuristic-2";
 pub const JOB_TYPE: &str = "preparation";
 #[derive(Serialize, Deserialize)]
 pub struct Request {

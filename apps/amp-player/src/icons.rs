@@ -117,7 +117,7 @@ pub fn button(
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let palette = theme::current(ui.ctx()).palette();
     let primary = selected && label.is_empty();
-    let fill = if primary {
+    let mut fill = if primary {
         palette.accent
     } else if selected {
         palette.accent.gamma_multiply(0.22)
@@ -126,6 +126,12 @@ pub fn button(
     } else {
         egui::Color32::TRANSPARENT
     };
+    if response.is_pointer_button_down_on() {
+        fill = palette.accent.gamma_multiply(0.55);
+    }
+    if !ui.is_enabled() {
+        fill = fill.gamma_multiply(0.4);
+    }
     ui.painter().rect_filled(rect, 8., fill);
     let color = if primary {
         palette.background
@@ -137,7 +143,15 @@ pub fn button(
     draw(
         ui,
         egui::Rect::from_min_size(
-            rect.min + egui::vec2(9., (rect.height() - 24.) / 2.),
+            rect.min
+                + egui::vec2(
+                    if label.is_empty() {
+                        (rect.width() - 24.) / 2.
+                    } else {
+                        9.
+                    },
+                    (rect.height() - 24.) / 2.,
+                ),
             egui::vec2(24., 24.),
         ),
         icon,
@@ -156,6 +170,19 @@ pub fn button(
                 color,
             );
     }
-    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+    let accessible = if !label.is_empty() {
+        label
+    } else {
+        match icon {
+            Icon::Play => "Play",
+            Icon::Pause => "Pause",
+            Icon::Stop => "Stop",
+            Icon::Previous => "Previous track",
+            Icon::Next => "Next track",
+            _ => "Navigation",
+        }
+    };
+    response
+        .widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), accessible));
     response
 }

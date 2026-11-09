@@ -79,12 +79,6 @@ pub fn panel<R>(ui: &mut egui::Ui, _purple: bool, body: impl FnOnce(&mut egui::U
         ui.painter()
             .set(bg, egui::Shape::rect_filled(rect, 10., p.surface));
     }
-    ui.painter().rect_stroke(
-        rect.shrink(2.),
-        2.,
-        Stroke::new(1., p.border.gamma_multiply(0.5)),
-        egui::StrokeKind::Inside,
-    );
     if theme == crate::theme::Theme::Classic {
         let frame = rect.shrink(2.);
         ui.painter().rect_stroke(
@@ -352,13 +346,73 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
             egui::pos2(controls_left + offset, rect.top() + 5.),
             egui::vec2(31., 31.),
         );
-        if ui
-            .put(
-                button_rect,
-                egui::Button::new(RichText::new(text).color(p.accent)),
-            )
-            .clicked()
-        {
+        let response = ui.interact(
+            button_rect,
+            ui.scope_id().with(("window-control", text)),
+            egui::Sense::click(),
+        );
+        let close = text == "X";
+        let fill = if response.is_pointer_button_down_on() {
+            p.accent.gamma_multiply(0.4)
+        } else if response.hovered() {
+            if close {
+                C::from_rgb(170, 40, 45)
+            } else {
+                p.elevated
+            }
+        } else {
+            C::TRANSPARENT
+        };
+        ui.painter().rect_filled(button_rect, 6., fill);
+        let stroke = Stroke::new(
+            1.5,
+            if close && response.hovered() {
+                C::WHITE
+            } else {
+                p.text
+            },
+        );
+        let r = button_rect.shrink(10.);
+        match text {
+            "_" => {
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(r.left(), r.center().y),
+                        egui::pos2(r.right(), r.center().y),
+                    ],
+                    stroke,
+                );
+            }
+            "[]" => {
+                if maximized {
+                    ui.painter().rect_stroke(
+                        r.translate(Vec2::new(2., -2.)),
+                        0.,
+                        stroke,
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                ui.painter()
+                    .rect_stroke(r, 0., stroke, egui::StrokeKind::Inside);
+            }
+            _ => {
+                ui.painter()
+                    .line_segment([r.left_top(), r.right_bottom()], stroke);
+                ui.painter()
+                    .line_segment([r.right_top(), r.left_bottom()], stroke);
+            }
+        }
+        let label = if close {
+            "Close"
+        } else if text == "_" {
+            "Minimize"
+        } else if maximized {
+            "Restore"
+        } else {
+            "Maximize"
+        };
+        response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, label));
+        if response.clone().on_hover_text(label).clicked() {
             ui.ctx().send_viewport_cmd(command);
         }
     }

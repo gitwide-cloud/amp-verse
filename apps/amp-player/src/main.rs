@@ -1649,7 +1649,7 @@ impl Player {
                     if ui.button("STOP").clicked(){self.stop(deck);}
                 });
                 ui.ctx().data_mut(|d|{d.insert_temp(egui::Id::unique(("dj-transport",deck)),transport.response.rect);d.insert_temp(egui::Id::unique(("dj-transport",deck)).with("screen"),(transport.response.rect,ui.layer_id()));});
-                let cues=self.loaded[deck].and_then(|index|self.loaded_track(deck).map(|t|(index,t.preparation.manual_cues.iter().chain(t.preparation.cues.iter().filter(|c|c.kind=="grid")).take(8).cloned().collect::<Vec<_>>())));
+                let cues=self.loaded[deck].and_then(|index|self.loaded_track(deck).map(|t|(index,t.preparation.manual_cues.iter().chain(t.preparation.cues.iter().filter(|c|matches!(c.kind.as_str(),"drop"|"energy-start"|"mix-in"|"grid"))).take(16).cloned().collect::<Vec<_>>())));
                 ui.horizontal_wrapped(|ui| {
                     let looping=self.audio.as_ref().is_some_and(|a|a.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed));
                     if ui.button(if looping{"Loop off"}else{"Loop"}).on_hover_text("Loop four prepared beats, or two seconds without BPM").clicked(){

@@ -8,6 +8,8 @@ use std::{io::Read, path::Path, process::Stdio};
 const RATE: f64 = 11025.;
 const BLOCK: usize = 110;
 const FFT: usize = 4096;
+#[path = "energy_cues.rs"]
+mod energy_cues;
 fn chroma(samples: &[f32], sum: &mut [f64; 12]) {
     let mut re = vec![0.; FFT];
     let mut im = vec![0.; FFT];
@@ -172,7 +174,11 @@ fn result(
     let last = energy.iter().rposition(|v| *v > threshold).unwrap();
     let (bpm, offset, tempo_confidence) = tempo(rhythmic);
     let (key, harmonic_key, key_confidence) = key(chroma);
-    let cue_in = first as f64 * BLOCK as f64 / RATE;
+    let audio_start = first as f64 * BLOCK as f64 / RATE;
+    let energy_cues = energy_cues::candidates(energy, first, last);
+    let cue_in = energy_cues
+        .first()
+        .map_or(audio_start, |(seconds, _)| *seconds);
     let cue_out = ((last + 1) as f64 * BLOCK as f64 / RATE).min(duration);
     let mut p = existing.clone();
     p.schema_version = Some(1);
@@ -185,7 +191,8 @@ fn result(
     }
 
     // Legacy hand-authored preparation is treated as manual rather than silently replaced.
-    let locked = existing.manual_override
+    let locked = !existing.manual_cues.is_empty()
+        || existing.manual_override
         || existing.analysis.as_ref().is_some_and(|a| a.reviewed)
         || (existing.analysis.is_none()
             && (existing.cue_in > 0. || existing.cue_out.is_some() || existing.bpm.is_some()));
@@ -202,7 +209,7 @@ fn result(
         Cue {
             id: "auto-in".into(),
             label: "Audio start".into(),
-            seconds: cue_in,
+            seconds: audio_start,
             kind: "boundary".into(),
             ..Default::default()
         },
@@ -214,12 +221,38 @@ fn result(
             ..Default::default()
         },
     ];
+    for (index, (seconds, label)) in energy_cues.iter().enumerate() {
+        p.cues.push(Cue {
+            id: format!("auto-energy-{}", index + 1),
+            label: (*label).into(),
+            seconds: *seconds,
+            kind: if *label == "High-energy drop" {
+                "drop"
+            } else {
+                "energy-start"
+            }
+            .into(),
+            ..Default::default()
+        });
+    }
+    p.cues.push(Cue {
+        id: "auto-mix-in".into(),
+        label: if energy_cues.is_empty() {
+            "Mix in · audio start fallback"
+        } else {
+            "Mix in · high energy"
+        }
+        .into(),
+        seconds: cue_in,
+        kind: "mix-in".into(),
+        ..Default::default()
+    });
     if let (Some(bpm), Some(offset)) = (bpm, offset) {
         let phrase = 64. * 60. / bpm;
         let mut at = offset;
         let mut i = 1;
         while at < cue_out && i <= 512 {
-            if at >= cue_in {
+            if at >= audio_start {
                 p.cues.push(Cue {
                     id: format!("auto-grid-{i}"),
                     label: format!("64-beat marker {i}"),
@@ -368,6 +401,41 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mix_in_uses_drop_without_losing_boundaries_or_manual_review() {
+        let mut energy = vec![0.04; 6000];
+        energy[2000..5000].fill(0.8);
+        let p = result(&energy, &energy, &[0.; 12], 60., &Preparation::default()).unwrap();
+        assert!((p.cue_in - 20.).abs() < 0.3);
+        assert_eq!(
+            p.cues.iter().find(|c| c.id == "auto-in").unwrap().seconds,
+            0.
+        );
+        assert!(p.cues.iter().any(|c| c.kind == "drop"));
+        assert!(
+            p.cues
+                .iter()
+                .any(|c| c.kind == "mix-in" && c.seconds == p.cue_in)
+        );
+        assert!(p.cues.iter().any(|c| c.id == "auto-out"));
+        let mut manual = Preparation::default();
+        manual.manual_cues.push(Cue {
+            id: "my-cue".into(),
+            label: "Approved".into(),
+            seconds: 3.,
+            kind: "hotcue".into(),
+            ..Default::default()
+        });
+        let kept = result(&energy, &energy, &[0.; 12], 60., &manual).unwrap();
+        assert_eq!(kept.cue_in, 0.);
+        assert_eq!(kept.manual_cues, manual.manual_cues);
+        assert!(
+            kept.extensions["analysis_recommendation"]["cue_in"]
+                .as_f64()
+                .unwrap()
+                > 19.
+        );
+    }
     #[test]
     fn click_tempo_and_manual_cues_survive() {
         let mut energy = vec![0.; 3000];

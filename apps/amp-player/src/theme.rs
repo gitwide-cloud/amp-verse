@@ -157,6 +157,13 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
     };
     style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1., p.accent);
     style.visuals.hyperlink_color = p.accent;
+    let radius = if theme == Theme::Classic { 2 } else { 8 };
+    style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(radius);
+    style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(radius);
+    style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(radius);
+    style.visuals.widgets.active.bg_fill = style.visuals.selection.bg_fill;
+    style.visuals.widgets.active.bg_stroke = egui::Stroke::new(1., p.accent);
+    style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1., p.text);
     style.spacing.button_padding = egui::vec2(10., 6.);
     style.spacing.item_spacing = egui::vec2(6., 5.);
     ctx.set_global_style(style);

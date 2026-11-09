@@ -174,7 +174,17 @@ impl Lane {
                 .preparation
                 .cues
                 .iter()
-                .map(|c| (c.seconds, c.label.as_str(), Color32::from_gray(170)))
+                .map(|c| {
+                    (
+                        c.seconds,
+                        c.label.as_str(),
+                        match c.kind.as_str() {
+                            "drop" => super::skin::accent(ui),
+                            "energy-start" | "mix-in" => super::skin::signal(ui),
+                            _ => crate::theme::current(ui.ctx()).palette().muted,
+                        },
+                    )
+                })
                 .collect();
             markers.extend(
                 t.preparation

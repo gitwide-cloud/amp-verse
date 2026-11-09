@@ -2,7 +2,7 @@ name: Headless Cast candidates
 on:
   push:
     branches: [main]
-    paths: ['crates/**', 'apps/amp-cast/**', 'deploy/**', 'Cargo.*', 'tools/smoke_coordination.py', 'tools/smoke_discovery.py', '.github/workflows/server.yml']
+    paths: ['crates/**', 'apps/amp-cast/**', 'deploy/**', 'Cargo.*', 'tools/smoke_coordination.py', 'tools/smoke_discovery.py', 'tools/smoke_energy_cues.py', '.github/workflows/server.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -18,6 +18,7 @@ jobs:
       - run: cargo test --locked -p amp-core -p amp-cast
       - run: cargo build --locked --release -p amp-cast
       - run: python3 tools/smoke_preparation.py target/release/amp-prepare
+      - run: python3 tools/smoke_energy_cues.py target/release/amp-prepare
       - run: python3 tools/smoke_coordination.py target/release/amp-prepare target/release/amp-cast
       - run: python3 tools/smoke_cast.py target/release/amp-cast
       - run: python3 tools/smoke_discovery.py target/release/amp-cast

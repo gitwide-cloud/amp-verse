@@ -28,7 +28,8 @@ with tempfile.TemporaryDirectory() as tmp:
     prep = json.loads(sidecar.read_text())
     assert abs(prep["bpm"] - 120) < 2, prep
     assert prep["harmonic_key"] == "8B", prep
-    assert abs(prep["cue_in"] - 1) < .03 and abs(prep["cue_out"] - 9) < .03, prep
+    assert abs(next(c["seconds"] for c in prep["cues"] if c["id"] == "auto-in") - 1) < .03, prep
+    assert .97 <= prep["cue_in"] < 1.5 and abs(prep["cue_out"] - 9) < .03, prep
     prep["manual_cues"] = [{"id":"my-drop", "label":"My drop", "seconds":3., "kind":"hotcue"}]
     prep["manual_override"] = True; prep["cue_in"] = 2.; prep["cue_out"] = 8.
     prep["vendor_extension"] = {"preserved":True}
@@ -43,7 +44,7 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run([binary,str(folder),"--jobs","3"],check=True)
     manual = json.loads(manual_sidecar.read_text())
     assert manual["bpm"] == 127 and manual["source_sha256"] == source_hash
-    assert manual["analysis_recommendation"]["analysis"]["engine"] == "amp-prep-heuristic-1"
+    assert manual["analysis_recommendation"]["analysis"]["engine"] == "amp-prep-heuristic-2"
     del manual["analysis_recommendation"]; manual_sidecar.write_text(json.dumps(manual))
     declined_bytes = manual_sidecar.read_bytes()
     subprocess.run([binary,str(folder),"--jobs","3"],check=True)

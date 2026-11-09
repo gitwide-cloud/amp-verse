@@ -1087,7 +1087,10 @@ mod tests {
             bpm: Some(126.),
             source_sha256: Some(crate::preparation::fingerprint(&audio).unwrap()),
             analysis: Some(crate::preparation::AnalysisInfo {
-                engine: "amp-prep-heuristic-2".into(),
+                engine: format!(
+                    "amp-prep-heuristic-{}",
+                    engine_version(crate::engine_api::ENGINE_ID).unwrap() + 1
+                ),
                 duration: 10.,
                 tempo_confidence: 1.,
                 key_confidence: 1.,
