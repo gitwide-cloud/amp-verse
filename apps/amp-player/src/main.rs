@@ -130,6 +130,7 @@ struct Player {
     loaded_snapshot: [Option<amp_core::Track>; 2],
     playing: [bool; 2],
     volume: u8,
+    new_playlist_name: Option<String>,
     playlist_snapshot: Option<(PathBuf, Playlist)>,
     queue: Vec<usize>,
     queue_selected: Option<usize>,
@@ -204,6 +205,7 @@ impl Default for Player {
             loaded_snapshot: [None, None],
             playing: [false; 2],
             volume: 75,
+            new_playlist_name: None,
             playlist_snapshot: None,
             queue: vec![],
             queue_selected: None,
@@ -386,6 +388,23 @@ impl Player {
             lib.tracks.len()
         );
         self.library = Some(lib);
+        if let Ok(files) = std::fs::read_dir(self.root.join(".ampverse/playlists")) {
+            for file in files.flatten() {
+                let path = file.path();
+                if path
+                    .extension()
+                    .is_some_and(|extension| extension == "json")
+                    && !self
+                        .dj_browser
+                        .playlists
+                        .iter()
+                        .any(|(existing, _)| existing == &path)
+                    && let Ok(list) = Playlist::load(&path, &self.root)
+                {
+                    self.dj_browser.playlists.push((path, list));
+                }
+            }
+        }
     }
     fn poll(&mut self) {
         if let Some(engine) = &mut self.audio {
@@ -714,38 +733,99 @@ impl Player {
             self.scan();
         }
     }
+    fn create_playlist_at(&mut self, path: PathBuf, name: &str) -> Result<(), String> {
+        let name = name.trim();
+        if name.is_empty() {
+            return Err("Enter a playlist name".into());
+        }
+        if path.exists() {
+            return Err("A playlist already exists there. Choose a different filename.".into());
+        }
+        let list = Playlist {
+            sync: None,
+            version: 1,
+            name: name.into(),
+            tracks: Vec::new(),
+        };
+        list.save_in_library(&path, &self.root)
+            .map_err(|error| error.to_string())?;
+        let saved = Playlist::load(&path, &self.root).map_err(|error| error.to_string())?;
+        self.queue.clear();
+        self.queue_selected = None;
+        self.playlist_snapshot = Some((path.clone(), saved.clone()));
+        self.dj_browser.playlists.push((path, saved));
+        self.new_playlist_name = None;
+        self.status = "Playlist created. Add songs from Library, then Save.".into();
+        Ok(())
+    }
     fn save_playlist(&mut self) {
-        if let Some(lib) = &self.library
-            && let Some(path) = rfd::FileDialog::new()
-                .add_filter("AMP playlist", &["json"])
-                .save_file()
+        let path = self
+            .playlist_snapshot
+            .as_ref()
+            .map(|(path, _)| path.clone())
+            .or_else(|| {
+                rfd::FileDialog::new()
+                    .add_filter("AMP playlist", &["json"])
+                    .set_file_name("Playlist.json")
+                    .save_file()
+            });
+        let Some(path) = path else {
+            return;
+        };
+        let tracks: Option<Vec<_>> = self
+            .queue
+            .iter()
+            .map(|&index| {
+                self.library
+                    .as_ref()?
+                    .tracks
+                    .get(index)
+                    .map(|track| track.path.clone())
+            })
+            .collect();
+        let Some(tracks) = tracks else {
+            self.status = "Wait for the library scan before saving these songs".into();
+            return;
+        };
+        let list = Playlist {
+            sync: self
+                .playlist_snapshot
+                .as_ref()
+                .filter(|(p, _)| p == &path)
+                .and_then(|(_, list)| list.sync.clone()),
+            version: 1,
+            name: self
+                .playlist_snapshot
+                .as_ref()
+                .filter(|(p, _)| p == &path)
+                .map(|(_, list)| list.name.clone())
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                }),
+            tracks,
+        };
+        match list
+            .save_in_library(&path, &self.root)
+            .and_then(|()| Playlist::load(&path, &self.root))
         {
-            let list = Playlist {
-                sync: self
-                    .playlist_snapshot
-                    .as_ref()
-                    .filter(|(p, _)| p == &path)
-                    .and_then(|(_, list)| list.sync.clone()),
-                version: 1,
-                name: path
-                    .file_stem()
-                    .map(|s| s.to_string_lossy().into_owned())
-                    .unwrap_or_else(|| "Playlist".into()),
-                tracks: self
-                    .queue
-                    .iter()
-                    .map(|&i| lib.tracks[i].path.clone())
-                    .collect(),
-            };
-            match list.save_in_library(&path, &self.root) {
-                Ok(()) => {
-                    self.status = "Playlist saved".into();
-                    if let Ok(saved) = Playlist::load(&path, &self.root) {
-                        self.playlist_snapshot = Some((path, saved));
-                    }
+            Ok(saved) => {
+                self.playlist_snapshot = Some((path.clone(), saved.clone()));
+                if let Some(entry) = self
+                    .dj_browser
+                    .playlists
+                    .iter_mut()
+                    .find(|(p, _)| p == &path)
+                {
+                    entry.1 = saved;
+                } else {
+                    self.dj_browser.playlists.push((path, saved));
                 }
-                Err(e) => self.status = e.to_string(),
+                self.status = "Playlist saved".into();
             }
+            Err(error) => self.status = error.to_string(),
         }
     }
     fn load_playlist(&mut self) {

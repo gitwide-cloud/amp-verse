@@ -185,8 +185,8 @@ impl Playlist {
         for path in &mut list.tracks {
             *path = PathBuf::from(path.to_string_lossy().replace('\\', "/"));
         }
-        if list.version != 1 || list.tracks.is_empty() {
-            return Err(io::Error::other("Expected nonempty version 1 playlist"));
+        if list.version != 1 {
+            return Err(io::Error::other("Expected version 1 playlist"));
         }
         for p in &list.tracks {
             resolve(root, p)?;
@@ -205,8 +205,8 @@ impl Playlist {
         for path in &mut portable.tracks {
             *path = PathBuf::from(path.to_string_lossy().replace('\\', "/"));
         }
-        if portable.version != 1 || portable.tracks.is_empty() {
-            return Err(io::Error::other("Expected nonempty version 1 playlist"));
+        if portable.version != 1 {
+            return Err(io::Error::other("Expected version 1 playlist"));
         }
         let proposed = serde_json::to_value(&portable).map_err(io::Error::other)?;
         let result = (|| {

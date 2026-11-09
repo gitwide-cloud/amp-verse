@@ -140,14 +140,61 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
         }
         ui.horizontal(|ui| {
             if ui.button("New playlist").clicked() {
-                self.queue.clear();
-                self.queue_selected = None;
-                self.playlist_snapshot = None;
+                self.new_playlist_name = Some(String::new());
             }
             if ui.button("Import playlist").clicked() {
                 self.load_playlist();
             }
         });
+        if let Some(mut name) = self.new_playlist_name.clone() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label("Playlist name");
+                ui.add(
+                    egui::TextEdit::singleline(&mut name)
+                        .hint_text("e.g. Friday night")
+                        .desired_width(220.),
+                );
+                self.new_playlist_name = Some(name.clone());
+                if ui
+                    .add_enabled(
+                        !name.trim().is_empty(),
+                        egui::Button::new("Create playlist..."),
+                    )
+                    .clicked()
+                {
+                    let directory = self.root.join(".ampverse/playlists");
+                    match std::fs::create_dir_all(&directory) {
+                        Ok(()) => {
+                            let filename: String = name
+                                .chars()
+                                .map(|c| {
+                                    if c.is_control() || "<>:\"/\\|?*".contains(c) {
+                                        '_'
+                                    } else {
+                                        c
+                                    }
+                                })
+                                .collect();
+                            if let Some(path) = rfd::FileDialog::new()
+                                .set_directory(directory)
+                                .add_filter("AMP playlist", &["json"])
+                                .set_file_name(format!("{}.json", filename.trim()))
+                                .save_file()
+                                && let Err(error) = self.create_playlist_at(path, &name)
+                            {
+                                self.status = error;
+                            }
+                        }
+                        Err(error) => {
+                            self.status = format!("Could not create playlist folder: {error}")
+                        }
+                    }
+                }
+                if ui.button("Cancel").clicked() {
+                    self.new_playlist_name = None;
+                }
+            });
+        }
         ui.add_space(12.);
         ui.horizontal_top(|ui| {
             let width = (ui.available_width() * 0.32).max(190.);
@@ -209,6 +256,10 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                             .map_or("New playlist", |(_, p)| p.name.as_str()),
                     );
                     ui.weak(format!("{} tracks", self.queue.len()));
+                    ui.horizontal_wrapped(|ui| {
+                        if ui.button("Add songs from Library").clicked() { self.library_page = 0; self.status = "Select songs with the library checkboxes, or use Add folder. Then save the playlist queue.".into(); }
+                        if ui.add_enabled(self.playlist_snapshot.is_some() || !self.queue.is_empty(),egui::Button::new("Save playlist")).clicked() { self.save_playlist(); }
+                    });
                     if ui
                         .add_enabled(!self.queue.is_empty(), egui::Button::new("Play playlist"))
                         .clicked()
@@ -469,7 +520,10 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                     self.load_playlist();
                 }
                 if ui
-                    .add_enabled(!self.queue.is_empty(), egui::Button::new("Save"))
+                    .add_enabled(
+                        self.playlist_snapshot.is_some() || !self.queue.is_empty(),
+                        egui::Button::new("Save"),
+                    )
                     .clicked()
                 {
                     self.save_playlist();
@@ -548,6 +602,52 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn regular_playlist_create_add_save_and_restart_discovery() {
+        let directory = tempfile::tempdir().unwrap();
+        let root = directory.path();
+        std::fs::write(root.join("song.mp3"), b"fixture").unwrap();
+        let folder = root.join(".ampverse/playlists");
+        std::fs::create_dir_all(&folder).unwrap();
+        let path = folder.join("Friday.json");
+        let mut player = Player {
+            root: root.into(),
+            ..Default::default()
+        };
+        player
+            .create_playlist_at(path.clone(), "Friday night")
+            .unwrap();
+        let empty = Playlist::load(&path, root).unwrap();
+        assert!(empty.tracks.is_empty());
+        assert_eq!(empty.name, "Friday night");
+        assert!(
+            player
+                .create_playlist_at(path.clone(), "Overwrite")
+                .is_err()
+        );
+        player.accept_library_scan(amp_core::scan(root).unwrap());
+        player.queue = vec![0, 0];
+        player.save_playlist();
+        let saved = Playlist::load(&path, root).unwrap();
+        assert_eq!(saved.name, "Friday night");
+        assert_eq!(saved.tracks, vec![PathBuf::from("song.mp3"); 2]);
+        assert_eq!(std::fs::read(root.join("song.mp3")).unwrap(), b"fixture");
+        let mut restarted = Player {
+            root: root.into(),
+            ..Default::default()
+        };
+        restarted.accept_library_scan(amp_core::scan(root).unwrap());
+        assert!(
+            restarted
+                .dj_browser
+                .playlists
+                .iter()
+                .any(|(p, list)| p == &path
+                    && list.name == "Friday night"
+                    && list.tracks.len() == 2)
+        );
+    }
+
     #[test]
     fn library_navigation_changes_page_without_touching_playback_or_queue() {
         let ctx = egui::Context::default();
