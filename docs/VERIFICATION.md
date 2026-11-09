@@ -298,3 +298,12 @@ Player tests passed (38 passed, 7 hardware-dependent ignored), plus the targeted
 Reproduced a real overflow: a long folder/track fixture expanded the DJ content to about three times the viewport width despite the existing window transform. Shared folder headers now lay out a single ellipsized line within the sidebar and expose the full name on hover. Deck titles, selected Smart Playlist names and source headings are width constrained. Waveform zoom opens as a menu so it cannot vertically expand the centre strip and displace the lower library.
 
 Added a regression using long folder, track and Smart Playlist names in both Folders and Smart sources. It verifies complete transformed DJ content bounds over repeated frames at 900x600, 1000x760 and 740x480. Player tests passed: 39 passed, 7 hardware-dependent ignored. Strict Clippy passed. Existing lower-browser, crossfader, transport, magnetic-attachment and inline-editor checks remain passing.
+
+
+## Desktop AMP Lab inspection and integration
+
+Inspection confirmed the previous desktop Lab only offered an arrangement form and external editor launcher. Added an integrated waveform-editing workspace adapted from MP3 Lab's existing desktop foundation, retaining MIT attribution and recording the exact source SHA. Desktop installers and CI distributions now include that license/provenance. No changes were made to the MP3 Lab repository.
+
+Final player tests passed (42 passed, 8 ignored); targeted editor tests pass, including a real pointer drag changing IN from 1 to 3 seconds while preserving OUT. Explicit codec tests passed for normalized/faded/gain-adjusted 256 kbps MP3 selection export, decoded waveform peaks, asynchronous processed preview generation, owned preview cleanup, source-byte preservation and combined/individual timeline MP3 rendering. Strict Clippy passed. Actual soundcard audition is not claimed by these codec tests. The mix-arrangement engine remains basic; full multitrack editing and stems are not claimed.
+
+Optimized Lab screenshots were checked in Classic, Modern Light and Modern Dark with generated source audio. The waveform, trim handles, processing/export panels and transport remain inside the workspace. Closing Lab stops only its owned preview process.

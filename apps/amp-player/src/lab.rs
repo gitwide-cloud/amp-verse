@@ -10,10 +10,17 @@ use std::{
 #[derive(Default)]
 pub struct Arrangement {
     clips: Vec<Clip>,
+    editor: crate::lab_editor::Editor,
+    tab: usize,
+    demo_loaded: bool,
     status: String,
     job: Option<mpsc::Receiver<Result<String, String>>>,
 }
 impl Arrangement {
+    pub(super) fn stop_preview(&mut self) {
+        self.editor.stop();
+    }
+
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -23,7 +30,34 @@ impl Arrangement {
         crate::skin::panel(ui, false, |ui| {
             ui.set_min_size(ui.available_size());
             let action = crate::skin::heading(ui, "AMP Lab", true);
-            self.content(ui, root, library);
+            self.editor.poll(ui.ctx());
+            let previous = self.tab;
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(&mut self.tab, 0, "Waveform editor");
+                ui.selectable_value(&mut self.tab, 1, "Mix timeline");
+            });
+            if previous == 0 && self.tab != 0 {
+                self.editor.stop();
+            }
+            if !self.demo_loaded
+                && std::env::var("AMP_SCREENSHOT_VIEW").is_ok_and(|s| s == "lab")
+                && let Some(track) = library.and_then(|l| l.tracks.first())
+                && let Ok(path) = amp_core::resolve(root, &track.path)
+            {
+                self.editor.load_path(path);
+                self.demo_loaded = true;
+            }
+            egui::ScrollArea::vertical()
+                .id_salt("lab-workspace")
+                .max_height(ui.available_height())
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if self.tab == 0 {
+                        self.editor.show(ui, root, library);
+                    } else {
+                        self.content(ui, root, library);
+                    }
+                });
             action
         })
     }
@@ -36,9 +70,9 @@ impl Arrangement {
         }
         ui.heading("AMP Lab / Mix arrangement");
         ui.label("Arrange songs using cue IN/OUT and timeline starts. Overlaps mix together; source files stay unchanged.");
-        ui.horizontal(|ui| {
-            if ui.button("Open MP3 Lab waveform editor").clicked() {
-                self.status = open_editor().unwrap_or_else(|e| e);
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Waveform editor").clicked() {
+                self.tab = 0;
             }
             if ui.button("Save arrangement...").clicked()
                 && let Some(path) = rfd::FileDialog::new()
@@ -130,13 +164,19 @@ impl Arrangement {
                 for (i, clip) in self.clips.iter_mut().enumerate() {
                     ui.push_id(i, |ui| {
                         egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.strong(clip.path.display().to_string());
+                            ui.horizontal_wrapped(|ui| {
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(clip.path.display().to_string())
+                                            .strong(),
+                                    )
+                                    .truncate(),
+                                );
                                 if ui.button("Remove").clicked() {
                                     remove = Some(i);
                                 }
                             });
-                            ui.horizontal(|ui| {
+                            ui.horizontal_wrapped(|ui| {
                                 ui.label("Start (s)");
                                 ui.add(
                                     egui::DragValue::new(&mut clip.start)
@@ -190,7 +230,7 @@ impl Arrangement {
             "Timeline length: {extent:.2} seconds / bars show clip placement, not waveforms"
         ));
         ui.add_enabled_ui(self.job.is_none() && !self.clips.is_empty(), |ui| {
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 if ui.button("Export one combined MP3...").clicked()
                     && let Some(output) = rfd::FileDialog::new()
                         .add_filter("MP3", &["mp3"])
@@ -232,17 +272,4 @@ impl Arrangement {
             let _ = tx.send(result);
         });
     }
-}
-fn open_editor() -> Result<String, String> {
-    let path = std::env::var_os("LOCALAPPDATA")
-        .map(PathBuf::from)
-        .unwrap_or_default()
-        .join("Programs/MP3 Lab/mp3-lab.exe");
-    if !path.is_file() {
-        return Err("Install the existing MP3 Lab desktop editor to use waveform editing.".into());
-    }
-    amp_core::command(path.to_str().ok_or("Invalid editor path")?)
-        .spawn()
-        .map_err(|e| e.to_string())?;
-    Ok("MP3 Lab editor opened".into())
 }

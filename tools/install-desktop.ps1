@@ -33,6 +33,9 @@ if ($AudioTools) {
     Copy-Item -LiteralPath (Join-Path $AudioTools 'THIRD_PARTY_NOTICES.md') -Destination (Join-Path $Destination 'AUDIO_TOOL_NOTICES.md') -Force
 }
 Copy-Item -LiteralPath (Join-Path $repo 'assets/amp-verse.ico') -Destination $Destination -Force
+$ampLabNotices=Join-Path $Destination 'licenses/mp3-lab'
+New-Item -ItemType Directory -Force -Path $ampLabNotices | Out-Null
+foreach($name in @('LICENSE','PROVENANCE.md')) {Copy-Item -LiteralPath (Join-Path $repo "third-party/mp3-lab/$name") -Destination $ampLabNotices -Force}
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
     $shortcut = $shell.CreateShortcut((Join-Path $folder 'AMP Verse.lnk'))

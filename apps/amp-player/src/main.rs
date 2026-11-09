@@ -14,6 +14,7 @@ mod docking;
 mod engine;
 mod icons;
 mod lab;
+mod lab_editor;
 mod mixer;
 mod organized_library;
 mod performance;
@@ -1798,6 +1799,9 @@ impl eframe::App for Player {
                 self.run.cancel_automation();
                 self.play_cue(0, i, seconds);
             }
+        }
+        if !self.lab_open {
+            self.lab.stop_preview();
         }
         self.cast.poll();
         self.dj_effects(ui.ctx());

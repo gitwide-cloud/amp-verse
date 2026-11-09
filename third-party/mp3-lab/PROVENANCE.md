@@ -9,3 +9,7 @@ The four Android Java editor files were copied into `android/app/src/main/java/c
 Runtime remains the same pinned `dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.9` dependency, dynamically linked. See THIRD_PARTY_NOTICES.md for corresponding-source/rebuild terms. APK notice assets are carried over from the original editor. Any release that distributes this runtime must also supply the corresponding upstream source bundle as described there.
 
 Corresponding-source bundle is preserved unchanged alongside this file: `android-third-party-sources.zip`, SHA-256 `7387f541644d5f82494bfe97fab1d16c6fd534f62858b069da404573b577040f`. Original Java source hashes are recorded in SOURCE-SNAPSHOT.sha256.
+
+## Desktop editor integration
+
+Desktop processing, trim/fade constraints, preview lifecycle, waveform decoding and processing-order tests are adapted from `mp3-lab/desktop/src/main.rs` at the same source revision, SHA-256 `c587d4262f934784ca7575b13a02277dfba320d1dc669e01ed8f63e7f7c98849`. The adapted foundation is `apps/amp-player/src/lab_editor.rs`. AMP Verse supplies the shared-theme UI and arrangement workspace. The separate repository is read-only. Local export uses no-overwrite behavior and codec tools resolve through AMP Core. Keep the existing MIT license and notices with distributions.

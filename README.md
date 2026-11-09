@@ -144,3 +144,6 @@ Analysis engine revision 2 adds estimated sustained high-energy opening/drop can
 DJ keeps its music browser below the mixer. Selecting a different Smart Playlist in the top selector also selects that source in the lower browser. Right-click a Smart Playlist in Library, the DJ sidebar or selector for Edit, Duplicate, Resync, or Delete. Resync reloads saved rules and scans source folders; it does not rerun analysis or restart active decks.
 
 Smart Playlist editing stays inside the Library page: select a playlist in the left shelf and edit its sources and mix settings in the right panel. Save rules applies the draft; the editor no longer opens as a floating window.
+
+
+Desktop AMP Lab now includes the MP3 Lab desktop editor foundation inside the app: Open audio or From Library, drag waveform IN/OUT handles or type trim times, set fades/gain/normalization, preview Original/Processed, and export a new MP3 selection. The Mix timeline tab keeps arrangement editing and combined/individual export. Full multitrack waveform editing, fades/beat sync between tracks, stems and autosave remain unfinished.

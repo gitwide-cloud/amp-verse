@@ -57,13 +57,13 @@ const ENTRIES: [Entry; 6] = [
     },
     Entry {
         name: "AMP Lab",
-        kind: "Optional",
-        summary: "Connect the separately installed MP3 Lab editor.",
+        kind: "Included",
+        summary: "Integrated MP3 Lab editor foundation and mix arrangement.",
         features: &[
-            "Existing MP3 Lab: trim, fades and gain",
-            "Original/processed preview and MP3 export",
-            "Separate application; no in-process plugin loaded",
-            "AMP Lab multichannel interface remains planned",
+            "Waveform trim handles, fades, gain and normalization",
+            "Original/processed preview and selection MP3 export",
+            "Cue-aligned arrangement with combined or individual export",
+            "Multitrack fades, beat sync and stems remain unfinished",
         ],
     },
     Entry {

@@ -39,6 +39,9 @@ jobs:
         env:
           SDL_AUDIODRIVER: dummy
         run: cargo test -p amp-core --features analysis --locked -- --ignored --test-threads=1
+      - name: Verify MP3 Lab editor foundation with real codecs
+        if: runner.os == 'Linux'
+        run: cargo test -p amp-player --bin amp-player lab_editor::tests::ffmpeg_export_smoke -- --ignored
       - run: cargo build --workspace --release --locked
       - name: Build base player without analysis implementation
         run: cargo build -p amp-player --release --locked
@@ -87,6 +90,8 @@ jobs:
           cp target/release/amp-player${{ matrix.suffix }} dist/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
           cp -r docs dist/
+          mkdir -p dist/licenses/mp3-lab
+          cp third-party/mp3-lab/LICENSE third-party/mp3-lab/PROVENANCE.md dist/licenses/mp3-lab/
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}
