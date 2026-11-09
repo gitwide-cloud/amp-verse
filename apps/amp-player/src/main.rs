@@ -29,6 +29,29 @@ mod waveform;
 mod window_layout;
 use skin::{CYAN, GOLD, ORANGE};
 
+fn player_on_top_path() -> Option<PathBuf> {
+    theme::settings_path().map(|path| path.with_file_name("player-on-top.txt"))
+}
+fn load_player_on_top() -> bool {
+    player_on_top_path()
+        .and_then(|path| std::fs::read_to_string(path).ok())
+        .is_some_and(|value| value.trim() == "true")
+}
+fn save_player_on_top(enabled: bool) -> std::io::Result<()> {
+    use std::io::Write;
+    let path =
+        player_on_top_path().ok_or_else(|| std::io::Error::other("Settings folder unavailable"))?;
+    let directory = path
+        .parent()
+        .ok_or_else(|| std::io::Error::other("Settings folder unavailable"))?;
+    std::fs::create_dir_all(directory)?;
+    let mut file = tempfile::NamedTempFile::new_in(directory)?;
+    file.write_all(if enabled { b"true" } else { b"false" })?;
+    file.as_file().sync_all()?;
+    file.persist(path).map_err(|error| error.error)?;
+    Ok(())
+}
+
 fn library_preference() -> PathBuf {
     std::env::var_os("APPDATA")
         .map(PathBuf::from)
@@ -80,7 +103,7 @@ struct Player {
     dj_browser: dj_browser::Browser,
     dj_tab: usize,
     player_mode: u8,
-    mini_on_top: bool,
+    player_on_top: bool,
     run: performance::Run,
     show_editor: show_editor::Editor,
     control: Option<control::Control>,
@@ -151,7 +174,7 @@ impl Default for Player {
             dj_browser: Default::default(),
             dj_tab: 0,
             player_mode: 0,
-            mini_on_top: false,
+            player_on_top: load_player_on_top(),
             run: Default::default(),
             show_editor: Default::default(),
             control: None,
@@ -1072,7 +1095,11 @@ impl Player {
         if mode == 0 {
             ctx.send_viewport_cmd_to(
                 egui::ViewportId::ROOT,
-                egui::ViewportCommand::WindowLevel(egui::WindowLevel::Normal),
+                egui::ViewportCommand::WindowLevel(if self.player_on_top {
+                    egui::WindowLevel::AlwaysOnTop
+                } else {
+                    egui::WindowLevel::Normal
+                }),
             );
             self.resize_player(ctx, self.library_open && self.layout.parent[1] == Some(0));
         } else {
@@ -1091,7 +1118,7 @@ impl Player {
             );
             ctx.send_viewport_cmd_to(
                 egui::ViewportId::ROOT,
-                egui::ViewportCommand::WindowLevel(if self.mini_on_top {
+                egui::ViewportCommand::WindowLevel(if self.player_on_top {
                     egui::WindowLevel::AlwaysOnTop
                 } else {
                     egui::WindowLevel::Normal
@@ -1115,13 +1142,15 @@ impl Player {
                 }
             }
             if ui
-                .checkbox(&mut self.mini_on_top, "Keep small player on top")
+                .checkbox(&mut self.player_on_top, "Always on top")
                 .changed()
-                && self.player_mode != 0
             {
+                if let Err(error) = save_player_on_top(self.player_on_top) {
+                    self.status = format!("Always on top changed; could not save: {error}");
+                }
                 ui.ctx().send_viewport_cmd_to(
                     egui::ViewportId::ROOT,
-                    egui::ViewportCommand::WindowLevel(if self.mini_on_top {
+                    egui::ViewportCommand::WindowLevel(if self.player_on_top {
                         egui::WindowLevel::AlwaysOnTop
                     } else {
                         egui::WindowLevel::Normal
@@ -1928,6 +1957,11 @@ fn main() -> eframe::Result {
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_decorations(false)
+                .with_window_level(if player.player_on_top {
+                    egui::WindowLevel::AlwaysOnTop
+                } else {
+                    egui::WindowLevel::Normal
+                })
                 .with_icon(app_icon())
                 .with_inner_size(size)
                 .with_min_inner_size([size[0].min(740.), size[1].min(160.)])

@@ -151,3 +151,5 @@ Desktop AMP Lab now includes the MP3 Lab desktop editor foundation inside the ap
 ## Explicit analysis add-on download
 
 Plugin Manager now offers Download & install analysis engine. It retrieves the platform-specific executable and SHA-256 file from the public AMP Verse latest release over HTTPS, verifies the checksum, and replaces the engine through a temporary file in the add-on directory. Failed downloads or checksum failures preserve the installed engine. Downloading does not start analysis. Manual installation remains available. Browser links are enabled in the desktop build.
+
+Player view > Always on top keeps the full, compact or taskbar mini player above other windows. The choice is remembered after restart and when switching player modes. Attached panes follow the player window; detached windows retain their normal behavior.
