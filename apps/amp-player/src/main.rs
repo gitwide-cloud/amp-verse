@@ -1814,6 +1814,7 @@ impl eframe::App for Player {
             }
             "rules" => {
                 self.show_editor.open = true;
+                self.library_page = 1;
                 self.library_ui(ui);
             }
             "dj" => self.dj_ui(ui),

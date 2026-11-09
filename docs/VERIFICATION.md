@@ -286,3 +286,9 @@ The DJ mixer again includes the source browser below its decks instead of requir
 Smart Playlist rows in Library, DJ browser and the top selector share Edit in Library, Duplicate, Resync sources/rules and a confirmed Delete action. Duplicate/Delete use revision-aware saves; stale edits fail without removing newer rules. Resync reads saved rules and scans music sources, without starting analysis or replacing loaded deck snapshots. Added temporary-library tests for duplication, deletion and stale-save rejection. Player tests passed (37 passed, 7 hardware-dependent ignored); strict Clippy passed.
 
 Optimized native previews at 900x600 and 1000x920 were visually checked with generated songs: the lower source sidebar, song rows, search and Load A/Load B controls are visible. Browser sizing stays finite, with its source list scrolling inside the window. No personal library, playlist or playback session was changed by the fixture checks.
+
+## Inline Smart Playlist editor
+
+Removed the floating Smart Playlist rules window. The Library Smart Playlists page now keeps a playlist shelf on the left and the active draft editor in the right content panel, with internal scrolling and wrapped controls. Edit from DJ routes to this same page. Selecting another saved playlist preserves other unsaved draft edits. Save remains explicit and revision-aware; Reload remains explicit. Saved menu changes refresh a clean editor, and deleting/duplicating saved rules is blocked while an unsaved draft needs saving/reloading.
+
+Player tests passed (38 passed, 7 hardware-dependent ignored), plus the targeted draft tests after saved-state synchronization changes. Strict Clippy passed. New regression switches inline selection while preserving a draft, verifies the editor scroll viewport fits a 620x500 parent, and confirms no changes were published to saved rules. Existing conflict, source selection, resize and playback isolation regressions remain passing.

@@ -16,12 +16,6 @@ impl Player {
                 .text_styles
                 .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.));
         }
-        self.show_editor.show(
-            ui.ctx(),
-            &self.root,
-            &mut self.run.settings,
-            self.library.as_ref(),
-        );
         self.preparer
             .show(ui.ctx(), &self.root, self.library.as_mut());
         ui.painter().rect_filled(
@@ -45,8 +39,7 @@ impl Player {
             ui.vertical(|ui| {ui.set_width(ui.available_width()-8.);
                 match self.library_page {
                     0 => self.organized_music(ui,height),
-                    1 => {ui.heading("Smart Playlists");ui.weak("Choose sources and mixing rules; keep your preferred energy.");if ui.button("Edit Smart Playlist rules").clicked(){self.show_editor.open=true;}let mut edit=None;for list in &self.run.settings.playlists {let row=ui.selectable_label(false,&list.name);if row.clicked(){edit=Some((list.id.clone(),show_editor::PlaylistAction::Edit));}
-if let Some(action)=show_editor::playlist_menu(&row){edit=Some((list.id.clone(),action));}}if let Some((id,action))=edit{self.smart_playlist_action(ui,&id,action);}},
+                    1 => self.organized_smart(ui,height),
                     2 => self.organized_playlists(ui,height),
                     3 => {ui.heading("Devices");ui.weak("Find AMP Cast servers on your LAN or connect by address.");self.cast.show(ui);},
                     4 => {ui.heading("Playback history");ui.weak("Tracks started by this desktop session. A start does not mean the full track was played.");egui::ScrollArea::vertical().max_height(height-80.).show(ui,|ui|{for (deck,title) in self.playback_history.iter().rev(){ui.label(format!("Deck {}    {title}",deck+1));}if self.playback_history.is_empty(){ui.weak("Play a song to begin your session history.");}});},
@@ -68,6 +61,65 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
             );
             ui.separator();
             ui.add(egui::Label::new(self.root.display().to_string()).truncate());
+        });
+    }
+    fn organized_smart(&mut self, ui: &mut egui::Ui, height: f32) {
+        ui.heading("Smart Playlists");
+        ui.weak("Choose your music, set mixing rules and save your changes.");
+        ui.add_space(12.);
+        ui.horizontal_top(|ui| {
+            let width = (ui.available_width() * 0.25).clamp(180., 260.);
+            let selected = self.show_editor.selected_id().map(str::to_owned);
+            let mut action = None;
+            skin::panel(ui, false, |ui| {
+                ui.set_width(width);
+                ui.set_min_height((height - 140.).max(200.));
+                ui.strong("Your Smart Playlists");
+                ui.separator();
+                egui::ScrollArea::vertical()
+                    .id_salt("smart-playlist-shelf")
+                    .max_height((height - 200.).max(160.))
+                    .show(ui, |ui| {
+                        for list in &self.run.settings.playlists {
+                            let row = ui.add_sized(
+                                [width, 36.],
+                                egui::Button::selectable(
+                                    selected.as_deref() == Some(list.id.as_str()),
+                                    &list.name,
+                                )
+                                .right_text("")
+                                .truncate(),
+                            );
+                            if row.clicked() {
+                                action = Some((list.id.clone(), show_editor::PlaylistAction::Edit));
+                            }
+                            if let Some(value) = show_editor::playlist_menu(&row) {
+                                action = Some((list.id.clone(), value));
+                            }
+                        }
+                    });
+            });
+            if let Some((id, value)) = action {
+                self.smart_playlist_action(ui, &id, value);
+            }
+            ui.allocate_ui_with_layout(
+                egui::vec2(
+                    (ui.available_width() - 8.).max(200.),
+                    (height - 80.).max(220.),
+                ),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    skin::panel(ui, false, |ui| {
+                        ui.set_min_width(ui.available_width());
+                        self.show_editor.show(
+                            ui,
+                            &self.root,
+                            &mut self.run.settings,
+                            self.library.as_ref(),
+                        );
+                    });
+                },
+            );
         });
     }
     fn organized_playlists(&mut self, ui: &mut egui::Ui, height: f32) {

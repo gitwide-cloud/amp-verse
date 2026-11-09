@@ -41,6 +41,13 @@ impl Player {
         id: &str,
         action: PlaylistAction,
     ) {
+        if matches!(action, PlaylistAction::Delete | PlaylistAction::Duplicate)
+            && self.show_editor.has_unsaved()
+        {
+            self.status =
+                "Save or reload your Smart Playlist draft before changing saved playlists.".into();
+            return;
+        }
         match action {
             PlaylistAction::Edit => {
                 self.library_page = 1;
@@ -48,6 +55,7 @@ impl Player {
             }
             PlaylistAction::Resync => match amp_core::show::Settings::load(&self.root) {
                 Ok(fresh) => {
+                    self.show_editor.refresh_saved(&fresh);
                     self.run.settings = fresh;
                     if self.scan.is_none() {
                         self.scan();
@@ -59,6 +67,7 @@ impl Player {
             PlaylistAction::Delete | PlaylistAction::Duplicate => {
                 match change_saved(&self.root, &self.run.settings, id, action) {
                     Ok(fresh) => {
+                        self.show_editor.refresh_saved(&fresh);
                         self.run.settings = fresh;
                         self.status = if action == PlaylistAction::Delete {
                             "Smart Playlist deleted. Music and active playback were kept."
