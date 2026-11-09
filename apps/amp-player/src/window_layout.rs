@@ -174,10 +174,24 @@ pub fn resize_edges(ui: &mut egui::Ui) {
                 egui::Sense::drag(),
             )
             .on_hover_cursor(cursor);
-        if response.drag_started() {
+        // Start native resizing on the button-down event, before egui's drag
+        // threshold or a scaled child scene can claim the pointer gesture.
+        let pointer_on_edge = ui.input(|input| {
+            input
+                .pointer
+                .hover_pos()
+                .is_some_and(|position| area.contains(position))
+        });
+        if pointer_on_edge {
+            ui.ctx().set_cursor_icon(cursor);
+        }
+        let pressed_on_edge = pointer_on_edge
+            && ui.input(|input| input.pointer.button_pressed(egui::PointerButton::Primary));
+        if pressed_on_edge {
             ui.ctx()
                 .send_viewport_cmd(egui::ViewportCommand::BeginResize(direction));
         }
+        let _ = response;
     }
     let painter = ui.ctx().layer_painter(egui::LayerId::new(
         egui::Order::Foreground,
@@ -203,7 +217,6 @@ mod tests {
         for (position, press) in [
             (egui::pos2(797., 597.), None),
             (egui::pos2(797., 597.), Some(true)),
-            (egui::pos2(790., 590.), None),
         ] {
             let mut raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(
@@ -236,7 +249,7 @@ mod tests {
         }
         assert!(
             requested,
-            "Dragging the visible corner must request OS resizing"
+            "Pressing the visible corner must start OS resizing immediately, without waiting for drag movement"
         );
     }
     #[test]
