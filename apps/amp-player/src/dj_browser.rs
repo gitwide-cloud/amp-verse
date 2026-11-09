@@ -46,6 +46,7 @@ impl Player {
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
                     ui.set_width(195.);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                     toggle = ui.checkbox(&mut auto, "Auto DJ on / off").changed();
                     ui.separator();
                     ui.selectable_value(
@@ -156,7 +157,11 @@ impl Player {
                             .find(|p| p.id == self.dj_browser.smart)
                         {
                             ui.horizontal(|ui| {
-                                ui.strong(&profile.name);
+                                ui.add_sized(
+                                    [(ui.available_width() - 400.).max(120.), 26.],
+                                    egui::Label::new(egui::RichText::new(&profile.name).strong())
+                                        .truncate(),
+                                );
                                 load_smart = ui.button("Load for Auto DJ").clicked();
                                 edit_smart = ui.button("Edit sources / rules in Library").clicked();
                             });

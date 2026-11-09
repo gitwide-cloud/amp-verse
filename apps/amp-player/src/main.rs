@@ -747,18 +747,27 @@ impl Player {
         }
     }
     fn folder_tree(ui: &mut egui::Ui, folder: &Folder, path: &Path, selected: &mut PathBuf) {
-        let response =
-            egui::CollapsingHeader::new(RichText::new(&folder.name).color(skin::accent(ui)))
-                .id_salt(path)
-                .default_open(path.as_os_str().is_empty())
-                .show(ui, |ui| {
-                    for child in &folder.folders {
-                        Self::folder_tree(ui, child, &path.join(&child.name), selected);
-                    }
-                    if folder.folders.is_empty() {
-                        ui.weak(format!("{} audio files", folder.tracks.len()));
-                    }
-                });
+        let mut label = egui::text::LayoutJob::simple_singleline(
+            folder.name.clone(),
+            egui::TextStyle::Body.resolve(ui.style()),
+            skin::accent(ui),
+        );
+        label.wrap.max_width = (ui.available_width() - 38.).max(12.);
+        label.wrap.max_rows = 1;
+        label.wrap.break_anywhere = true;
+        let label = ui.fonts_mut(|fonts| fonts.layout_job(label));
+        let response = egui::CollapsingHeader::new(label)
+            .id_salt(path)
+            .default_open(path.as_os_str().is_empty())
+            .show(ui, |ui| {
+                for child in &folder.folders {
+                    Self::folder_tree(ui, child, &path.join(&child.name), selected);
+                }
+                if folder.folders.is_empty() {
+                    ui.weak(format!("{} audio files", folder.tracks.len()));
+                }
+            });
+        response.header_response.clone().on_hover_text(&folder.name);
         if response.header_response.clicked() {
             *selected = path.to_path_buf();
         }
@@ -1377,6 +1386,8 @@ impl Player {
         let mut context_edit = None;
         ui.horizontal_wrapped(|ui| {
             let selector = egui::ComboBox::from_id_salt("performance-playlist")
+                .width(180.)
+                .truncate()
                 .selected_text(
                     self.run
                         .settings
@@ -1616,7 +1627,7 @@ impl Player {
                                     .prefix("Mix ")
                                     .suffix(" s"),
                             );
-                            egui::CollapsingHeader::new("Waveform zoom").show(ui, |ui| {
+                            ui.menu_button("Waveform zoom", |ui| {
                                 ui.add(
                                     egui::Slider::new(&mut self.wave_span, 4. ..=64.)
                                         .show_value(true),
@@ -1659,7 +1670,7 @@ impl Player {
         ui.allocate_ui_with_layout(egui::vec2(width,0.),egui::Layout::top_down(egui::Align::Center),|ui|{
             skin::panel(ui,true,|ui|{ui.set_width(width-18.);
                 ui.horizontal(|ui|{skin::label(ui,if deck==0{"DECK A"}else{"DECK B"});let position=self.audio.as_ref().map_or(0.,|a|a.position(deck));ui.label(RichText::new(format!("{:02}:{:02}",position as u64/60,position as u64%60)).monospace().color(skin::signal(ui)));});
-                skin::display(ui,|ui|{ui.set_min_width(ui.available_width());ui.label(RichText::new(self.title(deck)).strong().color(skin::signal(ui)));let track=self.loaded_track(deck);ui.label(track.map(|t|format!("{} BPM · {}",t.preparation.bpm.map(|b|format!("{:.1}",b*(1.+self.pitch[deck]as f64/100.))).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--"))).unwrap_or_else(||"Load a track from the library".into()));});
+                skin::display(ui,|ui|{ui.set_min_width(ui.available_width());ui.add(egui::Label::new(RichText::new(self.title(deck)).strong().color(skin::signal(ui))).truncate());let track=self.loaded_track(deck);ui.label(track.map(|t|format!("{} BPM · {}",t.preparation.bpm.map(|b|format!("{:.1}",b*(1.+self.pitch[deck]as f64/100.))).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--"))).unwrap_or_else(||"Load a track from the library".into()));});
                 ui.horizontal(|ui|{ui.vertical(|ui|{ui.label("PITCH");ui.spacing_mut().slider_width=platter_side;if ui.add(egui::Slider::new(&mut self.pitch[deck],-16. ..=16.).vertical().show_value(false)).changed()&&let Some(a)=&self.audio{a.set_rate(deck,1.+self.pitch[deck]/100.);}ui.label(format!("{:+.1}%",self.pitch[deck]));});let phase=ui.ctx().input(|i|i.time)as f32;skin::platter(ui,platter_side,accent,self.playing[deck],phase);});
                 let transport=ui.horizontal(|ui|{
                     if skin::button(ui,"CUE",accent).on_hover_text("Return to the prepared cue IN and pause").clicked()&&let Some(i)=self.loaded[deck]{self.load_deck(deck,i,false);}
@@ -2108,6 +2119,72 @@ mod window_tests {
                         && screen.bottom() <= size.y + 1.,
                     "{size:?}: control outside window {screen:?}"
                 );
+            }
+        }
+    }
+    #[test]
+    fn dj_long_titles_and_deep_folders_do_not_expand_outside_resized_window() {
+        let ctx = egui::Context::default();
+        let long = "Very long album artist folder and extended remix title ".repeat(12);
+        let track = amp_core::Track {
+            path: PathBuf::from("song.wav"),
+            title: long.clone(),
+            preparation: Default::default(),
+        };
+        let mut player = Player {
+            library: Some(Library {
+                tracks: vec![track.clone()],
+                tree: Folder {
+                    name: long.clone(),
+                    folders: vec![Folder {
+                        name: long,
+                        folders: vec![],
+                        tracks: vec![0],
+                    }],
+                    tracks: vec![],
+                },
+            }),
+            loaded: [Some(0), Some(0)],
+            loaded_snapshot: [Some(track.clone()), Some(track)],
+            ..Default::default()
+        };
+        player.run.settings.playlists[0].name = "Long Smart Playlist name ".repeat(30);
+        player.run.choice = player.run.settings.playlists[0].id.clone();
+        for smart in [false, true] {
+            player.dj_browser = Default::default();
+            if smart {
+                player.dj_browser.select_smart(&player.run.choice);
+            }
+            for size in [
+                egui::vec2(900., 600.),
+                egui::vec2(1000., 760.),
+                egui::vec2(740., 480.),
+            ] {
+                for _ in 0..2 {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                            ..Default::default()
+                        },
+                        |ui| player.group_ui(ui, 2),
+                    );
+                    output.textures_delta.clear();
+                    let rect = ctx
+                        .data(|d| {
+                            d.get_temp::<egui::Rect>(egui::Id::unique(("pane-bounds", 2usize)))
+                        })
+                        .unwrap();
+                    let layer = ctx
+                        .data(|d| {
+                            d.get_temp::<egui::LayerId>(egui::Id::unique(("pane-layer", 2usize)))
+                        })
+                        .unwrap();
+                    let screen = ctx.layer_transform_to_global(layer).unwrap_or_default() * rect;
+                    assert!(
+                        screen.right() <= size.x + 1. && screen.bottom() <= size.y + 1.,
+                        "{size:?}: content escaped {screen:?}"
+                    );
+                }
             }
         }
     }

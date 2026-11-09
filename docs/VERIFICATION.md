@@ -292,3 +292,9 @@ Optimized native previews at 900x600 and 1000x920 were visually checked with gen
 Removed the floating Smart Playlist rules window. The Library Smart Playlists page now keeps a playlist shelf on the left and the active draft editor in the right content panel, with internal scrolling and wrapped controls. Edit from DJ routes to this same page. Selecting another saved playlist preserves other unsaved draft edits. Save remains explicit and revision-aware; Reload remains explicit. Saved menu changes refresh a clean editor, and deleting/duplicating saved rules is blocked while an unsaved draft needs saving/reloading.
 
 Player tests passed (38 passed, 7 hardware-dependent ignored), plus the targeted draft tests after saved-state synchronization changes. Strict Clippy passed. New regression switches inline selection while preserving a draft, verifies the editor scroll viewport fits a 620x500 parent, and confirms no changes were published to saved rules. Existing conflict, source selection, resize and playback isolation regressions remain passing.
+
+## DJ clipping with long library names
+
+Reproduced a real overflow: a long folder/track fixture expanded the DJ content to about three times the viewport width despite the existing window transform. Shared folder headers now lay out a single ellipsized line within the sidebar and expose the full name on hover. Deck titles, selected Smart Playlist names and source headings are width constrained. Waveform zoom opens as a menu so it cannot vertically expand the centre strip and displace the lower library.
+
+Added a regression using long folder, track and Smart Playlist names in both Folders and Smart sources. It verifies complete transformed DJ content bounds over repeated frames at 900x600, 1000x760 and 740x480. Player tests passed: 39 passed, 7 hardware-dependent ignored. Strict Clippy passed. Existing lower-browser, crossfader, transport, magnetic-attachment and inline-editor checks remain passing.
