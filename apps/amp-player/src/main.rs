@@ -1728,42 +1728,105 @@ impl Player {
     }
     fn dj_effects(&mut self, ctx: &egui::Context) {
         if self.eq_open {
-            let mut open = true;
-            egui::Window::new("AMP DJ · Channel EQ")
-                .open(&mut open)
-                .show(ctx, |ui| {
-                    for d in 0..2 {
-                        ui.strong(if d == 0 { "Deck A" } else { "Deck B" });
-                        for (b, name) in ["Low", "Mid", "High"].iter().enumerate() {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("amp-equalizer"),
+                egui::ViewportBuilder::default()
+                    .with_title("AMP Verse · Equalizer")
+                    .with_icon(app_icon())
+                    .with_inner_size([420., 410.])
+                    .with_min_inner_size([300., 240.])
+                    .with_resizable(true)
+                    .with_clamp_size_to_monitor_size(true)
+                    .with_window_level(if self.player_on_top {
+                        egui::WindowLevel::AlwaysOnTop
+                    } else {
+                        egui::WindowLevel::Normal
+                    }),
+                |ui, _| {
+                    if ui.input(|i| i.viewport().close_requested()) {
+                        self.eq_open = false;
+                    }
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.heading("Equalizer");
+                        ui.weak("Deck A is used for player playback.");
+                        ui.spacing_mut().slider_width =
+                            (ui.available_width() - 130.).clamp(80., 240.);
+                        for d in 0..2 {
+                            ui.separator();
+                            ui.strong(if d == 0 { "Player / Deck A" } else { "Deck B" });
+                            for (b, name) in ["Low", "Mid", "High"].iter().enumerate() {
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut self.eq[d][b], -12. ..=12.)
+                                            .text(*name)
+                                            .suffix(" dB"),
+                                    )
+                                    .changed()
+                                    && let Some(a) = &self.audio
+                                {
+                                    a.set_eq(d, b, self.eq[d][b]);
+                                }
+                            }
+                            if ui.button("Reset to flat").clicked() {
+                                self.eq[d] = [0.; 3];
+                                if let Some(a) = &self.audio {
+                                    for b in 0..3 {
+                                        a.set_eq(d, b, 0.);
+                                    }
+                                }
+                            }
+                        }
+                    });
+                },
+            );
+        }
+        if self.fx_open {
+            ctx.show_viewport_immediate(
+                egui::ViewportId::from_hash_of("amp-filter-effects"),
+                egui::ViewportBuilder::default()
+                    .with_title("AMP Verse · Filter FX")
+                    .with_icon(app_icon())
+                    .with_inner_size([420., 250.])
+                    .with_min_inner_size([300., 180.])
+                    .with_resizable(true)
+                    .with_clamp_size_to_monitor_size(true)
+                    .with_window_level(if self.player_on_top {
+                        egui::WindowLevel::AlwaysOnTop
+                    } else {
+                        egui::WindowLevel::Normal
+                    }),
+                |ui, _| {
+                    if ui.input(|i| i.viewport().close_requested()) {
+                        self.fx_open = false;
+                    }
+                    egui::ScrollArea::vertical().show(ui, |ui| {
+                        ui.heading("Filter FX");
+                        ui.spacing_mut().slider_width =
+                            (ui.available_width() - 155.).clamp(80., 220.);
+                        for d in 0..2 {
                             if ui
                                 .add(
-                                    egui::Slider::new(&mut self.eq[d][b], -12. ..=12.)
-                                        .text(*name)
-                                        .suffix(" dB"),
+                                    egui::Slider::new(&mut self.filter[d], 200. ..=22000.)
+                                        .logarithmic(true)
+                                        .text(if d == 0 { "A low-pass" } else { "B low-pass" })
+                                        .suffix(" Hz"),
                                 )
                                 .changed()
                                 && let Some(a) = &self.audio
                             {
-                                a.set_eq(d, b, self.eq[d][b]);
+                                a.set_filter(d, self.filter[d]);
                             }
-                        }
-                        if ui.button(format!("Flat {}", d + 1)).clicked() {
-                            self.eq[d] = [0.; 3];
-                            if let Some(a) = &self.audio {
-                                for b in 0..3 {
-                                    a.set_eq(d, b, 0.);
+                            if ui.button(format!("Bypass {}", d + 1)).clicked() {
+                                self.filter[d] = 22000.;
+                                if let Some(a) = &self.audio {
+                                    a.set_filter(d, 22000.);
                                 }
                             }
                         }
-                    }
-                });
-            self.eq_open = open;
-        }
-        if self.fx_open {
-            let mut open = true;
-            egui::Window::new("AMP DJ · Filter FX").open(&mut open).show(ctx,|ui|{for d in 0..2{if ui.add(egui::Slider::new(&mut self.filter[d],200. ..=22000.).logarithmic(true).text(if d==0{"A low-pass"}else{"B low-pass"}).suffix(" Hz")).changed()&&let Some(a)=&self.audio{a.set_filter(d,self.filter[d]);}
-if ui.button(format!("Bypass {}",d+1)).clicked(){self.filter[d]=22000.;if let Some(a)=&self.audio{a.set_filter(d,22000.);}}}ui.weak("First FX: channel low-pass filter. Additional effects and MIDI/OSC remain future work.");});
-            self.fx_open = open;
+                        ui.weak("Channel low-pass filter.");
+                    });
+                },
+            );
         }
     }
     fn cast_ui(&mut self, ui: &mut egui::Ui) {
