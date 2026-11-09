@@ -125,3 +125,9 @@ Detailed implementation boundaries and unmet revised-spec items are recorded in 
 ## Optional desktop analysis boundary
 
 See [OPTIONAL_ANALYSIS.md](OPTIONAL_ANALYSIS.md). Basic player builds exclude the analysis implementation; Library invokes the separately installed `amp-engine` process. QNAP app deployment is cancelled; shared NAS storage coordination still applies. DJ/Library UI separation into installable modules remains unfinished.
+
+## Organized desktop shell and vector controls
+
+The shared Library layout lives in `organized_library.rs`: Library (folders/tracks/queue), Smart Playlists, Playlists, Devices, session History, Sources and Analyze Music. It reuses the existing scan, revision-aware playlist save/load, preparation editor, Cast client and optional engine boundaries. `icons.rs` draws transport/navigation icons with egui geometry rather than fonts or bitmap screen backgrounds. Painter geometry and input regions participate in the desktop window transform; all themes use the same navigation and behavior. The AMP Verse title dropdown and explicit magnetic window controls remain available.
+
+Opened/saved playlists are listed for this app session and preserve their actual membership, including duplicates. Session history records successful deck loads requested to start playback; it is not a distributed audit log or a completed-play statistic. Devices shows actual Cast discovery/connection data; it does not invent an inventory of NAS/mobile services. Analysis cards derive counts from loaded preparation metadata and progress from returned worker jobs. Unsupported pause/resume and per-host job dashboards from the visual reference are not presented as working controls. Default appearance is Modern Dark when there is no saved theme; existing preferences and Classic/Modern Light selection remain supported.

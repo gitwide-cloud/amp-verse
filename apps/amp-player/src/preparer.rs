@@ -33,6 +33,9 @@ pub struct Preparer {
     skipped: usize,
 }
 impl Preparer {
+    pub fn progress(&self) -> (usize, usize) {
+        (self.done, self.total)
+    }
     pub fn busy(&self) -> bool {
         self.job.is_some()
     }

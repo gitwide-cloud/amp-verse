@@ -55,6 +55,11 @@ pub fn panel<R>(ui: &mut egui::Ui, _purple: bool, body: impl FnOnce(&mut egui::U
     let p = theme.palette();
     let bg = ui.painter().add(egui::Shape::Noop);
     let response = egui::Frame::new()
+        .corner_radius(if theme == crate::theme::Theme::Classic {
+            2
+        } else {
+            10
+        })
         .inner_margin(8)
         .stroke(Stroke::new(1., p.border))
         .show(ui, |ui| {
@@ -67,8 +72,13 @@ pub fn panel<R>(ui: &mut egui::Ui, _purple: bool, body: impl FnOnce(&mut egui::U
     } else {
         (p.elevated, p.surface)
     };
-    ui.painter()
-        .set(bg, gradient(ui.painter(), rect, top, bottom));
+    if theme == crate::theme::Theme::Classic {
+        ui.painter()
+            .set(bg, gradient(ui.painter(), rect, top, bottom));
+    } else {
+        ui.painter()
+            .set(bg, egui::Shape::rect_filled(rect, 10., p.surface));
+    }
     ui.painter().rect_stroke(
         rect.shrink(2.),
         2.,

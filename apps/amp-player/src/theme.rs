@@ -3,9 +3,9 @@ use std::{fs, io, path::PathBuf};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Theme {
-    #[default]
     Classic,
     ModernLight,
+    #[default]
     ModernDark,
 }
 impl Theme {

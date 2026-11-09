@@ -258,3 +258,9 @@ Player tests passed (34 passed, 7 hardware-dependent tests ignored), with strict
 Added a 520x210 compact view and 620x100 floating taskbar mini view, both scaled with their window. They reuse the active desktop playback engine and queue. Full restores the existing magnetic layout; compact views temporarily omit attached panels without closing or detaching them. Window-level pinning is optional and Full restores normal window level. These are app windows, not a native taskbar toolbar or taskbar thumbnail controls.
 
 Player unit tests and strict Clippy passed. The view-switch regression verifies loaded decks, play state, queue, library visibility and magnetic parent relationships survive Compact, Mini and Full transitions. Native preview screenshots are generated for both views. No new hardware audio or Linux window-manager behavior is claimed from these layout checks.
+
+## Reference-based desktop organization and vectors
+
+Player tests: **36 passed, 7 hardware-dependent tests ignored**. Strict Clippy passed. Navigation regression clicks the real vector Sources control under Modern Dark and confirms page change without altering loaded decks, play state or queue membership. Existing resize, magnetic merge/detach, compact mode, playlist ordering and protected-playback snapshot regressions pass.
+
+Built optimized Windows previews for combined Player/Library, Library, Playlists, Analyze Music and DJ. Visual review corrected empty-list card sizing, modern text spacing and the shared theme font scope so larger Library text does not push DJ controls outside its window. CI screenshot coverage now includes Playlists, Analyze, Devices, Compact and Mini in all three themes. Local UI checks do not establish physical LAN discovery, cross-device history, NAS service inventory or Linux window-manager verification.

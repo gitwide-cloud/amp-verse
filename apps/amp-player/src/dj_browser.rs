@@ -13,7 +13,7 @@ pub struct Browser {
     folder: PathBuf,
     smart: String,
     search: String,
-    playlists: Vec<(PathBuf, Playlist)>,
+    pub(super) playlists: Vec<(PathBuf, Playlist)>,
     playlist: Option<usize>,
 }
 fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
