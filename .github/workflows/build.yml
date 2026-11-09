@@ -101,6 +101,9 @@ jobs:
         run: |
           mkdir -p engine-dist
           cp target/release/amp-engine${{ matrix.suffix }} LICENSE THIRD_PARTY_NOTICES.md engine-dist/
+          if [ "${{ runner.os }}" = "Windows" ]; then asset=amp-engine-windows-x86_64.exe; else asset=amp-engine-linux-x86_64; fi
+          cp target/release/amp-engine${{ matrix.suffix }} "engine-dist/$asset"
+          (cd engine-dist && sha256sum "$asset" > "$asset.sha256")
       - uses: actions/upload-artifact@v4
         with:
           name: amp-analysis-engine-${{ runner.os }}
@@ -124,6 +127,8 @@ jobs:
       - run: |
           cd packages
           for dir in amp-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
+          cp amp-analysis-engine-Windows/amp-engine-windows-x86_64.exe* .
+          cp amp-analysis-engine-Linux/amp-engine-linux-x86_64* .
           sha256sum *.zip > SHA256SUMS.txt
       - uses: softprops/action-gh-release@v2
         with:
@@ -132,3 +137,4 @@ jobs:
           files: |
             packages/*.zip
             packages/SHA256SUMS.txt
+            packages/amp-engine-*

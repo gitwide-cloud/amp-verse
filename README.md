@@ -147,3 +147,7 @@ Smart Playlist editing stays inside the Library page: select a playlist in the l
 
 
 Desktop AMP Lab now includes the MP3 Lab desktop editor foundation inside the app: Open audio or From Library, drag waveform IN/OUT handles or type trim times, set fades/gain/normalization, preview Original/Processed, and export a new MP3 selection. The Mix timeline tab keeps arrangement editing and combined/individual export. Full multitrack waveform editing, fades/beat sync between tracks, stems and autosave remain unfinished.
+
+## Explicit analysis add-on download
+
+Plugin Manager now offers Download & install analysis engine. It retrieves the platform-specific executable and SHA-256 file from the public AMP Verse latest release over HTTPS, verifies the checksum, and replaces the engine through a temporary file in the add-on directory. Failed downloads or checksum failures preserve the installed engine. Downloading does not start analysis. Manual installation remains available. Browser links are enabled in the desktop build.

@@ -81,6 +81,7 @@ const ENTRIES: [Entry; 6] = [
 
 pub struct Manager {
     pub selected: usize,
+    download: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     search: String,
     filter: usize,
     lab: Option<PathBuf>,
@@ -91,6 +92,7 @@ impl Default for Manager {
     fn default() -> Self {
         Self {
             selected: 5,
+            download: None,
             search: String::new(),
             filter: 0,
             lab: std::env::var_os("AMP_LAB_EXE")
@@ -116,6 +118,27 @@ impl Manager {
         };
     }
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<Module> {
+        if let Some(receiver) = &self.download {
+            match receiver.try_recv() {
+                Ok(result) => {
+                    self.status = match result {
+                        Ok(()) => {
+                            "Analysis add-on downloaded and installed. Ready to analyze.".into()
+                        }
+                        Err(e) => format!("Download failed: {e}"),
+                    };
+                    self.download = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                    self.status = "Download stopped unexpectedly. Please retry.".into();
+                    self.download = None;
+                }
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    ui.ctx()
+                        .request_repaint_after(std::time::Duration::from_millis(100));
+                }
+            }
+        }
         if self.icon.is_none() {
             let icon = crate::app_icon();
             self.icon = Some(ui.ctx().load_texture(
@@ -197,6 +220,8 @@ impl Manager {
                         ui.weak("The server must already be running. Presence does not imply an active station.");
                     },
                     4=>{
+                        if skin::button(ui,"OPEN AMP LAB",GOLD).clicked() { action=Some(Module::LabSetup); }
+                        ui.weak("Integrated waveform editor included. External editor connection is optional.");
                         ui.hyperlink_to("Download MP3 Lab releases","https://github.com/gitwide-cloud/mp3-lab/releases");
                         if ui.button("Connect installed editor...").clicked() && let Some(path)=rfd::FileDialog::new().pick_file() { self.lab=Some(path); self.status="Editor selected for this session. Click Open editor to launch it.".into(); }
                         if let Some(path)=&self.lab {ui.add(egui::Label::new(path.display().to_string()).truncate());}
@@ -206,7 +231,13 @@ impl Manager {
                     _=>{
                         let installed=crate::engine::path();
                         ui.label(if installed.is_some(){"Analysis add-on installed"}else{"Analysis add-on not installed"});
-                        ui.hyperlink_to("Download analysis add-on", "https://github.com/gitwide-cloud/amp-verse/releases");
+                        if ui.add_enabled(self.download.is_none(), egui::Button::new(if self.download.is_some() {"Downloading..."} else {"Download & install analysis engine"})).clicked() {
+                            let (sender, receiver) = std::sync::mpsc::channel();
+                            self.download = Some(receiver);
+                            self.status = "Downloading the engine from GitHub Releases...".into();
+                            std::thread::spawn(move || { let _ = sender.send(crate::engine_download::download()); });
+                        }
+                        ui.hyperlink_to("Open releases in browser", "https://github.com/gitwide-cloud/amp-verse/releases");
                         if ui.button("Install downloaded engine...").clicked() && let Some(source)=rfd::FileDialog::new().pick_file() {
                             self.status=match std::env::current_exe().map_err(|e|e.to_string()).and_then(|exe| {
                                 let directory=exe.parent().ok_or("Missing application directory")?.join("addons");
@@ -220,13 +251,13 @@ impl Manager {
                             }) {Ok(())=>"Analysis add-on installed. Library analysis is available.".into(),Err(e)=>format!("Could not install analysis add-on: {e}")};
                         }
                         if let Some(path)=installed {
-                            ui.label(path.display().to_string());
+                            ui.add(egui::Label::new(path.display().to_string()).truncate());
                             let local=std::env::current_exe().ok().and_then(|p|p.parent().map(|p|p.join("addons").join(if cfg!(windows){"amp-engine.exe"}else{"amp-engine"}))).is_some_and(|p|p==path);
                             if local && ui.button("Remove analysis add-on").clicked() {
                                 self.status=match std::fs::remove_file(path) {Ok(())=>"Analysis add-on removed. Prepared playback and manual editing remain available.".into(),Err(e)=>format!("Could not remove add-on: {e}")};
                             }
                         }
-                        ui.weak("Install only a trusted AMP Verse release. No engine is downloaded or started automatically.");
+                        ui.weak("Downloads start only when requested. SHA-256 is checked before installation. Analysis starts separately.");
                     },
                 }
             });

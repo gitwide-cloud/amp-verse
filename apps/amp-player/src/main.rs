@@ -12,6 +12,7 @@ mod control;
 mod dj_browser;
 mod docking;
 mod engine;
+mod engine_download;
 mod icons;
 mod lab;
 mod lab_editor;
