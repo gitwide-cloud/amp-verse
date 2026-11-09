@@ -16,6 +16,8 @@ struct Bank {
     paths: [Option<PathBuf>; 9],
     gains: [f32; 9],
     master: f32,
+    names: [String; 9],
+    loops: [bool; 9],
 }
 impl Default for Bank {
     fn default() -> Self {
@@ -23,6 +25,8 @@ impl Default for Bank {
             paths: Default::default(),
             gains: [1.; 9],
             master: 0.7,
+            names: Default::default(),
+            loops: [false; 9],
         }
     }
 }
@@ -30,7 +34,13 @@ fn settings() -> Option<PathBuf> {
     crate::theme::settings_path().map(|p| p.with_file_name("sampler.json"))
 }
 fn load_bank() -> Bank {
-    let bank = settings()
+    load_bank_at(settings())
+}
+fn load_bank_at(path: Option<PathBuf>) -> Bank {
+    if cfg!(test) {
+        return Bank::default();
+    }
+    let bank = path
         .and_then(|p| std::fs::read(p).ok())
         .and_then(|b| serde_json::from_slice::<Bank>(&b).ok())
         .unwrap_or_default();
@@ -114,6 +124,7 @@ pub enum Action {
 }
 pub struct Sampler {
     bank: Bank,
+    settings_path: Option<PathBuf>,
     ready: [bool; 9],
     queue: VecDeque<(usize, PathBuf)>,
     job: Option<mpsc::Receiver<Loaded>>,
@@ -125,6 +136,7 @@ impl Default for Sampler {
     fn default() -> Self {
         Self {
             bank: load_bank(),
+            settings_path: settings(),
             ready: [false; 9],
             queue: VecDeque::new(),
             job: None,
@@ -136,24 +148,143 @@ impl Default for Sampler {
     }
 }
 impl Sampler {
+    pub fn needs_audio(&self) -> bool {
+        !self.queue.is_empty() || self.job.is_some()
+    }
     pub fn has_saved(&self) -> bool {
         self.bank.paths.iter().any(Option::is_some)
     }
-    fn save(&mut self) {
-        let result = (|| -> Result<(), String> {
-            let path = settings().ok_or("Settings folder unavailable")?;
-            std::fs::create_dir_all(path.parent().unwrap()).map_err(|e| e.to_string())?;
-            let temp = path.with_extension(format!("json.{}.tmp", std::process::id()));
-            std::fs::write(
-                &temp,
-                serde_json::to_vec_pretty(&self.bank).map_err(|e| e.to_string())?,
-            )
-            .map_err(|e| e.to_string())?;
-            std::fs::rename(temp, path).map_err(|e| e.to_string())
-        })();
-        if let Err(e) = result {
-            self.status = format!("Sampler settings were not saved: {e}");
+    pub fn separate_bank(name: &str) -> Self {
+        let settings_path = crate::theme::settings_path().map(|path| path.with_file_name(name));
+        Self {
+            bank: load_bank_at(settings_path.clone()),
+            settings_path,
+            ..Default::default()
         }
+    }
+    fn save(&mut self) {
+        use std::io::Write;
+        let result = (|| -> Result<(), String> {
+            let path = self
+                .settings_path
+                .as_ref()
+                .ok_or("Settings folder unavailable")?;
+            let directory = path.parent().ok_or("Settings folder unavailable")?;
+            std::fs::create_dir_all(directory).map_err(|e| e.to_string())?;
+            let mut file = tempfile::NamedTempFile::new_in(directory).map_err(|e| e.to_string())?;
+            file.write_all(&serde_json::to_vec_pretty(&self.bank).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+            file.persist(path).map_err(|e| e.to_string())?;
+            Ok(())
+        })();
+        if let Err(error) = result {
+            self.status = format!("Sampler settings were not saved: {error}");
+        }
+    }
+    pub fn compact(
+        &mut self,
+        ui: &mut egui::Ui,
+        engine: Option<&Engine>,
+        accent: egui::Color32,
+    ) -> Vec<Action> {
+        let mut actions = Vec::new();
+        ui.spacing_mut().slider_width = (ui.available_width() - 55.).max(50.);
+        if ui
+            .add(
+                egui::Slider::new(&mut self.bank.master, 0. ..=1.)
+                    .show_value(false)
+                    .text("Vol"),
+            )
+            .changed()
+        {
+            self.save();
+        }
+        let side = ((ui.available_width() - 12.) / 3.).max(34.);
+        egui::Grid::new("compact-pads")
+            .spacing([4., 6.])
+            .show(ui, |ui| {
+                for pad in 0..9 {
+                    ui.push_id(pad, |ui| {
+                        let playing = engine.is_some_and(|audio| {
+                            audio.controls.sample_playing[pad]
+                                .load(std::sync::atomic::Ordering::Relaxed)
+                        });
+                        let name = if self.bank.names[pad].is_empty() {
+                            format!("PAD {}", pad + 1)
+                        } else {
+                            self.bank.names[pad].clone()
+                        };
+                        let response = ui
+                            .add_sized(
+                                [side, side],
+                                egui::Button::new(RichText::new(name).color(accent).size(12.))
+                                    .wrap()
+                                    .selected(playing),
+                            )
+                            .on_hover_text(
+                                self.bank.paths[pad]
+                                    .as_ref()
+                                    .map(|path| path.display().to_string())
+                                    .unwrap_or_else(|| "Drop audio here or click to load".into()),
+                            );
+                        response.context_menu(|ui| {
+                            if ui.button("Replace...").clicked() {
+                                actions.push(Action::Load(pad));
+                                ui.close();
+                            }
+                            ui.label("Pad name");
+                            if ui.text_edit_singleline(&mut self.bank.names[pad]).changed() {
+                                self.save();
+                            }
+                            if ui
+                                .checkbox(&mut self.bank.loops[pad], "Loop playback")
+                                .changed()
+                            {
+                                self.save();
+                            }
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut self.bank.gains[pad], 0. ..=1.)
+                                        .text("Level"),
+                                )
+                                .changed()
+                            {
+                                self.save();
+                            }
+                            if ui.button("Stop").clicked() {
+                                actions.push(Action::Stop(pad));
+                                ui.close();
+                            }
+                            if ui.button("Clear").clicked() {
+                                actions.push(Action::Clear(pad));
+                                ui.close();
+                            }
+                        });
+                        if let Some(path) = crate::dragdrop::target(&response, accent) {
+                            if playing {
+                                self.status = "Stop this pad before replacing its sample".into();
+                            } else {
+                                self.request_load(pad, path);
+                            }
+                        }
+                        if response.clicked() {
+                            actions.push(if self.ready[pad] {
+                                Action::Trigger(pad)
+                            } else {
+                                Action::Load(pad)
+                            });
+                        }
+                    });
+                    if pad % 3 == 2 {
+                        ui.end_row();
+                    }
+                }
+            });
+        if ui.button("Stop all pads").clicked() {
+            actions.push(Action::StopAll);
+        }
+        ui.add(egui::Label::new(&self.status).wrap());
+        actions
     }
     pub fn restore(&mut self) {
         self.started = true;
@@ -170,6 +301,10 @@ impl Sampler {
     pub fn poll(&mut self, engine: &mut Engine) {
         engine.sample_maintenance();
         engine.sample_levels(self.bank.master, self.bank.gains);
+        for pad in 0..9 {
+            engine.controls.sample_looping[pad]
+                .store(self.bank.loops[pad], std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(rx) = &self.job {
             match rx.try_recv() {
                 Ok(loaded) => {
@@ -287,7 +422,7 @@ impl Sampler {
         actions
     }
 }
-fn shortcut(key: egui::Key) -> Option<usize> {
+pub(super) fn shortcut(key: egui::Key) -> Option<usize> {
     [
         egui::Key::Num1,
         egui::Key::Num2,
@@ -306,6 +441,31 @@ fn shortcut(key: egui::Key) -> Option<usize> {
 mod tests {
     use super::*;
     #[test]
+    fn bank_replacement_persists_independent_assignments() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut left = Sampler {
+            settings_path: Some(dir.path().join("left.json")),
+            ..Default::default()
+        };
+        let mut right = Sampler {
+            settings_path: Some(dir.path().join("right.json")),
+            ..Default::default()
+        };
+        left.bank.names[0] = "Left".into();
+        right.bank.names[0] = "Right".into();
+        left.save();
+        right.save();
+        left.bank.loops[0] = true;
+        left.save();
+        let a: Bank =
+            serde_json::from_slice(&std::fs::read(left.settings_path.unwrap()).unwrap()).unwrap();
+        let b: Bank =
+            serde_json::from_slice(&std::fs::read(right.settings_path.unwrap()).unwrap()).unwrap();
+        assert!(a.loops[0] && !b.loops[0]);
+        assert_eq!(a.names[0], "Left");
+        assert_eq!(b.names[0], "Right");
+    }
+    #[test]
     fn all_nine_shortcuts_and_bank_paths_round_trip() {
         assert_eq!(shortcut(egui::Key::Num1), Some(0));
         assert_eq!(shortcut(egui::Key::Num9), Some(8));
@@ -313,9 +473,14 @@ mod tests {
         let mut b = Bank::default();
         b.paths[8] = Some(PathBuf::from("effects/air horn.wav"));
         b.gains[8] = 0.4;
+        b.names[8] = "Air horn".into();
+        b.loops[8] = true;
         let restored: Bank = serde_json::from_slice(&serde_json::to_vec(&b).unwrap()).unwrap();
         assert_eq!(restored.paths, b.paths);
         assert_eq!(restored.gains, b.gains);
+        assert_eq!(restored.names, b.names);
+        assert_eq!(restored.loops, b.loops);
+        assert!(serde_json::from_str::<Bank>(r#"{"paths":[null,null,null,null,null,null,null,null,null],"gains":[1,1,1,1,1,1,1,1,1],"master":0.7}"#).is_ok());
     }
     #[test]
     #[ignore = "requires native audio, ffmpeg and AMP_WAVEFORM_FIXTURE; muted"]

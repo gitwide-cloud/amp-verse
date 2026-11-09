@@ -19,6 +19,7 @@ pub struct Run {
     pub target: Option<f64>,
     pub auto: bool,
     pub crossfade: bool,
+    pub future_candidates: VecDeque<usize>,
     pub locked: bool,
     pub progression: Option<show::Progression>,
     planned_progression: Option<show::EnergyPlan>,
@@ -42,6 +43,7 @@ impl Default for Run {
             target: None,
             auto: false,
             crossfade: true,
+            future_candidates: VecDeque::new(),
             locked: false,
             progression: None,
             planned_progression: None,
@@ -58,6 +60,7 @@ impl Default for Run {
 }
 impl Run {
     pub fn cancel_automation(&mut self) {
+        self.future_candidates.clear();
         self.auto = false;
         self.pending = None;
         self.pending_at = None;
@@ -93,7 +96,7 @@ impl Player {
             }
         }
     }
-    fn find_song(&self, song: &str) -> Result<usize, String> {
+    pub(super) fn find_song(&self, song: &str) -> Result<usize, String> {
         let lib = self
             .library
             .as_ref()
@@ -185,6 +188,7 @@ impl Player {
         engine.set_rate(d, rate);
         engine.load(d, &self.root, &track, execution == Execution::PlayNow)?;
         self.loaded_snapshot[d] = Some(track.clone());
+        self.loaded_origin[d] = Some(self.root.clone());
         self.loaded[d] = Some(index);
         self.auto = false;
         match execution {
@@ -248,6 +252,19 @@ impl Player {
             .as_ref()
             .map(|p| p.next())
             .or(self.run.target);
+        while let Some(index) = self.run.future_candidates.pop_front() {
+            if current != Some(index)
+                && let Some(track) = tracks.get(index)
+                && show::eligible(&p, track)
+                && !recent
+                    .iter()
+                    .rev()
+                    .take(p.recent_repeat)
+                    .any(|id| *id == show::song_id(track))
+            {
+                return self.call_track(index, None, Deck::Auto, Execution::LoadOnly);
+            }
+        }
         let index = show::choose_with_snapshot(
             &p,
             tracks,
@@ -270,6 +287,8 @@ impl Player {
                     | Action::Pause { .. }
                     | Action::Play { .. }
                     | Action::Sampler { .. }
+                    | Action::CueDeck { .. }
+                    | Action::SideSampler { .. }
                     | Action::SetCrossfader { .. }
                     | Action::AutoDj { enabled: false }
             )
@@ -619,6 +638,23 @@ impl Player {
                     .set_fader(value);
                 self.run.transition = None;
             }
+            Action::CueDeck { side, operation } => self.cue_command(side, operation)?,
+            Action::SideSampler { side, pad } => {
+                if side > 1 || !(1..=9).contains(&pad) {
+                    return Err("Sampler side is 0/1 and pad is 1–9".into());
+                }
+                if side == 0 {
+                    self.audio
+                        .as_ref()
+                        .ok_or("Load the left sampler first")?
+                        .sample_trigger(pad - 1)?;
+                } else {
+                    self.right_sample_audio
+                        .as_ref()
+                        .ok_or("Load the right sampler first")?
+                        .sample_trigger(pad - 1)?;
+                }
+            }
             Action::Sampler { pad } => {
                 if !(1..=9).contains(&pad) {
                     return Err("Sampler pad must be 1–9".into());
@@ -766,7 +802,7 @@ impl Player {
             json!({"deck":if d==0{"A"}else{"B"},"loaded":engine_loaded,"ready":engine_loaded&&a.is_some_and(|a|a.controls.ready[d].load(Relaxed)),"playing":playing,"state":if playing{"playing"}else if engine_loaded{"paused"}else{"stopped"},"song_id":if engine_loaded{t.map(show::song_id)}else{None},"title":if engine_loaded{t.map(|t|t.title.as_str())}else{None},"artist":if engine_loaded{t.and_then(|t|t.preparation.extensions.get("artist")).cloned()}else{None},"position":if engine_loaded{a.map(|a|a.source_position(d))}else{None},"remaining":if engine_loaded{a.and_then(|a|a.remaining(d))}else{None}})
         }).collect();
         let fading = a.is_some_and(|a| a.fading() || a.controls.level_fading.load(Relaxed));
-        json!({"version":1,"amp":{"connected":true,"playback_state":tracks[active]["state"],"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active==0{"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"manual_dj_locked":self.run.locked},"decks":tracks})
+        json!({"version":1,"amp":{"connected":true,"playback_state":tracks[active]["state"],"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active==0{"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"manual_dj_locked":self.run.locked},"decks":tracks,"cue_decks":self.sides.iter().map(|side|side.snapshot()).collect::<Vec<_>>()})
     }
 }
 

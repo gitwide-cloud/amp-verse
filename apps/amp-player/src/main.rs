@@ -11,6 +11,7 @@ mod cast;
 mod control;
 mod dj_browser;
 mod docking;
+mod dragdrop;
 mod engine;
 mod engine_download;
 mod icons;
@@ -22,6 +23,7 @@ mod performance;
 mod preparer;
 mod sampler;
 mod show_editor;
+mod side_deck;
 mod skin;
 mod smart_actions;
 mod smart_preview;
@@ -101,6 +103,11 @@ struct Player {
     search: String,
     audio: Option<mixer::Engine>,
     sampler: sampler::Sampler,
+    right_sampler: sampler::Sampler,
+    right_sample_audio: Option<mixer::Engine>,
+    sides: [side_deck::SideDeck; 2],
+    pending_load: [Option<(PathBuf, Option<f64>)>; 2],
+    loaded_origin: [Option<PathBuf>; 2],
     dj_browser: dj_browser::Browser,
     dj_tab: usize,
     player_mode: u8,
@@ -176,6 +183,11 @@ impl Default for Player {
             search: String::new(),
             audio: None,
             sampler: Default::default(),
+            right_sampler: sampler::Sampler::separate_bank("sampler-right.json"),
+            right_sample_audio: None,
+            sides: [side_deck::SideDeck::new(0), side_deck::SideDeck::new(1)],
+            pending_load: Default::default(),
+            loaded_origin: Default::default(),
             dj_browser: Default::default(),
             dj_tab: 0,
             player_mode: 0,
@@ -378,6 +390,12 @@ impl Player {
         self.queue = queue;
         self.queue_selected = queue_selected;
         self.run.preloaded = preloaded;
+        self.run.future_candidates = self
+            .run
+            .future_candidates
+            .iter()
+            .filter_map(|&index| remap(index))
+            .collect();
         if self
             .run
             .pending
@@ -409,9 +427,20 @@ impl Player {
             }
         }
     }
+    fn auxiliary_playing(&self) -> bool {
+        self.sides.iter().any(side_deck::SideDeck::playing)
+            || self.right_sample_audio.as_ref().is_some_and(|audio| {
+                audio
+                    .controls
+                    .sample_playing
+                    .iter()
+                    .any(|voice| voice.load(std::sync::atomic::Ordering::Relaxed))
+            })
+    }
     fn poll(&mut self) {
         if self.smart_preview.active()
-            && (self.run.locked
+            && (self.auxiliary_playing()
+                || self.run.locked
                 || self.run.auto
                 || self.audio.as_ref().is_some_and(|audio| {
                     audio.playing(0)
@@ -426,6 +455,13 @@ impl Player {
             self.smart_preview.stop();
         }
         self.smart_preview.poll();
+        for side in &mut self.sides {
+            side.poll(self.volume as f32 / 100.);
+        }
+        if let Some(audio) = &mut self.right_sample_audio {
+            audio.set_master(self.volume as f32 / 100.);
+            self.right_sampler.poll(audio);
+        }
         if let Some(engine) = &mut self.audio {
             self.sampler.poll(engine);
         }
@@ -542,6 +578,9 @@ impl Player {
                     .unwrap()
                     .load(deck, &self.root, &track, play)
             });
+            if result.is_ok() {
+                self.loaded_origin[deck] = Some(self.root.clone());
+            }
             match result {
                 Ok(()) => {
                     if let Some(rate) = track
@@ -565,6 +604,7 @@ impl Player {
                         }
                     }
                     self.loaded_snapshot[deck] = Some(track.clone());
+                    self.loaded_origin[deck] = Some(self.root.clone());
                     self.loaded[deck] = Some(index);
                     self.playing[deck] = play;
                     self.status = format!("Deck {} / {}", deck + 1, track.title);
@@ -604,6 +644,7 @@ impl Player {
             match result {
                 Ok(()) => {
                     self.loaded_snapshot[deck] = Some(track.clone());
+                    self.loaded_origin[deck] = Some(self.root.clone());
                     self.loaded[deck] = Some(index);
                     self.status = format!("Deck {} cue {:.2}s", deck + 1, seconds);
                 }
@@ -629,6 +670,13 @@ impl Player {
             && !audio.controls.finished[deck].load(std::sync::atomic::Ordering::Relaxed)
         {
             audio.toggle(deck);
+        } else if let Some(track) = self.loaded_snapshot[deck].clone() {
+            let root = self.loaded_origin[deck].as_deref().unwrap_or(&self.root);
+            if let Some(audio) = &mut self.audio
+                && let Err(error) = audio.load(deck, root, &track, true)
+            {
+                self.status = error;
+            }
         } else if let Some(i) = self.loaded[deck].or(self.selected) {
             self.play(deck, i);
         }
@@ -964,7 +1012,17 @@ impl Player {
             };
             let minimum_height: f32 = panes.iter().map(|&p| preferred(p) + 8.).sum();
             let available = ui.available_size().max(egui::vec2(1., 1.));
-            let scale = (available.x / 900.)
+            let minimum_width = if panes.contains(&2) {
+                900. + self
+                    .sides
+                    .iter()
+                    .filter(|side| !side.config.collapsed)
+                    .count() as f32
+                    * 210.
+            } else {
+                900.
+            };
+            let scale = (available.x / minimum_width)
                 .min(available.y / minimum_height)
                 .min(1.);
             let logical = available / scale;
@@ -1694,38 +1752,58 @@ impl Player {
     }
     fn dj_ui(&mut self, ui: &mut egui::Ui) {
         self.release_jog_wheels(ui.ctx());
+        if !ui.ctx().egui_wants_keyboard_input() && ui.input(|input| input.focused) {
+            for event in ui.input(|input| input.events.clone()) {
+                if let egui::Event::Key {
+                    key,
+                    pressed: true,
+                    repeat: false,
+                    modifiers,
+                    ..
+                } = event
+                    && !modifiers.ctrl
+                    && !modifiers.alt
+                    && !modifiers.command
+                    && let Some(pad) = sampler::shortcut(key)
+                {
+                    self.side_sample_action(
+                        usize::from(modifiers.shift),
+                        sampler::Action::Trigger(pad),
+                    );
+                }
+            }
+        }
         skin::panel(ui, true, |ui| {
             ui.set_min_width(ui.available_width());
             self.header(ui, "AMP DJ", true);
-            ui.horizontal(|ui| {
-                for (tab, label) in [(0, "Mixer + library"), (2, "Sampler")] {
-                    ui.selectable_value(&mut self.dj_tab, tab, label);
-                }
-            });
-            if self.dj_tab != 0 {
-                egui::ScrollArea::both()
-                    .id_salt("dj-selected-tool")
-                    .max_height(ui.available_height())
-                    .show(ui, |ui| {
-                        if self.dj_tab == 1 {
-                            self.dj_library_ui(ui);
-                        } else {
-                            self.sampler_ui(ui);
-                        }
-                    });
-                return;
-            }
             self.performance_controls(ui);
             for d in 0..2 {
                 let track = self.loaded_track(d).cloned();
                 let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
                 self.waveforms[d].height = Some(40.);
-                self.waveforms[d].show(ui, &self.root, track.as_ref(), position, self.wave_span, d);
+                self.waveforms[d].show(
+                    ui,
+                    self.loaded_origin[d].as_deref().unwrap_or(&self.root),
+                    track.as_ref(),
+                    position,
+                    self.wave_span,
+                    d,
+                );
             }
             let browser_height = (ui.available_height() * 0.34).clamp(280., 360.);
             let height = (ui.available_height() - browser_height - 50.).max(230.);
-            let deck_width = ((ui.available_width() - 178.) / 2.).max(250.);
+            let side_widths = std::array::from_fn::<_, 2, _>(|side| {
+                if self.sides[side].config.collapsed {
+                    30.
+                } else {
+                    190.
+                }
+            });
+            let deck_width =
+                ((ui.available_width() - 178. - side_widths.iter().sum::<f32>() - 16.) / 2.)
+                    .max(250.);
             ui.horizontal_top(|ui| {
+                self.side_panel(ui, 0, side_widths[0], height);
                 self.deck_ui(ui, 0, deck_width, height);
                 ui.allocate_ui_with_layout(
                     egui::vec2(160., 0.),
@@ -1825,6 +1903,7 @@ impl Player {
                     },
                 );
                 self.deck_ui(ui, 1, deck_width, height);
+                self.side_panel(ui, 1, side_widths[1], height);
             });
             ui.horizontal(|ui| {
                 ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Master"))
@@ -1852,10 +1931,327 @@ impl Player {
             );
         });
     }
+    fn add_dropped_to_queue(&mut self, path: PathBuf) {
+        let result = (|| -> Result<usize, String> {
+            let absolute = path.canonicalize().map_err(|error| error.to_string())?;
+            let base = self
+                .root
+                .canonicalize()
+                .map_err(|error| error.to_string())?;
+            let relative = absolute
+                .strip_prefix(base)
+                .map_err(|_| "Add this folder to the indexed Library before queueing its songs")?;
+            self.library
+                .as_ref()
+                .and_then(|library| {
+                    library
+                        .tracks
+                        .iter()
+                        .position(|track| track.path == relative)
+                })
+                .ok_or("Rescan Library to index this song before queueing it".into())
+        })();
+        match result {
+            Ok(index) => {
+                if self.run.auto {
+                    let eligible = self
+                        .run
+                        .profile
+                        .as_ref()
+                        .zip(self.library.as_ref())
+                        .is_some_and(|(profile, library)| {
+                            amp_core::show::eligible(profile, &library.tracks[index])
+                        });
+                    if !eligible {
+                        self.status =
+                            "That song is outside the active Auto Mix rules; it was not queued"
+                                .into();
+                        return;
+                    }
+                    self.run.future_candidates.push_back(index);
+                }
+                self.queue.push(index);
+                self.status = "Song added to the queue; playback unchanged".into();
+            }
+            Err(error) => self.status = error,
+        }
+    }
+    fn cue_command(&mut self, side: usize, operation: side_deck::Operation) -> Result<(), String> {
+        if side > 1 {
+            return Err("Cue side must be 0 (left) or 1 (right)".into());
+        }
+        match operation {
+            side_deck::Operation::Load { song } => {
+                let index = self.find_song(&song)?;
+                let track = self
+                    .library
+                    .as_ref()
+                    .and_then(|library| library.tracks.get(index))
+                    .ok_or("Track unavailable")?;
+                self.sides[side].load(self.root.join(&track.path))?;
+            }
+            side_deck::Operation::Play => self.sides[side].play()?,
+            side_deck::Operation::Pause => self.sides[side].pause(),
+            side_deck::Operation::Stop => self.sides[side].stop(),
+            side_deck::Operation::Seek { seconds } => self.sides[side].seek(seconds)?,
+            side_deck::Operation::Volume { value } => self.sides[side].gain(value)?,
+            side_deck::Operation::HotCue { number } => {
+                let cue = self.sides[side]
+                    .track
+                    .as_ref()
+                    .and_then(|track| {
+                        track
+                            .preparation
+                            .manual_cues
+                            .iter()
+                            .chain(&track.preparation.cues)
+                            .nth(number.saturating_sub(1))
+                    })
+                    .filter(|_| number > 0)
+                    .ok_or("Cue number not found")?
+                    .seconds;
+                self.sides[side].seek(cue)?;
+            }
+            side_deck::Operation::Send { deck } => {
+                let target = match deck {
+                    control::Deck::A => 0,
+                    control::Deck::B => 1,
+                    control::Deck::Auto => {
+                        if !self.playing[0] {
+                            0
+                        } else {
+                            1
+                        }
+                    }
+                };
+                let path = self.sides[side]
+                    .config
+                    .path
+                    .clone()
+                    .ok_or("Load a cue track first")?;
+                self.safe_load_path(target, path, Some(self.sides[side].position()))?;
+            }
+        }
+        Ok(())
+    }
+    fn safe_load_path(
+        &mut self,
+        deck: usize,
+        path: PathBuf,
+        cue: Option<f64>,
+    ) -> Result<(), String> {
+        if deck > 1 {
+            return Err("Deck must be A or B".into());
+        }
+        if self
+            .audio
+            .as_ref()
+            .is_some_and(|audio| audio.playing(deck) || audio.fading())
+            || (self.run.auto
+                && self
+                    .run
+                    .preloaded
+                    .is_some_and(|(reserved, _)| reserved == deck))
+        {
+            self.pending_load[deck] = Some((path, cue));
+            self.status = format!(
+                "Deck {} replacement staged. Stop it, then Apply staged track.",
+                if deck == 0 { "A" } else { "B" }
+            );
+            return Ok(());
+        }
+        let path = path.canonicalize().map_err(|error| error.to_string())?;
+        let root = path
+            .parent()
+            .ok_or("Audio file folder missing")?
+            .to_path_buf();
+        let mut preparation = amp_core::preparation::load(&path)?;
+        if let Some(cue) = cue {
+            let end = preparation.cue_out.or(preparation
+                .analysis
+                .as_ref()
+                .map(|analysis| analysis.duration));
+            preparation.cue_in = end.map_or(cue.max(0.), |end| cue.clamp(0., (end - 0.02).max(0.)));
+        }
+        let track = amp_core::Track {
+            path: path.file_name().ok_or("Audio filename missing")?.into(),
+            title: preparation
+                .extensions
+                .get("title")
+                .and_then(|value| value.as_str())
+                .map(str::to_owned)
+                .unwrap_or_else(|| {
+                    path.file_stem()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .into_owned()
+                }),
+            preparation,
+        };
+        self.ensure_audio()?;
+        self.audio
+            .as_mut()
+            .unwrap()
+            .load(deck, &root, &track, false)?;
+        self.run.cancel_automation();
+        self.auto = false;
+        self.loaded[deck] = path.strip_prefix(&self.root).ok().and_then(|relative| {
+            self.library
+                .as_ref()?
+                .tracks
+                .iter()
+                .position(|track| track.path == relative)
+        });
+        self.loaded_snapshot[deck] = Some(track);
+        self.loaded_origin[deck] = Some(root);
+        self.pending_load[deck] = None;
+        self.status = format!(
+            "Deck {} prepared; playback unchanged",
+            if deck == 0 { "A" } else { "B" }
+        );
+        Ok(())
+    }
+    fn recue_deck(&mut self, deck: usize) {
+        if let Some(track) = self.loaded_track(deck).cloned()
+            && let Some(audio) = &mut self.audio
+        {
+            let root = self.loaded_origin[deck].as_deref().unwrap_or(&self.root);
+            if let Err(error) = audio.load(deck, root, &track, false) {
+                self.status = error;
+            }
+            self.run.cancel_automation();
+            self.auto = false;
+        }
+    }
+    fn side_panel(&mut self, ui: &mut egui::Ui, side: usize, width: f32, height: f32) {
+        let accent = if side == 0 { ORANGE } else { CYAN };
+        ui.push_id(("side-tools", side), |ui| {
+            ui.allocate_ui_with_layout(
+                egui::vec2(width, height),
+                egui::Layout::top_down(egui::Align::Min),
+                |ui| {
+                    skin::panel(ui, false, |ui| {
+                        ui.set_width((width - 16.).max(14.));
+                        ui.set_min_height((height - 16.).max(50.));
+                        self.sides[side].header(ui, accent);
+                        if self.sides[side].config.collapsed {
+                            ui.add(
+                                egui::Label::new(if self.sides[side].config.cue {
+                                    "C"
+                                } else {
+                                    "S"
+                                })
+                                .truncate(),
+                            );
+                            return;
+                        }
+                        egui::ScrollArea::vertical()
+                            .id_salt("side-controls")
+                            .max_height((height - 80.).max(150.))
+                            .show(ui, |ui| {
+                                if self.sides[side].config.cue {
+                                    if let Some((path, cue, deck)) =
+                                        self.sides[side].show_cue(ui, accent)
+                                        && let Err(error) =
+                                            self.safe_load_path(deck, path, Some(cue))
+                                    {
+                                        self.status = error;
+                                    }
+                                } else {
+                                    if side == 0 {
+                                        if !self.sampler.started {
+                                            self.sampler.started = true;
+                                            if self.sampler.has_saved()
+                                                && self.ensure_audio().is_ok()
+                                            {
+                                                self.sampler.restore();
+                                            }
+                                        }
+                                        let actions =
+                                            self.sampler.compact(ui, self.audio.as_ref(), accent);
+                                        if (!actions.is_empty() || self.sampler.needs_audio())
+                                            && let Err(error) = self.ensure_audio()
+                                        {
+                                            self.sampler.status = error;
+                                            return;
+                                        }
+                                        for action in actions {
+                                            self.side_sample_action(0, action);
+                                        }
+                                    } else {
+                                        if !self.right_sampler.started {
+                                            self.right_sampler.started = true;
+                                            if self.right_sampler.has_saved()
+                                                && self.ensure_right_samples().is_ok()
+                                            {
+                                                self.right_sampler.restore();
+                                            }
+                                        }
+                                        let actions = self.right_sampler.compact(
+                                            ui,
+                                            self.right_sample_audio.as_ref(),
+                                            accent,
+                                        );
+                                        if (!actions.is_empty() || self.right_sampler.needs_audio())
+                                            && let Err(error) = self.ensure_right_samples()
+                                        {
+                                            self.right_sampler.status = error;
+                                            return;
+                                        }
+                                        for action in actions {
+                                            self.side_sample_action(1, action);
+                                        }
+                                    }
+                                }
+                            });
+                    });
+                },
+            );
+        });
+    }
+    fn ensure_right_samples(&mut self) -> Result<(), String> {
+        if self.right_sample_audio.is_none() {
+            let audio = mixer::Engine::new()?;
+            audio.set_master(self.volume as f32 / 100.);
+            self.right_sample_audio = Some(audio);
+        }
+        Ok(())
+    }
+    fn side_sample_action(&mut self, side: usize, action: sampler::Action) {
+        let (sampler, audio) = if side == 0 {
+            (&mut self.sampler, self.audio.as_mut())
+        } else {
+            (&mut self.right_sampler, self.right_sample_audio.as_mut())
+        };
+        let Some(audio) = audio else {
+            return;
+        };
+        let result = match action {
+            sampler::Action::Load(pad) => {
+                if let Some(path) = rfd::FileDialog::new()
+                    .add_filter(
+                        "Audio",
+                        &["wav", "mp3", "flac", "ogg", "m4a", "opus", "aac"],
+                    )
+                    .pick_file()
+                {
+                    sampler.request_load(pad, path);
+                }
+                Ok(())
+            }
+            sampler::Action::Trigger(pad) => audio.sample_trigger(pad),
+            sampler::Action::Stop(pad) => audio.sample_stop(Some(pad)),
+            sampler::Action::Clear(pad) => sampler.clear(pad, audio),
+            sampler::Action::StopAll => audio.sample_stop(None),
+        };
+        if let Err(error) = result {
+            sampler.status = error;
+        }
+    }
     fn deck_ui(&mut self, ui: &mut egui::Ui, deck: usize, width: f32, height: f32) {
         let accent = if deck == 0 { ORANGE } else { CYAN };
         let platter_side = (height - 190.).clamp(80., 170.);
-        ui.allocate_ui_with_layout(egui::vec2(width,0.),egui::Layout::top_down(egui::Align::Center),|ui|{
+        let area=ui.allocate_ui_with_layout(egui::vec2(width,0.),egui::Layout::top_down(egui::Align::Center),|ui|{
             skin::panel(ui,true,|ui|{ui.set_width(width-18.);
                 ui.horizontal(|ui|{skin::label(ui,if deck==0{"DECK A"}else{"DECK B"});let position=self.audio.as_ref().map_or(0.,|a|a.position(deck));ui.label(RichText::new(format!("{:02}:{:02}",position as u64/60,position as u64%60)).monospace().color(skin::signal(ui)));});
                 skin::display(ui,|ui|{ui.set_min_width(ui.available_width());ui.add(egui::Label::new(RichText::new(self.title(deck)).strong().color(skin::signal(ui))).truncate());let track=self.loaded_track(deck);ui.label(track.map(|t|format!("{} BPM · {}",t.preparation.bpm.map(|b|format!("{:.1}",b*(1.+self.pitch[deck]as f64/100.))).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--"))).unwrap_or_else(||"Load a track from the library".into()));});
@@ -1863,13 +2259,13 @@ impl Player {
                     let wheel=skin::platter(ui,platter_side,accent,self.playing[deck] || self.jog_resume[deck].is_some(),phase).on_hover_text("Drag around the wheel to scratch forward/backward. Scroll to seek; Shift = 5 seconds.");
                     self.jog_wheel(ui, deck, &wheel);});
                 let transport=ui.horizontal(|ui|{
-                    if skin::button(ui,"CUE",accent).on_hover_text("Return to the prepared cue IN and pause").clicked()&&let Some(i)=self.loaded[deck]{self.load_deck(deck,i,false);}
+                    if skin::button(ui,"CUE",accent).on_hover_text("Return to the prepared cue IN and pause").clicked(){self.recue_deck(deck);}
                     if skin::button(ui,if self.playing[deck]{"PAUSE"}else{"PLAY"},accent).clicked(){if deck==0{self.auto=false;}self.toggle_deck(deck);}
                     if skin::button(ui,"SYNC",accent).on_hover_text("Match prepared BPM to the other deck. Changes pitch with speed; beat-phase sync/key lock are not available.").clicked(){self.sync_deck(deck);}
                     if ui.button("STOP").clicked(){self.stop(deck);}
                 });
                 ui.ctx().data_mut(|d|{d.insert_temp(egui::Id::unique(("dj-transport",deck)),transport.response.rect);d.insert_temp(egui::Id::unique(("dj-transport",deck)).with("screen"),(transport.response.rect,ui.layer_id()));});
-                let cues=self.loaded[deck].and_then(|index|self.loaded_track(deck).map(|t|(index,t.preparation.manual_cues.iter().chain(t.preparation.cues.iter().filter(|c|matches!(c.kind.as_str(),"drop"|"energy-start"|"mix-in"|"grid"))).take(16).cloned().collect::<Vec<_>>())));
+                let cues=self.loaded_track(deck).map(|track|track.preparation.manual_cues.iter().chain(&track.preparation.cues).take(16).cloned().collect::<Vec<_>>());
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Seek -").on_hover_text("Seek back 1 second; Shift: 5 seconds").clicked() { self.seek_deck_relative(deck, if ui.input(|i|i.modifiers.shift) {-5.} else {-1.}); }
                     if ui.button("Seek +").on_hover_text("Seek forward 1 second; Shift: 5 seconds").clicked() { self.seek_deck_relative(deck, if ui.input(|i|i.modifiers.shift) {5.} else {1.}); }
@@ -1880,12 +2276,35 @@ impl Player {
                     }
                     if ui.button("Pitch reset").clicked(){self.pitch[deck]=0.;if let Some(a)=&self.audio{a.set_rate(deck,1.);}}
                     ui.menu_button("Hot cues",|ui| {
-                        if let Some((index,cues))=&cues {for cue in cues {if ui.button(&cue.label).clicked(){self.play_cue(deck,*index,cue.seconds);ui.close();}}}
+                        if let Some(cues)=&cues {for cue in cues {if ui.button(&cue.label).clicked(){let position=self.audio.as_ref().map_or(0.,|audio|audio.source_position(deck));self.seek_deck_relative(deck,cue.seconds-position);ui.close();}}}
                         else {ui.weak("Load a prepared track first");}
                     });
                 });
             });
         });
+        let response = ui
+            .interact(
+                area.response.rect,
+                ui.scope_id().with(("deck-drop", deck)),
+                egui::Sense::hover(),
+            )
+            .on_hover_text(
+                "Drop to preload. Playing decks stage the replacement without interrupting audio.",
+            );
+        if let Some(path) = dragdrop::target(&response, accent)
+            && let Err(error) = self.safe_load_path(deck, path, None)
+        {
+            self.status = error;
+        }
+        if self.pending_load[deck].is_some()
+            && ui
+                .add_enabled(!self.playing[deck], egui::Button::new("Apply staged track"))
+                .clicked()
+            && let Some((path, cue)) = self.pending_load[deck].take()
+            && let Err(error) = self.safe_load_path(deck, path, cue)
+        {
+            self.status = error;
+        }
     }
     fn seek_deck_relative(&mut self, deck: usize, delta: f64) {
         let Some(mut track) = self.loaded_track(deck).cloned() else {
@@ -1906,7 +2325,12 @@ impl Player {
         self.run.cancel_automation();
         self.auto = false;
         if let Some(audio) = &mut self.audio
-            && let Err(error) = audio.load(deck, &self.root, &track, was_playing)
+            && let Err(error) = audio.load(
+                deck,
+                self.loaded_origin[deck].as_deref().unwrap_or(&self.root),
+                &track,
+                was_playing,
+            )
         {
             self.status = error;
         }

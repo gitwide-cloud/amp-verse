@@ -145,6 +145,14 @@ pub enum Action {
     Sampler {
         pad: usize,
     },
+    CueDeck {
+        side: usize,
+        operation: crate::side_deck::Operation,
+    },
+    SideSampler {
+        side: usize,
+        pad: usize,
+    },
 }
 fn yes() -> bool {
     true
@@ -425,6 +433,23 @@ async fn command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn auxiliary_commands_preserve_existing_protocol() {
+        let request: Request = serde_json::from_value(
+            json!({"id":"cue","action":"cue_deck","side":1,"operation":{"operation":"seek","seconds":12.5}}),
+        )
+        .unwrap();
+        assert!(
+            matches!(request.command, Action::CueDeck { side:1, operation:crate::side_deck::Operation::Seek {seconds} } if seconds == 12.5)
+        );
+        let request: Request =
+            serde_json::from_value(json!({"id":"pad","action":"side_sampler","side":1,"pad":9}))
+                .unwrap();
+        assert!(matches!(
+            request.command,
+            Action::SideSampler { side: 1, pad: 9 }
+        ));
+    }
     #[test]
     fn load_only_is_default_and_actions_validate() {
         let r: Request =

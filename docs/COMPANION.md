@@ -86,3 +86,18 @@ python tools/amp_control.py '{"action":"load_smart_playlist","playlist":"backgro
 ```
 
 The recommended Companion primary page maps Playback, Music, Transitions, Smart DJ and Extras to these requests. The optional eight-button page can map Play, Pause, Fade Out, Auto Fade, Call Song, Recognition, Everyday and Auto DJ. Place crossfader and sampler controls on a secondary page. These are setup instructions, not a fabricated `.companionconfig` import file.
+
+
+## Auxiliary DJ controls
+
+Existing main-deck and `sampler` commands remain unchanged. Additive commands use zero-based `side` (0 left, 1 right), with pad numbers 1–9:
+
+```json
+{"id":"cue-load-1","action":"cue_deck","side":0,"operation":{"operation":"load","song":"song_ID_FROM_CATALOG"}}
+{"id":"cue-play-1","action":"cue_deck","side":0,"operation":{"operation":"play"}}
+{"id":"cue-seek-1","action":"cue_deck","side":0,"operation":{"operation":"seek","seconds":30.0}}
+{"id":"cue-send-1","action":"cue_deck","side":0,"operation":{"operation":"send","deck":"b"}}
+{"id":"right-pad-1","action":"side_sampler","side":1,"pad":1}
+```
+
+Other cue operations are `pause`, `stop`, `hot_cue` (`number`, 1-based), and `volume` (`value`, 0–1). `cue_decks` state provides loaded/playing/position/title/volume/output/mode for both auxiliary decks. Sending to a playing main deck stages the prepared track without replacing live audio. Cue outputs are selected locally in DJ; a default/shared output is not headphone isolation.

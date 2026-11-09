@@ -15,6 +15,7 @@ pub struct Browser {
     search: String,
     pub(super) playlists: Vec<(PathBuf, Playlist)>,
     playlist: Option<usize>,
+    destination: usize,
 }
 impl Browser {
     pub(super) fn select_smart(&mut self, id: &str) {
@@ -35,6 +36,7 @@ impl Player {
         skin::label(ui, "DJ LIBRARY");
         let mut auto = self.run.auto;
         let mut toggle = false;
+        let mut queue_drop = None;
         let mut open_playlist = false;
         let mut load = None;
         let mut load_smart = false;
@@ -201,20 +203,19 @@ impl Player {
                             let i = indices[row];
                             let t = &lib.tracks[i];
                             ui.horizontal(|ui| {
-                                if ui
-                                    .add_sized(
-                                        [(ui.available_width() - 330.).max(160.), 24.],
+                                let row=ui.add_sized(
+                                        [(ui.available_width() - 300.).max(140.), 24.],
                                         egui::Button::selectable(
                                             self.selected == Some(i),
                                             &t.title,
                                         )
                                         .right_text("")
-                                        .truncate(),
+                                        .truncate().sense(egui::Sense::click_and_drag()),
                                     )
-                                    .clicked()
-                                {
-                                    self.selected = Some(i);
-                                }
+;
+                                crate::dragdrop::source(&row,self.root.join(&t.path));
+                                if row.clicked() {self.selected=Some(i);}
+                                if row.double_clicked() {load=Some((self.dj_browser.destination,i));}
                                 ui.weak(format!(
                                     "{} BPM · {}",
                                     t.preparation
@@ -223,20 +224,23 @@ impl Player {
                                         .unwrap_or_else(|| "--".into()),
                                     t.preparation.harmonic_key.as_deref().unwrap_or("--")
                                 ));
-                                if ui.button("Load A").clicked() {
-                                    load = Some((0, i));
-                                }
-                                if ui.button("Load B").clicked() {
-                                    load = Some((1, i));
+                                ui.label("Load →");
+                                for (deck,label,color) in [(0,"A",ORANGE),(1,"B",CYAN)] {
+                                    if ui.add_sized([30.,24.],egui::Button::new(egui::RichText::new(label).strong().color(color)).selected(self.dj_browser.destination==deck)).on_hover_text(format!("Prepare on Deck {label}; playing decks stage the replacement")).clicked(){self.dj_browser.destination=deck;load=Some((deck,i));}
                                 }
                             });
                         }
                     });
+                let target=ui.add_sized([ui.available_width(),24.],egui::Button::new(if self.run.auto {"Drop music here → Auto Mix candidates"}else{"Drop music here → Playlist queue"}).sense(egui::Sense::hover()));
+                queue_drop=dragdrop::target(&target,GOLD);
                 if indices.is_empty() {
                     ui.weak("No tracks in this source. Prepare and edit playlists in AMP Library.");
                 }
             });
         });
+        if let Some(path) = queue_drop {
+            self.add_dropped_to_queue(path);
+        }
         if open_playlist
             && let Some(path) = rfd::FileDialog::new()
                 .add_filter("AMP playlist", &["json"])
@@ -330,7 +334,16 @@ impl Player {
         }
         if let Some((deck, index)) = load {
             self.selected = Some(index);
-            self.load_deck(deck, index, false);
+            if let Some(track) = self
+                .library
+                .as_ref()
+                .and_then(|library| library.tracks.get(index))
+            {
+                let path = self.root.join(&track.path);
+                if let Err(error) = self.safe_load_path(deck, path, None) {
+                    self.status = error;
+                }
+            }
             self.dj_tab = 0;
         }
     }

@@ -169,3 +169,12 @@ Library > Smart Playlists now uses My Smart Playlists / + New Playlist on the le
 Advanced controls are retained; searchable song exceptions and recognition assignments open only when requested. Drafts are stored in the local app settings directory, not published on reconnect. Explicit saves back up the existing show.json, retain revision checks and leave loaded performance snapshots alone. Preview Mix plays up to three short excerpts using a separate instance of the existing two-deck mixer, with a suggested order and style-dependent fades. Preview is blocked during active player/DJ/sampler/Auto Mix playback and stops if live playback takes over.
 
 Current source boundary: folders and playlist entries must belong to the current indexed music root. Selecting an outside folder reports this clearly and preserves existing rules; this UI change does not introduce a multi-root library or change path-confinement behavior. Imported membership/order is a snapshot; the mixing engine chooses the playback sequence.
+
+
+## DJ side decks
+
+DJ now has independent collapsible left/right panels. Choose Sampler or Cue Deck on each side; switching or collapsing preserves playback. Each sampler has nine square pads, its own volume, file drops and a right-click menu for replace, rename, loop, level, stop and clear. Assignments and panel preferences persist locally. Keys 1–9 trigger the left bank; Shift+1–9 triggers the right bank when DJ is focused.
+
+Cue Deck is an auxiliary playback deck using the same mixer/decoder implementation, with load, play/pause/stop, seek, saved cue recall and independent volume. Send its prepared position to amber A or cyan B without autoplay. Select a separate output device for headphones; the default output is shared speakers and is labelled accordingly. This supports separate audio devices, not ASIO or arbitrary multichannel output-pair mapping.
+
+Drag songs from DJ Library, Library, regular playlists, Smart Playlist previews or Explorer onto a main deck, cue deck or sampler pad. Playing main/cue decks stage replacements for explicit application after stopping; dropping never starts a main deck. The compact Load → A/B control chooses the destination for double-click loading. Queue drops require an indexed Library song; Auto Mix candidates also have to satisfy the active rules. This does not change source files or publish cue edits.

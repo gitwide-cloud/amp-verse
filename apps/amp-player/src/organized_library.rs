@@ -125,7 +125,8 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                         ui.set_min_width(ui.available_width());
                         self.show_editor.preview_active = self.smart_preview.active();
                         self.show_editor.preview_status = self.smart_preview.status.clone();
-                        self.show_editor.audition_blocked = self.run.locked
+                        self.show_editor.audition_blocked = self.auxiliary_playing()
+                            || self.run.locked
                             || self.run.auto
                             || self.audio.as_ref().is_some_and(|audio| {
                                 audio.playing(0)
@@ -478,6 +479,8 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                                                 self.selected == Some(index),
                                                 &track.title,
                                             );
+                                            let row = row.interact(egui::Sense::click_and_drag());
+                                            dragdrop::source(&row, self.root.join(&track.path));
                                             if row.clicked() {
                                                 self.selected = Some(index);
                                             }
@@ -568,6 +571,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
         });
     }
     fn organized_queue(&mut self, ui: &mut egui::Ui, height: f32) {
+        let mut drop = None;
         skin::panel(ui, false, |ui| {
             ui.set_min_width(ui.available_width());
             ui.heading(format!("Playlist Queue · {} tracks", self.queue.len()));
@@ -638,20 +642,33 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                     }
                     if let Some(lib) = &self.library {
                         for (row, &index) in self.queue.iter().enumerate() {
-                            if let Some(track) = lib.tracks.get(index)
-                                && ui
-                                    .selectable_label(
+                            if let Some(track) = lib.tracks.get(index) {
+                                let response = ui.add(
+                                    egui::Button::selectable(
                                         self.queue_selected == Some(row),
                                         format!("{:02}     {}", row + 1, track.title),
                                     )
-                                    .clicked()
-                            {
-                                self.queue_selected = Some(row);
+                                    .truncate()
+                                    .sense(egui::Sense::click_and_drag()),
+                                );
+                                dragdrop::source(&response, self.root.join(&track.path));
+                                if response.clicked() {
+                                    self.queue_selected = Some(row);
+                                }
                             }
                         }
                     }
                 });
+            let response = ui.interact(
+                ui.min_rect(),
+                ui.scope_id().with("playlist-drop"),
+                egui::Sense::hover(),
+            );
+            drop = dragdrop::target(&response, skin::accent(ui));
         });
+        if let Some(path) = drop {
+            self.add_dropped_to_queue(path);
+        }
     }
 }
 

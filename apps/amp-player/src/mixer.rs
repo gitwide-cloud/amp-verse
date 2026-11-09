@@ -24,6 +24,7 @@ fn set(v: &AtomicU32, x: f32) {
 }
 pub struct Controls {
     pub sample_playing: [AtomicBool; 9],
+    pub sample_looping: [AtomicBool; 9],
     sample_generation: [AtomicU64; 9],
     sample_gain: [AtomicU32; 9],
     sample_master: AtomicU32,
@@ -56,6 +57,7 @@ impl Default for Controls {
     fn default() -> Self {
         Self {
             sample_playing: std::array::from_fn(|_| AtomicBool::new(false)),
+            sample_looping: std::array::from_fn(|_| AtomicBool::new(false)),
             sample_generation: std::array::from_fn(|_| AtomicU64::new(0)),
             sample_gain: std::array::from_fn(|_| atom(1.)),
             sample_master: atom(0.7),
@@ -510,8 +512,12 @@ impl Mixer {
                 }
                 v.position += 1;
                 if v.position >= frames.len() {
-                    v.playing = false;
-                    c.sample_playing[pad].store(false, Relaxed);
+                    if c.sample_looping[pad].load(Relaxed) {
+                        v.position = 0;
+                    } else {
+                        v.playing = false;
+                        c.sample_playing[pad].store(false, Relaxed);
+                    }
                 }
             }
             output(
@@ -549,10 +555,38 @@ pub struct Engine {
 }
 impl Engine {
     pub fn new() -> Result<Self, String> {
+        Self::with_output(None)
+    }
+    pub fn output_names() -> Vec<String> {
+        cpal::default_host()
+            .output_devices()
+            .map(|devices| {
+                devices
+                    .filter_map(|device| {
+                        device
+                            .description()
+                            .ok()
+                            .map(|description| description.name().to_owned())
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub fn with_output(output: Option<&str>) -> Result<Self, String> {
         let host = cpal::default_host();
-        let device = host
-            .default_output_device()
-            .ok_or("No audio output device is available")?;
+        let device = if let Some(name) = output {
+            host.output_devices()
+                .map_err(|error| error.to_string())?
+                .find(|device| {
+                    device
+                        .description()
+                        .is_ok_and(|description| description.name() == name)
+                })
+                .ok_or("Selected cue output is unavailable; choose another device")?
+        } else {
+            host.default_output_device()
+                .ok_or("No audio output device is available")?
+        };
         let config = device.default_output_config().map_err(|e| e.to_string())?;
         let rate = config.sample_rate();
         let channels = config.channels() as usize;
@@ -992,6 +1026,28 @@ mod tests {
             position: 0.,
             primed: false,
         }
+    }
+    #[test]
+    fn looping_pad_survives_end_and_stops_without_interrupting_main() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        tx.send(Command::Load(0, source(0.2, 4000), true, 1))
+            .unwrap();
+        tx.send(Command::SampleLoad(
+            0,
+            1,
+            Some(Arc::from(vec![[0.1, 0.1]; 10])),
+        ))
+        .unwrap();
+        controls.sample_looping[0].store(true, Relaxed);
+        tx.send(Command::SampleTrigger(0)).unwrap();
+        mixer.render(100, |_, _| {});
+        assert!(controls.sample_playing[0].load(Relaxed));
+        tx.send(Command::SampleStop(Some(0))).unwrap();
+        mixer.render(10, |_, _| {});
+        assert!(!controls.sample_playing[0].load(Relaxed));
+        assert!(controls.play[0].load(Relaxed));
     }
     #[test]
     fn scratch_reads_audio_in_both_directions_without_growing_history() {

@@ -334,3 +334,12 @@ Backed up the affected UI source files before editing. Preserved the shared Smar
 Tests cover recursive folder inclusion without song Allow checks, relative M3U8/BOM import with partial missing entries and original source order, preserving assignments/IDs, local draft replacement/restore, no saved-rule changes during preview, empty source safety, configuration round trips and existing Companion/show-control paths. A muted native audio test used generated WAV data, completed a crossfaded preview through the production decoder/mixer, and confirmed source bytes and profile settings were unchanged. Player suite: 52 passed, 10 ignored; the native preview test was also explicitly run and passed. Strict Clippy passed. Modern Dark native screenshot was visually checked against the simplified concept.
 
 No claim of new beat-phase synchronization, key lock or analysis capabilities is made; those remain as implemented in the existing engine. This change also retains the existing single indexed music-root boundary and reports outside/unindexed source entries, rather than widening filesystem access silently.
+
+
+## 2026-11-08 — dual-purpose DJ side decks
+
+- Player suite: 56 passed, 11 environment-dependent tests skipped. Strict all-target player Clippy passed.
+- Explicit muted native test `side_deck::tests::auxiliary_transport_and_mode_changes_leave_main_playing` passed with the generated Phone-test.wav fixture: independent main/cue playback, seek/pause/stop, mode/collapse preservation, cue replacement staging, and staged main replacement without changing the loaded cue snapshot.
+- Deterministic mixer test verifies looping sampler playback across its end and independent stop while main playback continues. Independent bank replacement, old-bank decoding, names/loop persistence, side preferences, and additive control command parsing are covered.
+- Existing narrow/short/attached-window bounds and scaled pointer tests pass with both side panels present. Visually inspected the 900x600 modern-dark DJ screenshot (`test-output/dual-side-dj.png`): both side panels, main controls and bottom library remain inside the viewport. Small windows scale the complete mixer, so larger windows are preferable for touch use.
+- Cue routing offers CPAL output-device selection. Physical headphone separation and every OS Explorer drag source were not exercised on external hardware; no arbitrary multichannel/ASIO mapping is claimed. Queue drops remain limited to indexed library songs and respect active Auto Mix eligibility.

@@ -49,6 +49,7 @@ pub struct Editor {
     pub preview_status: String,
     pub preview: Option<(std::path::PathBuf, f64)>,
     preview_order: Vec<String>,
+    preview_paths: Vec<std::path::PathBuf>,
     source_labels: std::collections::HashMap<String, String>,
     existing_sources: Vec<amp_core::Playlist>,
     cache_bytes: Vec<u8>,
@@ -413,13 +414,14 @@ impl Editor {
                         else if let Some(lib)=library {
                             let order=preview_mix(p,lib);
                             self.preview_order=order.iter().map(|&index|lib.tracks[index].title.clone()).collect();
+                            self.preview_paths=order.iter().map(|&index|lib.tracks[index].path.clone()).collect();
                             self.mix_request=Some((p.clone(),order));
                         }
                     }
                 });
                 if !self.preview_order.is_empty() {
                     ui.separator(); ui.strong("Mix preview · suggested order");
-                    for (index,title) in self.preview_order.iter().enumerate() { ui.add(egui::Label::new(format!("{}. {title}",index+1)).truncate()); }
+                    for (index,title) in self.preview_order.iter().enumerate() { let row=ui.add(egui::Label::new(format!("{}. {title}",index+1)).truncate().sense(egui::Sense::click_and_drag()));if let Some(path)=self.preview_paths.get(index){crate::dragdrop::source(&row,root.join(path));} }
                     if ui.add_enabled(!self.audition_blocked,egui::Button::new("Audition first track")).on_hover_text("Available when player, DJ, sampler and Auto Mix are stopped").clicked() && let Some(lib)=library && let Some(index)=preview_mix(p,lib).first().copied() {
                         self.preview=Some((lib.tracks[index].path.clone(),lib.tracks[index].preparation.cue_in));
                     }
