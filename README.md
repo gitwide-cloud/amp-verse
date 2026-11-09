@@ -155,3 +155,5 @@ Plugin Manager now offers Download & install analysis engine. It retrieves the p
 Player view > Always on top keeps the full, compact or taskbar mini player above other windows. The choice is remembered after restart and when switching player modes. Attached panes follow the player window; detached windows retain their normal behavior.
 
 EQ and Filter FX open in independent resizable desktop windows, so full, compact and mini player heights do not clip their controls. Each has its own minimum size and vertical scrolling, and follows the player's Always on top preference.
+
+The full player includes compact Low/Mid/High EQ sliders in its spare right-hand space when there is room. The player's EQ button opens the expanded Equalizer page inside Library, with shared live controls for Player/Deck A and Deck B. Narrow player sizes retain access through the EQ button.

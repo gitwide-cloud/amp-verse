@@ -1057,6 +1057,33 @@ impl Player {
                 }
                 response.on_hover_text("Live measured output amplitude history");
                 ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Vol"));
+                if ui.available_width() >= 90. {
+                    ui.separator();
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 48.),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.spacing_mut().item_spacing.y = 0.;
+                            ui.spacing_mut().interact_size.y = 14.;
+                            ui.spacing_mut().slider_width =
+                                (ui.available_width() - 38.).clamp(45., 115.);
+                            for (band, label) in ["Low", "Mid", "High"].iter().enumerate() {
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut self.eq[0][band], -12. ..=12.)
+                                            .text(*label)
+                                            .show_value(false),
+                                    )
+                                    .on_hover_text("Player EQ · -12 to +12 dB")
+                                    .changed()
+                                    && let Some(audio) = &self.audio
+                                {
+                                    audio.set_eq(0, band, self.eq[0][band]);
+                                }
+                            }
+                        },
+                    );
+                }
             });
             ui.horizontal(|ui| {
                 self.player_view_menu(ui);
@@ -1082,8 +1109,15 @@ impl Player {
                 }
                 ui.toggle_value(&mut self.shuffle, "Shuffle");
                 ui.toggle_value(&mut self.repeat_one, "Repeat one");
-                if ui.button("EQ").clicked() {
-                    self.eq_open = true;
+                if ui
+                    .button("EQ")
+                    .on_hover_text("Open expanded EQ in Library")
+                    .clicked()
+                {
+                    self.library_page = 7;
+                    self.library_open = true;
+                    self.layout.parent[1] = Some(0);
+                    self.resize_player(ui.ctx(), true);
                 }
 
                 ui.weak(&self.status);
@@ -1725,6 +1759,61 @@ impl Player {
                 });
             });
         });
+    }
+    fn library_equalizer(&mut self, ui: &mut egui::Ui) {
+        ui.heading("Equalizer");
+        ui.weak("Player / Deck A and DJ Deck B · live three-band EQ");
+        ui.separator();
+        egui::ScrollArea::vertical()
+            .id_salt("library-eq")
+            .show(ui, |ui| {
+                ui.columns(2, |columns| {
+                    for (deck, column) in columns.iter_mut().enumerate() {
+                        skin::panel(column, false, |ui| {
+                            ui.set_min_width(ui.available_width());
+                            ui.strong(if deck == 0 {
+                                "Player / Deck A"
+                            } else {
+                                "Deck B"
+                            });
+                            ui.add_space(12.);
+                            ui.horizontal(|ui| {
+                                for (band, label) in ["Low", "Mid", "High"].iter().enumerate() {
+                                    ui.push_id((deck, band), |ui| {
+                                        ui.vertical(|ui| {
+                                            ui.label(*label);
+                                            ui.spacing_mut().slider_width = 150.;
+                                            if ui
+                                                .add(
+                                                    egui::Slider::new(
+                                                        &mut self.eq[deck][band],
+                                                        -12. ..=12.,
+                                                    )
+                                                    .vertical()
+                                                    .suffix(" dB"),
+                                                )
+                                                .changed()
+                                                && let Some(audio) = &self.audio
+                                            {
+                                                audio.set_eq(deck, band, self.eq[deck][band]);
+                                            }
+                                        });
+                                    });
+                                }
+                            });
+                            ui.add_space(12.);
+                            if ui.button("Reset to flat").clicked() {
+                                self.eq[deck] = [0.; 3];
+                                if let Some(audio) = &self.audio {
+                                    for band in 0..3 {
+                                        audio.set_eq(deck, band, 0.);
+                                    }
+                                }
+                            }
+                        });
+                    }
+                });
+            });
     }
     fn dj_effects(&mut self, ctx: &egui::Context) {
         if self.eq_open {
