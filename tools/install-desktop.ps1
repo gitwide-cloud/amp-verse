@@ -32,11 +32,13 @@ if ($AudioTools) {
     }
     Copy-Item -LiteralPath (Join-Path $AudioTools 'THIRD_PARTY_NOTICES.md') -Destination (Join-Path $Destination 'AUDIO_TOOL_NOTICES.md') -Force
 }
+Copy-Item -LiteralPath (Join-Path $repo 'assets/amp-verse.ico') -Destination $Destination -Force
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
     $shortcut = $shell.CreateShortcut((Join-Path $folder 'AMP Verse.lnk'))
     $shortcut.TargetPath = Join-Path $Destination 'amp-player.exe'
     $shortcut.WorkingDirectory = $Destination
+    $shortcut.IconLocation = (Join-Path $Destination 'amp-verse.ico') + ',0'
     $shortcut.Description = 'AMP Verse network audio player and DJ'
     $shortcut.Save()
 }

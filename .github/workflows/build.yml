@@ -85,7 +85,7 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/amp-player${{ matrix.suffix }} dist/
-          cp README.md LICENSE THIRD_PARTY_NOTICES.md dist/
+          cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
           cp -r docs dist/
       - uses: actions/upload-artifact@v4
         with:
