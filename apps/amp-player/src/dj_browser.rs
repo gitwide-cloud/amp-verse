@@ -47,7 +47,12 @@ impl Player {
                 |ui| {
                     ui.set_width(195.);
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                    toggle = ui.checkbox(&mut auto, "Auto DJ on / off").changed();
+                    let label = if auto {
+                        "Auto Mix: ON"
+                    } else {
+                        "Auto Mix: OFF"
+                    };
+                    toggle = ui.toggle_value(&mut auto, label).changed();
                     ui.separator();
                     ui.selectable_value(
                         &mut self.dj_browser.source,
@@ -276,6 +281,35 @@ impl Player {
             }
         }
         if toggle {
+            if auto && self.dj_browser.source != Source::Smart && !self.run.locked {
+                // Snapshot the chosen browser source for this session only. Never
+                // silently fall back to a different Smart Playlist or all folders.
+                if let Some(library) = &self.library {
+                    let mut profile = amp_core::show::Settings::default().playlists.remove(7);
+                    profile.id = "browser-session".into();
+                    profile.name = "DJ browser source".into();
+                    if self.dj_browser.source == Source::Folders {
+                        profile.restrict_folders = true;
+                        profile.folders = vec![self.dj_browser.folder.clone()];
+                    } else {
+                        let indices = self
+                            .dj_browser
+                            .playlist
+                            .and_then(|i| self.dj_browser.playlists.get(i))
+                            .map(|(_, list)| playlist_indices(library, list))
+                            .unwrap_or_else(|| self.queue.clone());
+                        profile.restrict_allowed = true;
+                        profile.allowed = indices
+                            .iter()
+                            .filter_map(|&i| library.tracks.get(i))
+                            .map(amp_core::show::song_id)
+                            .collect();
+                    }
+                    self.run.playlist = Some(profile.id.clone());
+                    self.run.profile = Some(profile);
+                    self.run.preloaded = None;
+                }
+            }
             let action = if auto
                 && self.dj_browser.source == Source::Smart
                 && !self.dj_browser.smart.is_empty()
@@ -291,7 +325,7 @@ impl Player {
                 control::Action::AutoDj { enabled: auto }
             };
             if let Err(e) = self.execute_control(action) {
-                self.status = e;
+                self.status = format!("Auto Mix could not start: {e}");
             }
         }
         if let Some((deck, index)) = load {

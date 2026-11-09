@@ -1484,13 +1484,27 @@ impl Player {
             {
                 self.status = e;
             }
-            if ui.button("Start Auto DJ").clicked() {
-                let result = self.execute_control(control::Action::LoadSmartPlaylist {
-                    playlist: selected.clone(),
-                    execution: control::Execution::PlayNow,
-                    style: None,
-                    energy: None,
-                });
+            if ui
+                .add(egui::Button::selectable(
+                    self.run.auto,
+                    if self.run.auto {
+                        "Auto Mix: ON"
+                    } else {
+                        "Auto Mix: OFF"
+                    },
+                ))
+                .clicked()
+            {
+                let result = if self.run.auto {
+                    self.execute_control(control::Action::AutoDj { enabled: false })
+                } else {
+                    self.execute_control(control::Action::LoadSmartPlaylist {
+                        playlist: selected.clone(),
+                        execution: control::Execution::PlayNow,
+                        style: None,
+                        energy: None,
+                    })
+                };
                 if let Err(e) = result {
                     self.status = e;
                 }
@@ -1500,13 +1514,21 @@ impl Player {
             {
                 self.status = e;
             }
-            ui.checkbox(&mut self.run.crossfade, "Auto crossfade");
+            let crossfade_label = if self.run.crossfade {
+                "Crossfade: ON"
+            } else {
+                "Crossfade: OFF"
+            };
+            ui.toggle_value(&mut self.run.crossfade, crossfade_label);
             if ui
                 .checkbox(&mut self.run.locked, "Manual DJ Lock")
                 .changed()
                 && self.run.locked
             {
                 self.run.cancel_automation();
+            }
+            if self.run.locked {
+                ui.weak("Unlock Manual DJ Lock to enable Auto Mix");
             }
             ui.label(format!("{:?}", self.run.style))
                 .on_hover_text(format!(

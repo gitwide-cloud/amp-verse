@@ -271,6 +271,7 @@ impl Player {
                     | Action::Play { .. }
                     | Action::Sampler { .. }
                     | Action::SetCrossfader { .. }
+                    | Action::AutoDj { enabled: false }
             )
         {
             return Err("Manual DJ Lock prevents automated takeover".into());
@@ -580,7 +581,8 @@ impl Player {
                 if enabled && self.run.playlist.is_none() {
                     return Err("Load a Smart Playlist first".into());
                 }
-                self.run.auto = enabled;
+                // Do not claim ON until loading/starting the first song succeeds.
+                self.run.auto = false;
                 if enabled
                     && !self
                         .audio
@@ -595,6 +597,10 @@ impl Player {
                         if d == 0 { Deck::A } else { Deck::B },
                         Execution::PlayNow,
                     )?;
+                }
+                self.run.auto = enabled;
+                if !enabled {
+                    self.run.cancel_automation();
                 }
             }
             Action::ManualLock { enabled } => {
@@ -766,6 +772,36 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn auto_mix_failed_start_stays_off_and_locked_stop_remains_available() {
+        let mut player = Player::default();
+        player.run.playlist = Some("test".into());
+        player.run.profile = Some(show::Settings::default().playlists.remove(0));
+        assert!(
+            player
+                .execute_control(Action::AutoDj { enabled: true })
+                .is_err()
+        );
+        assert!(
+            !player.run.auto,
+            "A failed start must not display Auto Mix ON"
+        );
+        player.run.locked = true;
+        assert!(
+            player
+                .execute_control(Action::AutoDj { enabled: true })
+                .is_err()
+        );
+        assert!(!player.run.auto);
+        player.run.auto = true;
+        player
+            .execute_control(Action::AutoDj { enabled: false })
+            .unwrap();
+        assert!(
+            !player.run.auto,
+            "Stopping automation remains available under manual lock"
+        );
+    }
     use super::*;
     #[test]
     #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; muted"]
