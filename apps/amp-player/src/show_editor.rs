@@ -424,7 +424,7 @@ fn source_ui(
     }
     if mode == SourceMode::Folders {
         ui.horizontal_wrapped(|ui|{
-            if ui.add_enabled(library.is_some(),egui::Button::new("Browse source folder...")).clicked()
+            if ui.add_enabled(!root.as_os_str().is_empty(),egui::Button::new("Browse source folder...")).clicked()
                 && let Some(folder)=rfd::FileDialog::new().set_directory(root).pick_folder() {
                 let relative=(|| {
                     let base=root.canonicalize().map_err(|e|e.to_string())?;
@@ -473,6 +473,9 @@ fn source_ui(
         // turn an explicitly empty folder selection into the entire library.
         p.restrict_allowed = p.folders.is_empty();
         ui.weak("Folder sources include subfolders. No folders selected means no songs.");
+        if library.is_none() {
+            ui.weak("You can choose folders now. Scan the music root in Library > Sources to load their songs before building the mix.");
+        }
     }
     if mode == SourceMode::Songs {
         ui.horizontal_wrapped(|ui|{
