@@ -23,6 +23,9 @@ fn scratch_phrase(seconds: f32, flourish: bool) -> f32 {
     }
 }
 pub struct Run {
+    pub transitions: crate::transition_styles::Settings,
+    effect_bridge: Option<EffectBridge>,
+    effect_done: Option<Instant>,
     pub choice: String,
     pub profile: Option<show::SmartPlaylist>,
     pub settings: show::Settings,
@@ -50,7 +53,11 @@ pub struct Run {
 }
 impl Default for Run {
     fn default() -> Self {
+        let transitions = crate::transition_styles::load();
         Self {
+            transitions,
+            effect_bridge: None,
+            effect_done: None,
             choice: String::new(),
             profile: None,
             settings: Default::default(),
@@ -59,7 +66,7 @@ impl Default for Run {
             target: None,
             auto: false,
             crossfade: true,
-            scratch_assist: true,
+            scratch_assist: transitions.enabled,
             scratch_bridge: None,
             completed_handoffs: 0,
             future_candidates: VecDeque::new(),
@@ -79,6 +86,52 @@ impl Default for Run {
     }
 }
 impl Run {
+    fn tick_effect(&mut self, audio: &crate::mixer::Engine) -> Option<String> {
+        let mut effect = self.effect_bridge.take()?;
+        if !audio.fading() {
+            self.effect_bridge = Some(effect);
+            return None;
+        }
+        let progress = f32::from_bits(audio.controls.fade_progress.load(Relaxed)).clamp(0., 1.);
+        let window = effect.seconds.min(0.8);
+        let elapsed = progress * effect.seconds - (effect.seconds - window);
+        if elapsed >= 0. {
+            if !effect.engaged {
+                if audio.controls.looping[effect.deck].load(Relaxed) {
+                    return None;
+                }
+                if effect.style == crate::transition_styles::Style::Stutter
+                    && audio.stutter_start(effect.deck, effect.grain).is_err()
+                {
+                    return None;
+                }
+                effect.engaged = true;
+            }
+            if effect.style == crate::transition_styles::Style::Brake {
+                let rate = f32::from_bits(audio.controls.rate[effect.deck].load(Relaxed));
+                audio.scratch(effect.deck, true, rate * (1. - elapsed / window).max(0.04));
+            }
+        }
+        let label = effect
+            .engaged
+            .then(|| format!("{} transition", effect.style.label()));
+        self.effect_bridge = Some(effect);
+        label
+    }
+    pub fn cancel_effects(&mut self, audio: &crate::mixer::Engine) {
+        if let Some(effect) = self.effect_bridge.take()
+            && effect.engaged
+        {
+            if effect.style == crate::transition_styles::Style::Stutter {
+                audio.loop_stop(effect.deck);
+            } else {
+                audio.scratch(effect.deck, false, 1.);
+            }
+        }
+        if let Some((deck, _)) = self.scratch_bridge.take() {
+            audio.scratch(deck, false, 1.);
+        }
+    }
     pub fn cancel_automation(&mut self) {
         self.future_candidates.clear();
         self.auto = false;
@@ -87,6 +140,13 @@ impl Run {
         self.transition = None;
         self.preloaded = None;
     }
+}
+struct EffectBridge {
+    deck: usize,
+    style: crate::transition_styles::Style,
+    seconds: f32,
+    grain: f32,
+    engaged: bool,
 }
 impl Player {
     fn active_deck(&self) -> usize {
@@ -771,12 +831,19 @@ impl Player {
             .and_then(|t| show::energy(&t.preparation))
     }
     pub(super) fn performance_tick(&mut self) {
-        // A cancelled handoff must always release its temporary scratch control.
-        if (self.run.pending.is_none() || !self.run.scratch_assist)
-            && let Some((deck, _)) = self.run.scratch_bridge.take()
+        // Every temporary effect must release its transport when automation stops.
+        if ((self.run.pending.is_none() && self.run.transition.is_none())
+            || !self.run.scratch_assist
+            || self.run.locked)
             && let Some(audio) = &self.audio
         {
-            audio.scratch(deck, false, 1.);
+            self.run.cancel_effects(audio);
+        }
+
+        if let Some(audio) = &self.audio
+            && let Some(label) = self.run.tick_effect(audio)
+        {
+            self.status = label;
         }
 
         if self.run.auto
@@ -819,21 +886,58 @@ impl Player {
                 );
             } else if ready && due {
                 let outgoing = 1 - incoming;
-                let flourish = self.run.auto && self.run.completed_handoffs % 4 == 3;
+                let chosen =
+                    if self.run.auto && !self.run.locked && self.run.effect_done != Some(started) {
+                        self.run.transitions.pick(self.run.completed_handoffs)
+                    } else {
+                        None
+                    };
+                let flourish = chosen == Some(crate::transition_styles::Style::Scratch);
+                let safe = self.audio.as_ref().is_some_and(|a| {
+                    a.playing(outgoing)
+                        && a.position(outgoing) > 0.3
+                        && !a.controls.looping[outgoing].load(Relaxed)
+                        && a.remaining(outgoing).is_none_or(|r| r > 0.9)
+                });
+                let effect_plan = if safe
+                    && matches!(
+                        chosen,
+                        Some(
+                            crate::transition_styles::Style::Stutter
+                                | crate::transition_styles::Style::Brake
+                        )
+                    ) {
+                    let bpm = self
+                        .loaded_track(outgoing)
+                        .and_then(|t| t.preparation.bpm)
+                        .unwrap_or(120.)
+                        * (1. + self.pitch[outgoing] as f64 / 100.);
+                    Some((chosen.unwrap(), (60. / bpm / 4.).clamp(0.03, 0.25) as f32))
+                } else {
+                    None
+                };
                 let bridge_needed = self.run.scratch_assist
-                    && self
-                        .audio
-                        .as_ref()
-                        .is_some_and(|a| a.playing(outgoing) && a.position(outgoing) > 0.25)
+                    && !self.run.locked
+                    && self.run.effect_done != Some(started)
+                    && self.audio.as_ref().is_some_and(|a| {
+                        a.playing(outgoing)
+                            && a.position(outgoing) > 0.25
+                            && !a.controls.looping[outgoing].load(Relaxed)
+                    })
                     && (flourish
-                        || self
-                            .loaded_track(outgoing)
-                            .and_then(|t| t.preparation.bpm)
-                            .zip(self.loaded_track(incoming).and_then(|t| t.preparation.bpm))
-                            .is_some_and(|(a, b)| {
-                                let ratio = a * (1. + self.pitch[outgoing] as f64 / 100.) / b;
-                                !(0.84..=1.16).contains(&ratio)
-                            }));
+                        || (matches!(
+                            self.run.transitions.style,
+                            crate::transition_styles::Style::Variety
+                                | crate::transition_styles::Style::Scratch
+                        ) && chosen.is_none()
+                            && self
+                                .loaded_track(outgoing)
+                                .and_then(|t| t.preparation.bpm)
+                                .zip(self.loaded_track(incoming).and_then(|t| t.preparation.bpm))
+                                .is_some_and(|(a, b)| {
+                                    let ratio = a * (1. + self.pitch[outgoing] as f64 / 100.) / b;
+                                    !(0.84..=1.16).contains(&ratio)
+                                })));
                 if bridge_needed || self.run.scratch_bridge.is_some() {
                     let (_, started) = *self
                         .run
@@ -853,6 +957,7 @@ impl Player {
                     }
                     audio.scratch(outgoing, false, 1.);
                     self.run.scratch_bridge = None;
+                    self.run.effect_done = Some(started);
                 }
 
                 let a = self.audio.as_ref().unwrap();
@@ -873,7 +978,18 @@ impl Player {
                 } else {
                     let seconds = self.fade_seconds;
                     match a.crossfade(seconds) {
-                        Ok(()) => self.run.transition = Some(incoming),
+                        Ok(()) => {
+                            self.run.transition = Some(incoming);
+                            if let Some((style, grain)) = effect_plan {
+                                self.run.effect_bridge = Some(EffectBridge {
+                                    deck: outgoing,
+                                    style,
+                                    seconds,
+                                    grain,
+                                    engaged: false,
+                                });
+                            }
+                        }
                         Err(e) => {
                             self.status = format!("Waiting for a safe handoff: {e}");
                             // Keep the incoming track and retry next tick, including
@@ -921,7 +1037,7 @@ impl Player {
             if (finished
                 || (self.run.crossfade
                     && remaining.is_some_and(|r| {
-                        r <= mix_seconds + if self.run.scratch_assist { 0.25 } else { 0. }
+                        r <= mix_seconds + if self.run.scratch_assist { 0.8 } else { 0. }
                     })))
                 && let Some((incoming, _)) = self.run.preloaded
             {
@@ -931,6 +1047,9 @@ impl Player {
         }
     }
     fn complete_change(&mut self, incoming: usize) {
+        if let Some(audio) = &self.audio {
+            self.run.cancel_effects(audio);
+        }
         self.run.completed_handoffs = self.run.completed_handoffs.wrapping_add(1);
         self.run.active = incoming;
         self.run.transition = None;
@@ -966,6 +1085,75 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "native audio and AMP_WAVEFORM_FIXTURE; output muted"]
+    fn stutter_and_brake_complete_and_release_all_temporary_controls() {
+        use crate::transition_styles::Style as Fx;
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
+        for i in 0..2 {
+            let path = std::path::PathBuf::from(format!("song{i}.wav"));
+            std::fs::copy(&fixture, dir.path().join(&path)).unwrap();
+            amp_core::preparation::save(
+                dir.path(),
+                &path,
+                &amp_core::Preparation {
+                    cue_in: 0.25,
+                    cue_out: Some(4.),
+                    bpm: Some(120.),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        for style in [Fx::Stutter, Fx::Brake] {
+            let mut player = Player {
+                root: dir.path().into(),
+                library: Some(amp_core::scan(dir.path()).unwrap()),
+                channel_gain: [0.; 2],
+                fade_seconds: 0.8,
+                ..Default::default()
+            };
+            player
+                .execute_control(Action::LoadSmartPlaylist {
+                    playlist: "everyday".into(),
+                    execution: Execution::PlayNow,
+                    style: Some(Style::Steady),
+                    energy: None,
+                })
+                .unwrap();
+            wait(&mut player, |p| {
+                p.audio
+                    .as_ref()
+                    .is_some_and(|a| a.position(p.active_deck()) > 0.3)
+            });
+            player.run.transitions.style = style;
+            player.run.transitions.every = 2;
+            player.run.completed_handoffs = 1;
+            player
+                .execute_control(Action::MixNext { immediate: true })
+                .unwrap();
+            wait(&mut player, |p| {
+                p.run.effect_bridge.as_ref().is_some_and(|fx| fx.engaged)
+            });
+            wait(&mut player, |p| p.run.completed_handoffs == 2);
+            assert!(player.run.auto);
+            assert_eq!(player.fade_seconds, 0.8);
+            assert!(player.run.effect_bridge.is_none());
+            let audio = player.audio.as_ref().unwrap();
+            assert!(audio.controls.scratching.iter().all(|v| !v.load(Relaxed)));
+            // Loop stop is an audio-thread command; allow its acknowledgement.
+            wait(&mut player, |p| {
+                p.audio
+                    .as_ref()
+                    .unwrap()
+                    .controls
+                    .looping
+                    .iter()
+                    .all(|v| !v.load(Relaxed))
+            });
+        }
+    }
     #[test]
     #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
     fn occasional_scratch_runs_at_matched_tempo_and_keeps_auto_dj_running() {

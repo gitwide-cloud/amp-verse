@@ -1068,6 +1068,17 @@ impl Engine {
         };
         self.send(Command::Loop(deck, frames))
     }
+    pub fn loop_stop(&self, deck: usize) {
+        let _ = self.send(Command::Loop(deck, None));
+    }
+    pub fn stutter_start(&self, deck: usize, seconds: f32) -> Result<(), String> {
+        self.send(Command::Loop(
+            deck,
+            Some(Vec::with_capacity(
+                (seconds.clamp(0.03, 0.25) * self.sample_rate as f32) as usize,
+            )),
+        ))
+    }
     pub fn set_gain(&self, deck: usize, value: f32) {
         let _ = self.send(Command::LevelSet(deck, value.clamp(0., 1.)));
     }

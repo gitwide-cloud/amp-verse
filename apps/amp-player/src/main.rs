@@ -38,6 +38,7 @@ mod smart_preview;
 mod station_download;
 mod stems;
 mod theme;
+mod transition_styles;
 mod waveform;
 mod window_layout;
 use skin::{CYAN, GOLD, ORANGE};
@@ -1915,8 +1916,15 @@ impl Player {
             egui::CollapsingHeader::new("Transition options")
                 .id_salt("dj-advanced")
                 .show(ui, |ui| {
-                    ui.toggle_value(&mut self.run.scratch_assist, "Scratch transitions")
-                        .on_hover_text("Occasional back/forward scratches in Auto DJ, plus help with large tempo gaps. Turn off for clean crossfades.");
+                    let previous=self.run.transitions;
+                    ui.toggle_value(&mut self.run.transitions.enabled,"Auto DJ transition effects");
+                    egui::ComboBox::from_id_salt("auto-dj-transition-style").selected_text(self.run.transitions.style.label()).show_ui(ui,|ui|{
+                        for style in [transition_styles::Style::Variety,transition_styles::Style::Fade,transition_styles::Style::Scratch,transition_styles::Style::Stutter,transition_styles::Style::Brake]{ui.selectable_value(&mut self.run.transitions.style,style,style.label());}
+                    });
+                    ui.horizontal_wrapped(|ui|{ui.label("Use an effect every");ui.add(egui::DragValue::new(&mut self.run.transitions.every).range(2..=12));ui.label("mixes");});
+                    ui.weak("Other mixes use your normal fade. Variety rotates scratch, stutter and tape brake. Your mix time stays unchanged.");
+                    self.run.scratch_assist=self.run.transitions.enabled;
+                    if previous!=self.run.transitions && let Err(error)=transition_styles::save(self.run.transitions){self.status=error;}
 
                     ui.add(
                         egui::Slider::new(&mut self.wave_span, 4. ..=60.).text("Waveform seconds"),
@@ -2669,6 +2677,7 @@ impl Player {
                 return;
             }
             self.jog_resume[deck] = Some((audio.playing(deck), ui.ctx().viewport_id()));
+            self.run.cancel_effects(audio);
             self.jog_angle[deck] = angle;
             self.run.cancel_automation();
             self.auto = false;
