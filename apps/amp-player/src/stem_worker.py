@@ -43,16 +43,17 @@ original = torch.from_numpy(samples.T.copy())
 reference = original.mean(0)
 scale = reference.std().clamp_min(1e-7)
 mean = reference.mean()
-print("Separating vocals locally on CPU", flush=True)
+print("Separating vocals, instruments and drums locally on CPU", flush=True)
 with torch.inference_mode():
     separated = apply_model(model, ((original - mean) / scale)[None], device="cpu", shifts=0, split=True, overlap=0.25, progress=True, num_workers=0)[0]
 vocals = separated[model.sources.index("vocals")] * scale + mean
 # Residual accompaniment preserves original phase, loudness, and exact alignment.
-instruments = original - vocals
+drums = separated[model.sources.index("drums")] * scale + mean
+instruments = original - vocals - drums
 out = Path(args.destination)
 out.mkdir(parents=True, exist_ok=True)
-manifest = {"engine": "demucs-4.0.1/htdemucs", "sample_rate": rate, "frames": original.shape[1], "channels": 2, "files": {}}
-for name, audio in [("vocals", vocals), ("instrumental", instruments)]:
+manifest = {"engine": "demucs-4.0.1/htdemucs-3stem", "sample_rate": rate, "frames": original.shape[1], "channels": 2, "files": {}}
+for name, audio in [("vocals", vocals), ("instrumental", instruments), ("drums", drums)]:
     values = audio.cpu().numpy().T.astype("<f4")
     if not np.isfinite(values).all():
         raise RuntimeError("Invalid separated samples")
@@ -60,4 +61,4 @@ for name, audio in [("vocals", vocals), ("instrumental", instruments)]:
     subprocess.run([ffmpeg, "-v", "error", "-y", "-f", "f32le", "-ar", str(rate), "-ac", "2", "-i", "pipe:0", "-c:a", "pcm_f32le", str(target)], input=values.tobytes(), check=True)
     manifest["files"][name] = {"sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "bytes": target.stat().st_size}
 (out / "audio.json").write_text(json.dumps(manifest), encoding="utf-8")
-print("Vocals and instrumental ready", flush=True)
+print("Vocals, instruments and drums ready", flush=True)

@@ -46,15 +46,18 @@ impl Panel {
             .store(self.cue_volume.to_bits(), Relaxed);
     }
 }
-fn dial(
+pub(super) fn dial(
     ui: &mut egui::Ui,
     label: &str,
     value: &mut f32,
     range: std::ops::RangeInclusive<f32>,
     accent: egui::Color32,
 ) -> egui::Response {
-    let (rect, mut response) =
-        ui.allocate_exact_size(egui::vec2(28., 24.), egui::Sense::click_and_drag());
+    let dial_size = ((ui.available_height() - 290.) / 8.).clamp(24., 42.);
+    let (rect, mut response) = ui.allocate_exact_size(
+        egui::vec2(dial_size + 4., dial_size),
+        egui::Sense::click_and_drag(),
+    );
     if response.clicked() {
         response.request_focus();
     }
@@ -89,7 +92,7 @@ fn dial(
         response.mark_changed();
     }
     let center = rect.center();
-    let radius = 10.;
+    let radius = dial_size * 0.42;
     ui.painter()
         .circle_filled(center, radius, ui.visuals().widgets.inactive.bg_fill);
     ui.painter().circle_stroke(
@@ -139,10 +142,11 @@ impl Player {
                     }
                     ui.horizontal(|ui| { dial(ui, "Filter (left: low-pass; right: high-pass)", &mut self.mixer_panel.sweep[d], -1. ..=1., accent); ui.label("Filter"); });
                     ui.horizontal(|ui| {
-                        ui.spacing_mut().slider_width = 52.;
+                        let fader_height = ((ui.available_height() - 270.) * 0.35).clamp(70., 160.);
+                        ui.spacing_mut().slider_width = fader_height;
                         if ui.add(egui::Slider::new(&mut self.channel_gain[d], 0. ..=1.).vertical().show_value(false)).changed()
                             && let Some(audio) = &self.audio { audio.set_gain(d, self.channel_gain[d]); }
-                        skin::meter(ui, self.audio.as_ref().map_or(0., |a| a.peak(d)), egui::vec2(14., 52.));
+                        skin::meter(ui, self.audio.as_ref().map_or(0., |a| a.peak(d)), egui::vec2(18., fader_height));
                     });
                     ui.toggle_value(&mut self.mixer_panel.cue[d], "CUE").on_hover_text("Listen before the channel fader and crossfader. Choose a headphone output below. The deck must be playing; this does not start or stop it.");
                 });

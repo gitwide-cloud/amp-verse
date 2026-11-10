@@ -1919,63 +1919,108 @@ impl Player {
                             }
                         });
                         ui.allocate_ui_with_layout(
-                            egui::vec2(280., 0.),
+                            egui::vec2(280., height),
                             egui::Layout::top_down(egui::Align::Center),
                             |ui| {
-                                skin::panel(ui, true, |ui| {
-                                    ui.set_width(260.);
-                                    self.inline_mixer(ui);
-                                    let fading = self.audio.as_ref().is_some_and(|a| a.fading());
-                                    let fade = ui.add_sized(
-                                        [240., 36.],
-                                        egui::Button::new(
-                                            RichText::new(
-                                                if fading && self.run.profile.is_some() {
-                                                    "Mixing…"
-                                                } else if fading {
-                                                    "Cancel mix"
-                                                } else {
-                                                    "Auto crossfade"
-                                                },
-                                            )
-                                            .size(16.)
-                                            .color(GOLD),
-                                        )
-                                        .fill(skin::accent(ui).gamma_multiply(0.16))
-                                        .stroke(egui::Stroke::new(1., skin::accent(ui)))
-                                        .wrap(),
-                                    );
-                                    ui.ctx().data_mut(|d| {
-                                        d.insert_temp(
-                                            egui::Id::unique("dj-auto-fade-bounds"),
-                                            fade.rect,
-                                        );
-                                        d.insert_temp(
-                                            egui::Id::unique("dj-auto-fade-bounds").with("screen"),
-                                            (fade.rect, ui.layer_id()),
-                                        )
-                                    });
-                                    if fade.clicked() {
-                                        self.auto = false;
-                                        self.auto_crossfade();
-                                    }
-                                    ui.horizontal(|ui| {
-                                        ui.label("A");
-                                        ui.spacing_mut().slider_width = 88.;
-                                        if ui
-                                            .add(
-                                                egui::Slider::new(&mut self.fader, 0. ..=1.)
-                                                    .show_value(false),
-                                            )
-                                            .changed()
-                                            && let Some(a) = &self.audio
-                                        {
-                                            self.run.cancel_automation();
-                                            a.set_fader(self.fader);
-                                        }
-                                        ui.label("B");
-                                    });
-                                });
+                                let scale = (height / 520.).min(1.);
+                                let logical = egui::vec2(280. / scale, height / scale);
+                                window_layout::fitted_content(
+                                    ui,
+                                    "dj-center-mixer",
+                                    logical,
+                                    scale,
+                                    |ui| {
+                                        skin::panel(ui, true, |ui| {
+                                            ui.set_width(logical.x - 18.);
+                                            ui.set_min_height(logical.y - 18.);
+                                            egui::ScrollArea::vertical()
+                                                .id_salt("dj-channel-controls")
+                                                .max_height((logical.y - 300.).max(160.))
+                                                .auto_shrink([false, true])
+                                                .show(ui, |ui| self.inline_mixer(ui));
+                                            let fading =
+                                                self.audio.as_ref().is_some_and(|a| a.fading());
+                                            let fade = ui.add_sized(
+                                                [240., 36.],
+                                                egui::Button::new(
+                                                    RichText::new(
+                                                        if fading && self.run.profile.is_some() {
+                                                            "Mixing…"
+                                                        } else if fading {
+                                                            "Cancel mix"
+                                                        } else {
+                                                            "Auto crossfade"
+                                                        },
+                                                    )
+                                                    .size(16.)
+                                                    .color(GOLD),
+                                                )
+                                                .fill(skin::accent(ui).gamma_multiply(0.16))
+                                                .stroke(egui::Stroke::new(1., skin::accent(ui)))
+                                                .wrap(),
+                                            );
+                                            ui.ctx().data_mut(|d| {
+                                                d.insert_temp(
+                                                    egui::Id::unique("dj-auto-fade-bounds"),
+                                                    fade.rect,
+                                                );
+                                                d.insert_temp(
+                                                    egui::Id::unique("dj-auto-fade-bounds")
+                                                        .with("screen"),
+                                                    (fade.rect, ui.layer_id()),
+                                                )
+                                            });
+                                            if fade.clicked() {
+                                                self.auto = false;
+                                                self.auto_crossfade();
+                                            }
+                                            ui.horizontal(|ui| {
+                                                ui.label("A");
+                                                ui.spacing_mut().slider_width = 88.;
+                                                if ui
+                                                    .add(
+                                                        egui::Slider::new(
+                                                            &mut self.fader,
+                                                            0. ..=1.,
+                                                        )
+                                                        .show_value(false),
+                                                    )
+                                                    .changed()
+                                                    && let Some(a) = &self.audio
+                                                {
+                                                    self.run.cancel_automation();
+                                                    a.set_fader(self.fader);
+                                                }
+                                                ui.label("B");
+                                            });
+                                            ui.separator();
+                                            ui.columns(2, |columns| {
+                                                for (deck, column) in columns.iter_mut().enumerate()
+                                                {
+                                                    let stem_path =
+                                                        self.loaded_track(deck).map(|track| {
+                                                            self.loaded_origin[deck]
+                                                                .as_deref()
+                                                                .unwrap_or(&self.root)
+                                                                .join(&track.path)
+                                                        });
+                                                    if self.stem_panel.show(
+                                                        column,
+                                                        deck,
+                                                        stem_path.as_deref(),
+                                                        self.audio.as_ref(),
+                                                        !self.run.auto && !self.playing[deck],
+                                                    ) && let Some(path) = stem_path
+                                                        && let Err(error) =
+                                                            self.safe_load_path(deck, path, None)
+                                                    {
+                                                        self.status = error;
+                                                    }
+                                                }
+                                            });
+                                        });
+                                    },
+                                );
                             },
                         );
                         ui.vertical(|ui| {
@@ -2365,10 +2410,6 @@ impl Player {
                 let track=self.loaded_track(deck);
                 ui.label(track.map(|t|format!("{} BPM   {}",t.preparation.bpm.map(|b|format!("{:.1}",b*(1.+self.pitch[deck]as f64/100.))).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--"))).unwrap_or_else(||"Load a track from the library".into()));
                 ui.separator();
-                let stem_path = self.loaded_track(deck).map(|track| self.loaded_origin[deck].as_deref().unwrap_or(&self.root).join(&track.path));
-                if self.stem_panel.show(ui, deck, stem_path.as_deref(), self.audio.as_ref(), !self.run.auto && !self.playing[deck])
-                    && let Some(path) = stem_path
-                    && let Err(error) = self.safe_load_path(deck, path, None) { self.status = error; }
                 ui.add_space(4.);
                 if self.dj_cues[deck] {
                     egui::ScrollArea::vertical().id_salt(("deck-cues", deck)).max_height(platter_side).show(ui, |ui| self.main_hot_cues(ui, deck, accent));
@@ -3228,6 +3269,8 @@ mod window_tests {
                 egui::Id::unique(("dj-transport", 0usize)),
                 egui::Id::unique(("dj-transport", 1usize)),
                 egui::Id::unique("dj-auto-fade-bounds"),
+                egui::Id::unique(("dj-stems", 0usize)),
+                egui::Id::unique(("dj-stems", 1usize)),
                 egui::Id::unique("dj-browser-screen"),
             ] {
                 let (rect, layer) = ctx

@@ -57,7 +57,7 @@ fn digest(path: &Path) -> Result<String, String> {
     }
     Ok(format!("{:x}", hash.finalize()))
 }
-fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 2]> {
+fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 3]> {
     let id = stamp(source).ok()?;
     let dir = cache.join(&id);
     let metadata = fs::metadata(dir.join("manifest.json")).ok()?;
@@ -67,11 +67,11 @@ fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 2]> {
     let manifest: Value =
         serde_json::from_slice(&fs::read(dir.join("manifest.json")).ok()?).ok()?;
     if manifest["source_stamp"].as_str()? != id
-        || manifest["audio"]["engine"] != "demucs-4.0.1/htdemucs"
+        || manifest["audio"]["engine"] != "demucs-4.0.1/htdemucs-3stem"
     {
         return None;
     }
-    for name in ["vocals", "instrumental"] {
+    for name in ["vocals", "instrumental", "drums"] {
         let path = dir.join(format!("{name}.wav"));
         let metadata = fs::symlink_metadata(path).ok()?;
         if !metadata.is_file()
@@ -81,9 +81,13 @@ fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 2]> {
             return None;
         }
     }
-    Some([dir.join("vocals.wav"), dir.join("instrumental.wav")])
+    Some([
+        dir.join("vocals.wav"),
+        dir.join("instrumental.wav"),
+        dir.join("drums.wav"),
+    ])
 }
-pub fn ready(source: &Path) -> Option<[PathBuf; 2]> {
+pub fn ready(source: &Path) -> Option<[PathBuf; 3]> {
     ready_in(&cache_root()?, source)
 }
 type Process = Arc<Mutex<Option<Child>>>;
@@ -166,14 +170,14 @@ fn prepare(
         &fs::read(stage.path().join("audio.json")).map_err(|e| e.to_string())?,
     )
     .map_err(|e| e.to_string())?;
-    if audio["engine"] != "demucs-4.0.1/htdemucs"
+    if audio["engine"] != "demucs-4.0.1/htdemucs-3stem"
         || audio["channels"] != 2
         || audio["sample_rate"] != 44100
         || audio["frames"].as_u64().unwrap_or(0) < 11025
     {
         return Err("Invalid prepared stem format".into());
     }
-    for name in ["vocals", "instrumental"] {
+    for name in ["vocals", "instrumental", "drums"] {
         let file = stage.path().join(format!("{name}.wav"));
         if digest(&file)? != audio["files"][name]["sha256"].as_str().unwrap_or("") {
             return Err("Prepared stem checksum failed".into());
@@ -222,18 +226,14 @@ impl Drop for Job {
 pub struct Panel {
     job: Option<Job>,
     status: [String; 2],
-    level: [[f32; 2]; 2],
-    mute: [[bool; 2]; 2],
-    solo: [[bool; 2]; 2],
+    level: [[f32; 3]; 2],
 }
 impl Default for Panel {
     fn default() -> Self {
         Self {
             job: None,
             status: Default::default(),
-            level: [[1.; 2]; 2],
-            mute: [[false; 2]; 2],
-            solo: [[false; 2]; 2],
+            level: [[0.; 3]; 2],
         }
     }
 }
@@ -256,96 +256,138 @@ impl Panel {
             self.job = None;
         }
         let mut reload = false;
-        egui::CollapsingHeader::new("Stems · Vocals / Instrumental")
-            .id_salt(("deck-stems", deck))
-            .show(ui, |ui| {
-                let prepared = source.is_some_and(|p| ready(p).is_some());
-                let active = audio.is_some_and(|a| {
-                    a.load_current(deck) && a.controls.stems_loaded[deck].load(Relaxed)
-                });
-                if let Some(job) = &self.job {
-                    ui.horizontal(|ui| {
-                        ui.spinner();
-                        ui.label("Separating locally…");
-                        if ui.button("Cancel").clicked() {
-                            job.cancel.store(true, Relaxed);
-                        }
-                    });
-                    ui.ctx().request_repaint_after(Duration::from_millis(150));
-                } else if !prepared
-                    && ui
-                        .add_enabled(
-                            source.is_some() && runtime().is_some(),
-                            egui::Button::new("Prepare stems"),
-                        )
-                        .clicked()
-                {
-                    let source = source.unwrap().to_path_buf();
-                    let python = runtime().unwrap();
-                    if let Some(cache) = cache_root() {
-                        let cancel = Arc::new(AtomicBool::new(false));
-                        let process = Arc::new(Mutex::new(None));
-                        let (tx, rx) = mpsc::channel();
-                        let stop = cancel.clone();
-                        let child = process.clone();
-                        std::thread::spawn(move || {
-                            let _ = tx.send(prepare(&cache, &source, &python, &stop, &child));
-                        });
-                        self.job = Some(Job {
-                            cancel,
-                            process,
-                            rx,
-                            deck,
-                        });
-                    }
-                }
-                if runtime().is_none() {
-                    ui.hyperlink_to(
-                        "Install the stem separator add-on",
-                        "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md",
-                    );
-                }
-                if prepared && !active {
-                    reload = ui
-                        .add_enabled(can_reload, egui::Button::new("Load prepared stems"))
-                        .clicked();
-                    ui.weak("Active playback is kept unchanged until the deck is reloaded.");
-                }
-                ui.add_enabled_ui(active, |ui| {
-                    for (stem, name) in [(0, "Vocals"), (1, "Instrumental")] {
-                        ui.horizontal(|ui| {
-                            ui.label(name);
-                            ui.toggle_value(&mut self.mute[deck][stem], "Mute");
-                            ui.toggle_value(&mut self.solo[deck][stem], "Solo");
-                        });
-                        ui.add(
-                            egui::Slider::new(&mut self.level[deck][stem], 0. ..=1.).text("Level"),
-                        );
-                    }
-                    if ui.button("Reset stems").clicked() {
-                        self.level[deck] = [1.; 2];
-                        self.mute[deck] = [false; 2];
-                        self.solo[deck] = [false; 2];
-                    }
-                });
-                ui.label(&self.status[deck]);
-            });
-        if let Some(audio) = audio {
-            let any_solo = self.solo[deck].iter().any(|s| *s);
-            for stem in 0..2 {
-                let level = if self.mute[deck][stem] || (any_solo && !self.solo[deck][stem]) {
-                    0_f32
+        let response = ui.push_id(("deck-stems", deck), |ui| {
+            ui.colored_label(
+                if deck == 0 {
+                    crate::ORANGE
                 } else {
-                    self.level[deck][stem]
-                };
-                audio.controls.stem_level[deck][stem].store(level.to_bits(), Relaxed);
+                    crate::CYAN
+                },
+                if deck == 0 {
+                    "A · STEMS"
+                } else {
+                    "B · STEMS"
+                },
+            );
+            let prepared = source.is_some_and(|p| ready(p).is_some());
+            let active = audio.is_some_and(|a| {
+                a.load_current(deck) && a.controls.stems_loaded[deck].load(Relaxed)
+            });
+            if let Some(job) = &self.job {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Separating locally…");
+                    if ui.button("Cancel").clicked() {
+                        job.cancel.store(true, Relaxed);
+                    }
+                });
+                ui.ctx().request_repaint_after(Duration::from_millis(150));
+            } else if !prepared
+                && ui
+                    .add_enabled(
+                        source.is_some() && runtime().is_some(),
+                        egui::Button::new("Prepare stems"),
+                    )
+                    .clicked()
+            {
+                let source = source.unwrap().to_path_buf();
+                let python = runtime().unwrap();
+                if let Some(cache) = cache_root() {
+                    let cancel = Arc::new(AtomicBool::new(false));
+                    let process = Arc::new(Mutex::new(None));
+                    let (tx, rx) = mpsc::channel();
+                    let stop = cancel.clone();
+                    let child = process.clone();
+                    std::thread::spawn(move || {
+                        let _ = tx.send(prepare(&cache, &source, &python, &stop, &child));
+                    });
+                    self.job = Some(Job {
+                        cancel,
+                        process,
+                        rx,
+                        deck,
+                    });
+                }
+            }
+            if runtime().is_none() {
+                ui.hyperlink_to(
+                    "Install the stem separator add-on",
+                    "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md",
+                );
+            }
+            if prepared && !active {
+                reload = ui
+                    .add_enabled(can_reload, egui::Button::new("Load prepared stems"))
+                    .clicked();
+                ui.weak("Active playback is kept unchanged until the deck is reloaded.");
+            }
+            ui.add_enabled_ui(active, |ui| {
+                for (stem, name) in [(0, "Vocals"), (1, "Instruments"), (2, "Beat")] {
+                    ui.horizontal(|ui| {
+                        crate::dj_mixer::dial(
+                            ui,
+                            name,
+                            &mut self.level[deck][stem],
+                            -1. ..=1.,
+                            if deck == 0 {
+                                crate::ORANGE
+                            } else {
+                                crate::CYAN
+                            },
+                        );
+                        ui.label(name);
+                    });
+                }
+                if ui.small_button("Reset").clicked() {
+                    self.level[deck] = [0.; 3];
+                }
+            });
+            ui.label(&self.status[deck]);
+        });
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::unique(("dj-stems", deck)).with("screen"),
+                (response.response.rect, ui.layer_id()),
+            )
+        });
+        if let Some(audio) = audio {
+            let gains = remix_gains(self.level[deck]);
+            for (stem, gain) in gains.into_iter().enumerate() {
+                audio.controls.stem_level[deck][stem].store(gain.to_bits(), Relaxed);
             }
         }
         reload
     }
 }
+/// Center is original mix; left removes this part, right attenuates other parts.
+fn remix_gains(knobs: [f32; 3]) -> [f32; 3] {
+    std::array::from_fn(|stem| {
+        let own = 1. + knobs[stem].clamp(-1., 0.);
+        knobs
+            .iter()
+            .enumerate()
+            .filter(|(i, _)| *i != stem)
+            .fold(own, |gain, (_, other)| gain * (1. - other.clamp(0., 1.)))
+    })
+}
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn remix_knobs_mute_isolate_and_restore_each_component() {
+        assert_eq!(super::remix_gains([0.; 3]), [1.; 3]);
+        for stem in 0..3 {
+            let mut knobs = [0.; 3];
+            knobs[stem] = -1.;
+            let gains = super::remix_gains(knobs);
+            assert_eq!(gains[stem], 0.);
+            assert_eq!(gains[(stem + 1) % 3], 1.);
+            knobs[stem] = 1.;
+            let gains = super::remix_gains(knobs);
+            assert_eq!(gains[stem], 1.);
+            assert_eq!(gains[(stem + 1) % 3], 0.);
+        }
+    }
+
     use super::*;
     #[test]
     #[ignore = "requires AMP_STEM_PYTHON, FFmpeg and the installed model; real local inference"]
@@ -388,13 +430,15 @@ mod tests {
         let original = decode(&source);
         let vocals = decode(&paths[0]);
         let instruments = decode(&paths[1]);
+        let drums = decode(&paths[2]);
+        assert_eq!(original.len(), drums.len());
         assert_eq!(original.len(), vocals.len());
         assert_eq!(original.len(), instruments.len());
         assert!(
             original
                 .iter()
-                .zip(vocals.iter().zip(&instruments))
-                .all(|(o, (v, i))| (o - (v + i)).abs() < 0.00001)
+                .zip(vocals.iter().zip(instruments.iter().zip(&drums)))
+                .all(|(o, (v, (i, d)))| (o - (v + i + d)).abs() < 0.00001)
         );
 
         // A completed local cache is reused, even without invoking another worker.
@@ -441,10 +485,10 @@ mod tests {
         let target = cache.join(&id);
         fs::create_dir_all(&target).unwrap();
         assert!(ready_in(&cache, &source).is_none());
-        for name in ["vocals", "instrumental"] {
+        for name in ["vocals", "instrumental", "drums"] {
             fs::write(target.join(format!("{name}.wav")), b"stem").unwrap();
         }
-        fs::write(target.join("manifest.json"),serde_json::to_vec(&json!({"source_stamp":id,"audio":{"engine":"demucs-4.0.1/htdemucs","files":{"vocals":{"bytes":4},"instrumental":{"bytes":4}}}})).unwrap()).unwrap();
+        fs::write(target.join("manifest.json"),serde_json::to_vec(&json!({"source_stamp":id,"audio":{"engine":"demucs-4.0.1/htdemucs-3stem","files":{"vocals":{"bytes":4},"instrumental":{"bytes":4},"drums":{"bytes":4}}}})).unwrap()).unwrap();
         assert!(ready_in(&cache, &source).is_some());
         fs::write(&source, b"new version").unwrap();
         assert!(ready_in(&cache, &source).is_none());

@@ -116,7 +116,12 @@ pub fn fitted_content(
         )
     });
     ui.ctx().set_sublayer(ui.layer_id(), layer);
-    ui.ctx().set_transform_layer(layer, transform);
+    let parent_transform = ui
+        .ctx()
+        .layer_transform_to_global(ui.layer_id())
+        .unwrap_or_default();
+    ui.ctx()
+        .set_transform_layer(layer, parent_transform * transform);
     let mut child = ui.new_child(
         egui::UiBuilder::new()
             .layer_id(layer)

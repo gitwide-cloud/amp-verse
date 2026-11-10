@@ -14,7 +14,7 @@ use std::{
     time::Duration,
 };
 type Frame = [f32; 2];
-type DeckFrame = [f32; 4];
+type DeckFrame = [f32; 6];
 fn atom(v: f32) -> AtomicU32 {
     AtomicU32::new(v.to_bits())
 }
@@ -43,7 +43,7 @@ pub struct Controls {
     pub scratch_rate: [AtomicU32; 2],
     pub eq: [[AtomicU32; 3]; 2],
     pub trim_db: [AtomicU32; 2],
-    pub stem_level: [[AtomicU32; 2]; 2],
+    pub stem_level: [[AtomicU32; 3]; 2],
     pub stems_loaded: [AtomicBool; 2],
     pub eq_kill: [[AtomicBool; 3]; 2],
     pub sweep: [AtomicU32; 2],
@@ -127,7 +127,7 @@ impl Source {
     }
     fn next(&mut self, rate: f32) -> Option<DeckFrame> {
         if rate.abs() < 0.0001 {
-            return Some([0.; 4]);
+            return Some([0.; 6]);
         }
         self.position = self.position.max(self.history_start as f64);
         let index = self.position.floor() as u64;
@@ -166,7 +166,7 @@ struct Voice {
     filter: Frame,
     sweep_state: Frame,
     trim: f32,
-    stem_mix: [f32; 2],
+    stem_mix: [f32; 3],
     gain: f32,
     looped: Option<Loop>,
 }
@@ -287,7 +287,7 @@ impl Mixer {
                     self.controls.stems_loaded[d].store(s.separated, Relaxed);
                     self.voices[d] = Voice {
                         source: Some(s),
-                        stem_mix: [1.; 2],
+                        stem_mix: [1.; 3],
                         trim: 10f32.powf(get(&self.controls.trim_db[d]).clamp(-12., 12.) / 20.),
                         ..Default::default()
                     };
@@ -526,13 +526,15 @@ impl Mixer {
                         l.capturing = false;
                     }
                 }
-                for stem in 0..2 {
+                for stem in 0..3 {
                     v.stem_mix[stem] +=
                         (get(&c.stem_level[d][stem]).clamp(0., 1.) - v.stem_mix[stem]) * 0.004;
                 }
                 let mut frame: Frame = if source.separated {
                     std::array::from_fn(|ch| {
-                        frame[ch] * v.stem_mix[0] + frame[ch + 2] * v.stem_mix[1]
+                        frame[ch] * v.stem_mix[0]
+                            + frame[ch + 2] * v.stem_mix[1]
+                            + frame[ch + 4] * v.stem_mix[2]
                     })
                 } else {
                     [frame[0], frame[1]]
@@ -732,7 +734,7 @@ impl Engine {
         root: &Path,
         track: &amp_core::Track,
         play: bool,
-        stems: Option<[std::path::PathBuf; 2]>,
+        stems: Option<[std::path::PathBuf; 3]>,
     ) -> Result<(), String> {
         track.preparation.validate()?;
         self.source_start[deck] = track.preparation.cue_in;
@@ -782,10 +784,11 @@ impl Engine {
                 }
                 let mut command = amp_core::command("ffmpeg");
                 command.args(["-v", "error"]);
-                if let Some([vocals, instruments]) = stems {
+                if let Some([vocals, instruments, drums]) = stems {
                     command.args(amp_core::cue_args(&prep)?).arg("-i").arg(vocals)
                         .args(amp_core::cue_args(&prep)?).arg("-i").arg(instruments)
-                        .args(["-filter_complex", "[0:a][1:a]join=inputs=2:channel_layout=quad:map=0.0-FL|0.1-FR|1.0-BL|1.1-BR[out]", "-map", "[out]"]);
+                        .args(amp_core::cue_args(&prep)?).arg("-i").arg(drums)
+                        .args(["-filter_complex", "[0:a][1:a][2:a]join=inputs=3:channel_layout=5.1:map=0.0-FL|0.1-FR|1.0-FC|1.1-LFE|2.0-BL|2.1-BR[out]", "-map", "[out]"]);
                 } else {
                     command.args(amp_core::cue_args(&prep)?).arg("-i").arg(path);
                 }
@@ -793,7 +796,7 @@ impl Engine {
                     .args([
                         "-vn",
                         "-ac",
-                        if separated { "4" } else { "2" },
+                        if separated { "6" } else { "2" },
                         "-ar",
                         &rate.to_string(),
                         "-f",
@@ -809,7 +812,7 @@ impl Engine {
                     let mut input = std::io::BufReader::new(
                         child.stdout.take().ok_or("Decoder output missing")?,
                     );
-                    let mut bytes = [0; 8192];
+                    let mut bytes = [0; 8160];
                     loop {
                         if stopped.load(Relaxed) || producer.is_abandoned() {
                             return Ok(());
@@ -825,7 +828,7 @@ impl Engine {
                         if n == 0 {
                             break;
                         }
-                        let frame_bytes = if separated { 16 } else { 8 };
+                        let frame_bytes = if separated { 24 } else { 8 };
                         if n % frame_bytes != 0 {
                             return Err("Incomplete PCM frame".into());
                         }
@@ -1148,7 +1151,7 @@ mod tests {
     fn source(value: f32, frames: usize) -> Source {
         let (mut p, c) = RingBuffer::new(frames + 1);
         for _ in 0..frames {
-            p.push([value, value, 0., 0.]).unwrap();
+            p.push([value, value, 0., 0., 0., 0.]).unwrap();
         }
         Source {
             ring: c,
@@ -1188,7 +1191,7 @@ mod tests {
         let (mut producer, consumer) = RingBuffer::new(65);
         for frame in 0..64 {
             producer
-                .push([frame as f32, -(frame as f32), 0., 0.])
+                .push([frame as f32, -(frame as f32), 0., 0., 0., 0.])
                 .unwrap();
         }
         let mut source = Source {
@@ -1204,10 +1207,10 @@ mod tests {
         for expected in 0..12 {
             assert_eq!(source.next(1.).unwrap()[0], expected as f32);
         }
-        assert_eq!(source.next(-1.).unwrap(), [12., -12., 0., 0.]);
-        assert_eq!(source.next(-1.).unwrap(), [11., -11., 0., 0.]);
-        assert_eq!(source.next(-1.).unwrap(), [10., -10., 0., 0.]);
-        assert_eq!(source.next(0.), Some([0.; 4]));
+        assert_eq!(source.next(-1.).unwrap(), [12., -12., 0., 0., 0., 0.]);
+        assert_eq!(source.next(-1.).unwrap(), [11., -11., 0., 0., 0., 0.]);
+        assert_eq!(source.next(-1.).unwrap(), [10., -10., 0., 0., 0., 0.]);
+        assert_eq!(source.next(0.), Some([0.; 6]));
         assert_eq!(source.position, 9.);
         assert_eq!(source.next(0.5).unwrap()[0], 9.);
         assert_eq!(source.next(0.5).unwrap()[0], 9.5);
@@ -1446,7 +1449,7 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(8);
         let (mut producer, consumer) = RingBuffer::new(12000);
         for _ in 0..11000 {
-            producer.push([0.2, 0.1, -0.05, 0.1]).unwrap();
+            producer.push([0.2, 0.1, -0.05, 0.1, 0.03, -0.02]).unwrap();
         }
         let mut voice = source(0., 2);
         voice.ring = consumer;
@@ -1456,22 +1459,29 @@ mod tests {
         mixer.render(2000, |_, _| {});
         let mut sum = [0.; 2];
         mixer.render(1, |_, f| sum = f);
-        assert!((sum[0] / std::f32::consts::FRAC_1_SQRT_2 - 0.15).abs() < 0.001);
-        assert!((sum[1] / std::f32::consts::FRAC_1_SQRT_2 - 0.2).abs() < 0.001);
+        assert!((sum[0] / std::f32::consts::FRAC_1_SQRT_2 - 0.18).abs() < 0.001);
+        assert!((sum[1] / std::f32::consts::FRAC_1_SQRT_2 - 0.18).abs() < 0.001);
         set(&c.stem_level[0][0], 0.);
         mixer.render(2000, |_, _| {});
         let mut instrumental = [0.; 2];
         mixer.render(1, |_, f| instrumental = f);
-        assert!((instrumental[0] / std::f32::consts::FRAC_1_SQRT_2 + 0.05).abs() < 0.001);
+        assert!((instrumental[0] / std::f32::consts::FRAC_1_SQRT_2 + 0.02).abs() < 0.001);
         set(&c.stem_level[0][0], 1.);
         set(&c.stem_level[0][1], 0.);
+        set(&c.stem_level[0][2], 0.);
         mixer.render(2000, |_, _| {});
         let mut vocals = [0.; 2];
         mixer.render(1, |_, f| vocals = f);
         assert!((vocals[0] / std::f32::consts::FRAC_1_SQRT_2 - 0.2).abs() < 0.001);
+        set(&c.stem_level[0][0], 0.);
+        set(&c.stem_level[0][2], 1.);
+        mixer.render(2000, |_, _| {});
+        let mut drums = [0.; 2];
+        mixer.render(1, |_, f| drums = f);
+        assert!((drums[0] / std::f32::consts::FRAC_1_SQRT_2 - 0.03).abs() < 0.001);
         assert!(c.play[0].load(Relaxed));
         assert!(c.stems_loaded[0].load(Relaxed));
-        assert_eq!(c.position[0].load(Relaxed), 6003);
+        assert_eq!(c.position[0].load(Relaxed), 8004);
     }
     #[test]
     #[ignore = "requires FFmpeg and native audio; output muted"]
@@ -1480,6 +1490,7 @@ mod tests {
         let paths = [
             dir.path().join("vocals.wav"),
             dir.path().join("instrumental.wav"),
+            dir.path().join("drums.wav"),
         ];
         for (index, path) in paths.iter().enumerate() {
             assert!(
@@ -1607,7 +1618,7 @@ mod tests {
             let (mut producer, consumer) = RingBuffer::new(10000);
             for i in 0..8000 {
                 let value = (std::f32::consts::TAU * frequency * i as f32 / 48000.).sin() * 0.2;
-                producer.push([value, value, 0., 0.]).unwrap();
+                producer.push([value, value, 0., 0., 0., 0.]).unwrap();
             }
             let mut voice = source(0., 2);
             voice.ring = consumer;
@@ -1635,7 +1646,7 @@ mod tests {
             let (mut producer, consumer) = RingBuffer::new(10000);
             for i in 0..8000 {
                 let value = (std::f32::consts::TAU * 8000. * i as f32 / 48000.).sin() * 0.2;
-                producer.push([value, value, 0., 0.]).unwrap();
+                producer.push([value, value, 0., 0., 0., 0.]).unwrap();
             }
             let mut voice = source(0., 2);
             voice.ring = consumer;

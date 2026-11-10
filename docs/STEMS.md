@@ -1,12 +1,16 @@
-# Vocal and instrumental stems
+# Live DJ stem controls
 
-Load a song in AMP DJ and expand **Stems · Vocals / Instrumental** on its deck. Press **Prepare stems**. Separation runs locally in a separate process, with four CPU threads at most, and can be canceled. It never uploads music. Only one preparation job runs per application at a time.
+The center mixer fills the deck section. In short windows, channel controls scroll independently while the crossfader and stem controls remain below them. Below the crossfader, each deck always shows three knobs: Vocals, Instruments and Beat (drums). Center keeps the original level; turn left to reduce/remove that part, or right to reduce the other parts and isolate it. Double-click or Home resets a knob. Reset restores the original three-part mix. A uses amber and B uses cyan.
 
-When preparation finishes, pause the deck and press **Load prepared stems**, or let the prepared song load on a future transition. An already playing deck keeps its original snapshot. Each separated component has Level, Mute and Solo; Reset restores both. Vocals and instrumental share one decoder timeline, pitch, scratch history, loop and cue range. The mixer EQ, filters, crossfader and headphone bus process the resulting mix normally. Ordinary songs still play without this add-on.
+Load a song and press Prepare stems in its mixer column. Separation runs locally in a separate process, with four CPU threads at most, and can be canceled. Only one job runs per application at a time. It never uploads music. When ready, pause the deck and press Load prepared stems, or let the prepared song load on a future transition. A playing deck keeps its snapshot. The three controls become active for prepared audio; they cannot separate an unprepared song instantly.
 
-Prepared stems are currently a device-local cache beside the app preferences, not NAS metadata or Android offline downloads. The cache is keyed by source path, size and modification time; completed generations contain an audio hash and hashes of both prepared files. Temporary work is published only after validation. Source changes invalidate the local cache. Existing corrupt generations are retained separately when a new generation is prepared. No user cue, beatgrid, rating or playlist is changed. Library-wide or automatic separation is not enabled.
+Vocals, drums and residual instruments share one six-channel decoder timeline, pitch, scratch history, loop and cue range. EQ, filters, crossfader and headphones process the result normally. Stem controls remain usable during AutoMix for prepared tracks. Ordinary songs still play without the add-on.
 
-The optional separator is Demucs 4.0.1 with the official `htdemucs` checkpoint. It extracts vocals and creates a phase-aligned instrumental residual, preserving original mix reconstruction when both levels are full. Separation quality depends on the recording and can include bleed or artifacts. This is prepared separation, not a zero-latency AI process in the live audio callback. Files from 0.25 seconds to 30 minutes are supported by this initial worker.
+Prepared stems are a device-local cache, not NAS metadata or Android downloads. The cache tracks source path, size and modification time and checks all three output hashes before publication. Old two-part caches need preparation again for the drums part; their previous generation is retained. No user cue, beatgrid, rating or playlist is changed. Library-wide automatic separation is not enabled.
+
+Demucs 4.0.1 with the official htdemucs checkpoint extracts vocals and drums. Instruments are the original minus both, preserving reconstruction at centered knobs. Quality depends on the recording and may contain bleed/artifacts. This is prepared separation, not zero-latency inference. Songs from 0.25 seconds to 30 minutes are supported.
+
+VirtualDJ reference behavior: https://virtualdj.com/manuals/virtualdj/interface/mixer/audio.html . AMP implements its own controls and uses Demucs separation, not VirtualDJ code or models.
 
 ## Optional Windows add-on
 
