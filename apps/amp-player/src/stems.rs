@@ -1,0 +1,453 @@
+//! Optional background separation and device-local prepared audio cache.
+//! Never writes source audio, NAS preparation, or active deck snapshots.
+use eframe::egui;
+use serde_json::{Value, json};
+use sha2::{Digest, Sha256};
+use std::{
+    fs,
+    io::{Read, Write},
+    path::{Path, PathBuf},
+    process::{Child, Stdio},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, Ordering::Relaxed},
+        mpsc,
+    },
+    time::{Duration, SystemTime},
+};
+fn cache_root() -> Option<PathBuf> {
+    crate::theme::settings_path().and_then(|p| p.parent().map(|p| p.join("prepared-stems")))
+}
+pub(super) fn runtime() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("AMP_STEM_PYTHON")
+        .map(PathBuf::from)
+        .filter(|p| p.is_file())
+    {
+        return Some(path);
+    }
+    let root = std::env::current_exe().ok()?.parent()?.join("addons/stems");
+    [root.join("Scripts/python.exe"), root.join("bin/python")]
+        .into_iter()
+        .find(|p| p.is_file())
+}
+fn stamp(source: &Path) -> Result<String, String> {
+    let source = source.canonicalize().map_err(|e| e.to_string())?;
+    let metadata = fs::metadata(&source).map_err(|e| e.to_string())?;
+    let modified = metadata
+        .modified()
+        .map_err(|e| e.to_string())?
+        .duration_since(SystemTime::UNIX_EPOCH)
+        .map_err(|e| e.to_string())?
+        .as_nanos();
+    Ok(format!(
+        "{:x}",
+        Sha256::digest(format!("{}|{}|{modified}", source.display(), metadata.len()).as_bytes())
+    ))
+}
+fn digest(path: &Path) -> Result<String, String> {
+    let mut file = fs::File::open(path).map_err(|e| e.to_string())?;
+    let mut hash = Sha256::new();
+    let mut bytes = [0; 65536];
+    loop {
+        let n = file.read(&mut bytes).map_err(|e| e.to_string())?;
+        if n == 0 {
+            break;
+        }
+        hash.update(&bytes[..n]);
+    }
+    Ok(format!("{:x}", hash.finalize()))
+}
+fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 2]> {
+    let id = stamp(source).ok()?;
+    let dir = cache.join(&id);
+    let metadata = fs::metadata(dir.join("manifest.json")).ok()?;
+    if metadata.len() > 16384 {
+        return None;
+    }
+    let manifest: Value =
+        serde_json::from_slice(&fs::read(dir.join("manifest.json")).ok()?).ok()?;
+    if manifest["source_stamp"].as_str()? != id
+        || manifest["audio"]["engine"] != "demucs-4.0.1/htdemucs"
+    {
+        return None;
+    }
+    for name in ["vocals", "instrumental"] {
+        let path = dir.join(format!("{name}.wav"));
+        let metadata = fs::symlink_metadata(path).ok()?;
+        if !metadata.is_file()
+            || metadata.file_type().is_symlink()
+            || metadata.len() != manifest["audio"]["files"][name]["bytes"].as_u64()?
+        {
+            return None;
+        }
+    }
+    Some([dir.join("vocals.wav"), dir.join("instrumental.wav")])
+}
+pub fn ready(source: &Path) -> Option<[PathBuf; 2]> {
+    ready_in(&cache_root()?, source)
+}
+type Process = Arc<Mutex<Option<Child>>>;
+fn prepare(
+    cache: &Path,
+    source: &Path,
+    python: &Path,
+    cancel: &AtomicBool,
+    process: &Process,
+) -> Result<(), String> {
+    fs::create_dir_all(cache).map_err(|e| e.to_string())?;
+    let id = stamp(source)?;
+    let _lock = amp_core::coordination::Lock::acquire(&cache.join(&id))?;
+    if ready_in(cache, source).is_some() {
+        return Ok(());
+    }
+    let stage = tempfile::Builder::new()
+        .prefix(".pending-")
+        .tempdir_in(cache)
+        .map_err(|e| e.to_string())?;
+    let input = stage.path().join("input.audio");
+    fs::copy(source, &input).map_err(|e| e.to_string())?;
+    let source_hash = digest(&input)?;
+    if stamp(source)? != id || cancel.load(Relaxed) {
+        return Err("Source changed or preparation canceled".into());
+    }
+    let worker = stage.path().join("worker.py");
+    fs::write(&worker, include_str!("stem_worker.py")).map_err(|e| e.to_string())?;
+    let log = fs::File::create(stage.path().join("worker.log")).map_err(|e| e.to_string())?;
+    let mut command = amp_core::command(python.to_string_lossy().as_ref());
+    command
+        .arg(&worker)
+        .arg(&input)
+        .arg(stage.path())
+        .stdin(Stdio::null())
+        .stdout(log.try_clone().map_err(|e| e.to_string())?)
+        .stderr(log);
+    if let Some(addons) = python.parent().and_then(Path::parent) {
+        command.env("TORCH_HOME", addons.join("models"));
+    }
+    if let Some(exe) = std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.join("ffmpeg.exe")))
+        .filter(|p| p.is_file())
+    {
+        command.env("AMP_STEM_FFMPEG", exe);
+    }
+    *process.lock().map_err(|_| "Stem process unavailable")? =
+        Some(command.spawn().map_err(|e| e.to_string())?);
+    let status = loop {
+        let mut slot = process.lock().map_err(|_| "Stem process unavailable")?;
+        let child = slot.as_mut().ok_or("Stem process stopped")?;
+        if cancel.load(Relaxed) {
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err("Stem preparation canceled".into());
+        }
+        if let Some(status) = child.try_wait().map_err(|e| e.to_string())? {
+            slot.take();
+            break status;
+        }
+        drop(slot);
+        std::thread::sleep(Duration::from_millis(100));
+    };
+    if !status.success() {
+        let log = fs::read_to_string(stage.path().join("worker.log")).unwrap_or_default();
+        return Err(format!(
+            "Stem preparation failed: {}",
+            log.lines()
+                .rev()
+                .take(3)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .rev()
+                .collect::<Vec<_>>()
+                .join(" ")
+        ));
+    }
+    let audio: Value = serde_json::from_slice(
+        &fs::read(stage.path().join("audio.json")).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    if audio["engine"] != "demucs-4.0.1/htdemucs"
+        || audio["channels"] != 2
+        || audio["sample_rate"] != 44100
+        || audio["frames"].as_u64().unwrap_or(0) < 11025
+    {
+        return Err("Invalid prepared stem format".into());
+    }
+    for name in ["vocals", "instrumental"] {
+        let file = stage.path().join(format!("{name}.wav"));
+        if digest(&file)? != audio["files"][name]["sha256"].as_str().unwrap_or("") {
+            return Err("Prepared stem checksum failed".into());
+        }
+    }
+    if stamp(source)? != id || cancel.load(Relaxed) {
+        return Err("Source changed or preparation canceled; result not published".into());
+    }
+    let manifest = json!({"version":1,"source_stamp":id,"source_sha256":source_hash,"audio":audio});
+    let mut file =
+        fs::File::create(stage.path().join("manifest.json")).map_err(|e| e.to_string())?;
+    file.write_all(serde_json::to_string_pretty(&manifest).unwrap().as_bytes())
+        .map_err(|e| e.to_string())?;
+    file.sync_all().map_err(|e| e.to_string())?;
+    drop(file);
+    fs::remove_file(input).map_err(|e| format!("Remove staged input: {e}"))?;
+    // A previously corrupted generation is retained, never overwritten silently.
+    let destination = cache.join(&id);
+    if destination.exists() {
+        fs::rename(
+            &destination,
+            cache.join(format!("{id}.previous-{}", amp_core::coordination::token())),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    drop(command);
+    fs::rename(stage.path(), &destination).map_err(|e| format!("Publish stem cache: {e}"))?;
+    Ok(())
+}
+struct Job {
+    cancel: Arc<AtomicBool>,
+    process: Process,
+    rx: mpsc::Receiver<Result<(), String>>,
+    deck: usize,
+}
+impl Drop for Job {
+    fn drop(&mut self) {
+        self.cancel.store(true, Relaxed);
+        if let Ok(mut slot) = self.process.lock()
+            && let Some(child) = slot.as_mut()
+        {
+            let _ = child.kill();
+        }
+    }
+}
+pub struct Panel {
+    job: Option<Job>,
+    status: [String; 2],
+    level: [[f32; 2]; 2],
+    mute: [[bool; 2]; 2],
+    solo: [[bool; 2]; 2],
+}
+impl Default for Panel {
+    fn default() -> Self {
+        Self {
+            job: None,
+            status: Default::default(),
+            level: [[1.; 2]; 2],
+            mute: [[false; 2]; 2],
+            solo: [[false; 2]; 2],
+        }
+    }
+}
+impl Panel {
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        source: Option<&Path>,
+        audio: Option<&crate::mixer::Engine>,
+        can_reload: bool,
+    ) -> bool {
+        if let Some(job) = &self.job
+            && let Ok(result) = job.rx.try_recv()
+        {
+            self.status[job.deck] = result.map_or_else(
+                |e| e,
+                |()| "Ready. Reload this paused deck, or use stems on its next song load.".into(),
+            );
+            self.job = None;
+        }
+        let mut reload = false;
+        egui::CollapsingHeader::new("Stems · Vocals / Instrumental")
+            .id_salt(("deck-stems", deck))
+            .show(ui, |ui| {
+                let prepared = source.is_some_and(|p| ready(p).is_some());
+                let active = audio.is_some_and(|a| {
+                    a.load_current(deck) && a.controls.stems_loaded[deck].load(Relaxed)
+                });
+                if let Some(job) = &self.job {
+                    ui.horizontal(|ui| {
+                        ui.spinner();
+                        ui.label("Separating locally…");
+                        if ui.button("Cancel").clicked() {
+                            job.cancel.store(true, Relaxed);
+                        }
+                    });
+                    ui.ctx().request_repaint_after(Duration::from_millis(150));
+                } else if !prepared
+                    && ui
+                        .add_enabled(
+                            source.is_some() && runtime().is_some(),
+                            egui::Button::new("Prepare stems"),
+                        )
+                        .clicked()
+                {
+                    let source = source.unwrap().to_path_buf();
+                    let python = runtime().unwrap();
+                    if let Some(cache) = cache_root() {
+                        let cancel = Arc::new(AtomicBool::new(false));
+                        let process = Arc::new(Mutex::new(None));
+                        let (tx, rx) = mpsc::channel();
+                        let stop = cancel.clone();
+                        let child = process.clone();
+                        std::thread::spawn(move || {
+                            let _ = tx.send(prepare(&cache, &source, &python, &stop, &child));
+                        });
+                        self.job = Some(Job {
+                            cancel,
+                            process,
+                            rx,
+                            deck,
+                        });
+                    }
+                }
+                if runtime().is_none() {
+                    ui.hyperlink_to(
+                        "Install the stem separator add-on",
+                        "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md",
+                    );
+                }
+                if prepared && !active {
+                    reload = ui
+                        .add_enabled(can_reload, egui::Button::new("Load prepared stems"))
+                        .clicked();
+                    ui.weak("Active playback is kept unchanged until the deck is reloaded.");
+                }
+                ui.add_enabled_ui(active, |ui| {
+                    for (stem, name) in [(0, "Vocals"), (1, "Instrumental")] {
+                        ui.horizontal(|ui| {
+                            ui.label(name);
+                            ui.toggle_value(&mut self.mute[deck][stem], "Mute");
+                            ui.toggle_value(&mut self.solo[deck][stem], "Solo");
+                        });
+                        ui.add(
+                            egui::Slider::new(&mut self.level[deck][stem], 0. ..=1.).text("Level"),
+                        );
+                    }
+                    if ui.button("Reset stems").clicked() {
+                        self.level[deck] = [1.; 2];
+                        self.mute[deck] = [false; 2];
+                        self.solo[deck] = [false; 2];
+                    }
+                });
+                ui.label(&self.status[deck]);
+            });
+        if let Some(audio) = audio {
+            let any_solo = self.solo[deck].iter().any(|s| *s);
+            for stem in 0..2 {
+                let level = if self.mute[deck][stem] || (any_solo && !self.solo[deck][stem]) {
+                    0_f32
+                } else {
+                    self.level[deck][stem]
+                };
+                audio.controls.stem_level[deck][stem].store(level.to_bits(), Relaxed);
+            }
+        }
+        reload
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    #[ignore = "requires AMP_STEM_PYTHON, FFmpeg and the installed model; real local inference"]
+    fn real_separation_publishes_aligned_cache_without_changing_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = PathBuf::from(std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap());
+        let source = dir.path().join("source.wav");
+        fs::copy(fixture, &source).unwrap();
+        let before = digest(&source).unwrap();
+        let python = PathBuf::from(std::env::var_os("AMP_STEM_PYTHON").unwrap());
+        let cache = dir.path().join("cache");
+        let cancel = AtomicBool::new(false);
+        let process = Arc::new(Mutex::new(None));
+        prepare(&cache, &source, &python, &cancel, &process).unwrap();
+        let paths = ready_in(&cache, &source).unwrap();
+        assert!(paths.iter().all(|p| p.is_file()));
+        assert_eq!(digest(&source).unwrap(), before);
+        let manifest: Value = serde_json::from_slice(
+            &fs::read(paths[0].parent().unwrap().join("manifest.json")).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(manifest["source_sha256"], before);
+        assert!(manifest["audio"]["frames"].as_u64().unwrap() > 44100);
+        let decode = |path: &Path| {
+            let output = amp_core::command("ffmpeg")
+                .args(["-v", "error", "-i"])
+                .arg(path)
+                .args(["-ac", "2", "-ar", "44100", "-f", "f32le", "pipe:1"])
+                .output()
+                .unwrap();
+            assert!(output.status.success());
+            output
+                .stdout
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b))
+                .collect::<Vec<_>>()
+        };
+        let original = decode(&source);
+        let vocals = decode(&paths[0]);
+        let instruments = decode(&paths[1]);
+        assert_eq!(original.len(), vocals.len());
+        assert_eq!(original.len(), instruments.len());
+        assert!(
+            original
+                .iter()
+                .zip(vocals.iter().zip(&instruments))
+                .all(|(o, (v, i))| (o - (v + i)).abs() < 0.00001)
+        );
+
+        // A completed local cache is reused, even without invoking another worker.
+        prepare(
+            &cache,
+            &source,
+            Path::new("not-an-interpreter"),
+            &cancel,
+            &process,
+        )
+        .unwrap();
+    }
+    #[test]
+    fn canceled_preparation_does_not_publish_or_change_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("song.wav");
+        fs::write(&source, b"source bytes").unwrap();
+        let before = digest(&source).unwrap();
+        let cache = dir.path().join("cache");
+        let result = prepare(
+            &cache,
+            &source,
+            Path::new("not-an-interpreter"),
+            &AtomicBool::new(true),
+            &Arc::new(Mutex::new(None)),
+        );
+        assert!(result.unwrap_err().contains("canceled"));
+        assert!(ready_in(&cache, &source).is_none());
+        assert_eq!(digest(&source).unwrap(), before);
+        assert!(!fs::read_dir(&cache).unwrap().any(|p| {
+            p.unwrap()
+                .file_name()
+                .to_string_lossy()
+                .starts_with(".pending-")
+        }));
+    }
+    #[test]
+    fn cache_invalidation_and_incomplete_outputs_fail_closed() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("song.wav");
+        fs::write(&source, b"original").unwrap();
+        let cache = dir.path().join("cache");
+        let id = stamp(&source).unwrap();
+        let target = cache.join(&id);
+        fs::create_dir_all(&target).unwrap();
+        assert!(ready_in(&cache, &source).is_none());
+        for name in ["vocals", "instrumental"] {
+            fs::write(target.join(format!("{name}.wav")), b"stem").unwrap();
+        }
+        fs::write(target.join("manifest.json"),serde_json::to_vec(&json!({"source_stamp":id,"audio":{"engine":"demucs-4.0.1/htdemucs","files":{"vocals":{"bytes":4},"instrumental":{"bytes":4}}}})).unwrap()).unwrap();
+        assert!(ready_in(&cache, &source).is_some());
+        fs::write(&source, b"new version").unwrap();
+        assert!(ready_in(&cache, &source).is_none());
+        assert_eq!(fs::read(&source).unwrap(), b"new version");
+    }
+}

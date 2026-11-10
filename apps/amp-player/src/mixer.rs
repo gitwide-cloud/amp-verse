@@ -5,6 +5,7 @@ use std::{
     collections::VecDeque,
     io::Read,
     path::Path,
+    process::Stdio,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Relaxed},
@@ -13,6 +14,7 @@ use std::{
     time::Duration,
 };
 type Frame = [f32; 2];
+type DeckFrame = [f32; 4];
 fn atom(v: f32) -> AtomicU32 {
     AtomicU32::new(v.to_bits())
 }
@@ -41,6 +43,8 @@ pub struct Controls {
     pub scratch_rate: [AtomicU32; 2],
     pub eq: [[AtomicU32; 3]; 2],
     pub trim_db: [AtomicU32; 2],
+    pub stem_level: [[AtomicU32; 2]; 2],
+    pub stems_loaded: [AtomicBool; 2],
     pub eq_kill: [[AtomicBool; 3]; 2],
     pub sweep: [AtomicU32; 2],
     pub cue: [AtomicBool; 2],
@@ -82,6 +86,8 @@ impl Default for Controls {
             scratch_rate: std::array::from_fn(|_| atom(0.)),
             eq: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             trim_db: std::array::from_fn(|_| atom(0.)),
+            stem_level: std::array::from_fn(|_| std::array::from_fn(|_| atom(1.))),
+            stems_loaded: std::array::from_fn(|_| AtomicBool::new(false)),
             eq_kill: std::array::from_fn(|_| std::array::from_fn(|_| AtomicBool::new(false))),
             sweep: std::array::from_fn(|_| atom(0.)),
             cue: std::array::from_fn(|_| AtomicBool::new(false)),
@@ -105,22 +111,23 @@ impl Default for Controls {
     }
 }
 struct Source {
-    ring: Consumer<Frame>,
+    ring: Consumer<DeckFrame>,
     duration: Arc<AtomicU64>,
     done: Arc<AtomicBool>,
-    history: VecDeque<Frame>,
+    history: VecDeque<DeckFrame>,
     history_start: u64,
     position: f64,
     primed: bool,
+    separated: bool,
 }
 impl Source {
     fn buffered(&self, rate: u32) -> bool {
         self.ring.slots() >= rate as usize / 4
             || (self.done.load(std::sync::atomic::Ordering::Acquire) && self.ring.slots() > 1)
     }
-    fn next(&mut self, rate: f32) -> Option<Frame> {
+    fn next(&mut self, rate: f32) -> Option<DeckFrame> {
         if rate.abs() < 0.0001 {
-            return Some([0.; 2]);
+            return Some([0.; 4]);
         }
         self.position = self.position.max(self.history_start as f64);
         let index = self.position.floor() as u64;
@@ -144,7 +151,7 @@ impl Source {
     }
 }
 struct Loop {
-    frames: Vec<Frame>,
+    frames: Vec<DeckFrame>,
     length: usize,
     phase: f64,
     origin: f64,
@@ -159,6 +166,7 @@ struct Voice {
     filter: Frame,
     sweep_state: Frame,
     trim: f32,
+    stem_mix: [f32; 2],
     gain: f32,
     looped: Option<Loop>,
 }
@@ -195,7 +203,7 @@ enum Command {
     Fader(f32),
     Fade { to: f32, seconds: f32 },
     Cancel,
-    Loop(usize, Option<Vec<Frame>>),
+    Loop(usize, Option<Vec<DeckFrame>>),
 }
 struct Mixer {
     voices: [Voice; 2],
@@ -276,8 +284,10 @@ impl Mixer {
                     self.levels[d] = None;
                     self.controls.scratching[d].store(false, Relaxed);
                     self.controls.play[d].store(play, Relaxed);
+                    self.controls.stems_loaded[d].store(s.separated, Relaxed);
                     self.voices[d] = Voice {
                         source: Some(s),
+                        stem_mix: [1.; 2],
                         trim: 10f32.powf(get(&self.controls.trim_db[d]).clamp(-12., 12.) / 20.),
                         ..Default::default()
                     };
@@ -498,7 +508,7 @@ impl Mixer {
                 } else {
                     source.next(rates[d])
                 };
-                let Some(mut frame) = frame else {
+                let Some(frame) = frame else {
                     if source.done.load(std::sync::atomic::Ordering::Acquire) {
                         c.play[d].store(false, Relaxed);
                         c.finished[d].store(true, Relaxed);
@@ -516,6 +526,17 @@ impl Mixer {
                         l.capturing = false;
                     }
                 }
+                for stem in 0..2 {
+                    v.stem_mix[stem] +=
+                        (get(&c.stem_level[d][stem]).clamp(0., 1.) - v.stem_mix[stem]) * 0.004;
+                }
+                let mut frame: Frame = if source.separated {
+                    std::array::from_fn(|ch| {
+                        frame[ch] * v.stem_mix[0] + frame[ch + 2] * v.stem_mix[1]
+                    })
+                } else {
+                    [frame[0], frame[1]]
+                };
                 v.gain += (get(&c.gain[d]).clamp(0., 1.) - v.gain) * 0.004;
                 v.trim += (trims[d] - v.trim) * 0.004;
                 for ch in 0..2 {
@@ -702,15 +723,27 @@ impl Engine {
         track: &amp_core::Track,
         play: bool,
     ) -> Result<(), String> {
+        let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
+        self.load_with_stems(deck, root, track, play, crate::stems::ready(&path))
+    }
+    fn load_with_stems(
+        &mut self,
+        deck: usize,
+        root: &Path,
+        track: &amp_core::Track,
+        play: bool,
+        stems: Option<[std::path::PathBuf; 2]>,
+    ) -> Result<(), String> {
         track.preparation.validate()?;
         self.source_start[deck] = track.preparation.cue_in;
         let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
+        let separated = stems.is_some();
         if let Some(cancel) = self.cancel[deck].take() {
             cancel.store(true, Relaxed);
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
-        let (mut producer, consumer) = RingBuffer::<Frame>::new(self.sample_rate as usize * 4);
+        let (mut producer, consumer) = RingBuffer::<DeckFrame>::new(self.sample_rate as usize * 4);
         let rate = self.sample_rate;
         let prep = track.preparation.clone();
         let duration = Arc::new(AtomicU64::new(
@@ -747,24 +780,29 @@ impl Engine {
                         Relaxed,
                     );
                 }
-                let mut child = amp_core::command("ffmpeg")
-                    .args(["-v", "error"])
-                    .args(amp_core::cue_args(&prep)?)
-                    .arg("-i")
-                    .arg(path)
+                let mut command = amp_core::command("ffmpeg");
+                command.args(["-v", "error"]);
+                if let Some([vocals, instruments]) = stems {
+                    command.args(amp_core::cue_args(&prep)?).arg("-i").arg(vocals)
+                        .args(amp_core::cue_args(&prep)?).arg("-i").arg(instruments)
+                        .args(["-filter_complex", "[0:a][1:a]join=inputs=2:channel_layout=quad:map=0.0-FL|0.1-FR|1.0-BL|1.1-BR[out]", "-map", "[out]"]);
+                } else {
+                    command.args(amp_core::cue_args(&prep)?).arg("-i").arg(path);
+                }
+                let mut child = command
                     .args([
                         "-vn",
                         "-ac",
-                        "2",
+                        if separated { "4" } else { "2" },
                         "-ar",
                         &rate.to_string(),
                         "-f",
                         "f32le",
                         "pipe:1",
                     ])
-                    .stdin(std::process::Stdio::null())
-                    .stdout(std::process::Stdio::piped())
-                    .stderr(std::process::Stdio::null())
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
                     .spawn()
                     .map_err(|e| e.to_string())?;
                 let decoded: Result<(), String> = (|| {
@@ -787,14 +825,18 @@ impl Engine {
                         if n == 0 {
                             break;
                         }
-                        if n % 8 != 0 {
+                        let frame_bytes = if separated { 16 } else { 8 };
+                        if n % frame_bytes != 0 {
                             return Err("Incomplete PCM frame".into());
                         }
-                        for b in bytes[..n].as_chunks::<8>().0 {
-                            let mut frame = [
-                                f32::from_le_bytes(b[..4].try_into().unwrap()),
-                                f32::from_le_bytes(b[4..].try_into().unwrap()),
-                            ];
+                        for b in bytes[..n].chunks_exact(frame_bytes) {
+                            let mut frame: DeckFrame = std::array::from_fn(|ch| {
+                                if ch < frame_bytes / 4 {
+                                    f32::from_le_bytes(b[ch * 4..ch * 4 + 4].try_into().unwrap())
+                                } else {
+                                    0.
+                                }
+                            });
                             if frame.iter().any(|s| !s.is_finite()) {
                                 return Err("Invalid decoded PCM".into());
                             }
@@ -846,6 +888,7 @@ impl Engine {
                 history_start: 0,
                 position: 0.,
                 primed: false,
+                separated,
             },
             play,
             generation,
@@ -1105,7 +1148,7 @@ mod tests {
     fn source(value: f32, frames: usize) -> Source {
         let (mut p, c) = RingBuffer::new(frames + 1);
         for _ in 0..frames {
-            p.push([value, value]).unwrap();
+            p.push([value, value, 0., 0.]).unwrap();
         }
         Source {
             ring: c,
@@ -1115,6 +1158,7 @@ mod tests {
             history_start: 0,
             position: 0.,
             primed: false,
+            separated: false,
         }
     }
     #[test]
@@ -1143,7 +1187,9 @@ mod tests {
     fn scratch_reads_audio_in_both_directions_without_growing_history() {
         let (mut producer, consumer) = RingBuffer::new(65);
         for frame in 0..64 {
-            producer.push([frame as f32, -(frame as f32)]).unwrap();
+            producer
+                .push([frame as f32, -(frame as f32), 0., 0.])
+                .unwrap();
         }
         let mut source = Source {
             ring: consumer,
@@ -1153,14 +1199,15 @@ mod tests {
             history_start: 0,
             position: 0.,
             primed: true,
+            separated: false,
         };
         for expected in 0..12 {
             assert_eq!(source.next(1.).unwrap()[0], expected as f32);
         }
-        assert_eq!(source.next(-1.).unwrap(), [12., -12.]);
-        assert_eq!(source.next(-1.).unwrap(), [11., -11.]);
-        assert_eq!(source.next(-1.).unwrap(), [10., -10.]);
-        assert_eq!(source.next(0.), Some([0.; 2]));
+        assert_eq!(source.next(-1.).unwrap(), [12., -12., 0., 0.]);
+        assert_eq!(source.next(-1.).unwrap(), [11., -11., 0., 0.]);
+        assert_eq!(source.next(-1.).unwrap(), [10., -10., 0., 0.]);
+        assert_eq!(source.next(0.), Some([0.; 4]));
         assert_eq!(source.position, 9.);
         assert_eq!(source.next(0.5).unwrap()[0], 9.);
         assert_eq!(source.next(0.5).unwrap()[0], 9.5);
@@ -1393,6 +1440,104 @@ mod tests {
         assert!(engine.take_error().is_none());
     }
     #[test]
+    fn stem_levels_share_transport_and_sum_without_touching_original_mode() {
+        let c = Arc::new(Controls::default());
+        set(&c.master, 1.);
+        let (tx, rx) = mpsc::sync_channel(8);
+        let (mut producer, consumer) = RingBuffer::new(12000);
+        for _ in 0..11000 {
+            producer.push([0.2, 0.1, -0.05, 0.1]).unwrap();
+        }
+        let mut voice = source(0., 2);
+        voice.ring = consumer;
+        voice.separated = true;
+        tx.send(Command::Load(0, voice, true, 1)).unwrap();
+        let mut mixer = Mixer::new(1000, rx, c.clone());
+        mixer.render(2000, |_, _| {});
+        let mut sum = [0.; 2];
+        mixer.render(1, |_, f| sum = f);
+        assert!((sum[0] / std::f32::consts::FRAC_1_SQRT_2 - 0.15).abs() < 0.001);
+        assert!((sum[1] / std::f32::consts::FRAC_1_SQRT_2 - 0.2).abs() < 0.001);
+        set(&c.stem_level[0][0], 0.);
+        mixer.render(2000, |_, _| {});
+        let mut instrumental = [0.; 2];
+        mixer.render(1, |_, f| instrumental = f);
+        assert!((instrumental[0] / std::f32::consts::FRAC_1_SQRT_2 + 0.05).abs() < 0.001);
+        set(&c.stem_level[0][0], 1.);
+        set(&c.stem_level[0][1], 0.);
+        mixer.render(2000, |_, _| {});
+        let mut vocals = [0.; 2];
+        mixer.render(1, |_, f| vocals = f);
+        assert!((vocals[0] / std::f32::consts::FRAC_1_SQRT_2 - 0.2).abs() < 0.001);
+        assert!(c.play[0].load(Relaxed));
+        assert!(c.stems_loaded[0].load(Relaxed));
+        assert_eq!(c.position[0].load(Relaxed), 6003);
+    }
+    #[test]
+    #[ignore = "requires FFmpeg and native audio; output muted"]
+    fn native_prepared_stems_decode_in_lockstep_at_saved_cue() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = [
+            dir.path().join("vocals.wav"),
+            dir.path().join("instrumental.wav"),
+        ];
+        for (index, path) in paths.iter().enumerate() {
+            assert!(
+                amp_core::command("ffmpeg")
+                    .args([
+                        "-v",
+                        "error",
+                        "-f",
+                        "lavfi",
+                        "-i",
+                        if index == 0 {
+                            "sine=frequency=440:duration=3"
+                        } else {
+                            "sine=frequency=220:duration=3"
+                        },
+                        "-ac",
+                        "2",
+                        "-c:a",
+                        "pcm_f32le"
+                    ])
+                    .arg(path)
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let track = amp_core::Track {
+            title: "Prepared test".into(),
+            path: "vocals.wav".into(),
+            preparation: amp_core::Preparation {
+                cue_in: 0.5,
+                cue_out: Some(2.5),
+                ..Default::default()
+            },
+        };
+        let mut engine = Engine::new().unwrap();
+        engine.set_master(0.);
+        engine
+            .load_with_stems(0, dir.path(), &track, false, Some(paths))
+            .unwrap();
+        let until = std::time::Instant::now() + Duration::from_secs(5);
+        while !engine.controls.ready[0].load(Relaxed) {
+            assert!(
+                std::time::Instant::now() < until,
+                "{:?}",
+                engine.take_decode_errors()
+            );
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(engine.controls.stems_loaded[0].load(Relaxed));
+        assert!((engine.source_position(0) - 0.5).abs() < 0.001);
+        engine.controls.play[0].store(true, Relaxed);
+        std::thread::sleep(Duration::from_millis(150));
+        assert!(engine.position(0) > 0.05);
+        assert!(engine.take_decode_errors().is_empty());
+        engine.stop(0);
+    }
+    #[test]
     fn headphone_cue_is_pre_fader_and_trim_and_kills_affect_both_buses() {
         let controls = Arc::new(Controls::default());
         set(&controls.master, 0.);
@@ -1462,7 +1607,7 @@ mod tests {
             let (mut producer, consumer) = RingBuffer::new(10000);
             for i in 0..8000 {
                 let value = (std::f32::consts::TAU * frequency * i as f32 / 48000.).sin() * 0.2;
-                producer.push([value, value]).unwrap();
+                producer.push([value, value, 0., 0.]).unwrap();
             }
             let mut voice = source(0., 2);
             voice.ring = consumer;
@@ -1490,7 +1635,7 @@ mod tests {
             let (mut producer, consumer) = RingBuffer::new(10000);
             for i in 0..8000 {
                 let value = (std::f32::consts::TAU * 8000. * i as f32 / 48000.).sin() * 0.2;
-                producer.push([value, value]).unwrap();
+                producer.push([value, value, 0., 0.]).unwrap();
             }
             let mut voice = source(0., 2);
             voice.ring = consumer;
@@ -1578,6 +1723,7 @@ mod tests {
                 history_start: 0,
                 position: 0.,
                 primed: false,
+                separated: false,
             },
             false,
             0,

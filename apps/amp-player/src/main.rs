@@ -31,6 +31,7 @@ mod skin;
 mod smart_actions;
 mod smart_preview;
 mod station_download;
+mod stems;
 mod theme;
 mod waveform;
 mod window_layout;
@@ -137,6 +138,7 @@ struct Player {
     jog_resume: [Option<(bool, egui::ViewportId)>; 2],
     jog_angle: [f32; 2],
     mixer_panel: dj_mixer::Panel,
+    stem_panel: stems::Panel,
     eq_open: bool,
     fx_open: bool,
     eq: [[f32; 3]; 2],
@@ -220,6 +222,7 @@ impl Default for Player {
             jog_resume: [None; 2],
             jog_angle: [0.; 2],
             mixer_panel: Default::default(),
+            stem_panel: Default::default(),
             eq_open: false,
             fx_open: false,
             eq: [[0.; 3]; 2],
@@ -2362,7 +2365,11 @@ impl Player {
                 let track=self.loaded_track(deck);
                 ui.label(track.map(|t|format!("{} BPM   {}",t.preparation.bpm.map(|b|format!("{:.1}",b*(1.+self.pitch[deck]as f64/100.))).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--"))).unwrap_or_else(||"Load a track from the library".into()));
                 ui.separator();
-                ui.add_space(10.);
+                let stem_path = self.loaded_track(deck).map(|track| self.loaded_origin[deck].as_deref().unwrap_or(&self.root).join(&track.path));
+                if self.stem_panel.show(ui, deck, stem_path.as_deref(), self.audio.as_ref(), !self.run.auto && !self.playing[deck])
+                    && let Some(path) = stem_path
+                    && let Err(error) = self.safe_load_path(deck, path, None) { self.status = error; }
+                ui.add_space(4.);
                 if self.dj_cues[deck] {
                     egui::ScrollArea::vertical().id_salt(("deck-cues", deck)).max_height(platter_side).show(ui, |ui| self.main_hot_cues(ui, deck, accent));
                 } else {

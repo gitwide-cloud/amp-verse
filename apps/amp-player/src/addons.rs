@@ -12,7 +12,7 @@ struct Entry {
     summary: &'static str,
     features: &'static [&'static str],
 }
-const ENTRIES: [Entry; 6] = [
+const ENTRIES: [Entry; 7] = [
     Entry {
         name: "AMP VERSE",
         kind: "Included",
@@ -75,6 +75,17 @@ const ENTRIES: [Entry; 6] = [
             "Shared-library leases and protected manual metadata",
             "Runs only when analysis is requested",
             "Requires FFmpeg; install a build matching your OS",
+        ],
+    },
+    Entry {
+        name: "AMP Stem Separator",
+        kind: "Optional",
+        summary: "Prepare real vocal and instrumental audio for live deck controls.",
+        features: &[
+            "Local Demucs separation; music is never uploaded",
+            "Per-deck levels, mute and solo on a shared playback clock",
+            "Background preparation with cancel and reusable local cache",
+            "Original audio and saved cues remain unchanged",
         ],
     },
 ];
@@ -227,6 +238,12 @@ impl Manager {
                         if let Some(path)=&self.lab {ui.add(egui::Label::new(path.display().to_string()).truncate());}
                         if ui.add_enabled(self.lab.as_ref().is_some_and(|p|p.is_file()),egui::Button::new("Open editor")).clicked() {self.launch_lab();}
                         ui.weak("The connected executable stays separate. Use AMP_LAB_EXE to configure it at startup; picker connections last for this session.");
+                    },
+                    6=>{
+                        ui.label(if crate::stems::runtime().is_some() { "Stem add-on installed" } else { "Stem add-on not installed" });
+                        if skin::button(ui,"OPEN AMP DJ",GOLD).clicked() { action=Some(Module::Dj); }
+                        ui.weak("Load a song, open Stems on its deck, then Prepare stems. Playback stays unchanged until a prepared deck is loaded.");
+                        ui.hyperlink_to("Stem setup guide", "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md");
                     },
                     _=>{
                         let installed=crate::engine::path();

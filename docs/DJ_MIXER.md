@@ -70,3 +70,8 @@ The Filter dial sweeps left to low-pass, stays neutral in the center, and sweeps
 Open Headphones / output and select an output device. Use a different device from the main speakers for private monitoring. CUE selects a playing deck before its channel fader and the crossfader. It does not start or stop that deck. Cue / Master blends the selected cue channels with the live master mix; Phones controls the monitoring level independently. Turning headphone output off leaves the main mix running.
 
 When the library is enlarged, the mixer can be scrolled to reach its lower controls.
+
+
+## Prepared stem controls
+
+AMP DJ now supports optional prepared vocal/instrumental separation with independent Level, Mute and Solo controls on each deck. This is separate from frequency EQ. See [STEMS.md](STEMS.md) for setup, preparation and device-local cache behavior.
