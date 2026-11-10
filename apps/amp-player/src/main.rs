@@ -14,6 +14,7 @@ mod docking;
 mod dragdrop;
 mod engine;
 mod engine_download;
+mod hot_cues;
 mod icons;
 mod lab;
 mod lab_editor;
@@ -2000,12 +2001,9 @@ impl Player {
                     .track
                     .as_ref()
                     .and_then(|track| {
-                        track
-                            .preparation
-                            .manual_cues
-                            .iter()
-                            .chain(&track.preparation.cues)
-                            .nth(number.saturating_sub(1))
+                        u16::try_from(number)
+                            .ok()
+                            .and_then(|number| hot_cues::slot(&track.preparation, number))
                     })
                     .filter(|_| number > 0)
                     .ok_or("Cue number not found")?
@@ -2250,7 +2248,7 @@ impl Player {
     }
     fn deck_ui(&mut self, ui: &mut egui::Ui, deck: usize, width: f32, height: f32) {
         let accent = if deck == 0 { ORANGE } else { CYAN };
-        let platter_side = (height - 190.).clamp(80., 170.);
+        let platter_side = (height - 300.).clamp(32., 170.);
         let area=ui.allocate_ui_with_layout(egui::vec2(width,0.),egui::Layout::top_down(egui::Align::Center),|ui|{
             skin::panel(ui,true,|ui|{ui.set_width(width-18.);
                 ui.horizontal(|ui|{skin::label(ui,if deck==0{"DECK A"}else{"DECK B"});let position=self.audio.as_ref().map_or(0.,|a|a.position(deck));ui.label(RichText::new(format!("{:02}:{:02}",position as u64/60,position as u64%60)).monospace().color(skin::signal(ui)));});
@@ -2265,7 +2263,6 @@ impl Player {
                     if ui.button("STOP").clicked(){self.stop(deck);}
                 });
                 ui.ctx().data_mut(|d|{d.insert_temp(egui::Id::unique(("dj-transport",deck)),transport.response.rect);d.insert_temp(egui::Id::unique(("dj-transport",deck)).with("screen"),(transport.response.rect,ui.layer_id()));});
-                let cues=self.loaded_track(deck).map(|track|track.preparation.manual_cues.iter().chain(&track.preparation.cues).take(16).cloned().collect::<Vec<_>>());
                 ui.horizontal_wrapped(|ui| {
                     if ui.button("Seek -").on_hover_text("Seek back 1 second; Shift: 5 seconds").clicked() { self.seek_deck_relative(deck, if ui.input(|i|i.modifiers.shift) {-5.} else {-1.}); }
                     if ui.button("Seek +").on_hover_text("Seek forward 1 second; Shift: 5 seconds").clicked() { self.seek_deck_relative(deck, if ui.input(|i|i.modifiers.shift) {5.} else {1.}); }
@@ -2275,11 +2272,22 @@ impl Player {
                         if let Some(a)=&self.audio&&let Err(e)=a.loop_toggle(deck,seconds as f32){self.status=e;}
                     }
                     if ui.button("Pitch reset").clicked(){self.pitch[deck]=0.;if let Some(a)=&self.audio{a.set_rate(deck,1.);}}
-                    ui.menu_button("Hot cues",|ui| {
-                        if let Some(cues)=&cues {for cue in cues {if ui.button(&cue.label).clicked(){let position=self.audio.as_ref().map_or(0.,|audio|audio.source_position(deck));self.seek_deck_relative(deck,cue.seconds-position);ui.close();}}}
-                        else {ui.weak("Load a prepared track first");}
-                    });
+
                 });
+                let prep = self.loaded_track(deck).map(|t| t.preparation.clone());
+                if let Some(action) = hot_cues::pads(ui, prep.as_ref(), accent) {
+                    let position = self.audio.as_ref().map_or(0., |a| a.source_position(deck));
+                    match action {
+                        hot_cues::Action::Jump(seconds) => self.seek_deck_relative(deck, seconds - position),
+                        _ => if let Some(track) = self.loaded_track(deck).cloned() {
+                            let path = self.loaded_origin[deck].as_deref().unwrap_or(&self.root).join(&track.path);
+                            match hot_cues::edit(self.loaded_origin[deck].as_deref().unwrap_or(&self.root), &path, &track.preparation, action, position) {
+                                Ok(saved) => { let mut snapshot = track; hot_cues::update_snapshot(&mut snapshot.preparation, saved); self.loaded_snapshot[deck] = Some(snapshot); },
+                                Err(error) => self.status = error,
+                            }
+                        }
+                    }
+                }
             });
         });
         let response = ui
@@ -3028,7 +3036,18 @@ mod window_tests {
         let track = amp_core::Track {
             path: PathBuf::from("song.wav"),
             title: long.clone(),
-            preparation: Default::default(),
+            preparation: amp_core::Preparation {
+                manual_cues: (1..=8)
+                    .map(|number| amp_core::preparation::Cue {
+                        id: format!("cue-{number}"),
+                        label: long.clone(),
+                        number: Some(number),
+                        seconds: 12.,
+                        ..Default::default()
+                    })
+                    .collect(),
+                ..Default::default()
+            },
         };
         let mut player = Player {
             library: Some(Library {

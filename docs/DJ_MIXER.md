@@ -28,3 +28,12 @@ AMP DJ has a collapsible 3×3 sampler above the deck controls. Load a short effe
 File assignments and volumes are saved in `sampler.json` beside the theme settings and reloaded in the background when DJ opens. Files stay at their chosen paths; they are not copied into the library or bundled with the app. Missing/unreadable files are reported. FFmpeg decodes stereo PCM to the actual output device rate before a pad is ready. Limits are 30 seconds and 12 MiB decoded PCM per pad; longer effects are rejected rather than silently cut. Nine buffers can use up to 108 MiB plus decoding overhead. The shared output has existing headroom and final clipping protection; set sampler/pad levels appropriately when layering loud effects.
 
 The CPAL callback mixes the nine resident voices alongside the decks, with 5 ms file-edge attack/release, no file access or sample allocation on trigger. Retrigger restarts that pad; it does not add another voice for the same pad. Acknowledged buffer retirement keeps large sample-buffer deallocation on the UI thread. A sampler does not replace the deck loops: tempo sync, sample looping, recording, slicing and MIDI triggering are not implemented.
+
+
+## Hot-cue pads
+
+Main decks and auxiliary Cue Decks show eight numbered hot-cue pads. Click an empty pad to save the current source position; click an occupied pad to seek there, preserving the current playing/paused state. Each pad displays its slot number and source time; hover for its saved name and exact position. Right-click to replace its position or clear it. Additional saved and unnumbered analysis cues remain available under More saved / analysis cues.
+
+Explicit pad edits are saved in portable preparation metadata using revision checks. A same-slot change from another device is rejected until the track is reloaded; unrelated newer fields are preserved. Cue names, IDs and custom fields survive position replacements. Editing pads does not reload the active beatgrid, tempo or cue-in/out snapshot. These jumps still use replacement decoders: sample-instant stutter, cue quantization and key-lock are not implemented.
+
+The side Cue Deck remains an independent audio deck with its own transport and output selection. Send A is amber; Send B is cyan. Mixed In Key results are not imported by installing that application: an explicit compatible importer is still required.

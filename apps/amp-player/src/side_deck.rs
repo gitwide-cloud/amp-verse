@@ -367,40 +367,28 @@ impl SideDeck {
                 self.status = error;
             }
         });
-        ui.menu_button("Saved hot cues", |ui| {
-            let cues = self
-                .track
-                .as_ref()
-                .map(|track| {
-                    track
-                        .preparation
-                        .manual_cues
-                        .iter()
-                        .chain(&track.preparation.cues)
-                        .cloned()
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            if cues.is_empty() {
-                ui.weak("No saved cues on this track");
-            }
-            for (index, cue) in cues.iter().enumerate() {
-                if ui
-                    .button(format!(
-                        "{} · {} ({:.1}s)",
-                        index + 1,
-                        cue.label,
-                        cue.seconds
-                    ))
-                    .clicked()
-                {
-                    if let Err(error) = self.seek(cue.seconds) {
-                        self.status = error;
+        let prep = self.track.as_ref().map(|t| t.preparation.clone());
+        if let Some(action) = crate::hot_cues::pads(ui, prep.as_ref(), accent) {
+            let result = match action {
+                crate::hot_cues::Action::Jump(seconds) => self.seek(seconds),
+                _ => {
+                    if let (Some(path), Some(prep)) = (&self.config.path, &prep) {
+                        crate::hot_cues::edit(&self.root, path, prep, action, self.position()).map(
+                            |saved| {
+                                if let Some(track) = &mut self.track {
+                                    crate::hot_cues::update_snapshot(&mut track.preparation, saved);
+                                }
+                            },
+                        )
+                    } else {
+                        Err("Load a track first".into())
                     }
-                    ui.close();
                 }
+            };
+            if let Err(error) = result {
+                self.status = error;
             }
-        });
+        }
         ui.horizontal(|ui| {
             ui.label("Send →");
             for (deck, label, color) in [(0, "A", crate::skin::ORANGE), (1, "B", crate::skin::CYAN)]
