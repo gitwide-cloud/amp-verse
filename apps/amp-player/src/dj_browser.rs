@@ -32,7 +32,14 @@ fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
 }
 impl Player {
     pub(super) fn dj_library_ui(&mut self, ui: &mut egui::Ui) {
-        let height = ui.available_height().clamp(240., 420.);
+        let height = ui.available_height().max(180.);
+        let sidebar_id = egui::Id::unique("dj-source-width");
+        let sidebar_max = (ui.available_width() * 0.35).clamp(150., 400.);
+        let mut sidebar_width = ui
+            .ctx()
+            .data_mut(|d| d.get_persisted::<f32>(sidebar_id))
+            .unwrap_or(195.)
+            .clamp(150., sidebar_max);
         skin::label(ui, "DJ Library");
         let mut auto = self.run.auto;
         let mut toggle = false;
@@ -44,10 +51,10 @@ impl Player {
         let mut context_edit = None;
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
-                egui::vec2(195., height - 30.),
+                egui::vec2(sidebar_width, height - 30.),
                 egui::Layout::top_down(egui::Align::Min),
                 |ui| {
-                    ui.set_width(195.);
+                    ui.set_width(sidebar_width);
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
                     let label = if auto {
                         "Auto Mix: ON"
@@ -129,7 +136,8 @@ impl Player {
                         });
                 },
             );
-            ui.separator();
+            window_layout::splitter(ui, "dj-source-divider", &mut sidebar_width, 150. ..=sidebar_max, true, 1., height - 30.);
+            ui.ctx().data_mut(|d| d.insert_persisted(sidebar_id, sidebar_width));
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
                 ui.add(

@@ -1020,11 +1020,16 @@ impl Player {
                     i.viewport().maximized == Some(true) || i.viewport().fullscreen == Some(true)
                 }),
             );
+            let wave_height = ui
+                .ctx()
+                .data_mut(|d| d.get_persisted::<f32>(egui::Id::unique("dj-wave-height")))
+                .unwrap_or(72.)
+                .clamp(56., 140.);
             let preferred = |p| {
                 if p == 0 {
                     135.
                 } else if p == 2 {
-                    if expanded_dj { 1100. } else { 920. }
+                    (if expanded_dj { 1100. } else { 920. }) + (wave_height - 72.).max(0.) * 2.
                 } else {
                     680.
                 }
@@ -1811,28 +1816,48 @@ impl Player {
             self.header(ui, "AMP DJ", true);
             self.performance_controls(ui);
             ui.add_space(12.);
-            egui::CollapsingHeader::new("Waveforms and transition options")
+            let wave_id = egui::Id::unique("dj-wave-height");
+            let mut wave_height = ui
+                .ctx()
+                .data_mut(|d| d.get_persisted::<f32>(wave_id))
+                .unwrap_or(72.)
+                .clamp(56., 140.);
+            for d in 0..2 {
+                let track = self.loaded_track(d).cloned();
+                let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
+                self.waveforms[d].height = Some(wave_height);
+                self.waveforms[d].show(
+                    ui,
+                    self.loaded_origin[d].as_deref().unwrap_or(&self.root),
+                    track.as_ref(),
+                    position,
+                    self.wave_span,
+                    d,
+                );
+            }
+            window_layout::splitter(
+                ui,
+                "dj-wave-divider",
+                &mut wave_height,
+                56. ..=140.,
+                false,
+                0.5,
+                10.,
+            );
+            ui.ctx()
+                .data_mut(|d| d.insert_persisted(wave_id, wave_height));
+            egui::CollapsingHeader::new("Transition options")
                 .id_salt("dj-advanced")
                 .show(ui, |ui| {
                     ui.toggle_value(&mut self.run.scratch_assist, "Scratch assist");
                     ui.add(
                         egui::Slider::new(&mut self.fade_seconds, 0.5..=30.).text("Mix seconds"),
                     );
-                    for d in 0..2 {
-                        let track = self.loaded_track(d).cloned();
-                        let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
-                        self.waveforms[d].height = Some(26.);
-                        self.waveforms[d].show(
-                            ui,
-                            self.loaded_origin[d].as_deref().unwrap_or(&self.root),
-                            track.as_ref(),
-                            position,
-                            self.wave_span,
-                            d,
-                        );
-                    }
+                    ui.add(
+                        egui::Slider::new(&mut self.wave_span, 4. ..=60.).text("Waveform seconds"),
+                    );
                 });
-            ui.add_space(12.);
+            ui.add_space(8.);
             let pads_below = window_layout::dj_pads_below(
                 ui.ctx().viewport_rect().size(),
                 ui.input(|i| {
@@ -1840,8 +1865,14 @@ impl Player {
                 }),
             );
             let bank_height = if pads_below { 230. } else { 0. };
-            let browser_height = (ui.available_height() * 0.34).clamp(240., 340.);
-            let height = (ui.available_height() - browser_height - 50.).max(230.);
+            let library_id = egui::Id::unique("dj-library-height");
+            let library_max = (ui.available_height() - 90. - 330. - bank_height).max(180.);
+            let mut browser_height = ui
+                .ctx()
+                .data_mut(|d| d.get_persisted::<f32>(library_id))
+                .unwrap_or(250.)
+                .clamp(180., library_max);
+            let height = (ui.available_height() - browser_height - 90.).max(330. + bank_height);
             let side_widths = std::array::from_fn::<_, 2, _>(|side| {
                 if pads_below {
                     0.
@@ -1912,7 +1943,9 @@ impl Player {
                             let fade = ui.add_sized(
                                 [140., 54.],
                                 egui::Button::new(
-                                    RichText::new(if fading {
+                                    RichText::new(if fading && self.run.profile.is_some() {
+                                        "Mixing…"
+                                    } else if fading {
                                         "Cancel mix"
                                     } else {
                                         "Auto crossfade"
@@ -1974,7 +2007,17 @@ impl Player {
                     );
                 ui.add(egui::Label::new(&self.status).truncate());
             });
-            ui.separator();
+            window_layout::splitter(
+                ui,
+                "dj-library-divider",
+                &mut browser_height,
+                180. ..=library_max,
+                false,
+                -1.,
+                10.,
+            );
+            ui.ctx()
+                .data_mut(|d| d.insert_persisted(library_id, browser_height));
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), browser_height),
                 egui::Layout::top_down(egui::Align::Min),
@@ -3276,6 +3319,39 @@ mod window_tests {
                         "{size:?}: content escaped {screen:?}"
                     );
                 }
+            }
+        }
+    }
+    #[test]
+    fn enlarged_waveforms_and_library_remain_inside_the_window() {
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        ctx.data_mut(|d| {
+            d.insert_persisted(egui::Id::unique("dj-wave-height"), 140_f32);
+            d.insert_persisted(egui::Id::unique("dj-library-height"), 600_f32);
+            d.insert_persisted(egui::Id::unique("dj-source-width"), 400_f32);
+        });
+        for size in [egui::vec2(740., 480.), egui::vec2(1920., 1080.)] {
+            for _ in 0..2 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |ui| player.group_ui(ui, 2),
+                );
+                output.textures_delta.clear();
+                let rect = ctx
+                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique(("pane-bounds", 2usize))))
+                    .unwrap();
+                let layer = ctx
+                    .data(|d| d.get_temp::<egui::LayerId>(egui::Id::unique(("pane-layer", 2usize))))
+                    .unwrap();
+                let screen = ctx.layer_transform_to_global(layer).unwrap_or_default() * rect;
+                assert!(
+                    screen.right() <= size.x + 1. && screen.bottom() <= size.y + 1.,
+                    "{size:?}: {screen:?}"
+                );
             }
         }
     }

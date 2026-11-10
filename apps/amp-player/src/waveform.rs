@@ -77,6 +77,14 @@ fn decode(path: &Path, cancel: &AtomicBool) -> Result<Vec<[f32; 2]>, String> {
 fn time_x(time: f64, position: f64, span: f64, rect: egui::Rect) -> f32 {
     rect.left() + ((time - position) / span + 0.3) as f32 * rect.width()
 }
+// Keep a real graph area even in compact lanes; headers must not invert it.
+fn graph_rect(rect: egui::Rect) -> egui::Rect {
+    let top = rect.top() + 16_f32.min(rect.height() * 0.3);
+    egui::Rect::from_min_max(
+        egui::pos2(rect.left(), top),
+        egui::pos2(rect.right(), rect.bottom() - 3.),
+    )
+}
 impl Lane {
     pub fn show(
         &mut self,
@@ -136,7 +144,7 @@ impl Lane {
         );
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3., Color32::from_rgb(5, 7, 10));
-        let graph = rect.shrink2(egui::vec2(0., 20.));
+        let graph = graph_rect(rect);
         let start = position - span * 0.3;
         if let Some(t) = track {
             if let Some(bpm) = t.preparation.bpm.filter(|b| *b > 0.) {
@@ -289,6 +297,15 @@ mod tests {
         );
         assert!(peaks[60..400].iter().any(|p| p[1] > 0.01 && p[0] < -0.01));
         assert!(decode(Path::new(&path), &AtomicBool::new(true)).is_err());
+    }
+    #[test]
+    fn compact_waveforms_have_positive_visible_signal_area() {
+        for height in [26., 56., 72., 140.] {
+            let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800., height));
+            let graph = graph_rect(rect);
+            assert!(graph.height() >= height * 0.5);
+            assert!(rect.contains_rect(graph));
+        }
     }
     #[test]
     fn cues_scroll_past_fixed_playhead() {

@@ -249,9 +249,117 @@ pub fn dj_pads_below(size: egui::Vec2, expanded: bool) -> bool {
     expanded && size.x >= 1200. && size.y >= 850.
 }
 
+/// Visible, bounded drag divider. Direction controls which adjacent panel grows.
+pub fn splitter(
+    ui: &mut egui::Ui,
+    id: &str,
+    value: &mut f32,
+    range: std::ops::RangeInclusive<f32>,
+    vertical: bool,
+    direction: f32,
+    length: f32,
+) {
+    let size = if vertical {
+        egui::vec2(10., length)
+    } else {
+        egui::vec2(ui.available_width(), length)
+    };
+    let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
+    let response = ui.interact(rect, egui::Id::unique(id), egui::Sense::drag());
+    if response.dragged() {
+        let delta = ui.input(|i| i.pointer.delta());
+        *value = (*value + if vertical { delta.x } else { delta.y } * direction)
+            .clamp(*range.start(), *range.end());
+    }
+    response
+        .clone()
+        .on_hover_cursor(if vertical {
+            egui::CursorIcon::ResizeHorizontal
+        } else {
+            egui::CursorIcon::ResizeVertical
+        })
+        .on_hover_text("Drag to resize • double-click to reset");
+    if response.double_clicked() {
+        *value = (range.start() + range.end()) * 0.5;
+    }
+    let color = if response.hovered() || response.dragged() {
+        super::skin::accent(ui)
+    } else {
+        ui.visuals().widgets.noninteractive.bg_stroke.color
+    };
+    let half = if vertical {
+        egui::vec2(0., length.min(48.) * 0.5)
+    } else {
+        egui::vec2(rect.width().min(80.) * 0.5, 0.)
+    };
+    ui.painter().line_segment(
+        [rect.center() - half, rect.center() + half],
+        egui::Stroke::new(3., color),
+    );
+    ui.ctx()
+        .data_mut(|d| d.insert_temp(egui::Id::unique(id).with("bounds"), (rect, ui.layer_id())));
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dividers_drag_adjacent_panels_and_clamp_their_sizes() {
+        for vertical in [false, true] {
+            let ctx = egui::Context::default();
+            let mut value = 200.;
+            let mut point = egui::pos2(30., 5.);
+            for frame in 0..5 {
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(600., 400.),
+                    )),
+                    ..Default::default()
+                };
+                if frame >= 2 {
+                    point += if vertical {
+                        egui::vec2(80., 0.)
+                    } else {
+                        egui::vec2(0., 80.)
+                    };
+                }
+                raw.events.push(egui::Event::PointerMoved(point));
+                if frame == 1 || frame == 4 {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: frame == 1,
+                        modifiers: Default::default(),
+                    });
+                }
+                let mut output = ctx.run_ui(raw, |ui| {
+                    splitter(
+                        ui,
+                        "test-divider",
+                        &mut value,
+                        150. ..=300.,
+                        vertical,
+                        1.,
+                        200.,
+                    );
+                    if frame == 0 {
+                        point = ctx
+                            .data(|d| {
+                                d.get_temp::<(egui::Rect, egui::LayerId)>(
+                                    egui::Id::unique("test-divider").with("bounds"),
+                                )
+                            })
+                            .unwrap()
+                            .0
+                            .center();
+                    }
+                });
+                output.textures_delta.clear();
+            }
+            assert_eq!(value, 300., "Dragging should resize and stop at the limit");
+        }
+    }
     #[test]
     fn wheel_scrolls_content_without_panning_scaled_window() {
         let ctx = egui::Context::default();
