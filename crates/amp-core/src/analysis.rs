@@ -55,7 +55,17 @@ fn chroma(samples: &[f32], sum: &mut [f64; 12]) {
         return;
     }
     for k in 1..FFT / 2 - 1 {
-        let frequency = k as f64 * RATE / FFT as f64;
+        // Quadratic interpolation of log power reduces low-note FFT-bin bias.
+        let left = power[k - 1].max(1e-20).ln();
+        let center = power[k].max(1e-20).ln();
+        let right = power[k + 1].max(1e-20).ln();
+        let denominator = left - 2. * center + right;
+        let shift = if denominator.abs() > 1e-12 {
+            (0.5 * (left - right) / denominator).clamp(-0.5, 0.5)
+        } else {
+            0.
+        };
+        let frequency = (k as f64 + shift) * RATE / FFT as f64;
         if !(65. ..=2500.).contains(&frequency)
             || power[k] < peak * 0.025
             || power[k] < power[k - 1]
@@ -114,49 +124,10 @@ fn key(chroma: &[f64; 12]) -> (Option<String>, Option<String>, f64) {
         confidence,
     )
 }
+#[path = "rhythm.rs"]
+mod rhythm;
 fn tempo(energy: &[f64]) -> (Option<f64>, Option<f64>, f64) {
-    if energy.len() < 500 {
-        return (None, None, 0.);
-    }
-    let onset: Vec<_> = energy.windows(2).map(|w| (w[1] - w[0]).max(0.)).collect();
-    let peak = onset.iter().copied().fold(0., f64::max);
-    if peak < 1e-4 {
-        return (None, None, 0.);
-    }
-    let onset: Vec<_> = onset
-        .into_iter()
-        .map(|x| if x > peak * 0.15 { x } else { 0. })
-        .collect();
-    let hz = RATE / BLOCK as f64;
-    let mut best = (0., 0usize);
-    for lag in (hz * 60. / 180.) as usize..=(hz * 60. / 60.) as usize {
-        let mut cross = 0.;
-        let mut a = 0.;
-        let mut b = 0.;
-        for i in lag..onset.len() {
-            cross += onset[i] * onset[i - lag];
-            a += onset[i] * onset[i];
-            b += onset[i - lag] * onset[i - lag];
-        }
-        let score = if a * b > 0. {
-            cross / (a * b).sqrt()
-        } else {
-            0.
-        };
-        let preference = 1. - ((hz * 60. / lag as f64 - 120.).abs() / 300.);
-        let weighted = score * preference;
-        if weighted > best.0 {
-            best = (weighted, lag);
-        }
-    }
-    if best.0 < 0.25 {
-        return (None, None, best.0.clamp(0., 1.));
-    }
-    let beat = onset
-        .iter()
-        .position(|x| *x >= peak * 0.6)
-        .map(|i| (i + 1) as f64 / hz);
-    (Some(hz * 60. / best.1 as f64), beat, best.0.clamp(0., 1.))
+    rhythm::estimate(energy, RATE / BLOCK as f64)
 }
 fn result(
     energy: &[f64],
@@ -175,7 +146,13 @@ fn result(
     let (bpm, offset, tempo_confidence) = tempo(rhythmic);
     let (key, harmonic_key, key_confidence) = key(chroma);
     let audio_start = first as f64 * BLOCK as f64 / RATE;
-    let energy_cues = energy_cues::candidates(energy, first, last);
+    let mut energy_cues = energy_cues::candidates(energy, first, last);
+    // Snap only within half a beat; never invent a bar/downbeat from tempo alone.
+    if let (Some(bpm), Some(offset)) = (bpm, offset) {
+        for (seconds, _) in &mut energy_cues {
+            *seconds = rhythm::snap(*seconds, bpm, offset).clamp(audio_start, duration);
+        }
+    }
     let cue_in = energy_cues
         .first()
         .map_or(audio_start, |(seconds, _)| *seconds);
@@ -232,6 +209,23 @@ fn result(
                 "energy-start"
             }
             .into(),
+            ..Default::default()
+        });
+    }
+    for (index, seconds) in energy_cues::breakdowns(energy, first, last)
+        .into_iter()
+        .enumerate()
+    {
+        let seconds = match (bpm, offset) {
+            (Some(bpm), Some(offset)) => rhythm::snap(seconds, bpm, offset),
+            _ => seconds,
+        }
+        .clamp(audio_start, cue_out);
+        p.cues.push(Cue {
+            id: format!("auto-breakdown-{}", index + 1),
+            label: "Breakdown candidate".into(),
+            seconds,
+            kind: "breakdown".into(),
             ..Default::default()
         });
     }
@@ -500,6 +494,51 @@ mod tests {
         assert_eq!(p.extensions["loops"], existing.extensions["loops"]);
         assert!(crate::review::proposal(&p).is_some());
         assert!(!crate::review::changes(&p).is_empty());
+    }
+    #[test]
+    fn all_transposed_major_and_minor_triads() {
+        for tonic in 0..12 {
+            for (minor, third) in [(false, 4.), (true, 3.)] {
+                let mut bins = [0.; 12];
+                for (interval, strength) in [(0., 1.), (third, 0.8), (7., 0.6)] {
+                    let note = 48. + tonic as f64 + interval;
+                    let samples: Vec<_> = (0..FFT)
+                        .map(|i| {
+                            (strength
+                                * (std::f64::consts::TAU
+                                    * 440.
+                                    * 2f64.powf((note - 69.) / 12.)
+                                    * i as f64
+                                    / RATE)
+                                    .sin()) as f32
+                        })
+                        .collect();
+                    chroma(&samples, &mut bins);
+                }
+                let (name, wheel, _) = key(&bins);
+                assert!(
+                    name.as_ref().is_some_and(|n| n.ends_with(if minor {
+                        "minor"
+                    } else {
+                        "major"
+                    })),
+                    "{tonic} {minor}: {name:?}"
+                );
+                let expected = if minor {
+                    [5, 12, 7, 2, 9, 4, 11, 6, 1, 8, 3, 10]
+                } else {
+                    [8, 3, 10, 5, 12, 7, 2, 9, 4, 11, 6, 1]
+                };
+                assert_eq!(
+                    wheel,
+                    Some(format!(
+                        "{}{}",
+                        expected[tonic],
+                        if minor { "A" } else { "B" }
+                    ))
+                );
+            }
+        }
     }
     #[test]
     fn tonal_fixture_and_silence() {

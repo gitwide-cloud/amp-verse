@@ -1,5 +1,34 @@
 //! Sustained relative-energy cue estimates. Not semantic section recognition.
 use super::{BLOCK, RATE};
+/// Sustained relative energy falls, kept separate from high-energy mix-in cues.
+pub(super) fn breakdowns(energy: &[f64], first: usize, last: usize) -> Vec<f64> {
+    let bin = (RATE / BLOCK as f64).round() as usize;
+    let bins: Vec<f64> = energy
+        .chunks(bin)
+        .map(|c| c.iter().sum::<f64>() / c.len() as f64)
+        .collect();
+    let max = bins.iter().copied().fold(0., f64::max);
+    let mut result = Vec::new();
+    for i in 4..bins.len().saturating_sub(4) {
+        let before = bins[i - 4..i].iter().sum::<f64>() / 4.;
+        let after = bins[i..i + 4].iter().sum::<f64>() / 4.;
+        let at = i * bin;
+        if at < first || at + 4 * bin > last || before < max * 0.65 || after > before * 0.45 {
+            continue;
+        }
+        let seconds = at as f64 * BLOCK as f64 / RATE;
+        if result
+            .last()
+            .is_none_or(|previous| seconds - previous >= 12.)
+        {
+            result.push(seconds);
+        }
+        if result.len() == 3 {
+            break;
+        }
+    }
+    result
+}
 pub(super) fn candidates(energy: &[f64], first: usize, last: usize) -> Vec<(f64, &'static str)> {
     let bin = (RATE / BLOCK as f64 / 2.).round() as usize;
     let bins: Vec<f64> = energy
@@ -74,6 +103,15 @@ pub(super) fn candidates(energy: &[f64], first: usize, last: usize) -> Vec<(f64,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn sustained_breakdown_not_a_single_quiet_frame() {
+        let mut e = vec![0.8; 6000];
+        e[500] = 0.;
+        e[2000..3000].fill(0.1);
+        let points = breakdowns(&e, 0, 5999);
+        assert_eq!(points.len(), 1);
+        assert!((points[0] - 20.).abs() < 1.1);
+    }
     #[test]
     fn sustained_drop_beats_quiet_intro_and_single_click() {
         let mut e = vec![0.05; 6000];
