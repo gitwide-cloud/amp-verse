@@ -3153,6 +3153,51 @@ fn main() -> eframe::Result {
 mod window_tests {
     use super::*;
     #[test]
+    fn appearance_choices_are_visible_and_clickable_inside_module_menu() {
+        for selected in theme::Theme::ALL {
+            let ctx = egui::Context::default();
+            let mut player = Player::default();
+            let mut draw = |position: egui::Pos2, pressed: Option<bool>| {
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1100., 900.),
+                    )),
+                    ..Default::default()
+                };
+                raw.events.push(egui::Event::PointerMoved(position));
+                if let Some(pressed) = pressed {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos: position,
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    });
+                }
+                let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 0));
+                output.textures_delta.clear();
+            };
+            for press in [None, Some(true), Some(false), None] {
+                draw(egui::pos2(100., 25.), press);
+            }
+            let (rect, clip, layer) = ctx
+                .data(|d| {
+                    d.get_temp::<(egui::Rect, egui::Rect, egui::LayerId)>(egui::Id::unique((
+                        "theme-choice",
+                        selected.id(),
+                    )))
+                })
+                .expect("Theme must be directly visible");
+            let target =
+                ctx.layer_transform_to_global(layer).unwrap_or_default() * rect.intersect(clip);
+            assert!(target.height() > 10.);
+            for press in [None, Some(true), Some(false), None] {
+                draw(target.center(), press);
+            }
+            assert_eq!(theme::current(&ctx), selected);
+        }
+    }
+    #[test]
     fn short_player_module_menu_is_visible_and_clickable() {
         let ctx = egui::Context::default();
         let mut player = Player {

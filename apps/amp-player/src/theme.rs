@@ -180,18 +180,28 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
 pub fn selector(ui: &mut egui::Ui) {
     let previous = current(ui.ctx());
     let mut selected = previous;
-    egui::ComboBox::from_id_salt("appearance")
-        .selected_text(selected.label())
-        .show_ui(ui, |ui| {
-            for theme in Theme::ALL {
-                ui.selectable_value(&mut selected, theme, theme.label());
-            }
+    for theme in Theme::ALL {
+        let response = ui.selectable_label(selected == theme, theme.label());
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::unique(("theme-choice", theme.id())),
+                (response.rect, ui.clip_rect(), ui.layer_id()),
+            )
         });
+        if response.clicked() {
+            selected = theme;
+        }
+    }
     if selected != previous {
         apply(ui.ctx(), selected);
-        let result = settings_path()
-            .ok_or_else(|| io::Error::other("Settings folder unavailable"))
-            .and_then(|p| save(&p, selected));
+        let result = if cfg!(test) {
+            Ok(())
+        } else {
+            settings_path()
+                .ok_or_else(|| io::Error::other("Settings folder unavailable"))
+                .and_then(|p| save(&p, selected))
+        };
         ui.ctx().data_mut(|d| {
             d.insert_temp(
                 egui::Id::unique("theme-save-error"),
