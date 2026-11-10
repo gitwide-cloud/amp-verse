@@ -17,6 +17,9 @@ pub struct Arrangement {
     job: Option<mpsc::Receiver<Result<String, String>>>,
 }
 impl Arrangement {
+    pub fn take_sample(&mut self) -> Option<crate::sample_editor::Delivery> {
+        self.editor.take_sample()
+    }
     pub(super) fn stop_preview(&mut self) {
         self.editor.stop();
     }

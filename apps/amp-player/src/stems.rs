@@ -91,6 +91,17 @@ pub fn ready(source: &Path) -> Option<[PathBuf; 3]> {
     ready_in(&cache_root()?, source)
 }
 type Process = Arc<Mutex<Option<Child>>>;
+pub(super) fn separate_clip(cache: &Path, source: &Path) -> Result<[PathBuf; 3], String> {
+    let python = runtime().ok_or("Install the stem separator add-on first")?;
+    prepare(
+        cache,
+        source,
+        &python,
+        &AtomicBool::new(false),
+        &Arc::new(Mutex::new(None)),
+    )?;
+    ready_in(cache, source).ok_or("Separated clip is incomplete".into())
+}
 fn prepare(
     cache: &Path,
     source: &Path,

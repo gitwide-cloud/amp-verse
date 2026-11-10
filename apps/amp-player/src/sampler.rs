@@ -18,6 +18,8 @@ struct Bank {
     master: f32,
     names: [String; 9],
     loops: [bool; 9],
+    toggle: [bool; 9],
+    colors: [[u8; 3]; 9],
 }
 impl Default for Bank {
     fn default() -> Self {
@@ -27,6 +29,8 @@ impl Default for Bank {
             master: 0.7,
             names: Default::default(),
             loops: [false; 9],
+            toggle: [false; 9],
+            colors: [[255, 193, 7]; 9],
         }
     }
 }
@@ -150,6 +154,25 @@ impl Default for Sampler {
     }
 }
 impl Sampler {
+    pub fn trigger(&self, engine: &Engine, pad: usize) -> Result<(), String> {
+        if pad >= 9 {
+            return Err("Unknown sampler pad".into());
+        }
+        if self.bank.toggle[pad]
+            && engine.controls.sample_playing[pad].load(std::sync::atomic::Ordering::Relaxed)
+        {
+            engine.sample_stop(Some(pad))
+        } else {
+            engine.sample_trigger(pad)
+        }
+    }
+    pub fn import_clip(&mut self, sample: crate::sample_editor::Delivery) {
+        self.bank.names[sample.pad] = sample.name;
+        self.bank.loops[sample.pad] = sample.looping;
+        self.bank.toggle[sample.pad] = sample.looping;
+        self.request_load(sample.pad, sample.path);
+        self.started = true;
+    }
     pub fn needs_audio(&self) -> bool {
         !self.queue.is_empty() || self.job.is_some()
     }
@@ -234,9 +257,17 @@ impl Sampler {
                             let response = ui
                                 .add_sized(
                                     [side, side],
-                                    egui::Button::new(RichText::new(name).color(accent).size(12.))
-                                        .wrap()
-                                        .selected(playing),
+                                    egui::Button::new(
+                                        RichText::new(name)
+                                            .color(egui::Color32::from_rgb(
+                                                self.bank.colors[pad][0],
+                                                self.bank.colors[pad][1],
+                                                self.bank.colors[pad][2],
+                                            ))
+                                            .size(12.),
+                                    )
+                                    .wrap()
+                                    .selected(playing),
                                 )
                                 .on_hover_text(
                                     self.bank.paths[pad]
@@ -252,6 +283,21 @@ impl Sampler {
                                     ui.close();
                                 }
                                 ui.label("Pad name");
+                                if ui
+                                    .color_edit_button_srgb(&mut self.bank.colors[pad])
+                                    .changed()
+                                {
+                                    self.save();
+                                }
+                                if ui
+                                    .checkbox(
+                                        &mut self.bank.toggle[pad],
+                                        "Toggle: press again to stop",
+                                    )
+                                    .changed()
+                                {
+                                    self.save();
+                                }
                                 if ui.text_edit_singleline(&mut self.bank.names[pad]).changed() {
                                     self.save();
                                 }
@@ -289,7 +335,9 @@ impl Sampler {
                             }
                             if response.clicked() {
                                 self.selected_pad = pad;
-                                actions.push(if self.ready[pad] {
+                                actions.push(if playing && self.bank.toggle[pad] {
+                                    Action::Stop(pad)
+                                } else if self.ready[pad] {
                                     Action::Trigger(pad)
                                 } else {
                                     Action::Load(pad)
@@ -371,6 +419,11 @@ impl Sampler {
                 }
                 Err(mpsc::TryRecvError::Empty) => (),
             }
+        }
+        if self.queue.front().is_some_and(|(pad, _)| {
+            engine.controls.sample_playing[*pad].load(std::sync::atomic::Ordering::Relaxed)
+        }) {
+            return;
         }
         if self.job.is_none()
             && let Some((pad, path)) = self.queue.pop_front()

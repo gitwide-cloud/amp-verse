@@ -11,6 +11,7 @@ use std::{
 
 #[derive(Default)]
 pub(super) struct Editor {
+    sample: crate::sample_editor::Editor,
     input: Option<PathBuf>,
     duration: f64,
     start: f64,
@@ -43,7 +44,11 @@ impl Drop for Editor {
     }
 }
 impl Editor {
+    pub fn take_sample(&mut self) -> Option<crate::sample_editor::Delivery> {
+        self.sample.take()
+    }
     pub(super) fn stop(&mut self) {
+        self.sample.stop();
         self.kill_player();
         self.preview_job = None;
         self.started = None;
@@ -416,6 +421,7 @@ fn read_waveform(path: &Path, duration: f64) -> Result<Vec<[f32; 2]>, String> {
 
 impl Editor {
     pub(super) fn poll(&mut self, ctx: &egui::Context) {
+        self.sample.poll(ctx);
         if let Some(rx) = &self.exporting {
             match rx.try_recv() {
                 Ok(result) => {
@@ -684,6 +690,15 @@ impl Editor {
             });
         });
         self.clamp();
+        ui.separator();
+        self.sample.show(
+            ui,
+            root,
+            self.input.as_deref(),
+            self.start,
+            self.end,
+            self.filter(),
+        );
         ui.separator();
         ui.label(&self.status);
         if self.wave_job.is_some() || self.preview_job.is_some() || busy {

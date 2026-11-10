@@ -26,6 +26,7 @@ mod monitor;
 mod organized_library;
 mod performance;
 mod preparer;
+mod sample_editor;
 mod sampler;
 mod show_editor;
 mod side_deck;
@@ -474,6 +475,21 @@ impl Player {
             })
     }
     fn poll(&mut self) {
+        if let Some(sample) = self.lab.take_sample() {
+            let result = self.ensure_audio();
+            if let Err(error) = result {
+                self.status = error;
+            }
+            if sample.right {
+                if let Err(error) = self.ensure_right_samples() {
+                    self.status = error;
+                }
+                self.right_sampler.import_clip(sample);
+            } else {
+                self.sampler.import_clip(sample);
+            }
+        }
+
         if !self.root.as_os_str().is_empty()
             && self.scan.is_none()
             && self.last_scan.elapsed() >= Duration::from_secs(120)
@@ -1824,7 +1840,7 @@ impl Player {
                     }
                     Ok(())
                 }
-                sampler::Action::Trigger(pad) => engine.sample_trigger(pad),
+                sampler::Action::Trigger(pad) => self.sampler.trigger(engine, pad),
                 sampler::Action::Stop(pad) => engine.sample_stop(Some(pad)),
                 sampler::Action::Clear(pad) => self.sampler.clear(pad, engine),
                 sampler::Action::StopAll => engine.sample_stop(None),
@@ -2460,7 +2476,7 @@ impl Player {
                 }
                 Ok(())
             }
-            sampler::Action::Trigger(pad) => audio.sample_trigger(pad),
+            sampler::Action::Trigger(pad) => sampler.trigger(audio, pad),
             sampler::Action::Stop(pad) => audio.sample_stop(Some(pad)),
             sampler::Action::Clear(pad) => sampler.clear(pad, audio),
             sampler::Action::StopAll => audio.sample_stop(None),
