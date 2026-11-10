@@ -1965,7 +1965,7 @@ impl Player {
                                                 ((logical.y - 220.) / 14.).clamp(24., 44.);
                                             egui::ScrollArea::vertical()
                                                 .id_salt("dj-channel-controls")
-                                                .max_height((logical.y - 350.).max(120.))
+                                                .max_height((logical.y - 480.).max(100.))
                                                 .auto_shrink([false, true])
                                                 .show(ui, |ui| self.inline_mixer(ui, logical.y));
                                             let fading =
@@ -3324,6 +3324,7 @@ mod window_tests {
         let ctx = egui::Context::default();
         let mut player = Player::default();
         for size in [
+            egui::vec2(2560., 1550.),
             egui::vec2(1200., 900.),
             egui::vec2(740., 480.),
             egui::vec2(540., 360.),
