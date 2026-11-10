@@ -444,6 +444,14 @@ impl Player {
                     .find(|p| p.id == playlist || p.name.eq_ignore_ascii_case(&playlist))
                     .ok_or("Smart Playlist not found")?
                     .clone();
+                if self.show_editor.playlist_unsaved(&p.id) {
+                    return Err("This Smart Playlist has unsaved Library changes. Open it in Library and Save Playlist first.".into());
+                }
+                if !self.library.as_ref().is_some_and(|library| {
+                    library.tracks.iter().any(|track| show::eligible(&p, track))
+                }) {
+                    return Err("This saved Smart Playlist has no matching songs. Choose its Music Source in Library, then Save Playlist.".into());
+                }
                 self.run.choice = p.id.clone();
                 self.run.planned_progression = p.energy_progression.clone();
                 self.run.planned_force = false;
@@ -808,6 +816,33 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn loading_empty_smart_source_preserves_the_current_session() {
+        let mut player = Player {
+            library: Some(amp_core::Library {
+                tracks: Vec::new(),
+                tree: amp_core::Folder {
+                    name: String::new(),
+                    folders: Vec::new(),
+                    tracks: Vec::new(),
+                },
+            }),
+            ..Default::default()
+        };
+        player.run.profile = Some(player.run.settings.playlists[1].clone());
+        player.run.playlist = Some("walk-in".into());
+        player.run.auto = true;
+        let result = player.execute_control(Action::LoadSmartPlaylist {
+            playlist: "recognition".into(),
+            execution: Execution::PlayNow,
+            style: None,
+            energy: None,
+        });
+        assert!(result.err().unwrap().contains("no matching songs"));
+        assert_eq!(player.run.playlist.as_deref(), Some("walk-in"));
+        assert!(player.run.auto);
+        assert!(player.audio.is_none());
+    }
     #[test]
     fn auto_mix_failed_start_stays_off_and_locked_stop_remains_available() {
         let mut player = Player::default();

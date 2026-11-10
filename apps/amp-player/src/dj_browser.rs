@@ -172,6 +172,10 @@ impl Player {
                                 load_smart = ui.button("Load for Auto DJ").clicked();
                                 edit_smart = ui.button("Edit sources / rules in Library").clicked();
                             });
+                            if self.show_editor.playlist_unsaved(&profile.id) {
+                                ui.colored_label(ORANGE,"Unsaved source changes: DJ uses the saved version.");
+                                if ui.button("Open draft in Library to save").clicked(){edit_smart=true;}
+                            }
                             let eligible: Vec<_> = lib
                                 .tracks
                                 .iter()

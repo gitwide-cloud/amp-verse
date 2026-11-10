@@ -357,3 +357,10 @@ No claim of new beat-phase synchronization, key lock or analysis capabilities is
 
 
 Final Android 0.1.12 results: main/test APK build and lint passed. The 17-case Pixel run completed without failures; its conditional live Cast case was then explicitly exercised using `castUrl` against the isolated server, and both Cast cases passed. The three-theme layout check and native Auto DJ transition are included in that run. Phone screenshots are under test-output (not committed). Test-only USB reverse ports and helper processes were removed after verification.
+
+
+## 2026-11-09 — desktop Smart Playlist save recovery
+
+Read-only diagnosis found Recognition saved with an empty allow restriction, while the local draft selected an existing music folder containing 788 direct audio files. The draft/baseline had no revision metadata; shared show.json had revision 2. No personal shared rules were modified during diagnosis.
+
+Regression tests cover the stale legacy baseline, independent shared cue-preference preservation, atomic source-group conflicts, explicit reviewed publication, unchanged playlist IDs, source eligibility after save, and refusal to overwrite an update made after review. Player suite: 59 passed, 11 optional native/environment tests skipped; strict Clippy passed. Personal source choice remains in its local draft for explicit review/save after restarting the updated desktop.

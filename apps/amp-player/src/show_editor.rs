@@ -53,10 +53,14 @@ pub struct Editor {
     source_labels: std::collections::HashMap<String, String>,
     existing_sources: Vec<amp_core::Playlist>,
     cache_bytes: Vec<u8>,
+    conflict_review: Option<(Settings, Settings)>,
+    review_scroll: bool,
 }
 impl Editor {
     pub fn open_playlist(&mut self, id: &str, root: &std::path::Path, saved: &Settings) {
         if self.draft.is_none() || self.root != root {
+            self.conflict_review = None;
+            self.review_scroll = false;
             self.draft = Some(saved.clone());
             self.baseline = Some(saved.clone());
             self.root = root.into();
@@ -90,6 +94,17 @@ impl Editor {
             .position(|p| p.id == id)
             .unwrap_or(0);
         self.open = true;
+    }
+    pub fn playlist_unsaved(&self, id: &str) -> bool {
+        let draft = self
+            .draft
+            .as_ref()
+            .and_then(|s| s.playlists.iter().find(|p| p.id == id));
+        let base = self
+            .baseline
+            .as_ref()
+            .and_then(|s| s.playlists.iter().find(|p| p.id == id));
+        draft.is_some() && serde_json::to_value(draft).ok() != serde_json::to_value(base).ok()
     }
     pub fn has_unsaved(&self) -> bool {
         self.draft.as_ref().is_some_and(|draft| {
@@ -174,7 +189,27 @@ impl Editor {
         let dirty = self.has_unsaved();
         let settings = self.draft.as_mut().unwrap();
         let height = ui.available_height().max(180.);
-        let area = egui::ScrollArea::vertical().id_salt("inline-smart-editor").max_height(height).auto_shrink([false,false]).show(ui, |ui| {
+        let mut scroll = egui::ScrollArea::vertical()
+            .id_salt("inline-smart-editor")
+            .max_height(height)
+            .auto_shrink([false, false]);
+        if std::mem::take(&mut self.review_scroll) {
+            scroll = scroll.vertical_scroll_offset(0.);
+        }
+        let area = scroll.show(ui, |ui| {
+            let mut approve_review=false;
+            let mut cancel_review=false;
+            if let Some((proposed,shared))=&self.conflict_review {
+                ui.colored_label(crate::ORANGE,"Shared rules changed. Review before saving your draft.");
+                ui.add(egui::Label::new(&self.status).wrap());
+                egui::CollapsingHeader::new("Compare saved and proposed sources").default_open(true).show(ui,|ui|{
+                    for mine in &proposed.playlists { if let Some(theirs)=shared.playlists.iter().find(|p|p.id==mine.id) && serde_json::to_value(mine).ok()!=serde_json::to_value(theirs).ok(){ui.strong(&mine.name);ui.label(format!("Saved: {} · folders: {}",source_summary(theirs),theirs.folders.iter().map(|p|p.display().to_string()).collect::<Vec<_>>().join(", ")));ui.label(format!("Proposed: {} · folders: {} · {} selected songs",source_summary(mine),mine.folders.iter().map(|p|p.display().to_string()).collect::<Vec<_>>().join(", "),mine.allowed.len()));if let (Ok(local),Ok(saved))=(serde_json::to_value(mine),serde_json::to_value(theirs)){for (key,value) in local.as_object().unwrap(){if !["folders","restrict_folders","allowed","restrict_allowed","id"].contains(&key.as_str())&&*value!=saved[key]{ui.label(format!("{key}: saved {} → proposed {value}",saved[key]));}}}}}
+                });
+                approve_review=ui.button("Save reviewed draft changes").clicked();
+                cancel_review=ui.button("Cancel review · keep both versions").clicked();
+                ui.separator();
+                ui.disable();
+            }
             let mut remove = false;
             let mut duplicate = false;
             let mut save = false;
@@ -191,7 +226,8 @@ impl Editor {
                         if ui.button("Copy control ID").clicked() { ui.ctx().copy_text(p.id.clone()); ui.close(); }
                     });
                 });
-                if dirty { ui.weak("Unsaved changes · draft kept locally"); }
+                if dirty { ui.colored_label(crate::ORANGE,"Unsaved changes · DJ still uses the saved version"); }
+                ui.horizontal_wrapped(|ui|{save|=ui.button("Save Playlist").clicked();if !self.status.is_empty(){ui.add(egui::Label::new(&self.status).wrap());}});
                 ui.add_space(16.);
                 ui.strong("Music source");
                 let count = library.map(|lib| lib.tracks.iter().filter(|track|amp_core::show::eligible(p,track)).count());
@@ -431,7 +467,21 @@ impl Editor {
                 let mut copy=original;copy.id=format!("custom-{}",std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos());copy.name.push_str(" (copy)");settings.playlists.push(copy);self.selected=settings.playlists.len()-1;
             }
             if remove && self.selected<settings.playlists.len() { settings.playlists.remove(self.selected); self.selected=self.selected.min(settings.playlists.len().saturating_sub(1)); }
-            if save { self.status=save_rules(root,settings,saved); if self.status.starts_with("Saved.") { self.baseline=Some(saved.clone()); } }
+            if cancel_review {self.conflict_review=None;}
+            if approve_review && let Some((mut proposed,_))=self.conflict_review.take(){self.status=save_rules(root,&mut proposed,saved);if self.status.starts_with("Saved."){*settings=proposed;self.baseline=Some(saved.clone());}}
+            if save {
+                self.conflict_review=None;
+                match Settings::load(root){
+                    Ok(current)=>{
+                        let baseline=self.baseline.as_ref().unwrap_or(saved);
+                        match merge_rules(baseline,settings,&current,false){
+                            Ok(mut proposed)=>{self.status=save_rules(root,&mut proposed,saved);if self.status.starts_with("Saved."){*settings=proposed;self.baseline=Some(saved.clone());}},
+                            Err(error)=>{self.status=error;if let Ok(proposed)=merge_rules(baseline,settings,&current,true){self.conflict_review=Some((proposed,current));self.review_scroll=true;}}
+                        }
+                    }
+                    Err(error)=>self.status=error,
+                }
+            }
             if reload { match Settings::load(root) { Ok(fresh)=>{*saved=fresh.clone();*settings=fresh.clone();self.baseline=Some(fresh);self.selected=0;self.preview_order.clear();},Err(error)=>self.status=error } }
             if self.audition_blocked { ui.weak("Stop player / DJ playback before auditioning a mix. Saving and editing remain available."); }
             ui.add_space(8.);ui.add(egui::Label::new(&self.status).wrap());
@@ -612,6 +662,108 @@ fn preview_mix(p: &amp_core::show::SmartPlaylist, library: &amp_core::Library) -
     order
 }
 
+/// Three-way edits preserve unrelated shared changes; source selectors form one atomic group.
+fn merge_rules(
+    base: &Settings,
+    draft: &Settings,
+    current: &Settings,
+    reviewed: bool,
+) -> Result<Settings, String> {
+    use serde_json::Value;
+    let mut merged = current.clone();
+    let fields = ["folders", "restrict_folders", "allowed", "restrict_allowed"];
+    let mut conflicts = Vec::new();
+    for old in &base.playlists {
+        if !draft.playlists.iter().any(|p| p.id == old.id)
+            && let Some(index) = merged.playlists.iter().position(|p| p.id == old.id)
+        {
+            if serde_json::to_value(&merged.playlists[index]).ok() != serde_json::to_value(old).ok()
+                && !reviewed
+            {
+                conflicts.push(format!(
+                    "{}: deleted locally and edited on shared library",
+                    old.name
+                ));
+            } else {
+                merged.playlists.remove(index);
+            }
+        }
+    }
+    for mine in &draft.playlists {
+        let prior = base.playlists.iter().find(|p| p.id == mine.id);
+        let index = merged.playlists.iter().position(|p| p.id == mine.id);
+        let Some(prior) = prior else {
+            if let Some(index) = index {
+                if serde_json::to_value(&merged.playlists[index]).ok()
+                    != serde_json::to_value(mine).ok()
+                {
+                    if reviewed {
+                        merged.playlists[index] = mine.clone();
+                    } else {
+                        conflicts.push(format!("{}: same ID added by another device", mine.name));
+                    }
+                }
+            } else {
+                merged.playlists.push(mine.clone());
+            }
+            continue;
+        };
+        let old = serde_json::to_value(prior).map_err(|e| e.to_string())?;
+        let local = serde_json::to_value(mine).map_err(|e| e.to_string())?;
+        let Some(index) = index else {
+            if old != local {
+                if reviewed {
+                    merged.playlists.push(mine.clone());
+                } else {
+                    conflicts.push(format!("{}: removed on shared library", mine.name));
+                }
+            }
+            continue;
+        };
+        let mut shared =
+            serde_json::to_value(&merged.playlists[index]).map_err(|e| e.to_string())?;
+        let group = |value: &Value| {
+            fields
+                .iter()
+                .map(|key| value[*key].clone())
+                .collect::<Vec<_>>()
+        };
+        if group(&local) != group(&old) {
+            if group(&shared) != group(&old) && group(&shared) != group(&local) && !reviewed {
+                conflicts.push(format!(
+                    "{}: music source changed in both versions",
+                    mine.name
+                ));
+            } else {
+                for key in fields {
+                    shared[key] = local[key].clone();
+                }
+            }
+        }
+        for (key, value) in local.as_object().ok_or("Invalid playlist")? {
+            if fields.contains(&key.as_str()) || key == "id" {
+                continue;
+            }
+            if *value != old[key] {
+                if shared[key] != old[key] && shared[key] != *value && !reviewed {
+                    conflicts.push(format!("{}: {key} changed in both versions", mine.name));
+                } else {
+                    shared[key] = value.clone();
+                }
+            }
+        }
+        merged.playlists[index] = serde_json::from_value(shared).map_err(|e| e.to_string())?;
+    }
+    if !conflicts.is_empty() {
+        return Err(format!(
+            "Conflict: {}. Your draft and shared rules were retained; review the proposed changes above.",
+            conflicts.join("; ")
+        ));
+    }
+    merged.validate()?;
+    Ok(merged)
+}
+
 fn save_rules(root: &std::path::Path, settings: &mut Settings, saved: &mut Settings) -> String {
     if root.as_os_str().is_empty() {
         return "Choose a music root first".into();
@@ -788,6 +940,70 @@ fn source_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stale_draft_merges_unrelated_updates_but_requires_source_review() {
+        let root = tempfile::tempdir().unwrap();
+        let base = Settings::default();
+        let mut shared = base.clone();
+        shared.playlists[0].restrict_allowed = true;
+        shared.playlists[0].use_manual_cues = false;
+        assert!(save_rules(root.path(), &mut shared, &mut base.clone()).starts_with("Saved."));
+        let current = Settings::load(root.path()).unwrap();
+        let mut draft = base.clone();
+        set_source_mode(&mut draft.playlists[0], SourceMode::Folders);
+        draft.playlists[0].folders.push("Recognition".into());
+        draft.playlists[0].restrict_allowed = false;
+        let before = std::fs::read(root.path().join(".ampverse/show.json")).unwrap();
+        assert!(
+            merge_rules(&base, &draft, &current, false)
+                .err()
+                .unwrap()
+                .contains("music source")
+        );
+        assert_eq!(
+            std::fs::read(root.path().join(".ampverse/show.json")).unwrap(),
+            before
+        );
+        let mut reviewed = merge_rules(&base, &draft, &current, true).unwrap();
+        assert!(
+            !reviewed.playlists[0].use_manual_cues,
+            "Independent shared edit must remain"
+        );
+        assert_eq!(
+            reviewed.sync.as_ref().unwrap().revision,
+            current.sync.as_ref().unwrap().revision
+        );
+        let mut saved = current.clone();
+        assert!(save_rules(root.path(), &mut reviewed, &mut saved).starts_with("Saved."));
+        let song = amp_core::Track {
+            path: "Recognition/song.mp3".into(),
+            title: "Song".into(),
+            preparation: Default::default(),
+        };
+        assert!(amp_core::show::eligible(&saved.playlists[0], &song));
+        let mut outside = song;
+        outside.path = "Outside/song.mp3".into();
+        assert!(!amp_core::show::eligible(&saved.playlists[0], &outside));
+        assert_eq!(saved.playlists[0].id, base.playlists[0].id);
+    }
+    #[test]
+    fn reviewed_rules_cannot_overwrite_a_newer_shared_revision() {
+        let root = tempfile::tempdir().unwrap();
+        let mut shared = Settings::default();
+        let mut saved = shared.clone();
+        assert!(save_rules(root.path(), &mut shared, &mut saved).starts_with("Saved."));
+        let baseline = shared.clone();
+        let mut draft = baseline.clone();
+        draft.playlists[0].name = "Local edit".into();
+        let mut proposed = merge_rules(&baseline, &draft, &shared, true).unwrap();
+        shared.playlists[1].name = "Other device edit".into();
+        assert!(save_rules(root.path(), &mut shared, &mut saved).starts_with("Saved."));
+        assert!(!save_rules(root.path(), &mut proposed, &mut saved).starts_with("Saved."));
+        assert_eq!(
+            Settings::load(root.path()).unwrap().playlists[1].name,
+            "Other device edit"
+        );
+    }
     #[test]
     fn simple_folder_and_m3u_sources_include_music_without_song_checkboxes() {
         let dir = tempfile::tempdir().unwrap();

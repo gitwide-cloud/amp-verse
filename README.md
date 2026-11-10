@@ -181,3 +181,6 @@ Drag songs from DJ Library, Library, regular playlists, Smart Playlist previews 
 
 
 Android 0.1.12 adds native A/B mixing, auxiliary Cue Decks, dual nine-pad samplers, local regular/Smart Playlists, BPM/key/energy/rating overrides and desktop Remote controls. Existing Player, Cast and integrated AMP Lab remain available. See [Android capabilities and remaining parity limits](docs/ANDROID.md#android-0112--dj-playlists-and-desktop-remote) before assuming every desktop feature runs on the phone.
+
+
+Smart Playlist saving now rebases local edits against the latest shared revision. Independent playlist/field edits merge; concurrent source edits show saved/proposed source details and require explicit review. A reviewed save still uses the captured shared revision, so a newer update cannot be overwritten. The editor keeps drafts on conflict, places Save/status at the top, and warns that DJ uses saved rules. Loading an empty or unsaved Smart Playlist reports the required source/save action before altering the active performance.
