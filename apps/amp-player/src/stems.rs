@@ -225,6 +225,10 @@ impl Drop for Job {
 }
 pub struct Panel {
     job: Option<Job>,
+    batch: Option<Job>,
+    batch_rx: Option<mpsc::Receiver<(usize, usize, String)>>,
+    batch_progress: (usize, usize),
+    batch_status: String,
     status: [String; 2],
     level: [[f32; 3]; 2],
 }
@@ -232,12 +236,96 @@ impl Default for Panel {
     fn default() -> Self {
         Self {
             job: None,
+            batch: None,
+            batch_rx: None,
+            batch_progress: (0, 0),
+            batch_status: String::new(),
             status: Default::default(),
             level: [[0.; 3]; 2],
         }
     }
 }
 impl Panel {
+    pub fn library(&mut self, ui: &mut egui::Ui, root: &Path, tracks: &[amp_core::Track]) {
+        if let Some(rx) = &self.batch_rx {
+            while let Ok((done, total, title)) = rx.try_recv() {
+                self.batch_progress = (done, total);
+                self.batch_status = title;
+            }
+        }
+        if let Some(job) = &self.batch
+            && let Ok(result) = job.rx.try_recv()
+        {
+            self.batch_status = result.map_or_else(|e| e, |()| "Stem preparation complete.".into());
+            self.batch = None;
+            self.batch_rx = None;
+        }
+        ui.heading("Prepare Stems");
+        ui.label("Separate vocals, instruments and beat for the DJ stem knobs.");
+        ui.weak("Prepares this library one song at a time. Existing prepared stems are reused; active playback stays unchanged.");
+        if let Some(job) = &self.batch {
+            let (done, total) = self.batch_progress;
+            ui.add(
+                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
+                    .text(format!("{done} / {total} songs")),
+            );
+            ui.spinner();
+            if ui.button("Stop preparing stems").clicked() {
+                job.cancel.store(true, Relaxed);
+            }
+            ui.ctx().request_repaint_after(Duration::from_millis(150));
+        } else if ui
+            .add_enabled(
+                !tracks.is_empty() && self.job.is_none() && runtime().is_some(),
+                egui::Button::new("Prepare library stems"),
+            )
+            .clicked()
+            && let (Some(cache), Some(python)) = (cache_root(), runtime())
+        {
+            let sources: Vec<_> = tracks
+                .iter()
+                .map(|t| (root.join(&t.path), t.title.clone()))
+                .collect();
+            self.batch_progress = (0, sources.len());
+            let cancel = Arc::new(AtomicBool::new(false));
+            let process = Arc::new(Mutex::new(None));
+            let (tx, rx) = mpsc::channel();
+            let (progress, updates) = mpsc::channel();
+            let stop = cancel.clone();
+            let child = process.clone();
+            std::thread::spawn(move || {
+                let result = (|| {
+                    let total = sources.len();
+                    for (index, (source, title)) in sources.into_iter().enumerate() {
+                        if stop.load(Relaxed) {
+                            return Err(
+                                "Stem preparation stopped. Completed songs are retained.".into()
+                            );
+                        }
+                        let _ = progress.send((index, total, format!("Preparing {title}")));
+                        prepare(&cache, &source, &python, &stop, &child)?;
+                        let _ = progress.send((index + 1, total, format!("Prepared {title}")));
+                    }
+                    Ok(())
+                })();
+                let _ = tx.send(result);
+            });
+            self.batch = Some(Job {
+                cancel,
+                process,
+                rx,
+                deck: 0,
+            });
+            self.batch_rx = Some(updates);
+        }
+        if runtime().is_none() {
+            ui.hyperlink_to(
+                "Install the stem separator add-on",
+                "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md",
+            );
+        }
+        ui.label(&self.batch_status);
+    }
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -285,7 +373,7 @@ impl Panel {
             } else if !prepared
                 && ui
                     .add_enabled(
-                        source.is_some() && runtime().is_some(),
+                        source.is_some() && runtime().is_some() && self.batch.is_none(),
                         egui::Button::new("Prepare stems"),
                     )
                     .clicked()

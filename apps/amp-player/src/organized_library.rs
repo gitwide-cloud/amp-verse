@@ -397,6 +397,15 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
             );
             ui.weak("Analysis requires the optional engine add-on. Manual edits remain protected.");
         });
+        ui.add_space(18.);
+        skin::panel(ui, false, |ui| {
+            ui.set_min_width(ui.available_width());
+            let tracks = self
+                .library
+                .as_ref()
+                .map_or(&[][..], |l| l.tracks.as_slice());
+            self.stem_panel.library(ui, &self.root, tracks);
+        });
     }
     fn organized_music(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.horizontal(|ui| {
