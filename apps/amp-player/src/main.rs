@@ -1911,7 +1911,8 @@ impl Player {
             egui::CollapsingHeader::new("Transition options")
                 .id_salt("dj-advanced")
                 .show(ui, |ui| {
-                    ui.toggle_value(&mut self.run.scratch_assist, "Scratch assist");
+                    ui.toggle_value(&mut self.run.scratch_assist, "Scratch transitions")
+                        .on_hover_text("Occasional back/forward scratches in Auto DJ, plus help with large tempo gaps. Turn off for clean crossfades.");
 
                     ui.add(
                         egui::Slider::new(&mut self.wave_span, 4. ..=60.).text("Waveform seconds"),
@@ -2655,7 +2656,9 @@ impl Player {
         };
         let relative = position - wheel.rect.center();
         let angle = relative.y.atan2(relative.x);
-        if wheel.drag_started()
+        if wheel.is_pointer_button_down_on()
+            && ui.input(|i| i.pointer.primary_down())
+            && self.jog_resume[deck].is_none()
             && let Some(audio) = &self.audio
         {
             if !audio.loaded(deck) {
@@ -2671,16 +2674,27 @@ impl Player {
             audio.set_fader(audio.fader());
             audio.scratch(deck, true, 0.);
             audio.controls.play[deck].store(true, std::sync::atomic::Ordering::Relaxed);
+            ui.ctx().request_repaint_after(Duration::from_millis(8));
+            return;
         }
-        if wheel.dragged() && self.jog_resume[deck].is_some() {
+        if wheel.is_pointer_button_down_on() && self.jog_resume[deck].is_some() {
             let delta = (angle - self.jog_angle[deck] + std::f32::consts::PI)
                 .rem_euclid(std::f32::consts::TAU)
                 - std::f32::consts::PI;
             self.jog_angle[deck] = angle;
             let dt = ui.input(|i| i.stable_dt).max(0.001);
+            let rate = if relative.length() < wheel.rect.width() * 0.2 {
+                // Near the spindle angle is unstable. A straight finger movement
+                // still moves the record, instead of jumping through half a turn.
+                let motion = ui.input(|i| i.pointer.delta());
+                (motion.x - motion.y) / wheel.rect.width().max(1.) / dt
+            } else {
+                delta / std::f32::consts::TAU * 1.8 / dt
+            };
             if let Some(audio) = &self.audio {
-                audio.scratch(deck, true, delta / std::f32::consts::TAU * 2. / dt);
+                audio.scratch(deck, true, rate);
             }
+            ui.ctx().request_repaint_after(Duration::from_millis(8));
         }
     }
     fn release_jog_wheels(&mut self, ctx: &egui::Context) {

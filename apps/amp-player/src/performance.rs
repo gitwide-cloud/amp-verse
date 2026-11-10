@@ -10,6 +10,18 @@ use std::{
     sync::atomic::Ordering::Relaxed,
     time::{Duration, Instant},
 };
+fn scratch_phrase(seconds: f32, flourish: bool) -> f32 {
+    if !flourish {
+        return if seconds < 0.09 { -0.65 } else { 0.8 };
+    }
+    // Two short back/forward strokes, ending forward before the handoff.
+    match (seconds / 0.09) as usize {
+        0 => -0.75,
+        1 => 1.1,
+        2 => -0.6,
+        _ => 1.,
+    }
+}
 pub struct Run {
     pub choice: String,
     pub profile: Option<show::SmartPlaylist>,
@@ -21,6 +33,7 @@ pub struct Run {
     pub crossfade: bool,
     pub scratch_assist: bool,
     scratch_bridge: Option<(usize, Instant)>,
+    completed_handoffs: u32,
     pub future_candidates: VecDeque<usize>,
     failed_songs: Vec<String>,
     pub locked: bool,
@@ -48,6 +61,7 @@ impl Default for Run {
             crossfade: true,
             scratch_assist: true,
             scratch_bridge: None,
+            completed_handoffs: 0,
             future_candidates: VecDeque::new(),
             failed_songs: Vec::new(),
             locked: false,
@@ -805,20 +819,21 @@ impl Player {
                 );
             } else if ready && due {
                 let outgoing = 1 - incoming;
+                let flourish = self.run.auto && self.run.completed_handoffs % 4 == 3;
                 let bridge_needed = self.run.scratch_assist
                     && self
                         .audio
                         .as_ref()
                         .is_some_and(|a| a.playing(outgoing) && a.position(outgoing) > 0.25)
-                    && self
-                        .loaded_track(outgoing)
-                        .and_then(|t| t.preparation.bpm)
-                        .zip(self.loaded_track(incoming).and_then(|t| t.preparation.bpm))
-                        .is_some_and(|(a, b)| {
-                            let ratio = a * (1. + self.pitch[outgoing] as f64 / 100.) / b;
-                            !(0.84..=1.16).contains(&ratio)
-                        });
-                let mut scratch_handoff = false;
+                    && (flourish
+                        || self
+                            .loaded_track(outgoing)
+                            .and_then(|t| t.preparation.bpm)
+                            .zip(self.loaded_track(incoming).and_then(|t| t.preparation.bpm))
+                            .is_some_and(|(a, b)| {
+                                let ratio = a * (1. + self.pitch[outgoing] as f64 / 100.) / b;
+                                !(0.84..=1.16).contains(&ratio)
+                            }));
                 if bridge_needed || self.run.scratch_bridge.is_some() {
                     let (_, started) = *self
                         .run
@@ -826,22 +841,18 @@ impl Player {
                         .get_or_insert((outgoing, Instant::now()));
                     let elapsed = started.elapsed();
                     let audio = self.audio.as_ref().unwrap();
-                    if elapsed < Duration::from_millis(180) {
+                    let duration = if flourish { 360 } else { 180 };
+                    if elapsed < Duration::from_millis(duration) {
                         audio.scratch(
                             outgoing,
                             true,
-                            if elapsed < Duration::from_millis(90) {
-                                -0.65
-                            } else {
-                                0.8
-                            },
+                            scratch_phrase(elapsed.as_secs_f32(), flourish),
                         );
                         self.status = "Scratch-assisted transition".into();
                         return;
                     }
                     audio.scratch(outgoing, false, 1.);
                     self.run.scratch_bridge = None;
-                    scratch_handoff = true;
                 }
 
                 let a = self.audio.as_ref().unwrap();
@@ -860,11 +871,7 @@ impl Player {
                         "Crossfader changed after preload; request the next song again".into();
                     self.run.cancel_automation();
                 } else {
-                    let seconds = if scratch_handoff {
-                        0.25
-                    } else {
-                        self.fade_seconds
-                    };
+                    let seconds = self.fade_seconds;
                     match a.crossfade(seconds) {
                         Ok(()) => self.run.transition = Some(incoming),
                         Err(e) => {
@@ -924,6 +931,7 @@ impl Player {
         }
     }
     fn complete_change(&mut self, incoming: usize) {
+        self.run.completed_handoffs = self.run.completed_handoffs.wrapping_add(1);
         self.run.active = incoming;
         self.run.transition = None;
         self.run.preloaded = None;
@@ -958,6 +966,66 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
+    fn occasional_scratch_runs_at_matched_tempo_and_keeps_auto_dj_running() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
+        for i in 0..2 {
+            let path = std::path::PathBuf::from(format!("song{i}.wav"));
+            std::fs::copy(&fixture, dir.path().join(&path)).unwrap();
+            amp_core::preparation::save(
+                dir.path(),
+                &path,
+                &amp_core::Preparation {
+                    cue_in: 0.25,
+                    cue_out: Some(4.),
+                    bpm: Some(120.),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut player = Player {
+            root: dir.path().into(),
+            library: Some(amp_core::scan(dir.path()).unwrap()),
+            channel_gain: [0.; 2],
+            fade_seconds: 0.5,
+            ..Default::default()
+        };
+        player
+            .execute_control(Action::LoadSmartPlaylist {
+                playlist: "everyday".into(),
+                execution: Execution::PlayNow,
+                style: Some(Style::Steady),
+                energy: None,
+            })
+            .unwrap();
+        wait(&mut player, |p| {
+            p.audio
+                .as_ref()
+                .is_some_and(|a| a.position(p.active_deck()) > 0.3)
+        });
+        player.run.completed_handoffs = 3;
+        player
+            .execute_control(Action::MixNext { immediate: true })
+            .unwrap();
+        wait(&mut player, |p| p.run.scratch_bridge.is_some());
+        wait(&mut player, |p| p.run.completed_handoffs == 4);
+        assert!(player.run.auto);
+        assert_eq!(player.fade_seconds, 0.5);
+        assert!(player.run.scratch_bridge.is_none());
+        assert!(
+            player
+                .audio
+                .as_ref()
+                .unwrap()
+                .controls
+                .scratching
+                .iter()
+                .all(|v| !v.load(Relaxed))
+        );
+    }
     #[test]
     fn loading_empty_smart_source_preserves_the_current_session() {
         let mut player = Player {
