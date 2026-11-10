@@ -6,7 +6,7 @@ Load a song and press Prepare stems in its mixer column. Separation runs locally
 
 Vocals, drums and residual instruments share one six-channel decoder timeline, pitch, scratch history, loop and cue range. EQ, filters, crossfader and headphones process the result normally. Stem controls remain usable during AutoMix for prepared tracks. Ordinary songs still play without the add-on.
 
-Prepared stems are a device-local cache, not NAS metadata or Android downloads. The cache tracks source path, size and modification time and checks all three output hashes before publication. Old two-part caches need preparation again for the drums part; their previous generation is retained. No user cue, beatgrid, rating or playlist is changed. Library-wide automatic separation is not enabled.
+Prepared stems are a device-local cache, not NAS metadata or Android downloads. The cache tracks source path, size and modification time and checks all three output hashes before publication. Old two-part caches need preparation again for the drums part; their previous generation is retained. No user cue, beatgrid, rating or playlist is changed. Library-wide preparation is available under Analyze Music / Prepare Stems.
 
 Demucs 4.0.1 with the official htdemucs checkpoint extracts vocals and drums. Instruments are the original minus both, preserving reconstruction at centered knobs. Quality depends on the recording and may contain bleed/artifacts. This is prepared separation, not zero-latency inference. Songs from 0.25 seconds to 30 minutes are supported.
 
@@ -19,3 +19,9 @@ From a source checkout, run `tools/install-stem-addon.ps1 -Python <Python-3.12-e
 On Linux, create an equivalent Python 3.12 environment with those versions and set `AMP_STEM_PYTHON` to its Python executable. FFmpeg must be available to the player and worker. `TORCH_HOME` is placed inside the add-on so its model cache is independent from other Python installations.
 
 Primary upstream documentation: https://github.com/facebookresearch/demucs .
+
+## Per-song defaults in Library
+
+Select a song in Library / Edit song / Default stem mix for this song. Prepare its stems, adjust Vocals / Instruments / Beat, and use Preview stem mix to listen. Left removes that part; right isolates it. Original mix resets all three. Press Save approved metadata to publish the default.
+
+Defaults use the existing revision and conflict checks and travel in the song's ampdj metadata. DJ applies them on the next load, including Auto DJ; playing decks keep their loaded snapshot. Songs without defaults load the original mix. Prepared audio is currently a local cache: another computer must prepare stems before playing a custom mix. Missing stems produce a preparation error instead of silently playing the original. Source audio is unchanged.

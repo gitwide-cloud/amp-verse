@@ -242,6 +242,7 @@ pub struct Panel {
     batch_status: String,
     status: [String; 2],
     level: [[f32; 3]; 2],
+    generation: [u64; 2],
 }
 impl Default for Panel {
     fn default() -> Self {
@@ -253,10 +254,60 @@ impl Default for Panel {
             batch_status: String::new(),
             status: Default::default(),
             level: [[0.; 3]; 2],
+            generation: [0; 2],
         }
     }
 }
 impl Panel {
+    pub fn prepare_song(&mut self, ui: &mut egui::Ui, source: &Path) -> bool {
+        if let Some(job) = &self.job
+            && let Ok(result) = job.rx.try_recv()
+        {
+            self.status[0] = result.map_or_else(|e| e, |()| "Stems ready".into());
+            self.job = None;
+        }
+        let prepared = ready(source).is_some();
+        if let Some(job) = &self.job {
+            ui.spinner();
+            ui.label("Preparing stems…");
+            if ui.button("Cancel preparation").clicked() {
+                job.cancel.store(true, Relaxed);
+            }
+            ui.ctx().request_repaint_after(Duration::from_millis(150));
+        } else if !prepared
+            && ui
+                .add_enabled(
+                    runtime().is_some(),
+                    egui::Button::new("Prepare stems for this song"),
+                )
+                .clicked()
+            && let (Some(cache), Some(python)) = (cache_root(), runtime())
+        {
+            let source = source.to_path_buf();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let process = Arc::new(Mutex::new(None));
+            let (tx, rx) = mpsc::channel();
+            let stop = cancel.clone();
+            let child = process.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(prepare(&cache, &source, &python, &stop, &child));
+            });
+            self.job = Some(Job {
+                cancel,
+                process,
+                rx,
+                deck: 0,
+            });
+        }
+        if prepared {
+            ui.label("Prepared stems available");
+        }
+        if runtime().is_none() && !prepared {
+            ui.weak("Install the stem separator add-on to prepare this song.");
+        }
+        ui.label(&self.status[0]);
+        prepared
+    }
     pub fn library(&mut self, ui: &mut egui::Ui, root: &Path, tracks: &[amp_core::Track]) {
         if let Some(rx) = &self.batch_rx {
             while let Ok((done, total, title)) = rx.try_recv() {
@@ -353,6 +404,16 @@ impl Panel {
                 |()| "Ready. Reload this paused deck, or use stems on its next song load.".into(),
             );
             self.job = None;
+        }
+        if let Some(audio) = audio {
+            let generation =
+                audio.controls.deck_generation[deck].load(std::sync::atomic::Ordering::Acquire);
+            if self.generation[deck] != generation {
+                self.level[deck] = std::array::from_fn(|i| {
+                    f32::from_bits(audio.controls.stem_knobs[deck][i].load(Relaxed))
+                });
+                self.generation[deck] = generation;
+            }
         }
         let mut reload = false;
         let response = ui.push_id(("deck-stems", deck), |ui| {
@@ -460,14 +521,7 @@ impl Panel {
 }
 /// Center is original mix; left removes this part, right attenuates other parts.
 fn remix_gains(knobs: [f32; 3]) -> [f32; 3] {
-    std::array::from_fn(|stem| {
-        let own = 1. + knobs[stem].clamp(-1., 0.);
-        knobs
-            .iter()
-            .enumerate()
-            .filter(|(i, _)| *i != stem)
-            .fold(own, |gain, (_, other)| gain * (1. - other.clamp(0., 1.)))
-    })
+    amp_core::stem_mix::gains(knobs)
 }
 #[cfg(test)]
 mod tests {

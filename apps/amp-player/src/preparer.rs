@@ -14,6 +14,9 @@ struct Update {
 }
 #[derive(Default)]
 pub struct Preparer {
+    stem_panel: crate::stems::Panel,
+    stem_preview: Option<crate::mixer::Engine>,
+    pub preview_blocked: bool,
     pub open: bool,
     pub preview: Option<(PathBuf, f64)>,
     review_selected: std::collections::HashSet<String>,
@@ -33,6 +36,12 @@ pub struct Preparer {
     skipped: usize,
 }
 impl Preparer {
+    pub fn guard_preview(&mut self, blocked: bool) {
+        self.preview_blocked = blocked;
+        if blocked {
+            self.stem_preview = None;
+        }
+    }
     pub fn progress(&self) -> (usize, usize) {
         (self.done, self.total)
     }
@@ -40,6 +49,7 @@ impl Preparer {
         self.job.is_some()
     }
     pub fn edit(&mut self, root: &std::path::Path, track: &Track) {
+        self.stem_preview = None;
         if self.busy() {
             return;
         }
@@ -187,6 +197,7 @@ impl Preparer {
         library: Option<&mut Library>,
     ) {
         if !self.open {
+            self.stem_preview = None;
             return;
         }
         let mut open = true;
@@ -231,6 +242,7 @@ self.status=match queued{Ok(path)=>format!("{e}. Draft kept locally at {}. Recon
                 });
             }
         });
+        self.stem_editor(ui);
         ui.weak("Saved and manually corrected values are protected. Use review decisions to approve replacements.");
         ui.horizontal(|ui|{ui.label("Cue IN (s)");if ui.add(egui::DragValue::new(&mut self.draft.cue_in).speed(0.01).range(0. ..=21600.)).changed(){self.draft.manual_override=true;}ui.label("Cue OUT (s)");let mut end=self.draft.cue_out.unwrap_or(0.);if ui.add(egui::DragValue::new(&mut end).speed(0.01).range(0. ..=21600.)).changed(){self.draft.cue_out=if end>0.{Some(end)}else{None};self.draft.manual_override=true;}});
         ui.horizontal(|ui|{ui.label("BPM");let mut bpm=self.draft.bpm.unwrap_or(0.);if ui.add(egui::DragValue::new(&mut bpm).speed(0.1).range(0. ..=300.)).changed(){self.draft.bpm=if bpm>0.{Some(bpm)}else{None};self.draft.manual_override=true;}ui.label("Grid offset (s)");let mut offset=self.draft.beat_offset.unwrap_or(0.);if ui.add(egui::DragValue::new(&mut offset).speed(0.01).range(0. ..=21600.)).changed(){self.draft.beat_offset=Some(offset);self.draft.manual_override=true;}});
@@ -266,5 +278,79 @@ ui.add(egui::TextEdit::singleline(&mut cue.label).desired_width(220.));ui.add(eg
         ui.label(&self.status);ui.weak(format!("Metadata: {}",amp_core::preparation::portable(&self.root.join(&self.path)).display()));
     });
         self.open = open;
+        if !open {
+            self.stem_preview = None;
+        }
+    }
+    fn stem_editor(&mut self, ui: &mut egui::Ui) {
+        if self.preview_blocked {
+            self.stem_preview = None;
+        }
+        ui.separator();
+        ui.strong("Default stem mix for this song");
+        ui.weak("Left removes a part; center keeps it; right isolates it. Save approved metadata to use this mix whenever DJ loads this song.");
+        let source = self.root.join(&self.path);
+        let prepared = self.stem_panel.prepare_song(ui, &source);
+        let mut knobs = amp_core::stem_mix::knobs(&self.draft).unwrap_or([0.; 3]);
+        let previous = knobs;
+        ui.horizontal_wrapped(|ui| {
+            for (index, name) in ["Vocals", "Instruments", "Beat"].iter().enumerate() {
+                ui.vertical(|ui| {
+                    crate::dj_mixer::dial(ui, name, &mut knobs[index], -1. ..=1., crate::ORANGE);
+                    ui.label(*name);
+                });
+            }
+            if ui.button("Original mix").clicked() {
+                knobs = [0.; 3];
+            }
+        });
+        if knobs != previous {
+            self.draft
+                .extensions
+                .insert("default_stem_mix".into(), serde_json::json!(knobs));
+            self.draft.manual_override = true;
+        }
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(
+                    prepared && !self.preview_blocked,
+                    egui::Button::new("Preview stem mix"),
+                )
+                .clicked()
+            {
+                let result = (|| {
+                    let mut audio = crate::mixer::Engine::new()?;
+                    audio.load(
+                        0,
+                        &self.root,
+                        &Track {
+                            path: self.path.clone(),
+                            title: self.title.clone(),
+                            preparation: self.draft.clone(),
+                        },
+                        true,
+                    )?;
+                    audio.set_fader(0.);
+                    self.stem_preview = Some(audio);
+                    Ok::<(), String>(())
+                })();
+                if let Err(e) = result {
+                    self.status = e;
+                }
+            }
+            if ui.button("Stop preview").clicked() {
+                self.stem_preview = None;
+            }
+        });
+        if self.preview_blocked {
+            ui.weak("Stop deck playback before previewing in Library.");
+        }
+        if let Some(audio) = &self.stem_preview {
+            for (i, gain) in amp_core::stem_mix::gains(knobs).iter().enumerate() {
+                audio.controls.stem_level[0][i]
+                    .store(gain.to_bits(), std::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        ui.weak("Saved defaults apply on the next load; playing decks keep their current mix. Other computers need prepared stems too.");
     }
 }

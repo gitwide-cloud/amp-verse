@@ -480,6 +480,17 @@ impl Player {
             })
     }
     fn poll(&mut self) {
+        self.preparer.guard_preview(
+            !self.library_open
+                || self.run.auto
+                || self.run.locked
+                || self.smart_preview.active()
+                || self.auxiliary_playing()
+                || self
+                    .audio
+                    .as_ref()
+                    .is_some_and(|a| a.playing(0) || a.playing(1)),
+        );
         if let Some(sample) = self.lab.take_sample() {
             let result = self.ensure_audio();
             if let Err(error) = result {

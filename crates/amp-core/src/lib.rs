@@ -11,6 +11,7 @@ pub mod preparation;
 pub mod review;
 pub mod show;
 pub mod smart;
+pub mod stem_mix;
 pub mod storage;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -64,6 +65,7 @@ impl Preparation {
             return Err("Beat offset must be nonnegative".into());
         }
         preparation::validate(self)?;
+        stem_mix::knobs(self)?;
         Ok(())
     }
 }

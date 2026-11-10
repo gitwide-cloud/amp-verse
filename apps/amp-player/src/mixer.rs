@@ -44,6 +44,7 @@ pub struct Controls {
     pub eq: [[AtomicU32; 3]; 2],
     pub trim_db: [AtomicU32; 2],
     pub stem_level: [[AtomicU32; 3]; 2],
+    pub stem_knobs: [[AtomicU32; 3]; 2],
     pub stems_loaded: [AtomicBool; 2],
     pub eq_kill: [[AtomicBool; 3]; 2],
     pub sweep: [AtomicU32; 2],
@@ -87,6 +88,7 @@ impl Default for Controls {
             eq: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             trim_db: std::array::from_fn(|_| atom(0.)),
             stem_level: std::array::from_fn(|_| std::array::from_fn(|_| atom(1.))),
+            stem_knobs: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             stems_loaded: std::array::from_fn(|_| AtomicBool::new(false)),
             eq_kill: std::array::from_fn(|_| std::array::from_fn(|_| AtomicBool::new(false))),
             sweep: std::array::from_fn(|_| atom(0.)),
@@ -119,6 +121,7 @@ struct Source {
     position: f64,
     primed: bool,
     separated: bool,
+    stem_knobs: [f32; 3],
 }
 impl Source {
     fn buffered(&self, rate: u32) -> bool {
@@ -289,9 +292,14 @@ impl Mixer {
                     self.controls.scratching[d].store(false, Relaxed);
                     self.controls.play[d].store(play, Relaxed);
                     self.controls.stems_loaded[d].store(s.separated, Relaxed);
+                    let gains = amp_core::stem_mix::gains(s.stem_knobs);
+                    for (i, gain) in gains.iter().enumerate() {
+                        set(&self.controls.stem_knobs[d][i], s.stem_knobs[i]);
+                        set(&self.controls.stem_level[d][i], *gain);
+                    }
                     self.voices[d] = Voice {
                         source: Some(s),
-                        stem_mix: [1.; 3],
+                        stem_mix: gains,
                         trim: 10f32.powf(get(&self.controls.trim_db[d]).clamp(-12., 12.) / 20.),
                         ..Default::default()
                     };
@@ -750,6 +758,13 @@ impl Engine {
         stems: Option<[std::path::PathBuf; 3]>,
     ) -> Result<(), String> {
         track.preparation.validate()?;
+        let stem_knobs = amp_core::stem_mix::knobs(&track.preparation)?;
+        if amp_core::stem_mix::changed(stem_knobs) && stems.is_none() {
+            return Err(
+                "This song has a saved stem mix. Prepare its stems in Library before playback."
+                    .into(),
+            );
+        }
         self.source_start[deck] = track.preparation.cue_in;
         let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
         let separated = stems.is_some();
@@ -905,6 +920,7 @@ impl Engine {
                 position: 0.,
                 primed: false,
                 separated,
+                stem_knobs,
             },
             play,
             generation,
@@ -1186,6 +1202,7 @@ mod tests {
             position: 0.,
             primed: false,
             separated: false,
+            stem_knobs: [0.; 3],
         }
     }
     #[test]
@@ -1227,6 +1244,7 @@ mod tests {
             position: 0.,
             primed: true,
             separated: false,
+            stem_knobs: [0.; 3],
         };
         for expected in 0..12 {
             assert_eq!(source.next(1.).unwrap()[0], expected as f32);
@@ -1465,6 +1483,32 @@ mod tests {
             0
         );
         assert!(engine.take_error().is_none());
+    }
+    #[test]
+    fn song_stem_defaults_apply_at_load_and_reset_for_the_next_song() {
+        let controls = Arc::new(Controls::default());
+        set(&controls.master, 1.);
+        let (tx, rx) = mpsc::sync_channel(8);
+        let (mut producer, consumer) = RingBuffer::new(3000);
+        for _ in 0..2500 {
+            producer.push([0.2, 0.2, 0.1, 0.1, 0.05, 0.05]).unwrap();
+        }
+        let mut separated = source(0., 2);
+        separated.ring = consumer;
+        separated.separated = true;
+        separated.stem_knobs = [-1., 0., 0.];
+        tx.send(Command::Load(0, separated, true, 1)).unwrap();
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        mixer.render(1500, |_, _| {});
+        let mut frame = [0.; 2];
+        mixer.render(1, |_, f| frame = f);
+        assert!((frame[0] / std::f32::consts::FRAC_1_SQRT_2 - 0.15).abs() < 0.001);
+        assert_eq!(get(&controls.stem_level[0][0]), 0.);
+        assert_eq!(get(&controls.stem_knobs[0][0]), -1.);
+        tx.send(Command::Load(0, source(0.2, 2), true, 2)).unwrap();
+        mixer.render(1, |_, _| {});
+        assert_eq!(get(&controls.stem_level[0][0]), 1.);
+        assert_eq!(get(&controls.stem_knobs[0][0]), 0.);
     }
     #[test]
     fn stem_levels_share_transport_and_sum_without_touching_original_mode() {
@@ -1765,6 +1809,7 @@ mod tests {
                 position: 0.,
                 primed: false,
                 separated: false,
+                stem_knobs: [0.; 3],
             },
             false,
             0,
