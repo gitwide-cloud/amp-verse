@@ -493,7 +493,7 @@ impl Player {
                 style,
                 energy,
             } => {
-                if self.scan.is_some() {
+                if self.scan.is_some() && self.library.is_none() {
                     return Err("Your music library is still scanning. Wait for the tracks to appear before starting Auto DJ.".into());
                 }
 
@@ -1001,6 +1001,25 @@ mod tests {
         assert!(result.unwrap_err().contains("still scanning"));
         assert!(!player.run.auto);
         assert!(player.run.profile.is_none());
+        // A saved catalog remains usable while the background receiver is pending.
+        player.library = Some(amp_core::Library {
+            tracks: vec![],
+            tree: amp_core::Folder {
+                name: "cached".into(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        });
+        let error = player
+            .execute_control(Action::LoadSmartPlaylist {
+                playlist: "recognition".into(),
+                execution: Execution::PlayNow,
+                style: None,
+                energy: None,
+            })
+            .unwrap_err();
+        assert!(!error.contains("still scanning"), "{error}");
+        assert!(error.contains("no matching songs"), "{error}");
     }
     #[test]
     fn auto_mix_failed_start_stays_off_and_locked_stop_remains_available() {

@@ -709,7 +709,7 @@ mod tests {
             root: root.into(),
             ..Default::default()
         };
-        restarted.accept_library_scan(amp_core::scan(root).unwrap());
+        restarted.accept_scan(crate::library_cache::scan(root).unwrap());
         assert!(
             restarted
                 .dj_browser

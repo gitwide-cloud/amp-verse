@@ -20,6 +20,7 @@ mod hot_cues;
 mod icons;
 mod lab;
 mod lab_editor;
+mod library_cache;
 mod mixer;
 mod monitor;
 mod organized_library;
@@ -103,7 +104,8 @@ fn capture(ctx: &egui::Context, path: PathBuf) {
 struct Player {
     root: PathBuf,
     library: Option<Library>,
-    scan: Option<mpsc::Receiver<Result<Library, String>>>,
+    scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
+    last_scan: std::time::Instant,
     selected: Option<usize>,
     folder: PathBuf,
     search: String,
@@ -187,6 +189,7 @@ impl Default for Player {
                 .unwrap_or_default(),
             library: None,
             scan: None,
+            last_scan: std::time::Instant::now(),
             selected: None,
             folder: PathBuf::new(),
             search: String::new(),
@@ -357,13 +360,51 @@ impl Player {
         }
     }
     fn scan(&mut self) {
+        if self.scan.is_some() {
+            return;
+        }
+        if self.library.is_none()
+            && let Some(snapshot) = library_cache::load(&self.root)
+        {
+            self.accept_scan(snapshot);
+            self.status = "Saved library ready; checking for new tracks in background…".into();
+        } else {
+            self.status = if self.library.is_some() {
+                "Library ready; checking for new tracks in background…"
+            } else {
+                "Scanning music folders…"
+            }
+            .into();
+        }
         let root = self.root.clone();
         let (tx, rx) = mpsc::channel();
         self.scan = Some(rx);
-        self.status = "Scanning music folders...".into();
+        self.last_scan = std::time::Instant::now();
         std::thread::spawn(move || {
-            let _ = tx.send(amp_core::scan(&root).map_err(|e| e.to_string()));
+            let result = library_cache::scan(&root);
+            if let Ok(snapshot) = &result {
+                let _ = library_cache::save(&root, snapshot);
+            }
+            let _ = tx.send(result);
         });
+    }
+    fn accept_scan(&mut self, snapshot: library_cache::Snapshot) {
+        self.accept_library_scan(snapshot.library);
+        if let Some(settings) = snapshot.settings {
+            self.run.settings = settings;
+        }
+        for (path, playlist) in snapshot.playlists {
+            if let Some((_, current)) = self
+                .dj_browser
+                .playlists
+                .iter_mut()
+                .find(|(p, _)| *p == path)
+            {
+                *current = playlist;
+            } else {
+                self.dj_browser.playlists.push((path, playlist));
+            }
+        }
     }
     fn accept_library_scan(&mut self, lib: Library) {
         let lookup: std::collections::HashMap<_, _> = lib
@@ -421,23 +462,6 @@ impl Player {
             lib.tracks.len()
         );
         self.library = Some(lib);
-        if let Ok(files) = std::fs::read_dir(self.root.join(".ampverse/playlists")) {
-            for file in files.flatten() {
-                let path = file.path();
-                if path
-                    .extension()
-                    .is_some_and(|extension| extension == "json")
-                    && !self
-                        .dj_browser
-                        .playlists
-                        .iter()
-                        .any(|(existing, _)| existing == &path)
-                    && let Ok(list) = Playlist::load(&path, &self.root)
-                {
-                    self.dj_browser.playlists.push((path, list));
-                }
-            }
-        }
     }
     fn auxiliary_playing(&self) -> bool {
         self.sides.iter().any(side_deck::SideDeck::playing)
@@ -450,6 +474,12 @@ impl Player {
             })
     }
     fn poll(&mut self) {
+        if !self.root.as_os_str().is_empty()
+            && self.scan.is_none()
+            && self.last_scan.elapsed() >= Duration::from_secs(120)
+        {
+            self.scan();
+        }
         if self.smart_preview.active()
             && (self.auxiliary_playing()
                 || self.run.locked
@@ -483,11 +513,7 @@ impl Player {
                 Ok(result) => {
                     match result {
                         Ok(lib) => {
-                            self.accept_library_scan(lib);
-                            match amp_core::show::Settings::load(&self.root) {
-                                Ok(settings) => self.run.settings = settings,
-                                Err(e) => self.status = e,
-                            }
+                            self.accept_scan(lib);
                             self.catalog_updated =
                                 std::time::Instant::now() - std::time::Duration::from_secs(3);
 
@@ -516,10 +542,12 @@ impl Player {
                         Err(e) => self.status = e,
                     }
                     self.scan = None;
+                    self.last_scan = std::time::Instant::now();
                 }
                 Err(mpsc::TryRecvError::Disconnected) => {
                     self.scan = None;
-                    self.status = "Scan interrupted".into();
+                    self.last_scan = std::time::Instant::now();
+                    self.status = "Background scan interrupted; saved library retained".into();
                 }
                 Err(mpsc::TryRecvError::Empty) => (),
             }
@@ -821,6 +849,7 @@ impl Player {
             self.queue_selected = None;
             self.library = None;
             self.show_editor.open = false;
+            self.scan = None; // Discard any previous root's in-flight result.
             self.root = root;
             let pref = library_preference();
             if let Some(parent) = pref.parent() {
