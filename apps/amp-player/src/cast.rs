@@ -178,12 +178,19 @@ enum Command {
     Start,
     Stop,
     Refresh,
+    Play(String),
+    Share,
 }
 struct Update {
     snapshot: Result<Snapshot, String>,
     control_error: Option<String>,
 }
 pub struct Dashboard {
+    google: crate::google_cast::Output,
+    listen_after_play: bool,
+    pub live_action: Option<bool>,
+    pub live_active: bool,
+    pub live_status: String,
     address: String,
     password: String,
     connected_address: String,
@@ -239,6 +246,20 @@ impl Default for Dashboard {
                     let outcome = match command {
                         Command::Start => client.control("start"),
                         Command::Stop => client.control("stop"),
+                        Command::Play(ref id) => {
+                            let id = id
+                                .bytes()
+                                .map(|b| {
+                                    if b.is_ascii_alphanumeric() || b"-_.".contains(&b) {
+                                        (b as char).to_string()
+                                    } else {
+                                        format!("%{b:02X}")
+                                    }
+                                })
+                                .collect::<String>();
+                            client.control(&format!("smart/playlists/{id}/play"))
+                        }
+                        Command::Share => client.control("smart/enable"),
                         _ => Ok(()),
                     };
                     control_error = outcome.err();
@@ -256,6 +277,11 @@ impl Default for Dashboard {
             }
         });
         let mut dashboard = Self {
+            google: Default::default(),
+            listen_after_play: false,
+            live_action: None,
+            live_active: false,
+            live_status: String::new(),
             address: std::env::var("AMP_CAST_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8787".into()),
             password: String::new(),
             connected_address: String::new(),
@@ -286,6 +312,16 @@ impl Default for Dashboard {
     }
 }
 impl Dashboard {
+    pub fn endpoint(&self) -> (String, String) {
+        (
+            if self.connected_address.is_empty() {
+                self.address.clone()
+            } else {
+                self.connected_address.clone()
+            },
+            self.password.clone(),
+        )
+    }
     fn send(&mut self, command: Command) {
         match self.tx.send(command) {
             Ok(()) => {
@@ -324,11 +360,13 @@ impl Dashboard {
                         .control_error
                         .or_else(|| snapshot.status.error.clone())
                     {
+                        self.listen_after_play = false;
                         self.message = error;
                     }
                     self.snapshot = Some(snapshot);
                 }
                 Err(error) => {
+                    self.listen_after_play = false;
                     self.snapshot = None;
                     self.message = error;
                 }
@@ -424,6 +462,13 @@ impl Dashboard {
     }
     pub fn show(&mut self, ui: &mut egui::Ui, root: &std::path::Path, ready: bool) {
         self.poll();
+        if self.listen_after_play
+            && !self.busy
+            && self.snapshot.as_ref().is_some_and(|s| s.status.running)
+        {
+            self.listen_after_play = false;
+            self.listen(&format!("http://{}/listen.mp3", self.connected_address));
+        }
         if let Some(child) = &mut self.host
             && let Ok(Some(code)) = child.try_wait()
         {
@@ -568,6 +613,47 @@ impl Dashboard {
                     }
                 });
             });
+        } else if self.section == 1 {
+            ui.heading("Broadcast my live DJ mix");
+            ui.label("Send the actual master mix: both decks, crossfader, EQ, stems and sampler. Headphone cue stays private.");
+            let supported = self
+                .snapshot
+                .as_ref()
+                .is_some_and(|s| s.status.capabilities["live_dj"] == true);
+            if ui
+                .add_enabled(
+                    supported && !self.live_active,
+                    egui::Button::new("Start live DJ broadcast"),
+                )
+                .clicked()
+            {
+                self.live_action = Some(true);
+            }
+            if self.live_active && ui.button("Stop my live DJ broadcast").clicked() {
+                self.live_action = Some(false);
+            }
+            ui.label(&self.live_status);
+            if !supported {
+                ui.weak("Connect to an updated AMP Cast server first, or start one below.");
+                if ui.button("Connect to Cast on this computer").clicked() {
+                    self.connected_address = "127.0.0.1:8787".into();
+                    self.address = self.connected_address.clone();
+                    self.send(Command::Connect(
+                        self.address.clone(),
+                        self.password.clone(),
+                    ));
+                }
+                if self.host.is_none()
+                    && ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new("Start Cast server on this computer"),
+                        )
+                        .clicked()
+                {
+                    self.host(root, true);
+                }
+            }
         } else {
             ui.heading(if self.section == 1 {
                 "Broadcast live audio"
@@ -576,6 +662,12 @@ impl Dashboard {
             });
             ui.label(if self.section==1 {"Other devices listen to the same live stream."}else{"Share saved normal and Smart Playlists on your LAN. Listeners can save original songs with your cues for offline listening."});
             ui.label(format!("Music library: {}", root.display()));
+            if self.snapshot.is_some() {
+                if ui.button("Share playlists on connected station").clicked() {
+                    self.send(Command::Share);
+                }
+                ui.weak("Enables shared playlists and offline downloads on the selected server.");
+            }
             if self.host.is_none() {
                 if ui
                     .add_enabled(
@@ -613,6 +705,7 @@ impl Dashboard {
         let mut download = None;
         let mut listen_url = None;
         let mut stop_remote = false;
+        let mut play_remote = None;
         if let Some(snapshot) = &self.snapshot {
             ui.label(format!(
                 "{} songs · {} listeners",
@@ -653,6 +746,9 @@ impl Dashboard {
                                 playlist["name"].as_str().unwrap_or("Playlist"),
                                 playlist["tracks"].as_array().map_or(0, Vec::len)
                             ));
+                            if ui.button("Play here").clicked() {
+                                play_remote = playlist["id"].as_str().map(str::to_owned);
+                            }
                             if ui
                                 .add_enabled(
                                     self.download.is_none(),
@@ -672,9 +768,19 @@ impl Dashboard {
         if stop_remote {
             self.send(Command::Stop);
         }
+        if let Some(id) = play_remote {
+            self.listen_after_play = true;
+            self.send(Command::Play(id));
+        }
         if let Some(url) = listen_url {
             self.listen(&url);
         }
+        ui.separator();
+        self.google.show(
+            ui,
+            &self.connected_address,
+            self.snapshot.as_ref().is_some_and(|s| s.status.running),
+        );
         if self.radio.is_some()
             && ui.button("Stop listening").clicked()
             && let Some(mut child) = self.radio.take()

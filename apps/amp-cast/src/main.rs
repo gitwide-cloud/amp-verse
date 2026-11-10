@@ -30,7 +30,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.station_name.clone(),
     );
     cast.sharing.store(
-        std::env::var("AMP_CAST_SMART_SHARING").as_deref() == Ok("1"),
+        std::env::var("AMP_CAST_SMART_SHARING").as_deref() == Ok("1") || config.sharing_enabled,
         std::sync::atomic::Ordering::Relaxed,
     );
     *cast.config_dir.lock().unwrap() = Some(config_dir);

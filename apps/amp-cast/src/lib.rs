@@ -1,5 +1,6 @@
 pub mod analysis_worker;
 pub mod config;
+mod live;
 pub mod sharing;
 use amp_core::{Library, Track};
 use axum::{
@@ -21,6 +22,11 @@ use tokio::{
 
 #[derive(Default, Serialize)]
 struct Station {
+    source: String,
+    #[serde(skip)]
+    live_token: Option<String>,
+    #[serde(skip)]
+    live_seen: Option<std::time::Instant>,
     running: bool,
     now_playing: Option<String>,
     current_index: Option<usize>,
@@ -29,6 +35,7 @@ struct Station {
     worker: Option<JoinHandle<()>>,
 }
 pub struct Cast {
+    operation: Mutex<()>,
     server_id: String,
     library_id: Option<String>,
     pub config_dir: std::sync::Mutex<Option<PathBuf>>,
@@ -41,6 +48,7 @@ pub struct Cast {
     password: Option<String>,
     station: Mutex<Station>,
     audio: broadcast::Sender<Bytes>,
+    selection: std::sync::Mutex<Option<serde_json::Value>>,
 }
 impl Cast {
     pub fn new(root: PathBuf, library: Library, password: Option<String>) -> Arc<Self> {
@@ -64,6 +72,7 @@ impl Cast {
         let root = root.canonicalize().unwrap_or(root);
         let (audio, _) = broadcast::channel(256);
         Arc::new(Self {
+            operation: Mutex::new(()),
             library_id: amp_core::coordination::library_id(&root).ok(),
             config_dir: std::sync::Mutex::new(None),
             server_id,
@@ -76,12 +85,14 @@ impl Cast {
             password,
             station: Mutex::new(Station::default()),
             audio,
+            selection: std::sync::Mutex::new(None),
         })
     }
     pub async fn shutdown(&self) {
         let worker = {
             let mut station = self.station.lock().await;
             station.running = false;
+            station.live_token = None;
             station.now_playing = None;
             station.current_index = None;
             station.worker.take()
@@ -129,6 +140,7 @@ pub fn router(cast: Arc<Cast>) -> Router {
             get(|| async { Html(include_str!("../web/index.html")) }),
         )
         .merge(sharing::routes())
+        .merge(live::routes())
         .route("/api/status", get(status))
         .route(
             "/app-icon.png",
@@ -161,7 +173,7 @@ async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
             .pause_for_radio
             .load(std::sync::atomic::Ordering::Relaxed);
     Json(
-        serde_json::json!({"library_id":cast.library_id,"capabilities":{"coordination_version":1,"stations_per_server":1,"google_cast":false,"hls":false,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":cast.station_name,"analysis":analysis,"running":station.running,"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
+        serde_json::json!({"library_id":cast.library_id,"source":station.source,"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"playlist_playback":true,"google_cast":false,"hls":false,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":cast.station_name,"analysis":analysis,"running":station.running,"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
     )
 }
 async fn pause_analysis(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
@@ -198,6 +210,10 @@ async fn playlist(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
     )
 }
 async fn start(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
+    let _operation = cast.operation.lock().await;
+    start_unlocked(State(cast.clone()), headers).await
+}
+async fn start_unlocked(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     if !cast.authorized(&headers) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -213,6 +229,7 @@ async fn start(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
         return (StatusCode::CONFLICT, "Music folder is empty").into_response();
     }
     station.running = true;
+    station.source = "playlist".into();
     station.error = None;
     let worker_cast = cast.clone();
     let task = tokio::spawn(async move {
@@ -231,75 +248,119 @@ async fn stop(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let _operation = cast.operation.lock().await;
     cast.shutdown().await;
     StatusCode::NO_CONTENT.into_response()
 }
 async fn broadcast_tracks(cast: Arc<Cast>) -> Result<(), String> {
+    let selection = cast.selection.lock().unwrap().clone();
+    let indices: Vec<usize> = selection
+        .as_ref()
+        .and_then(|p| p["tracks"].as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|i| i.as_u64().map(|i| i as usize))
+                .collect()
+        })
+        .unwrap_or_else(|| (0..cast.tracks.len()).collect());
+    let profile: Option<amp_core::show::SmartPlaylist> = selection
+        .as_ref()
+        .and_then(|p| serde_json::from_value(p["rules"].clone()).ok());
+    let mut recent = Vec::new();
+    let mut current = None;
+    let mut cursor = 0;
     loop {
-        for (index, track) in cast.tracks.iter().enumerate() {
-            let path = amp_core::resolve(&cast.root, &track.path).map_err(|e| e.to_string())?;
-            // Read once before loading; never change the running track's cues.
-            let preparation = amp_core::preparation::load(&path)?;
-            {
-                let mut station = cast.station.lock().await;
-                station.now_playing = Some(track.title.clone());
-                station.current_index = Some(index);
+        let index = if let Some(profile) = &profile {
+            amp_core::show::choose(
+                profile,
+                &cast.tracks,
+                current,
+                &recent,
+                profile.target_energy,
+                0,
+            )
+            .or_else(|| {
+                current.filter(|i| {
+                    profile.fallback != amp_core::show::Fallback::Stop
+                        && amp_core::show::eligible(profile, &cast.tracks[*i])
+                })
+            })
+            .ok_or("No eligible songs remain in Smart Playlist")?
+        } else {
+            let i = *indices
+                .get(cursor % indices.len().max(1))
+                .ok_or("Playlist is empty")?;
+            cursor += 1;
+            i
+        };
+        let track = cast.tracks.get(index).ok_or("Invalid playlist track")?;
+        let path = amp_core::resolve(&cast.root, &track.path).map_err(|e| e.to_string())?;
+        // Read once before loading; never change the running track's cues.
+        let preparation = amp_core::preparation::load(&path)?;
+        {
+            let mut station = cast.station.lock().await;
+            station.now_playing = Some(track.title.clone());
+            station.current_index = Some(index);
+        }
+        let mut command = tokio::process::Command::new("ffmpeg");
+        #[cfg(windows)]
+        command.creation_flags(0x08000000);
+        let mut child = command
+            .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-re"])
+            .arg("-ss")
+            .arg(preparation.cue_in.to_string())
+            .arg("-i")
+            .arg(path)
+            .args(
+                preparation
+                    .cue_out
+                    .map(|out| vec!["-t".to_string(), (out - preparation.cue_in).to_string()])
+                    .unwrap_or_default(),
+            )
+            .args([
+                "-vn",
+                "-ac",
+                "2",
+                "-ar",
+                "44100",
+                "-c:a",
+                "libmp3lame",
+                "-b:a",
+                "128k",
+                "-write_xing",
+                "0",
+                "-id3v2_version",
+                "0",
+                "-f",
+                "mp3",
+                "pipe:1",
+            ])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .map_err(|e| format!("FFmpeg unavailable: {e}"))?;
+        let mut stdout = child.stdout.take().ok_or("Missing encoder pipe")?;
+        let mut buffer = [0u8; 4096];
+        let mut total = 0;
+        loop {
+            let size = stdout.read(&mut buffer).await.map_err(|e| e.to_string())?;
+            if size == 0 {
+                break;
             }
-            let mut command = tokio::process::Command::new("ffmpeg");
-            #[cfg(windows)]
-            command.creation_flags(0x08000000);
-            let mut child = command
-                .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-re"])
-                .arg("-ss")
-                .arg(preparation.cue_in.to_string())
-                .arg("-i")
-                .arg(path)
-                .args(
-                    preparation
-                        .cue_out
-                        .map(|out| vec!["-t".to_string(), (out - preparation.cue_in).to_string()])
-                        .unwrap_or_default(),
-                )
-                .args([
-                    "-vn",
-                    "-ac",
-                    "2",
-                    "-ar",
-                    "44100",
-                    "-c:a",
-                    "libmp3lame",
-                    "-b:a",
-                    "128k",
-                    "-write_xing",
-                    "0",
-                    "-id3v2_version",
-                    "0",
-                    "-f",
-                    "mp3",
-                    "pipe:1",
-                ])
-                .stdin(std::process::Stdio::null())
-                .stdout(std::process::Stdio::piped())
-                .stderr(std::process::Stdio::null())
-                .kill_on_drop(true)
-                .spawn()
-                .map_err(|e| format!("FFmpeg unavailable: {e}"))?;
-            let mut stdout = child.stdout.take().ok_or("Missing encoder pipe")?;
-            let mut buffer = [0u8; 4096];
-            let mut total = 0;
-            loop {
-                let size = stdout.read(&mut buffer).await.map_err(|e| e.to_string())?;
-                if size == 0 {
-                    break;
-                }
-                total += size;
-                // One encoder feeds all listeners. A listener never starts its own station.
-                let _ = cast.audio.send(Bytes::copy_from_slice(&buffer[..size]));
-            }
-            let result = child.wait().await.map_err(|e| e.to_string())?;
-            if !result.success() || total == 0 {
-                return Err(format!("Audio encoding failed: {}", track.title));
-            }
+            total += size;
+            // One encoder feeds all listeners. A listener never starts its own station.
+            let _ = cast.audio.send(Bytes::copy_from_slice(&buffer[..size]));
+        }
+        let result = child.wait().await.map_err(|e| e.to_string())?;
+        if !result.success() || total == 0 {
+            return Err(format!("Audio encoding failed: {}", track.title));
+        }
+        current = Some(index);
+        recent.push(amp_core::show::song_id(track));
+        if recent.len() > 100 {
+            recent.remove(0);
         }
     }
 }
@@ -325,6 +386,7 @@ async fn listen(State(cast): State<Arc<Cast>>) -> Response {
         [
             ("content-type", "audio/mpeg"),
             ("cache-control", "no-store"),
+            ("access-control-allow-origin", "*"),
         ],
         Body::from_stream(stream),
     )

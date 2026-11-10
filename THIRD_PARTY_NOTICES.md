@@ -2,6 +2,8 @@
 
 AMP Verse original code is MIT licensed. It is not affiliated with Winamp.
 
+Desktop Google Cast control uses rust_cast 0.21.0 (MIT) and mdns-sd 0.21.7 (Apache-2.0 OR MIT), with Rustls and their Cargo.lock dependencies. Android Google Cast uses Google Play services Cast Framework 22.3.0 under Google's SDK terms, and AndroidX AppCompat/MediaRouter under Apache-2.0. No Google SDK code is copied into the Rust implementation. See the upstream packages and Google Cast documentation for their respective license terms.
+
 Rust dependencies are resolved in `Cargo.lock` and retain their respective licenses. Key direct dependencies include CPAL (Apache-2.0), rtrb (MIT OR Apache-2.0), eframe/egui (MIT OR Apache-2.0), rfd (MIT), serde/serde_json (MIT OR Apache-2.0), RustCrypto sha2 (MIT OR Apache-2.0), UUID/getrandom (MIT OR Apache-2.0), Tokio (MIT), Axum (MIT), tokio-tungstenite/tungstenite (MIT), bytes (MIT), async-stream (MIT), ureq (MIT OR Apache-2.0), and test-only tempfile/tower (MIT). Consult each dependency's source license for the complete terms, including transitive dependencies and embedded fonts. Before public binary distribution, generate and review a complete dependency license bundle.
 
 Desktop FFmpeg and FFplay remain external user-installed tools; no desktop codec runtime is bundled. Android AMP Lab now includes the same dynamically linked FFmpegKit audio runtime as the MP3 Lab editor. Their licenses depend on the build configuration. Any future bundled runtime must include matching license notices and required source/rebuild materials.

@@ -103,6 +103,7 @@ final class DjPanel extends LinearLayout {
     @Override protected void onAttachedToWindow(){super.onAttachedToWindow();timer.post(tick);}
     @Override protected void onDetachedFromWindow(){timer.removeCallbacks(tick);super.onDetachedFromWindow();}
     void redraw(){draw();}
+    @android.annotation.SuppressLint("AppCompatCustomView") // Main player retains its native Activity/theme; this pad is not used in the AppCompat Cast picker.
     private static final class SquarePad extends Button {
         SquarePad(Context context){super(context);}
         @Override protected void onMeasure(int widthSpec,int heightSpec){super.onMeasure(widthSpec,heightSpec);int width=getMeasuredWidth();if(width>0)setMeasuredDimension(width,width);}

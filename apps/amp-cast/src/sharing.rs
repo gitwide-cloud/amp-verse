@@ -7,11 +7,25 @@ use std::sync::atomic::Ordering::Relaxed;
 
 pub fn routes() -> Router<Arc<Cast>> {
     Router::new()
+        .route("/api/smart/enable", post(enable))
         .route("/api/smart/manifest", get(manifest))
         .route("/api/smart/tracks/{id}/metadata", get(metadata))
         .route("/api/smart/tracks/{id}/audio", get(audio))
+        .route("/api/smart/playlists/{id}/play", post(play))
 }
-fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
+async fn enable(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
+    if !cast.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(dir) = cast.config_dir.lock().unwrap().as_ref()
+        && let Err(error) = config::Config::set_sharing(dir, true)
+    {
+        return (StatusCode::SERVICE_UNAVAILABLE, error).into_response();
+    }
+    cast.sharing.store(true, Relaxed);
+    StatusCode::NO_CONTENT.into_response()
+}
+pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
     let mut result = Vec::new();
     let settings = if cast.root.join("ampdj/smart-playlists.json").is_file() {
         amp_core::show::Settings::load(&cast.root)?
@@ -67,6 +81,97 @@ fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
 fn allowed(cast: &Cast, headers: &HeaderMap) -> bool {
     cast.sharing.load(Relaxed) && cast.authorized(headers)
 }
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+    use axum::http::Request;
+    use tower::ServiceExt;
+    #[tokio::test]
+    #[ignore = "requires FFmpeg; no hardware playback"]
+    async fn remote_smart_playlist_streams_only_its_selected_folder() {
+        let root = tempfile::tempdir().unwrap();
+        for folder in ["allowed", "excluded"] {
+            std::fs::create_dir(root.path().join(folder)).unwrap();
+            let result = amp_core::command("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=1",
+                ])
+                .arg(root.path().join(folder).join("song.wav"))
+                .output()
+                .unwrap();
+            assert!(result.status.success());
+        }
+        let mut rules = amp_core::show::Settings::default();
+        let mut profile = rules.playlists[0].clone();
+        profile.id = "remote".into();
+        profile.folders = vec!["allowed".into()];
+        profile.restrict_folders = true;
+        profile.restrict_allowed = false;
+        profile.allowed.clear();
+        rules.playlists = vec![profile];
+        rules.save(root.path()).unwrap();
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        cast.sharing.store(true, Relaxed);
+        let mut audio = cast.audio.subscribe();
+        let result = router(cast.clone())
+            .oneshot(
+                Request::post("/api/smart/playlists/smart_remote/play")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.status(), 204);
+        let bytes = tokio::time::timeout(std::time::Duration::from_secs(5), audio.recv())
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!bytes.is_empty());
+        let index = cast.station.lock().await.current_index.unwrap();
+        assert!(cast.tracks[index].path.starts_with("allowed"));
+        cast.shutdown().await;
+    }
+}
+async fn play(
+    State(cast): State<Arc<Cast>>,
+    Path(id): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if !allowed(&cast, &headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let source = cast.clone();
+    let selection = tokio::task::spawn_blocking(move || {
+        lists(&source)?
+            .into_iter()
+            .find(|p| p["id"].as_str() == Some(&id))
+            .ok_or_else(|| "Playlist unavailable".to_string())
+    })
+    .await;
+    let value = match selection {
+        Ok(Ok(value)) => value,
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    if value["tracks"]
+        .as_array()
+        .is_none_or(|tracks| tracks.is_empty())
+    {
+        return (StatusCode::CONFLICT, "Playlist has no songs").into_response();
+    }
+    let _operation = cast.operation.lock().await;
+    cast.shutdown().await;
+    *cast.selection.lock().unwrap() = Some(value);
+    super::start_unlocked(State(cast.clone()), headers).await
+}
 fn shared_track(cast: &Cast, id: usize) -> Result<&Track, StatusCode> {
     let lists = lists(cast).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if !lists.iter().any(|p| {
@@ -82,7 +187,10 @@ async fn manifest(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response
     if !allowed(&cast, &headers) {
         return StatusCode::FORBIDDEN.into_response();
     }
-    let work=tokio::task::spawn_blocking(move||lists(&cast).map(|playlists|json!({"version":1,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"name":cast.station_name,"playlists":playlists,"tracks":cast.tracks.iter().enumerate().filter(|(id,_)|playlists.iter().any(|p|p["tracks"].as_array().is_some_and(|a|a.iter().any(|i|i.as_u64()==Some(*id as u64))))).map(|(id,t)|json!({"id":id,"title":t.title,"extension":t.path.extension().unwrap_or_default().to_string_lossy()})).collect::<Vec<_>>()}))).await;
+    let work=tokio::task::spawn_blocking(move||lists(&cast).map(|playlists|{
+        let shared:std::collections::HashSet<u64>=playlists.iter().filter_map(|p|p["tracks"].as_array()).flatten().filter_map(Value::as_u64).collect();
+        json!({"version":1,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"name":cast.station_name,"playlists":playlists,"tracks":cast.tracks.iter().enumerate().filter(|(id,_)|shared.contains(&(*id as u64))).map(|(id,t)|json!({"id":id,"title":t.title,"extension":t.path.extension().unwrap_or_default().to_string_lossy()})).collect::<Vec<_>>()})
+    })).await;
     match work {
         Ok(Ok(value)) => Json(value).into_response(),
         _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),

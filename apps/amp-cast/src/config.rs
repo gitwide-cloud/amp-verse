@@ -8,11 +8,22 @@ pub struct Config {
     pub station_id: String,
     pub station_name: String,
     pub analysis_enabled: bool,
+    #[serde(default)]
+    pub sharing_enabled: bool,
     pub analysis_workers: usize,
     pub scan_interval_seconds: u64,
     pub pause_analysis_during_radio: bool,
 }
 impl Config {
+    pub fn set_sharing(dir: &Path, enabled: bool) -> Result<(), String> {
+        let file = dir.join("server.json");
+        let _lock = amp_core::coordination::Lock::acquire(&file)?;
+        let mut config: Self =
+            serde_json::from_slice(&std::fs::read(&file).map_err(|e| e.to_string())?)
+                .map_err(|e| e.to_string())?;
+        config.sharing_enabled = enabled;
+        amp_core::coordination::atomic_write(&file, &config)
+    }
     pub fn set_analysis(dir: &Path, enabled: bool) -> Result<(), String> {
         let file = dir.join("server.json");
         let _lock = amp_core::coordination::Lock::acquire(&file)?;
@@ -35,6 +46,7 @@ impl Config {
                     station_id: amp_core::coordination::token(),
                     station_name: "AMP Radio".into(),
                     analysis_enabled: false,
+                    sharing_enabled: false,
                     analysis_workers: 1,
                     scan_interval_seconds: 60,
                     pause_analysis_during_radio: true,

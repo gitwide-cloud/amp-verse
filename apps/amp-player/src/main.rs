@@ -16,11 +16,13 @@ mod docking;
 mod dragdrop;
 mod engine;
 mod engine_download;
+mod google_cast;
 mod hot_cues;
 mod icons;
 mod lab;
 mod lab_editor;
 mod library_cache;
+mod live_mix;
 mod mixer;
 mod monitor;
 mod organized_library;
@@ -112,6 +114,7 @@ struct Player {
     search: String,
     audio: Option<mixer::Engine>,
     sampler: sampler::Sampler,
+    live_mix: Option<live_mix::Broadcast>,
     right_sampler: sampler::Sampler,
     right_sample_audio: Option<mixer::Engine>,
     sides: [side_deck::SideDeck; 2],
@@ -196,6 +199,7 @@ impl Default for Player {
             search: String::new(),
             audio: None,
             sampler: Default::default(),
+            live_mix: None,
             right_sampler: sampler::Sampler::separate_bank("sampler-right.json"),
             right_sample_audio: None,
             sides: [side_deck::SideDeck::new(0), side_deck::SideDeck::new(1)],
@@ -2874,6 +2878,10 @@ impl Player {
         }
     }
     fn cast_ui(&mut self, ui: &mut egui::Ui) {
+        self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
+        if let Some(broadcast) = &self.live_mix {
+            self.cast.live_status = broadcast.status.lock().unwrap().clone();
+        }
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
             self.header(ui, "AMP Cast", true);
@@ -2888,6 +2896,34 @@ impl Player {
                     );
                 });
         });
+        if let Some(start) = self.cast.live_action.take() {
+            if start {
+                let result = (|| {
+                    self.ensure_audio()?;
+                    self.ensure_right_samples()?;
+                    let (address, password) = self.cast.endpoint();
+                    live_mix::Broadcast::start(
+                        self.audio.as_ref().unwrap(),
+                        self.right_sample_audio.as_ref().unwrap(),
+                        address,
+                        password,
+                    )
+                })();
+                match result {
+                    Ok(broadcast) => self.live_mix = Some(broadcast),
+                    Err(error) => self.cast.live_status = error,
+                }
+            } else {
+                self.live_mix = None;
+                if let Some(audio) = &self.audio {
+                    audio.stop_broadcast_tap();
+                }
+                if let Some(audio) = &self.right_sample_audio {
+                    audio.stop_broadcast_tap();
+                }
+                self.cast.live_status = "Live DJ broadcast stopped".into();
+            }
+        }
     }
     fn addons_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, false, |ui| {

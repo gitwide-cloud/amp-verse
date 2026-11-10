@@ -193,6 +193,7 @@ struct SampleVoice {
 }
 enum Command {
     Monitor(Option<rtrb::Producer<Frame>>),
+    Broadcast(Option<rtrb::Producer<Frame>>),
     SampleLoad(usize, u64, Option<Arc<[Frame]>>),
     SampleTrigger(usize),
     SampleStop(Option<usize>),
@@ -214,6 +215,7 @@ struct Mixer {
     fade: Option<Fade>,
     levels: [Option<LevelFade>; 3],
     monitor: Option<rtrb::Producer<Frame>>,
+    broadcast: Option<rtrb::Producer<Frame>>,
 }
 impl Mixer {
     fn new(rate: u32, commands: mpsc::Receiver<Command>, controls: Arc<Controls>) -> Self {
@@ -226,12 +228,14 @@ impl Mixer {
             fade: None,
             levels: Default::default(),
             monitor: None,
+            broadcast: None,
         }
     }
     fn process_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
             match command {
                 Command::Monitor(producer) => self.monitor = producer,
+                Command::Broadcast(producer) => self.broadcast = producer,
                 Command::SampleLoad(pad, generation, frames) => {
                     self.samples[pad] = SampleVoice {
                         frames,
@@ -605,13 +609,14 @@ impl Mixer {
                 });
                 let _ = monitor.push(frame);
             }
-            output(
-                i,
-                [
-                    (mix[0] * get(&c.master)).clamp(-0.98, 0.98),
-                    (mix[1] * get(&c.master)).clamp(-0.98, 0.98),
-                ],
-            );
+            let master = [
+                (mix[0] * get(&c.master)).clamp(-0.98, 0.98),
+                (mix[1] * get(&c.master)).clamp(-0.98, 0.98),
+            ];
+            if let Some(tap) = &mut self.broadcast {
+                let _ = tap.push(master);
+            }
+            output(i, master);
         }
         for d in 0..2 {
             set(&c.peak[d], peaks[d]);
@@ -717,6 +722,14 @@ impl Engine {
             self.monitor_stream = None;
         }
         Ok(())
+    }
+    pub fn broadcast_tap(&self) -> Result<rtrb::Consumer<Frame>, String> {
+        let (producer, consumer) = RingBuffer::new(self.sample_rate as usize);
+        self.send(Command::Broadcast(Some(producer)))?;
+        Ok(consumer)
+    }
+    pub fn stop_broadcast_tap(&self) {
+        let _ = self.send(Command::Broadcast(None));
     }
     pub fn load(
         &mut self,
@@ -1558,6 +1571,8 @@ mod tests {
         set(&controls.cue_volume, 1.);
         let (tx, rx) = mpsc::sync_channel(8);
         let (producer, mut consumer) = RingBuffer::new(20000);
+        let (tap, mut broadcast) = RingBuffer::new(20000);
+        tx.send(Command::Broadcast(Some(tap))).unwrap();
         tx.send(Command::Monitor(Some(producer))).unwrap();
         tx.send(Command::Load(0, source(0.2, 20000), true, 0))
             .unwrap();
@@ -1575,6 +1590,10 @@ mod tests {
             "Cue must work with master and channel faders down"
         );
         assert_eq!(speaker_peak, 0., "Headphones must not leak into the master");
+        assert!(
+            std::iter::from_fn(|| broadcast.pop().ok()).all(|frame| frame == [0.; 2]),
+            "Private headphone cue must not leak into live broadcast"
+        );
         set(&controls.trim_db[0], 6.);
         mixer.render(2000, |_, _| {});
         let mut boosted = 0.;

@@ -34,6 +34,7 @@ final class CastClient {
         if(serverId.isEmpty())throw new IOException("Connect to a station first");
         request(start?"/api/start":"/api/stop",true);
     }
+    void playPlaylist(String id)throws Exception { if(id==null||id.isEmpty()||id.length()>512)throw new IOException("Invalid playlist"); request("/api/smart/playlists/"+android.net.Uri.encode(id)+"/play",true); }
     String stream(){return base+"/listen.mp3";}
     void download(int id,java.io.File file,long expected,String checksum)throws Exception {
         if(expected<0||expected>2L*1024*1024*1024)throw new IOException("Track exceeds download limit");

@@ -20,5 +20,9 @@ ureq = { version = "3", default-features = false, features = ["json", "rustls"] 
 sha2 = "0.10"
 tempfile = "3"
 
+rust_cast = "=0.21.0"
+rustls = {version="0.23",default-features=false,features=["ring","std","tls12"]}
+mdns-sd = "=0.21.7"
+
 [dev-dependencies]
 amp-cast = { path = "../amp-cast" }
