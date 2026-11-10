@@ -251,7 +251,18 @@ impl SideDeck {
                 self.config.collapsed = !self.config.collapsed;
             }
             if !self.config.collapsed {
-                ui.colored_label(accent, if self.side == 0 { "LEFT" } else { "RIGHT" });
+                ui.colored_label(
+                    accent,
+                    format!(
+                        "{} {}",
+                        if self.config.cue {
+                            "Cue Deck"
+                        } else {
+                            "Sampler"
+                        },
+                        if self.side == 0 { "A" } else { "B" }
+                    ),
+                );
             }
         });
         if !self.config.collapsed {

@@ -50,7 +50,7 @@ fn gradient(painter: &egui::Painter, rect: Rect, top: C, bottom: C) -> egui::Sha
     egui::Shape::mesh(mesh)
 }
 
-pub fn panel<R>(ui: &mut egui::Ui, _purple: bool, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
+pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui) -> R) -> R {
     let theme = crate::theme::current(ui.ctx());
     let p = theme.palette();
     let bg = ui.painter().add(egui::Shape::Noop);
@@ -72,9 +72,17 @@ pub fn panel<R>(ui: &mut egui::Ui, _purple: bool, body: impl FnOnce(&mut egui::U
     } else {
         (p.elevated, p.surface)
     };
-    if theme == crate::theme::Theme::Classic {
-        ui.painter()
-            .set(bg, gradient(ui.painter(), rect, top, bottom));
+    if theme == crate::theme::Theme::Classic || (purple && theme == crate::theme::Theme::ModernDark)
+    {
+        ui.painter().set(
+            bg,
+            gradient(
+                ui.painter(),
+                rect,
+                if purple { p.elevated } else { top },
+                bottom,
+            ),
+        );
     } else {
         ui.painter()
             .set(bg, egui::Shape::rect_filled(rect, 10., p.surface));
@@ -483,6 +491,34 @@ pub fn button(ui: &mut egui::Ui, text: &str, accent: C) -> egui::Response {
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, text));
     response
+}
+
+/// Scalable DJ transport matching the deck's amber/cyan identity.
+pub fn deck_button(
+    ui: &mut egui::Ui,
+    text: &str,
+    accent: C,
+    width: f32,
+    primary: bool,
+) -> egui::Response {
+    let accent = color(ui, accent);
+    let text = RichText::new(text).size(15.).strong().color(if primary {
+        C::from_rgb(15, 20, 25)
+    } else {
+        foreground(ui)
+    });
+    let mut button = egui::Button::new(text).corner_radius(8).stroke(Stroke::new(
+        1.,
+        if primary {
+            accent
+        } else {
+            crate::theme::current(ui.ctx()).palette().border
+        },
+    ));
+    if primary {
+        button = button.fill(accent);
+    }
+    ui.add_sized([width, 42.], button)
 }
 
 pub fn bolt(painter: &egui::Painter, rect: Rect, color: C) {

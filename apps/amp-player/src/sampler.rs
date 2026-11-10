@@ -205,75 +205,99 @@ impl Sampler {
             .show(ui, |ui| {
                 for pad in 0..9 {
                     ui.push_id(pad, |ui| {
-                        let playing = engine.is_some_and(|audio| {
-                            audio.controls.sample_playing[pad]
-                                .load(std::sync::atomic::Ordering::Relaxed)
-                        });
-                        let name = if self.bank.names[pad].is_empty() {
-                            format!("PAD {}", pad + 1)
-                        } else {
-                            self.bank.names[pad].clone()
-                        };
-                        let response = ui
-                            .add_sized(
-                                [side, side],
-                                egui::Button::new(RichText::new(name).color(accent).size(12.))
-                                    .wrap()
-                                    .selected(playing),
-                            )
-                            .on_hover_text(
-                                self.bank.paths[pad]
-                                    .as_ref()
-                                    .map(|path| path.display().to_string())
-                                    .unwrap_or_else(|| "Drop audio here or click to load".into()),
-                            );
-                        response.context_menu(|ui| {
-                            if ui.button("Replace...").clicked() {
-                                actions.push(Action::Load(pad));
-                                ui.close();
-                            }
-                            ui.label("Pad name");
-                            if ui.text_edit_singleline(&mut self.bank.names[pad]).changed() {
-                                self.save();
-                            }
-                            if ui
-                                .checkbox(&mut self.bank.loops[pad], "Loop playback")
-                                .changed()
-                            {
-                                self.save();
-                            }
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut self.bank.gains[pad], 0. ..=1.)
-                                        .text("Level"),
-                                )
-                                .changed()
-                            {
-                                self.save();
-                            }
-                            if ui.button("Stop").clicked() {
-                                actions.push(Action::Stop(pad));
-                                ui.close();
-                            }
-                            if ui.button("Clear").clicked() {
-                                actions.push(Action::Clear(pad));
-                                ui.close();
-                            }
-                        });
-                        if let Some(path) = crate::dragdrop::target(&response, accent) {
-                            if playing {
-                                self.status = "Stop this pad before replacing its sample".into();
-                            } else {
-                                self.request_load(pad, path);
-                            }
-                        }
-                        if response.clicked() {
-                            actions.push(if self.ready[pad] {
-                                Action::Trigger(pad)
-                            } else {
-                                Action::Load(pad)
+                        ui.vertical(|ui| {
+                            let playing = engine.is_some_and(|audio| {
+                                audio.controls.sample_playing[pad]
+                                    .load(std::sync::atomic::Ordering::Relaxed)
                             });
-                        }
+                            let name = if self.bank.names[pad].is_empty() {
+                                format!("PAD {}\n+", pad + 1)
+                            } else {
+                                self.bank.names[pad].clone()
+                            };
+                            let response = ui
+                                .add_sized(
+                                    [side, side],
+                                    egui::Button::new(RichText::new(name).color(accent).size(12.))
+                                        .wrap()
+                                        .selected(playing),
+                                )
+                                .on_hover_text(
+                                    self.bank.paths[pad]
+                                        .as_ref()
+                                        .map(|path| path.display().to_string())
+                                        .unwrap_or_else(|| {
+                                            "Drop audio here or click to load".into()
+                                        }),
+                                );
+                            response.context_menu(|ui| {
+                                if ui.button("Replace...").clicked() {
+                                    actions.push(Action::Load(pad));
+                                    ui.close();
+                                }
+                                ui.label("Pad name");
+                                if ui.text_edit_singleline(&mut self.bank.names[pad]).changed() {
+                                    self.save();
+                                }
+                                if ui
+                                    .checkbox(&mut self.bank.loops[pad], "Loop playback")
+                                    .changed()
+                                {
+                                    self.save();
+                                }
+                                if ui
+                                    .add(
+                                        egui::Slider::new(&mut self.bank.gains[pad], 0. ..=1.)
+                                            .text("Level"),
+                                    )
+                                    .changed()
+                                {
+                                    self.save();
+                                }
+                                if ui.button("Stop").clicked() {
+                                    actions.push(Action::Stop(pad));
+                                    ui.close();
+                                }
+                                if ui.button("Clear").clicked() {
+                                    actions.push(Action::Clear(pad));
+                                    ui.close();
+                                }
+                            });
+                            ui.horizontal(|ui| {
+                                ui.spacing_mut().item_spacing.x = 2.;
+                                ui.spacing_mut().button_padding = egui::vec2(2., 1.);
+                                for (label, action) in
+                                    [("Stop", Action::Stop(pad)), ("Clear", Action::Clear(pad))]
+                                {
+                                    if ui
+                                        .add_sized(
+                                            [(side - 2.) / 2., 18.],
+                                            egui::Button::new(RichText::new(label).size(9.))
+                                                .min_size(egui::vec2(0., 18.))
+                                                .truncate(),
+                                        )
+                                        .clicked()
+                                    {
+                                        actions.push(action);
+                                    }
+                                }
+                            });
+                            if let Some(path) = crate::dragdrop::target(&response, accent) {
+                                if playing {
+                                    self.status =
+                                        "Stop this pad before replacing its sample".into();
+                                } else {
+                                    self.request_load(pad, path);
+                                }
+                            }
+                            if response.clicked() {
+                                actions.push(if self.ready[pad] {
+                                    Action::Trigger(pad)
+                                } else {
+                                    Action::Load(pad)
+                                });
+                            }
+                        });
                     });
                     if pad % 3 == 2 {
                         ui.end_row();

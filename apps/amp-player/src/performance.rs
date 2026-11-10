@@ -19,6 +19,8 @@ pub struct Run {
     pub target: Option<f64>,
     pub auto: bool,
     pub crossfade: bool,
+    pub scratch_assist: bool,
+    scratch_bridge: Option<(usize, Instant)>,
     pub future_candidates: VecDeque<usize>,
     pub locked: bool,
     pub progression: Option<show::Progression>,
@@ -43,6 +45,8 @@ impl Default for Run {
             target: None,
             auto: false,
             crossfade: true,
+            scratch_assist: true,
+            scratch_bridge: None,
             future_candidates: VecDeque::new(),
             locked: false,
             progression: None,
@@ -707,6 +711,14 @@ impl Player {
             .and_then(|t| show::energy(&t.preparation))
     }
     pub(super) fn performance_tick(&mut self) {
+        // A cancelled handoff must always release its temporary scratch control.
+        if (self.run.pending.is_none() || !self.run.scratch_assist)
+            && let Some((deck, _)) = self.run.scratch_bridge.take()
+            && let Some(audio) = &self.audio
+        {
+            audio.scratch(deck, false, 1.);
+        }
+
         if (self.run.auto || self.run.planned_force)
             && self.run.transition.is_none()
             && self.run.progression.is_none()
@@ -732,6 +744,46 @@ impl Player {
                 self.status = "Incoming deck did not become ready; outgoing audio retained".into();
                 self.run.cancel_automation();
             } else if ready && due {
+                let outgoing = 1 - incoming;
+                let bridge_needed = self.run.scratch_assist
+                    && self
+                        .audio
+                        .as_ref()
+                        .is_some_and(|a| a.playing(outgoing) && a.position(outgoing) > 0.25)
+                    && self
+                        .loaded_track(outgoing)
+                        .and_then(|t| t.preparation.bpm)
+                        .zip(self.loaded_track(incoming).and_then(|t| t.preparation.bpm))
+                        .is_some_and(|(a, b)| {
+                            let ratio = a * (1. + self.pitch[outgoing] as f64 / 100.) / b;
+                            !(0.84..=1.16).contains(&ratio)
+                        });
+                let mut scratch_handoff = false;
+                if bridge_needed || self.run.scratch_bridge.is_some() {
+                    let (_, started) = *self
+                        .run
+                        .scratch_bridge
+                        .get_or_insert((outgoing, Instant::now()));
+                    let elapsed = started.elapsed();
+                    let audio = self.audio.as_ref().unwrap();
+                    if elapsed < Duration::from_millis(180) {
+                        audio.scratch(
+                            outgoing,
+                            true,
+                            if elapsed < Duration::from_millis(90) {
+                                -0.65
+                            } else {
+                                0.8
+                            },
+                        );
+                        self.status = "Scratch-assisted transition".into();
+                        return;
+                    }
+                    audio.scratch(outgoing, false, 1.);
+                    self.run.scratch_bridge = None;
+                    scratch_handoff = true;
+                }
+
                 let a = self.audio.as_ref().unwrap();
                 if !a.playing(1 - incoming) {
                     a.controls.play[incoming].store(true, Relaxed);
@@ -742,10 +794,14 @@ impl Player {
                         "Crossfader changed after preload; request the next song again".into();
                     self.run.cancel_automation();
                 } else {
-                    let seconds = match self.run.style {
-                        Style::Hype => 3.,
-                        Style::Steady => self.fade_seconds,
-                        Style::Chill => 10.,
+                    let seconds = if scratch_handoff {
+                        0.25
+                    } else {
+                        match self.run.style {
+                            Style::Hype => 3.,
+                            Style::Steady => self.fade_seconds,
+                            Style::Chill => 10.,
+                        }
                     };
                     match a.crossfade(seconds) {
                         Ok(()) => self.run.transition = Some(incoming),
@@ -792,7 +848,11 @@ impl Player {
                 .audio
                 .as_ref()
                 .is_some_and(|a| a.controls.finished[active].load(Relaxed));
-            if (finished || (self.run.crossfade && remaining.is_some_and(|r| r <= mix_seconds)))
+            if (finished
+                || (self.run.crossfade
+                    && remaining.is_some_and(|r| {
+                        r <= mix_seconds + if self.run.scratch_assist { 0.25 } else { 0. }
+                    })))
                 && let Some((incoming, _)) = self.run.preloaded
             {
                 self.run.pending_at = None;
@@ -893,6 +953,59 @@ mod tests {
         );
     }
     use super::*;
+    #[test]
+    #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
+    fn scratch_assist_bridges_large_tempo_gap_and_releases_on_cancel() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
+        for (i, bpm) in [120., 174.].into_iter().enumerate() {
+            let path = std::path::PathBuf::from(format!("song{i}.wav"));
+            std::fs::copy(&fixture, dir.path().join(&path)).unwrap();
+            amp_core::preparation::save(
+                dir.path(),
+                &path,
+                &amp_core::Preparation {
+                    cue_in: 0.25,
+                    cue_out: Some(4.),
+                    bpm: Some(bpm),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut player = Player {
+            root: dir.path().into(),
+            library: Some(amp_core::scan(dir.path()).unwrap()),
+            channel_gain: [0.; 2],
+            fade_seconds: 0.25,
+            ..Default::default()
+        };
+        player
+            .execute_control(Action::LoadSmartPlaylist {
+                playlist: "everyday".into(),
+                execution: Execution::PlayNow,
+                style: Some(Style::Steady),
+                energy: None,
+            })
+            .unwrap();
+        wait(&mut player, |p| p.run.scratch_bridge.is_some());
+        assert!(player.audio.as_ref().unwrap().controls.scratching[0].load(Relaxed));
+        player
+            .execute_control(Action::AutoDj { enabled: false })
+            .unwrap();
+        player.performance_tick();
+        assert!(!player.audio.as_ref().unwrap().controls.scratching[0].load(Relaxed));
+        player
+            .execute_control(Action::AutoDj { enabled: true })
+            .unwrap();
+        wait(&mut player, |p| {
+            p.loaded[p.active_deck()] == Some(1) && p.run.transition.is_none()
+        });
+        assert!(player.run.auto);
+        assert!(player.run.scratch_bridge.is_none());
+        assert!(!player.audio.as_ref().unwrap().controls.scratching[0].load(Relaxed));
+        assert!(player.audio.as_ref().unwrap().take_error().is_none());
+    }
     #[test]
     #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
     fn smart_auto_mix_advances_reorders_and_refills_without_commands() {

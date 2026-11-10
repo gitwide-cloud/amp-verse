@@ -33,7 +33,7 @@ fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
 impl Player {
     pub(super) fn dj_library_ui(&mut self, ui: &mut egui::Ui) {
         let height = ui.available_height().clamp(240., 420.);
-        skin::label(ui, "DJ LIBRARY");
+        skin::label(ui, "DJ Library");
         let mut auto = self.run.auto;
         let mut toggle = false;
         let mut queue_drop = None;
@@ -198,17 +198,25 @@ impl Player {
                     })
                 });
                 ui.weak(format!("{} tracks", indices.len()));
+                let title_width = (ui.available_width() - 330.).max(120.);
+                ui.horizontal(|ui| {
+                    for (label, width) in [("#", 28.), ("Track", title_width), ("BPM", 56.), ("Key", 40.), ("Length", 54.), ("Load", 68.)] {
+                        ui.add_sized([width, 22.], egui::Label::new(egui::RichText::new(label).strong()).halign(egui::Align::Min).truncate());
+                    }
+                });
+                ui.separator();
                 egui::ScrollArea::vertical()
                     .id_salt("dj-source-tracks")
-                    .max_height((height - 125.).max(80.))
-                    .min_scrolled_height((height - 125.).max(80.))
-                    .show_rows(ui, 28., indices.len(), |ui, range| {
+                    .max_height((height - 155.).max(80.))
+                    .min_scrolled_height((height - 155.).max(80.))
+                    .show_rows(ui, 34., indices.len(), |ui, range| {
                         for row in range {
                             let i = indices[row];
                             let t = &lib.tracks[i];
                             ui.horizontal(|ui| {
+                                ui.add_sized([28., 30.], egui::Label::new(format!("{}", row + 1)));
                                 let row=ui.add_sized(
-                                        [(ui.available_width() - 300.).max(140.), 24.],
+                                        [title_width, 30.],
                                         egui::Button::selectable(
                                             self.selected == Some(i),
                                             &t.title,
@@ -220,22 +228,19 @@ impl Player {
                                 crate::dragdrop::source(&row,self.root.join(&t.path));
                                 if row.clicked() {self.selected=Some(i);}
                                 if row.double_clicked() {load=Some((self.dj_browser.destination,i));}
-                                ui.weak(format!(
-                                    "{} BPM · {}",
-                                    t.preparation
-                                        .bpm
-                                        .map(|b| format!("{b:.1}"))
-                                        .unwrap_or_else(|| "--".into()),
-                                    t.preparation.harmonic_key.as_deref().unwrap_or("--")
-                                ));
-                                ui.label("Load →");
+                                let duration = t.preparation.analysis.as_ref().map(|a| a.duration).or(t.preparation.cue_out);
+                                for (value, width) in [
+                                    (t.preparation.bpm.map_or("--".into(), |b| format!("{b:.1}")), 56.),
+                                    (t.preparation.harmonic_key.clone().unwrap_or_else(|| "--".into()), 40.),
+                                    (duration.map_or("--:--".into(), |s| format!("{:02}:{:02}", s as u64 / 60, s as u64 % 60)), 54.),
+                                ] { ui.add_sized([width, 30.], egui::Label::new(value).truncate()); }
                                 for (deck,label,color) in [(0,"A",ORANGE),(1,"B",CYAN)] {
                                     if ui.add_sized([30.,24.],egui::Button::new(egui::RichText::new(label).strong().color(color)).selected(self.dj_browser.destination==deck)).on_hover_text(format!("Prepare on Deck {label}; playing decks stage the replacement")).clicked(){self.dj_browser.destination=deck;load=Some((deck,i));}
                                 }
                             });
                         }
                     });
-                let target=ui.add_sized([ui.available_width(),24.],egui::Button::new(if self.run.auto {"Drop music here → Auto Mix candidates"}else{"Drop music here → Playlist queue"}).sense(egui::Sense::hover()));
+                let target=ui.add_sized([ui.available_width(),24.],egui::Button::new(if self.run.auto {"Drop music here > Auto Mix candidates"}else{"Drop music here > Playlist queue"}).sense(egui::Sense::hover()));
                 queue_drop=dragdrop::target(&target,GOLD);
                 if indices.is_empty() {
                     ui.weak("No tracks in this source. Prepare and edit playlists in AMP Library.");

@@ -111,6 +111,7 @@ struct Player {
     loaded_origin: [Option<PathBuf>; 2],
     dj_browser: dj_browser::Browser,
     dj_tab: usize,
+    dj_cues: [bool; 2],
     player_mode: u8,
     player_on_top: bool,
     run: performance::Run,
@@ -191,6 +192,7 @@ impl Default for Player {
             loaded_origin: Default::default(),
             dj_browser: Default::default(),
             dj_tab: 0,
+            dj_cues: [false; 2],
             player_mode: 0,
             player_on_top: load_player_on_top(),
             run: Default::default(),
@@ -1028,7 +1030,7 @@ impl Player {
                     .iter()
                     .filter(|side| !side.config.collapsed)
                     .count() as f32
-                    * 210.
+                    * 250.
             } else {
                 900.
             };
@@ -1689,6 +1691,9 @@ impl Player {
                 "Crossfade: OFF"
             };
             ui.toggle_value(&mut self.run.crossfade, crossfade_label);
+            ui.toggle_value(&mut self.run.scratch_assist, "Scratch assist")
+                .on_hover_text("Brief outgoing scratch for tempo gaps beyond the matching range. Turn off for clean fades only.");
+
             if ui
                 .checkbox(&mut self.run.locked, "Manual DJ Lock")
                 .changed()
@@ -1791,7 +1796,7 @@ impl Player {
             for d in 0..2 {
                 let track = self.loaded_track(d).cloned();
                 let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
-                self.waveforms[d].height = Some(40.);
+                self.waveforms[d].height = Some(26.);
                 self.waveforms[d].show(
                     ui,
                     self.loaded_origin[d].as_deref().unwrap_or(&self.root),
@@ -1801,13 +1806,13 @@ impl Player {
                     d,
                 );
             }
-            let browser_height = (ui.available_height() * 0.34).clamp(280., 360.);
+            let browser_height = (ui.available_height() * 0.34).clamp(240., 340.);
             let height = (ui.available_height() - browser_height - 50.).max(230.);
             let side_widths = std::array::from_fn::<_, 2, _>(|side| {
                 if self.sides[side].config.collapsed {
                     30.
                 } else {
-                    190.
+                    230.
                 }
             });
             let deck_width =
@@ -1862,12 +1867,18 @@ impl Player {
                             });
                             let fading = self.audio.as_ref().is_some_and(|a| a.fading());
                             let fade = ui.add_sized(
-                                [140., 42.],
-                                egui::Button::new(if fading {
-                                    "Cancel mix"
-                                } else {
-                                    "Auto crossfade"
-                                })
+                                [140., 54.],
+                                egui::Button::new(
+                                    RichText::new(if fading {
+                                        "Cancel mix"
+                                    } else {
+                                        "Auto crossfade"
+                                    })
+                                    .size(16.)
+                                    .color(GOLD),
+                                )
+                                .fill(skin::accent(ui).gamma_multiply(0.16))
+                                .stroke(egui::Stroke::new(1., skin::accent(ui)))
                                 .wrap(),
                             );
                             ui.ctx().data_mut(|d| {
@@ -2258,19 +2269,32 @@ impl Player {
     }
     fn deck_ui(&mut self, ui: &mut egui::Ui, deck: usize, width: f32, height: f32) {
         let accent = if deck == 0 { ORANGE } else { CYAN };
-        let platter_side = (height - 300.).clamp(32., 170.);
+        let platter_side = (height - 210.).clamp(80., 260.);
         let area=ui.allocate_ui_with_layout(egui::vec2(width,0.),egui::Layout::top_down(egui::Align::Center),|ui|{
             skin::panel(ui,true,|ui|{ui.set_width(width-18.);
                 ui.horizontal(|ui|{skin::label(ui,if deck==0{"DECK A"}else{"DECK B"});let position=self.audio.as_ref().map_or(0.,|a|a.position(deck));ui.label(RichText::new(format!("{:02}:{:02}",position as u64/60,position as u64%60)).monospace().color(skin::signal(ui)));});
                 skin::display(ui,|ui|{ui.set_min_width(ui.available_width());ui.add(egui::Label::new(RichText::new(self.title(deck)).strong().color(skin::signal(ui))).truncate());let track=self.loaded_track(deck);ui.label(track.map(|t|format!("{} BPM · {}",t.preparation.bpm.map(|b|format!("{:.1}",b*(1.+self.pitch[deck]as f64/100.))).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--"))).unwrap_or_else(||"Load a track from the library".into()));});
-                ui.horizontal(|ui|{ui.vertical(|ui|{ui.label("PITCH");ui.spacing_mut().slider_width=platter_side;if ui.add(egui::Slider::new(&mut self.pitch[deck],-16. ..=16.).vertical().show_value(false)).changed()&&let Some(a)=&self.audio{a.set_rate(deck,1.+self.pitch[deck]/100.);}ui.label(format!("{:+.1}%",self.pitch[deck]));});let phase=self.audio.as_ref().map_or(0.,|audio|audio.source_position(deck)) as f32;
-                    let wheel=skin::platter(ui,platter_side,accent,self.playing[deck] || self.jog_resume[deck].is_some(),phase).on_hover_text("Drag around the wheel to scratch forward/backward. Scroll to seek; Shift = 5 seconds.");
-                    self.jog_wheel(ui, deck, &wheel);});
+                if self.dj_cues[deck] {
+                    egui::ScrollArea::vertical().id_salt(("deck-cues", deck)).max_height(platter_side).show(ui, |ui| self.main_hot_cues(ui, deck, accent));
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.label("PITCH");
+                            ui.spacing_mut().slider_width=platter_side;
+                            if ui.add(egui::Slider::new(&mut self.pitch[deck], -16. ..=16.).vertical().show_value(false)).changed() && let Some(a)=&self.audio { a.set_rate(deck,1.+self.pitch[deck]/100.); }
+                            ui.label(format!("{:+.1}%",self.pitch[deck]));
+                        });
+                        let phase=self.audio.as_ref().map_or(0.,|audio|audio.source_position(deck)) as f32;
+                        let wheel=skin::platter(ui,platter_side.min((width-85.).max(80.)),accent,self.playing[deck] || self.jog_resume[deck].is_some(),phase).on_hover_text("Drag around the wheel to scratch forward/backward. Scroll to seek; Shift = 5 seconds.");
+                        self.jog_wheel(ui, deck, &wheel);
+                    });
+                }
+                let transport_width=(ui.available_width()-ui.spacing().item_spacing.x*3.)/4.;
                 let transport=ui.horizontal(|ui|{
-                    if skin::button(ui,"CUE",accent).on_hover_text("Return to the prepared cue IN and pause").clicked(){self.recue_deck(deck);}
-                    if skin::button(ui,if self.playing[deck]{"PAUSE"}else{"PLAY"},accent).clicked(){if deck==0{self.auto=false;}self.toggle_deck(deck);}
-                    if skin::button(ui,"SYNC",accent).on_hover_text("Match prepared BPM to the other deck. Changes pitch with speed; beat-phase sync/key lock are not available.").clicked(){self.sync_deck(deck);}
-                    if ui.button("STOP").clicked(){self.stop(deck);}
+                    if skin::deck_button(ui,"CUE",accent,transport_width,false).on_hover_text("Return to the prepared cue IN and pause").clicked(){self.recue_deck(deck);}
+                    if skin::deck_button(ui,if self.playing[deck]{"PAUSE"}else{"PLAY"},accent,transport_width,true).clicked(){if deck==0{self.auto=false;}self.toggle_deck(deck);}
+                    if skin::deck_button(ui,"SYNC",accent,transport_width,false).on_hover_text("Match prepared BPM to the other deck. Changes pitch with speed; beat-phase sync/key lock are not available.").clicked(){self.sync_deck(deck);}
+                    if skin::deck_button(ui,"STOP",accent,transport_width,false).clicked(){self.stop(deck);}
                 });
                 ui.ctx().data_mut(|d|{d.insert_temp(egui::Id::unique(("dj-transport",deck)),transport.response.rect);d.insert_temp(egui::Id::unique(("dj-transport",deck)).with("screen"),(transport.response.rect,ui.layer_id()));});
                 ui.horizontal_wrapped(|ui| {
@@ -2282,22 +2306,10 @@ impl Player {
                         if let Some(a)=&self.audio&&let Err(e)=a.loop_toggle(deck,seconds as f32){self.status=e;}
                     }
                     if ui.button("Pitch reset").clicked(){self.pitch[deck]=0.;if let Some(a)=&self.audio{a.set_rate(deck,1.);}}
+                    ui.toggle_value(&mut self.dj_cues[deck], "Hot cues");
 
                 });
-                let prep = self.loaded_track(deck).map(|t| t.preparation.clone());
-                if let Some(action) = hot_cues::pads(ui, prep.as_ref(), accent) {
-                    let position = self.audio.as_ref().map_or(0., |a| a.source_position(deck));
-                    match action {
-                        hot_cues::Action::Jump(seconds) => self.seek_deck_relative(deck, seconds - position),
-                        _ => if let Some(track) = self.loaded_track(deck).cloned() {
-                            let path = self.loaded_origin[deck].as_deref().unwrap_or(&self.root).join(&track.path);
-                            match hot_cues::edit(self.loaded_origin[deck].as_deref().unwrap_or(&self.root), &path, &track.preparation, action, position) {
-                                Ok(saved) => { let mut snapshot = track; hot_cues::update_snapshot(&mut snapshot.preparation, saved); self.loaded_snapshot[deck] = Some(snapshot); },
-                                Err(error) => self.status = error,
-                            }
-                        }
-                    }
-                }
+
             });
         });
         let response = ui
@@ -2322,6 +2334,39 @@ impl Player {
             && let Err(error) = self.safe_load_path(deck, path, cue)
         {
             self.status = error;
+        }
+    }
+    fn main_hot_cues(&mut self, ui: &mut egui::Ui, deck: usize, accent: egui::Color32) {
+        let prep = self.loaded_track(deck).map(|t| t.preparation.clone());
+        if let Some(action) = hot_cues::pads(ui, prep.as_ref(), accent) {
+            let position = self.audio.as_ref().map_or(0., |a| a.source_position(deck));
+            match action {
+                hot_cues::Action::Jump(seconds) => {
+                    self.seek_deck_relative(deck, seconds - position)
+                }
+                _ => {
+                    if let Some(track) = self.loaded_track(deck).cloned() {
+                        let path = self.loaded_origin[deck]
+                            .as_deref()
+                            .unwrap_or(&self.root)
+                            .join(&track.path);
+                        match hot_cues::edit(
+                            self.loaded_origin[deck].as_deref().unwrap_or(&self.root),
+                            &path,
+                            &track.preparation,
+                            action,
+                            position,
+                        ) {
+                            Ok(saved) => {
+                                let mut snapshot = track;
+                                hot_cues::update_snapshot(&mut snapshot.preparation, saved);
+                                self.loaded_snapshot[deck] = Some(snapshot);
+                            }
+                            Err(error) => self.status = error,
+                        }
+                    }
+                }
+            }
         }
     }
     fn seek_deck_relative(&mut self, deck: usize, delta: f64) {
@@ -2765,7 +2810,7 @@ fn main() -> eframe::Result {
         "library" | "playlists" | "analysis" | "devices" => [1280., 860.],
         "preparation" | "rules" => [1200., 830.],
         "dj" => [1000., 920.],
-        "dj-window" => [900., 600.],
+        "dj-window" => [1440., 1000.],
         "compact" => [520., 210.],
         "mini" => [620., 100.],
         "dj-library" => [1100., 430.],
@@ -3079,6 +3124,7 @@ mod window_tests {
         player.run.settings.playlists[0].name = "Long Smart Playlist name ".repeat(30);
         player.run.choice = player.run.settings.playlists[0].id.clone();
         for smart in [false, true] {
+            player.dj_cues = [smart; 2];
             player.dj_browser = Default::default();
             if smart {
                 player.dj_browser.select_smart(&player.run.choice);
