@@ -292,10 +292,22 @@ pub fn splitter(
     } else {
         egui::vec2(rect.width().min(80.) * 0.5, 0.)
     };
-    ui.painter().line_segment(
-        [rect.center() - half, rect.center() + half],
-        egui::Stroke::new(3., color),
-    );
+    if id == "dj-library-divider" {
+        ui.painter()
+            .rect_filled(rect, 3., ui.visuals().widgets.inactive.bg_fill);
+        ui.painter().text(
+            rect.center(),
+            egui::Align2::CENTER_CENTER,
+            "Drag to resize library",
+            egui::FontId::proportional(12.),
+            super::skin::foreground(ui),
+        );
+    } else {
+        ui.painter().line_segment(
+            [rect.center() - half, rect.center() + half],
+            egui::Stroke::new(3., color),
+        );
+    }
     ui.ctx()
         .data_mut(|d| d.insert_temp(egui::Id::unique(id).with("bounds"), (rect, ui.layer_id())));
 }
