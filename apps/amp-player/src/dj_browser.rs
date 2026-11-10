@@ -201,7 +201,7 @@ impl Player {
                 let title_width = (ui.available_width() - 330.).max(120.);
                 ui.horizontal(|ui| {
                     for (label, width) in [("#", 28.), ("Track", title_width), ("BPM", 56.), ("Key", 40.), ("Length", 54.), ("Load", 68.)] {
-                        ui.add_sized([width, 22.], egui::Label::new(egui::RichText::new(label).strong()).halign(egui::Align::Min).truncate());
+                        ui.add_sized([width, 22.], egui::Label::new(egui::RichText::new(label).strong().size(14.)).halign(egui::Align::Min).truncate());
                     }
                 });
                 ui.separator();
@@ -219,7 +219,7 @@ impl Player {
                                         [title_width, 30.],
                                         egui::Button::selectable(
                                             self.selected == Some(i),
-                                            &t.title,
+                                            egui::RichText::new(&t.title).size(15.),
                                         )
                                         .right_text("")
                                         .truncate().sense(egui::Sense::click_and_drag()),

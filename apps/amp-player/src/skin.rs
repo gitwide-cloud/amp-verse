@@ -501,9 +501,13 @@ pub fn deck_button(
     width: f32,
     primary: bool,
 ) -> egui::Response {
-    let accent = color(ui, accent);
+    let accent = if primary {
+        color(ui, GOLD)
+    } else {
+        color(ui, accent)
+    };
     let text = RichText::new(text).size(15.).strong().color(if primary {
-        C::from_rgb(15, 20, 25)
+        C::WHITE
     } else {
         foreground(ui)
     });
@@ -516,7 +520,7 @@ pub fn deck_button(
         },
     ));
     if primary {
-        button = button.fill(accent);
+        button = button.fill(C::from_rgb(105, 75, 12));
     }
     ui.add_sized([width, 42.], button)
 }
@@ -617,4 +621,38 @@ pub fn meter(ui: &mut egui::Ui, peak: f32, size: Vec2) {
             },
         );
     }
+}
+
+/// Compact switch with an explicit on/off thumb.
+pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
+    ui.allocate_ui_with_layout(
+        egui::vec2(160., 26.),
+        egui::Layout::left_to_right(egui::Align::Center),
+        |ui| {
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(44., 24.), egui::Sense::click());
+            if response.clicked() {
+                *value = !*value;
+            }
+            let color = if *value {
+                accent(ui)
+            } else {
+                crate::theme::current(ui.ctx()).palette().border
+            };
+            ui.painter().rect_filled(rect, 12., color);
+            ui.painter().circle_filled(
+                egui::pos2(
+                    if *value {
+                        rect.right() - 12.
+                    } else {
+                        rect.left() + 12.
+                    },
+                    rect.center().y,
+                ),
+                9.,
+                C::WHITE,
+            );
+            ui.label(label);
+        },
+    );
 }

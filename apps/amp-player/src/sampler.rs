@@ -126,6 +126,7 @@ pub struct Sampler {
     bank: Bank,
     settings_path: Option<PathBuf>,
     ready: [bool; 9],
+    selected_pad: usize,
     queue: VecDeque<(usize, PathBuf)>,
     job: Option<mpsc::Receiver<Loaded>>,
     loading: Option<usize>,
@@ -138,6 +139,7 @@ impl Default for Sampler {
             bank: load_bank(),
             settings_path: settings(),
             ready: [false; 9],
+            selected_pad: 0,
             queue: VecDeque::new(),
             job: None,
             loading: None,
@@ -188,17 +190,25 @@ impl Sampler {
         accent: egui::Color32,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
-        ui.spacing_mut().slider_width = (ui.available_width() - 55.).max(50.);
-        if ui
-            .add(
-                egui::Slider::new(&mut self.bank.master, 0. ..=1.)
-                    .show_value(false)
-                    .text("Vol"),
-            )
-            .changed()
-        {
-            self.save();
-        }
+        ui.label("Volume");
+        ui.horizontal(|ui| {
+            ui.spacing_mut().slider_width = (ui.available_width() - 65.).max(50.);
+            let mut changed = ui
+                .add(egui::Slider::new(&mut self.bank.master, 0. ..=1.).show_value(false))
+                .changed();
+            changed |= ui
+                .add(
+                    egui::DragValue::new(&mut self.bank.master)
+                        .range(0. ..=1.)
+                        .speed(0.01)
+                        .fixed_decimals(2),
+                )
+                .changed();
+            if changed {
+                self.save();
+            }
+        });
+        ui.add_space(8.);
         let side = ((ui.available_width() - 12.) / 3.).max(34.);
         egui::Grid::new("compact-pads")
             .spacing([4., 6.])
@@ -211,7 +221,7 @@ impl Sampler {
                                     .load(std::sync::atomic::Ordering::Relaxed)
                             });
                             let name = if self.bank.names[pad].is_empty() {
-                                format!("PAD {}\n+", pad + 1)
+                                format!("PAD {}", pad + 1)
                             } else {
                                 self.bank.names[pad].clone()
                             };
@@ -263,25 +273,6 @@ impl Sampler {
                                     ui.close();
                                 }
                             });
-                            ui.horizontal(|ui| {
-                                ui.spacing_mut().item_spacing.x = 2.;
-                                ui.spacing_mut().button_padding = egui::vec2(2., 1.);
-                                for (label, action) in
-                                    [("Stop", Action::Stop(pad)), ("Clear", Action::Clear(pad))]
-                                {
-                                    if ui
-                                        .add_sized(
-                                            [(side - 2.) / 2., 18.],
-                                            egui::Button::new(RichText::new(label).size(9.))
-                                                .min_size(egui::vec2(0., 18.))
-                                                .truncate(),
-                                        )
-                                        .clicked()
-                                    {
-                                        actions.push(action);
-                                    }
-                                }
-                            });
                             if let Some(path) = crate::dragdrop::target(&response, accent) {
                                 if playing {
                                     self.status =
@@ -291,6 +282,7 @@ impl Sampler {
                                 }
                             }
                             if response.clicked() {
+                                self.selected_pad = pad;
                                 actions.push(if self.ready[pad] {
                                     Action::Trigger(pad)
                                 } else {
@@ -304,10 +296,29 @@ impl Sampler {
                     }
                 }
             });
-        if ui.button("Stop all pads").clicked() {
-            actions.push(Action::StopAll);
+        ui.add_space(18.);
+        ui.horizontal(|ui| {
+            let width = (ui.available_width() - 12.) / 3.;
+            for (label, action) in [
+                ("Play", Action::Trigger(self.selected_pad)),
+                ("Stop", Action::Stop(self.selected_pad)),
+                ("Clear", Action::Clear(self.selected_pad)),
+            ] {
+                let response = ui.add_sized([width, 36.], egui::Button::new(label));
+                if response.clicked() {
+                    actions.push(action);
+                }
+                response.context_menu(|ui| {
+                    if ui.button("Stop all pads").clicked() {
+                        actions.push(Action::StopAll);
+                        ui.close();
+                    }
+                });
+            }
+        });
+        if !self.status.starts_with("Load sound effects") {
+            ui.add(egui::Label::new(&self.status).wrap());
         }
-        ui.add(egui::Label::new(&self.status).wrap());
         actions
     }
     pub fn restore(&mut self) {
