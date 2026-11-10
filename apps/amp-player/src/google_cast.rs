@@ -96,6 +96,12 @@ fn cast(device: Device, url: String) -> Session {
             let cast =
                 rust_cast::CastDevice::connect_without_host_verification(device.host, device.port)
                     .map_err(|e| e.to_string())?;
+            *message.lock().unwrap() = "Opening Google Cast receiver connection…".into();
+            cast.connection
+                .connect("receiver-0")
+                .map_err(|e| e.to_string())?;
+            cast.heartbeat.ping().map_err(|e| e.to_string())?;
+            *message.lock().unwrap() = "Launching Google Cast audio receiver…".into();
             let app = cast
                 .receiver
                 .launch_app(&rust_cast::channels::receiver::CastDeviceApp::DefaultMediaReceiver)
