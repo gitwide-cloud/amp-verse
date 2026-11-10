@@ -56,3 +56,6 @@ The DJ opens at up to 1440×1000 within the available monitor. Resizing still co
 ## Simplified DJ surface
 
 The default mixer follows the supplied two-deck reference. Waveforms and scratch/mix-duration options are in an expandable section above the decks. Auto Crossfade is a switch and mixing style is a dropdown. Main decks show Loop and Hot Cues below their transport; right-click the platter for exact seek steps and pitch reset (wheel scrolling and dragging still work). Each sampler keeps its nine pads and one Play/Stop/Clear row for the last clicked pad; right-click a bottom control for Stop All. Volume has both a slider and a numeric value. Cue Deck mode remains available on either side.
+
+
+When the DJ is maximized or full screen with at least 1200×850 logical pixels, sampler banks move underneath their matching main decks as nine-pad horizontal strips. Restoring the window returns the side banks. Resizing only changes the layout: sample assignments, volumes, Cue Deck mode and active audio are preserved. The full mixer and library scale together to stay within the viewport.

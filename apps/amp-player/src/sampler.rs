@@ -188,9 +188,12 @@ impl Sampler {
         ui: &mut egui::Ui,
         engine: Option<&Engine>,
         accent: egui::Color32,
+        columns: usize,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
-        ui.label("Volume");
+        if columns == 3 {
+            ui.label("Volume");
+        }
         ui.horizontal(|ui| {
             ui.spacing_mut().slider_width = (ui.available_width() - 65.).max(50.);
             let mut changed = ui
@@ -208,8 +211,11 @@ impl Sampler {
                 self.save();
             }
         });
-        ui.add_space(8.);
-        let side = ((ui.available_width() - 12.) / 3.).max(34.);
+        if columns == 3 {
+            ui.add_space(8.);
+        }
+        let side =
+            ((ui.available_width() - (columns - 1) as f32 * 4.) / columns as f32).clamp(34., 70.);
         egui::Grid::new("compact-pads")
             .spacing([4., 6.])
             .show(ui, |ui| {
@@ -291,12 +297,12 @@ impl Sampler {
                             }
                         });
                     });
-                    if pad % 3 == 2 {
+                    if pad % columns == columns - 1 {
                         ui.end_row();
                     }
                 }
             });
-        ui.add_space(18.);
+        ui.add_space(if columns == 9 { 6. } else { 18. });
         ui.horizontal(|ui| {
             let width = (ui.available_width() - 12.) / 3.;
             for (label, action) in [

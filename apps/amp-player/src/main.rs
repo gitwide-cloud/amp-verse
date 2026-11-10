@@ -1013,11 +1013,17 @@ impl Player {
                     false
                 })
                 .collect();
+            let expanded_dj = window_layout::dj_pads_below(
+                ui.ctx().viewport_rect().size(),
+                ui.input(|i| {
+                    i.viewport().maximized == Some(true) || i.viewport().fullscreen == Some(true)
+                }),
+            );
             let preferred = |p| {
                 if p == 0 {
                     135.
                 } else if p == 2 {
-                    920.
+                    if expanded_dj { 1100. } else { 920. }
                 } else {
                     680.
                 }
@@ -1826,10 +1832,19 @@ impl Player {
                     }
                 });
             ui.add_space(12.);
+            let pads_below = window_layout::dj_pads_below(
+                ui.ctx().viewport_rect().size(),
+                ui.input(|i| {
+                    i.viewport().maximized == Some(true) || i.viewport().fullscreen == Some(true)
+                }),
+            );
+            let bank_height = if pads_below { 230. } else { 0. };
             let browser_height = (ui.available_height() * 0.34).clamp(240., 340.);
             let height = (ui.available_height() - browser_height - 50.).max(230.);
             let side_widths = std::array::from_fn::<_, 2, _>(|side| {
-                if self.sides[side].config.collapsed {
+                if pads_below {
+                    0.
+                } else if self.sides[side].config.collapsed {
                     30.
                 } else {
                     230.
@@ -1839,8 +1854,15 @@ impl Player {
                 ((ui.available_width() - 178. - side_widths.iter().sum::<f32>() - 36.) / 2.)
                     .max(250.);
             ui.horizontal_top(|ui| {
-                self.side_panel(ui, 0, side_widths[0], height);
-                self.deck_ui(ui, 0, deck_width, height);
+                if !pads_below {
+                    self.side_panel(ui, 0, side_widths[0], height, false);
+                }
+                ui.vertical(|ui| {
+                    self.deck_ui(ui, 0, deck_width, (height - bank_height).max(230.));
+                    if pads_below {
+                        self.side_panel(ui, 0, deck_width, bank_height, true);
+                    }
+                });
                 ui.allocate_ui_with_layout(
                     egui::vec2(160., 0.),
                     egui::Layout::top_down(egui::Align::Center),
@@ -1855,7 +1877,7 @@ impl Player {
                                     self.fx_open = true;
                                 }
                             });
-                            let meter_height = (height - 260.).clamp(80., 170.);
+                            let meter_height = (height - bank_height - 260.).clamp(80., 170.);
                             ui.horizontal(|ui| {
                                 for d in 0..2 {
                                     ui.vertical(|ui| {
@@ -1931,8 +1953,15 @@ impl Player {
                         });
                     },
                 );
-                self.deck_ui(ui, 1, deck_width, height);
-                self.side_panel(ui, 1, side_widths[1], height);
+                ui.vertical(|ui| {
+                    self.deck_ui(ui, 1, deck_width, (height - bank_height).max(230.));
+                    if pads_below {
+                        self.side_panel(ui, 1, deck_width, bank_height, true);
+                    }
+                });
+                if !pads_below {
+                    self.side_panel(ui, 1, side_widths[1], height, false);
+                }
             });
             ui.horizontal(|ui| {
                 ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Master"))
@@ -2149,9 +2178,9 @@ impl Player {
             self.auto = false;
         }
     }
-    fn side_panel(&mut self, ui: &mut egui::Ui, side: usize, width: f32, height: f32) {
+    fn side_panel(&mut self, ui: &mut egui::Ui, side: usize, width: f32, height: f32, below: bool) {
         let accent = if side == 0 { ORANGE } else { CYAN };
-        ui.push_id(("side-tools", side), |ui| {
+        let panel = ui.push_id(("side-tools", side), |ui| {
             ui.allocate_ui_with_layout(
                 egui::vec2(width, height),
                 egui::Layout::top_down(egui::Align::Min),
@@ -2193,8 +2222,12 @@ impl Player {
                                                 self.sampler.restore();
                                             }
                                         }
-                                        let actions =
-                                            self.sampler.compact(ui, self.audio.as_ref(), accent);
+                                        let actions = self.sampler.compact(
+                                            ui,
+                                            self.audio.as_ref(),
+                                            accent,
+                                            if below { 9 } else { 3 },
+                                        );
                                         if (!actions.is_empty() || self.sampler.needs_audio())
                                             && let Err(error) = self.ensure_audio()
                                         {
@@ -2217,6 +2250,7 @@ impl Player {
                                             ui,
                                             self.right_sample_audio.as_ref(),
                                             accent,
+                                            if below { 9 } else { 3 },
                                         );
                                         if (!actions.is_empty() || self.right_sampler.needs_audio())
                                             && let Err(error) = self.ensure_right_samples()
@@ -2233,6 +2267,12 @@ impl Player {
                     });
                 },
             );
+        });
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(
+                egui::Id::unique(("dj-side", side)).with("screen"),
+                (panel.response.rect, ui.layer_id()),
+            )
         });
     }
     fn ensure_right_samples(&mut self) -> Result<(), String> {
@@ -3060,6 +3100,59 @@ mod window_tests {
             assert_eq!(player.queue, vec![4, 6]);
             assert_eq!(player.layout.parent, parent);
             assert!(player.library_open);
+        }
+    }
+    #[test]
+    fn expanded_dj_moves_banks_below_and_restore_returns_them_to_sides() {
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        for (size, expanded, below) in [
+            (egui::vec2(1920., 1080.), true, true),
+            (egui::vec2(1440., 900.), true, true),
+            (egui::vec2(1000., 760.), false, false),
+        ] {
+            for _ in 0..2 {
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                };
+                raw.viewports
+                    .get_mut(&egui::ViewportId::ROOT)
+                    .unwrap()
+                    .maximized = Some(expanded);
+                let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 2));
+                output.textures_delta.clear();
+            }
+            let bounds = |id: egui::Id| {
+                let (rect, layer) = ctx
+                    .data(|d| d.get_temp::<(egui::Rect, egui::LayerId)>(id.with("screen")))
+                    .unwrap();
+                ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
+            };
+            for side in 0..2 {
+                let bank = bounds(egui::Id::unique(("dj-side", side)));
+                let transport = bounds(egui::Id::unique(("dj-transport", side)));
+                assert!(
+                    bank.right() <= size.x + 1. && bank.bottom() <= size.y + 1.,
+                    "Bank escaped {size:?}: {bank:?}"
+                );
+                if below {
+                    assert!(
+                        bank.top() > transport.bottom(),
+                        "Pads must sit below their deck"
+                    );
+                } else if side == 0 {
+                    assert!(bank.right() < transport.left());
+                } else {
+                    assert!(bank.left() > transport.right());
+                }
+            }
+            let browser = bounds(egui::Id::unique("dj-browser-screen"));
+            assert!(
+                browser.bottom() <= size.y + 1.,
+                "Library escaped {size:?}: {browser:?}"
+            );
+            assert!(!player.run.auto);
         }
     }
     #[test]
