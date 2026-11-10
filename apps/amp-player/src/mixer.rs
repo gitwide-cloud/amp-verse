@@ -40,6 +40,12 @@ pub struct Controls {
     pub scratching: [AtomicBool; 2],
     pub scratch_rate: [AtomicU32; 2],
     pub eq: [[AtomicU32; 3]; 2],
+    pub trim_db: [AtomicU32; 2],
+    pub eq_kill: [[AtomicBool; 3]; 2],
+    pub sweep: [AtomicU32; 2],
+    pub cue: [AtomicBool; 2],
+    pub cue_blend: AtomicU32,
+    pub cue_volume: AtomicU32,
     pub cutoff: [AtomicU32; 2],
     pub position: [AtomicU64; 2],
     pub duration_frames: [AtomicU64; 2],
@@ -52,6 +58,7 @@ pub struct Controls {
     pub underruns: [AtomicU64; 2],
     pub rendered: AtomicU64,
     pub error: Mutex<Option<String>>,
+    pub monitor_error: Mutex<Option<String>>,
     pub decode_errors: Mutex<Vec<(usize, u64, String)>>,
 }
 impl Default for Controls {
@@ -74,6 +81,12 @@ impl Default for Controls {
             scratching: std::array::from_fn(|_| AtomicBool::new(false)),
             scratch_rate: std::array::from_fn(|_| atom(0.)),
             eq: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
+            trim_db: std::array::from_fn(|_| atom(0.)),
+            eq_kill: std::array::from_fn(|_| std::array::from_fn(|_| AtomicBool::new(false))),
+            sweep: std::array::from_fn(|_| atom(0.)),
+            cue: std::array::from_fn(|_| AtomicBool::new(false)),
+            cue_blend: atom(0.),
+            cue_volume: atom(0.5),
             cutoff: std::array::from_fn(|_| atom(22000.)),
             position: std::array::from_fn(|_| AtomicU64::new(0)),
             duration_frames: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -86,6 +99,7 @@ impl Default for Controls {
             underruns: std::array::from_fn(|_| AtomicU64::new(0)),
             rendered: AtomicU64::new(0),
             error: Mutex::new(None),
+            monitor_error: Mutex::new(None),
             decode_errors: Mutex::new(Vec::new()),
         }
     }
@@ -143,6 +157,8 @@ struct Voice {
     low: Frame,
     high: Frame,
     filter: Frame,
+    sweep_state: Frame,
+    trim: f32,
     gain: f32,
     looped: Option<Loop>,
 }
@@ -168,6 +184,7 @@ struct SampleVoice {
     playing: bool,
 }
 enum Command {
+    Monitor(Option<rtrb::Producer<Frame>>),
     SampleLoad(usize, u64, Option<Arc<[Frame]>>),
     SampleTrigger(usize),
     SampleStop(Option<usize>),
@@ -188,6 +205,7 @@ struct Mixer {
     rate: u32,
     fade: Option<Fade>,
     levels: [Option<LevelFade>; 3],
+    monitor: Option<rtrb::Producer<Frame>>,
 }
 impl Mixer {
     fn new(rate: u32, commands: mpsc::Receiver<Command>, controls: Arc<Controls>) -> Self {
@@ -199,11 +217,13 @@ impl Mixer {
             rate,
             fade: None,
             levels: Default::default(),
+            monitor: None,
         }
     }
     fn process_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
             match command {
+                Command::Monitor(producer) => self.monitor = producer,
                 Command::SampleLoad(pad, generation, frames) => {
                     self.samples[pad] = SampleVoice {
                         frames,
@@ -258,6 +278,7 @@ impl Mixer {
                     self.controls.play[d].store(play, Relaxed);
                     self.voices[d] = Voice {
                         source: Some(s),
+                        trim: 10f32.powf(get(&self.controls.trim_db[d]).clamp(-12., 12.) / 20.),
                         ..Default::default()
                     };
                     self.controls.loaded[d].store(true, Relaxed);
@@ -334,7 +355,25 @@ impl Mixer {
         });
 
         let eq = std::array::from_fn::<_, 2, _>(|d| {
-            std::array::from_fn::<_, 3, _>(|b| 10f32.powf(get(&c.eq[d][b]) / 20.))
+            std::array::from_fn::<_, 3, _>(|b| {
+                if c.eq_kill[d][b].load(Relaxed) {
+                    0.
+                } else {
+                    10f32.powf(get(&c.eq[d][b]).clamp(-24., 12.) / 20.)
+                }
+            })
+        });
+        let trims = std::array::from_fn::<_, 2, _>(|d| {
+            10f32.powf(get(&c.trim_db[d]).clamp(-12., 12.) / 20.)
+        });
+        let sweeps = std::array::from_fn::<_, 2, _>(|d| get(&c.sweep[d]).clamp(-1., 1.));
+        let sweep_alpha = std::array::from_fn::<_, 2, _>(|d| {
+            let hz = if sweeps[d] < 0. {
+                20000. * (30_f32 / 20000.).powf(-sweeps[d])
+            } else {
+                30. * (15000_f32 / 30.).powf(sweeps[d])
+            };
+            1. - (-std::f32::consts::TAU * hz.min(self.rate as f32 * 0.45) / self.rate as f32).exp()
         });
         let alpha_low = 1. - (-std::f32::consts::TAU * 200. / self.rate as f32).exp();
         let alpha_high = 1. - (-std::f32::consts::TAU * 2000. / self.rate as f32).exp();
@@ -432,6 +471,7 @@ impl Mixer {
                 (x * std::f32::consts::FRAC_PI_2).sin(),
             ];
             let mut mix = [0.; 2];
+            let mut cue_mix = [0.; 2];
             for d in 0..2 {
                 let v = &mut self.voices[d];
                 if !c.play[d].load(Relaxed) {
@@ -477,7 +517,9 @@ impl Mixer {
                     }
                 }
                 v.gain += (get(&c.gain[d]).clamp(0., 1.) - v.gain) * 0.004;
+                v.trim += (trims[d] - v.trim) * 0.004;
                 for ch in 0..2 {
+                    frame[ch] *= v.trim;
                     v.low[ch] += alpha_low * (frame[ch] - v.low[ch]);
                     v.high[ch] += alpha_high * (frame[ch] - v.high[ch]);
                     let value = v.low[ch] * eq[d][0]
@@ -489,6 +531,15 @@ impl Mixer {
                     } else {
                         v.filter[ch]
                     };
+                    v.sweep_state[ch] += sweep_alpha[d] * (frame[ch] - v.sweep_state[ch]);
+                    if sweeps[d] < -0.001 {
+                        frame[ch] = v.sweep_state[ch];
+                    } else if sweeps[d] > 0.001 {
+                        frame[ch] -= v.sweep_state[ch];
+                    }
+                    if c.cue[d].load(Relaxed) {
+                        cue_mix[ch] += frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
+                    }
                     frame[ch] *= v.gain;
                     peaks[d] = peaks[d].max(frame[ch].abs());
                     mix[ch] += frame[ch] * weights[d] * std::f32::consts::FRAC_1_SQRT_2;
@@ -522,6 +573,15 @@ impl Mixer {
                     }
                 }
             }
+            if let Some(monitor) = &mut self.monitor {
+                let blend = get(&c.cue_blend).clamp(0., 1.);
+                let volume = get(&c.cue_volume).clamp(0., 1.);
+                let frame = std::array::from_fn(|ch| {
+                    ((cue_mix[ch] * (1. - blend) + mix[ch] * get(&c.master) * blend) * volume)
+                        .clamp(-0.98, 0.98)
+                });
+                let _ = monitor.push(frame);
+            }
             output(
                 i,
                 [
@@ -544,6 +604,7 @@ impl Mixer {
 }
 pub struct Engine {
     _stream: cpal::Stream,
+    monitor_stream: Option<cpal::Stream>,
     commands: mpsc::SyncSender<Command>,
     pub controls: Arc<Controls>,
     pub sample_rate: u32,
@@ -608,6 +669,7 @@ impl Engine {
         stream.play().map_err(|e| e.to_string())?;
         Ok(Self {
             _stream: stream,
+            monitor_stream: None,
             commands: tx,
             controls,
             sample_rate: rate,
@@ -619,6 +681,19 @@ impl Engine {
             sample_retired: Vec::new(),
             sample_generation: 0,
         })
+    }
+    pub fn configure_monitor(&mut self, name: Option<&str>) -> Result<(), String> {
+        if let Some(name) = name {
+            let (producer, consumer) = RingBuffer::new(self.sample_rate as usize / 2);
+            let stream =
+                crate::monitor::open(name, self.sample_rate, consumer, self.controls.clone())?;
+            self.send(Command::Monitor(Some(producer)))?;
+            self.monitor_stream = Some(stream);
+        } else {
+            self.send(Command::Monitor(None))?;
+            self.monitor_stream = None;
+        }
+        Ok(())
     }
     pub fn load(
         &mut self,
@@ -1316,6 +1391,91 @@ mod tests {
             0
         );
         assert!(engine.take_error().is_none());
+    }
+    #[test]
+    fn headphone_cue_is_pre_fader_and_trim_and_kills_affect_both_buses() {
+        let controls = Arc::new(Controls::default());
+        set(&controls.master, 0.);
+        set(&controls.gain[0], 0.);
+        set(&controls.crossfader, 1.);
+        controls.cue[0].store(true, Relaxed);
+        set(&controls.cue_volume, 1.);
+        let (tx, rx) = mpsc::sync_channel(8);
+        let (producer, mut consumer) = RingBuffer::new(20000);
+        tx.send(Command::Monitor(Some(producer))).unwrap();
+        tx.send(Command::Load(0, source(0.2, 20000), true, 0))
+            .unwrap();
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        let mut speaker_peak = 0_f32;
+        mixer.render(2000, |_, frame| {
+            speaker_peak = speaker_peak.max(frame[0].abs())
+        });
+        let mut baseline = 0.;
+        while let Ok(frame) = consumer.pop() {
+            baseline = frame[0];
+        }
+        assert!(
+            baseline > 0.13,
+            "Cue must work with master and channel faders down"
+        );
+        assert_eq!(speaker_peak, 0., "Headphones must not leak into the master");
+        set(&controls.trim_db[0], 6.);
+        mixer.render(2000, |_, _| {});
+        let mut boosted = 0.;
+        while let Ok(frame) = consumer.pop() {
+            boosted = frame[0];
+        }
+        assert!((boosted / baseline - 10_f32.powf(6. / 20.)).abs() < 0.01);
+        for kill in &controls.eq_kill[0] {
+            kill.store(true, Relaxed);
+        }
+        mixer.render(1000, |_, _| {});
+        while let Ok(frame) = consumer.pop() {
+            assert_eq!(frame, [0.; 2]);
+        }
+        for kill in &controls.eq_kill[0] {
+            kill.store(false, Relaxed);
+        }
+        controls.cue[0].store(false, Relaxed);
+        mixer.render(1000, |_, _| {});
+        while let Ok(frame) = consumer.pop() {
+            assert_eq!(frame, [0.; 2]);
+        }
+        // Cue/master blend follows the actual post-master mix when fully right.
+        set(&controls.cue_blend, 1.);
+        set(&controls.master, 1.);
+        set(&controls.gain[0], 1.);
+        set(&controls.crossfader, 0.);
+        let mut speaker = Vec::new();
+        mixer.render(1000, |_, frame| speaker.push(frame));
+        for frame in speaker {
+            assert_eq!(consumer.pop().unwrap(), frame);
+        }
+    }
+    #[test]
+    fn filter_sweep_attenuates_the_correct_side_of_the_spectrum() {
+        let measure = |frequency: f32, sweep: f32| {
+            let controls = Arc::new(Controls::default());
+            set(&controls.master, 1.);
+            set(&controls.sweep[0], sweep);
+            let (tx, rx) = mpsc::sync_channel(8);
+            let (mut producer, consumer) = RingBuffer::new(10000);
+            for i in 0..8000 {
+                let value = (std::f32::consts::TAU * frequency * i as f32 / 48000.).sin() * 0.2;
+                producer.push([value, value]).unwrap();
+            }
+            let mut voice = source(0., 2);
+            voice.ring = consumer;
+            tx.send(Command::Load(0, voice, true, 0)).unwrap();
+            let mut mixer = Mixer::new(48000, rx, controls);
+            mixer.render(2000, |_, _| {});
+            let mut sum = 0.;
+            mixer.render(2000, |_, frame| sum += frame[0] * frame[0]);
+            sum
+        };
+        assert!(measure(8000., -1.) < measure(8000., 0.) * 0.01);
+        assert!(measure(80., 1.) < measure(80., 0.) * 0.01);
+        assert!(measure(80., -0.2) > measure(80., 0.) * 0.9);
     }
     #[test]
     fn eq_flat_gain_and_filter_process_pcm() {

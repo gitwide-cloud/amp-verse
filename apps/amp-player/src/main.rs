@@ -10,6 +10,7 @@ mod addons;
 mod cast;
 mod control;
 mod dj_browser;
+mod dj_mixer;
 mod docking;
 mod dragdrop;
 mod engine;
@@ -19,6 +20,7 @@ mod icons;
 mod lab;
 mod lab_editor;
 mod mixer;
+mod monitor;
 mod organized_library;
 mod performance;
 mod preparer;
@@ -134,6 +136,7 @@ struct Player {
     fade_seconds: f32,
     jog_resume: [Option<(bool, egui::ViewportId)>; 2],
     jog_angle: [f32; 2],
+    mixer_panel: dj_mixer::Panel,
     eq_open: bool,
     fx_open: bool,
     eq: [[f32; 3]; 2],
@@ -216,6 +219,7 @@ impl Default for Player {
             fade_seconds: 8.,
             jog_resume: [None; 2],
             jog_angle: [0.; 2],
+            mixer_panel: Default::default(),
             eq_open: false,
             fx_open: false,
             eq: [[0.; 3]; 2],
@@ -562,6 +566,7 @@ impl Player {
                 }
                 audio.set_filter(d, self.filter[d]);
             }
+            self.mixer_panel.apply(&audio);
             self.audio = Some(audio);
         }
         Ok(())
@@ -1891,7 +1896,7 @@ impl Player {
                 }
             });
             let deck_width =
-                ((ui.available_width() - 178. - side_widths.iter().sum::<f32>() - 36.) / 2.)
+                ((ui.available_width() - 298. - side_widths.iter().sum::<f32>() - 36.) / 2.)
                     .max(250.);
             egui::ScrollArea::vertical()
                 .id_salt("dj-resizable-mixer")
@@ -1911,55 +1916,15 @@ impl Player {
                             }
                         });
                         ui.allocate_ui_with_layout(
-                            egui::vec2(160., 0.),
+                            egui::vec2(280., 0.),
                             egui::Layout::top_down(egui::Align::Center),
                             |ui| {
                                 skin::panel(ui, true, |ui| {
-                                    ui.set_width(140.);
-                                    ui.horizontal(|ui| {
-                                        if ui.button("EQ").clicked() {
-                                            self.eq_open = true;
-                                        }
-                                        if ui.button("FX").clicked() {
-                                            self.fx_open = true;
-                                        }
-                                    });
-                                    let meter_height =
-                                        (height - bank_height - 260.).clamp(80., 170.);
-                                    ui.horizontal(|ui| {
-                                        for d in 0..2 {
-                                            ui.vertical(|ui| {
-                                                ui.label(if d == 0 { "A" } else { "B" });
-                                                ui.horizontal(|ui| {
-                                                    ui.spacing_mut().slider_width = meter_height;
-                                                    if ui
-                                                        .add(
-                                                            egui::Slider::new(
-                                                                &mut self.channel_gain[d],
-                                                                0. ..=1.,
-                                                            )
-                                                            .vertical()
-                                                            .show_value(false),
-                                                        )
-                                                        .changed()
-                                                        && let Some(a) = &self.audio
-                                                    {
-                                                        a.set_gain(d, self.channel_gain[d]);
-                                                    }
-                                                    skin::meter(
-                                                        ui,
-                                                        self.audio
-                                                            .as_ref()
-                                                            .map_or(0., |a| a.peak(d)),
-                                                        egui::vec2(16., meter_height),
-                                                    );
-                                                });
-                                            });
-                                        }
-                                    });
+                                    ui.set_width(260.);
+                                    self.inline_mixer(ui);
                                     let fading = self.audio.as_ref().is_some_and(|a| a.fading());
                                     let fade = ui.add_sized(
-                                        [140., 54.],
+                                        [240., 36.],
                                         egui::Button::new(
                                             RichText::new(
                                                 if fading && self.run.profile.is_some() {

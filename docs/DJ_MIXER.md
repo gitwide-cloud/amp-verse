@@ -1,6 +1,6 @@
 # AMP DJ live mixer
 
-Load a track to Deck A and another to Deck B from the embedded library. Loading prebuffers audio without playing it. Start the outgoing deck with Play. Press **AUTO CROSSFADER** above the center slider to start the incoming deck and transition across. Press it again to cancel, or drag the manual slider to take over. At fade completion the outgoing deck pauses; its position is retained for a return transition.
+Load a track to Deck A and another to Deck B from the embedded library. Loading prebuffers audio without playing it. Start the outgoing deck with Play. Press **AUTO CROSSFADER** above the center slider to start the incoming deck and transition across. In a manual mix, press it again to cancel, or drag the manual slider to take over. A Smart Playlist handoff keeps AutoMix running when pressed again. At fade completion the outgoing deck pauses; its position is retained for a return transition.
 
 The Mix value sets 0.5-30 seconds. Transitions use equal-power gains on a single device sample clock. They shorten when either track has less audio remaining, using cue ranges or probed duration. A track still loading its duration, an ended incoming track or a stopped outgoing deck produces a status message. The incoming buffer must be ready before a fade starts. This removes the old independent-FFplay process timing from desktop playback, but cannot guarantee uninterrupted output during device failures or NAS starvation. Buffer underruns are counted and displayed.
 
@@ -55,7 +55,18 @@ The DJ opens at up to 1440×1000 within the available monitor. Resizing still co
 
 ## Simplified DJ surface
 
-The default mixer follows the supplied two-deck reference. Waveforms and scratch/mix-duration options are in an expandable section above the decks. Auto Crossfade is a switch and mixing style is a dropdown. Main decks show Loop and Hot Cues below their transport; right-click the platter for exact seek steps and pitch reset (wheel scrolling and dragging still work). Each sampler keeps its nine pads and one Play/Stop/Clear row for the last clicked pad; right-click a bottom control for Stop All. Volume has both a slider and a numeric value. Cue Deck mode remains available on either side.
+The default mixer follows the supplied two-deck reference. Waveforms stay visible above the decks; scratch/mix-duration options remain expandable. Auto Crossfade is a switch and mixing style is a dropdown. Main decks show Loop and Hot Cues below their transport; right-click the platter for exact seek steps and pitch reset (wheel scrolling and dragging still work). Each sampler keeps its nine pads and one Play/Stop/Clear row for the last clicked pad; right-click a bottom control for Stop All. Volume has both a slider and a numeric value. Cue Deck mode remains available on either side.
 
 
 When the DJ is maximized or full screen with at least 1200×850 logical pixels, sampler banks move underneath their matching main decks as nine-pad horizontal strips. Restoring the window returns the side banks. Resizing only changes the layout: sample assignments, volumes, Cue Deck mode and active audio are preserved. The full mixer and library scale together to stay within the viewport.
+
+
+## Channel mixer and live headphone monitoring
+
+The center mixer has separate amber A and cyan B channels. Gain adjusts the input level; the vertical fader adjusts the level sent to the main mix. High, Mid and Low adjust the three EQ bands. X kills a band without losing its dial setting. Double-click a dial to reset it; drag vertically, scroll, or use arrow keys to adjust it.
+
+The Filter dial sweeps left to low-pass, stays neutral in the center, and sweeps right to high-pass. These controls affect playback only; they do not edit the music files or saved cues. EQ bands are frequency controls, not isolated vocal/instrument stems.
+
+Open Headphones / output and select an output device. Use a different device from the main speakers for private monitoring. CUE selects a playing deck before its channel fader and the crossfader. It does not start or stop that deck. Cue / Master blends the selected cue channels with the live master mix; Phones controls the monitoring level independently. Turning headphone output off leaves the main mix running.
+
+When the library is enlarged, the mixer can be scrolled to reach its lower controls.
