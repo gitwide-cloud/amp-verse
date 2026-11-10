@@ -1,25 +1,26 @@
 //! Native Cast dashboard. The independent server owns broadcasting, not this viewport.
-use crate::skin;
-use eframe::egui::{self, RichText};
+use eframe::egui;
 use serde::Deserialize;
 use std::{sync::mpsc, time::Duration};
 
 #[derive(Default, Deserialize)]
 struct Status {
+    #[serde(default)]
+    server_id: String,
+    #[serde(default)]
+    station_id: String,
     running: bool,
     now_playing: Option<String>,
-    current_index: Option<usize>,
     error: Option<String>,
     tracks: usize,
     listeners: usize,
     password_required: bool,
+    #[serde(default)]
+    capabilities: serde_json::Value,
 }
 #[derive(Deserialize)]
 struct Track {
-    index: usize,
     title: String,
-    cue_in: f64,
-    cue_out: Option<f64>,
 }
 #[derive(Default, Deserialize)]
 struct Queue {
@@ -28,11 +29,13 @@ struct Queue {
 struct Snapshot {
     status: Status,
     queue: Queue,
+    manifest: Option<serde_json::Value>,
 }
 struct Client {
     agent: ureq::Agent,
     base: String,
     password: String,
+    identity: std::sync::Mutex<Option<(String, String)>>,
 }
 impl Client {
     fn new(address: &str, password: String) -> Result<Self, String> {
@@ -55,6 +58,7 @@ impl Client {
                 .into(),
             base: format!("http://{address}"),
             password,
+            identity: std::sync::Mutex::new(None),
         })
     }
     fn read(&self) -> Result<Snapshot, String> {
@@ -66,6 +70,19 @@ impl Client {
             .body_mut()
             .read_json::<Status>()
             .map_err(failure)?;
+        {
+            let mut identity = self
+                .identity
+                .lock()
+                .map_err(|_| "Station identity lock failed")?;
+            if let Some((server, station)) = identity.as_ref() {
+                if *server != status.server_id || *station != status.station_id {
+                    return Err("Station changed. Reconnect before controlling it.".into());
+                }
+            } else {
+                *identity = Some((status.server_id.clone(), status.station_id.clone()));
+            }
+        }
         let queue = self
             .agent
             .get(format!("{}/api/playlist", self.base))
@@ -74,25 +91,87 @@ impl Client {
             .body_mut()
             .read_json::<Queue>()
             .map_err(failure)?;
-        Ok(Snapshot { status, queue })
+        let manifest = if status.capabilities["smart_sharing"].as_bool() == Some(true) {
+            Some(
+                self.agent
+                    .get(format!("{}/api/smart/manifest", self.base))
+                    .header("x-amp-password", &self.password)
+                    .call()
+                    .map_err(failure)?
+                    .body_mut()
+                    .read_json()
+                    .map_err(failure)?,
+            )
+        } else {
+            None
+        };
+        Ok(Snapshot {
+            status,
+            queue,
+            manifest,
+        })
     }
     fn control(&self, action: &str) -> Result<(), String> {
-        self.agent
+        let mut request = self
+            .agent
             .post(format!("{}/api/{action}", self.base))
-            .header("x-amp-password", &self.password)
-            .send_empty()
-            .map_err(|error| match error {
-                ureq::Error::StatusCode(401) => {
-                    "Access denied. Enter the server's admin password and reconnect.".into()
-                }
-                ureq::Error::StatusCode(409) => "The server music folder is empty.".into(),
-                other => failure(other),
-            })?;
+            .header("x-amp-password", &self.password);
+        if let Some((server, station)) = self
+            .identity
+            .lock()
+            .map_err(|_| "Station identity lock failed")?
+            .as_ref()
+        {
+            request = request
+                .header("x-amp-server", server)
+                .header("x-amp-station", station);
+        }
+        request.send_empty().map_err(|error| match error {
+            ureq::Error::StatusCode(401) => {
+                "Access denied. Enter the server's admin password and reconnect.".into()
+            }
+            ureq::Error::StatusCode(409) => "The server music folder is empty.".into(),
+            other => failure(other),
+        })?;
         Ok(())
     }
 }
 fn failure(error: impl std::fmt::Display) -> String {
     format!("Cast request failed: {error}")
+}
+#[derive(Deserialize)]
+struct Radio {
+    name: String,
+    country: String,
+    url_resolved: String,
+}
+fn search_radio(query: &str) -> Result<Vec<Radio>, String> {
+    let agent: ureq::Agent = ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .max_redirects(0)
+        .build()
+        .into();
+    let mut last = String::new();
+    for server in ["de1.api.radio-browser.info", "nl1.api.radio-browser.info"] {
+        match agent
+            .get(format!("https://{server}/json/stations/search"))
+            .query("name", query)
+            .query("limit", "40")
+            .query("hidebroken", "true")
+            .header("User-Agent", "AMPVerse/0.1")
+            .call()
+        {
+            Ok(mut response) => {
+                let mut stations: Vec<Radio> = response.body_mut().read_json().map_err(failure)?;
+                stations.retain(|r| {
+                    r.url_resolved.starts_with("https://") || r.url_resolved.starts_with("http://")
+                });
+                return Ok(stations);
+            }
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(format!("Radio search unavailable: {last}"))
 }
 enum Command {
     Connect(String, String),
@@ -117,6 +196,13 @@ pub struct Dashboard {
     search: String,
     discovery: Option<mpsc::Receiver<Result<Vec<amp_core::discovery::Found>, String>>>,
     servers: Vec<amp_core::discovery::Found>,
+    host: Option<std::process::Child>,
+    host_broadcast: bool,
+    hosting: String,
+    download: Option<mpsc::Receiver<Result<std::path::PathBuf, String>>>,
+    radio_job: Option<mpsc::Receiver<Result<Vec<Radio>, String>>>,
+    radio_results: Vec<Radio>,
+    radio: Option<std::process::Child>,
 }
 impl Default for Dashboard {
     fn default() -> Self {
@@ -177,11 +263,20 @@ impl Default for Dashboard {
             rx,
             snapshot: None,
             busy: false,
-            message: "Connect to a running AMP Cast server.".into(),
+            message:
+                "Search LAN or broadcast stations, or host a Smart Station to share your playlists."
+                    .into(),
             section: 0,
             search: String::new(),
             discovery: None,
             servers: Vec::new(),
+            host: None,
+            host_broadcast: false,
+            hosting: String::new(),
+            download: None,
+            radio_job: None,
+            radio_results: Vec::new(),
+            radio: None,
         };
         if std::env::var("AMP_CAST_AUTOCONNECT").as_deref() == Ok("1") {
             dashboard.connected_address = dashboard.address.trim().into();
@@ -240,283 +335,404 @@ impl Dashboard {
             }
         }
     }
-    pub fn show(&mut self, ui: &mut egui::Ui) {
-        self.poll();
-        ui.horizontal_wrapped(|ui| {
-            if ui
-                .add_enabled(
-                    self.discovery.is_none(),
-                    egui::Button::new(if self.discovery.is_some() {
-                        "Searching…"
-                    } else {
-                        "Find servers"
-                    }),
-                )
-                .clicked()
-            {
-                let (tx, rx) = mpsc::channel();
-                self.discovery = Some(rx);
-                std::thread::spawn(move || {
-                    let _ = tx.send(amp_core::discovery::discover());
+    fn host(&mut self, root: &std::path::Path, smart: bool) {
+        let result = (|| -> Result<std::process::Child, String> {
+            let binary = std::env::current_exe()
+                .map_err(failure)?
+                .parent()
+                .unwrap()
+                .join(if cfg!(windows) {
+                    "amp-cast.exe"
+                } else {
+                    "amp-cast"
                 });
+            if !binary.is_file() {
+                return Err(
+                    "AMP Cast server is missing. Install the desktop server component.".into(),
+                );
+            }
+            let config = crate::theme::settings_path()
+                .ok_or("Settings folder unavailable")?
+                .with_file_name("cast-host");
+            std::fs::create_dir_all(&config).map_err(failure)?;
+            let port = std::net::TcpListener::bind("0.0.0.0:8787").map_err(
+                |_| "A station is already using port 8787. Find and connect to it instead.",
+            )?;
+            drop(port);
+            let log = std::fs::File::create(config.join("server.log")).map_err(failure)?;
+            let mut command = std::process::Command::new(&binary);
+            command
+                .env(
+                    "PATH",
+                    format!(
+                        "{};{}",
+                        binary.parent().unwrap().display(),
+                        std::env::var("PATH").unwrap_or_default()
+                    ),
+                )
+                .arg(root)
+                .env("AMP_CAST_BIND", "0.0.0.0:8787")
+                .env("AMP_CAST_SMART_SHARING", if smart { "1" } else { "0" })
+                .env("AMP_CAST_PASSWORD", &self.password)
+                .env("AMP_CAST_CONFIG_DIR", &config)
+                .env("AMP_ANALYSIS_ENABLED", "0")
+                .stdout(log.try_clone().map_err(failure)?)
+                .stderr(log);
+            #[cfg(windows)]
+            {
+                use std::os::windows::process::CommandExt;
+                command.creation_flags(0x08000000);
+            }
+            command.spawn().map_err(failure)
+        })();
+        match result {
+            Ok(child) => {
+                self.host = Some(child);
+                self.host_broadcast = !smart;
+                self.hosting = if smart {
+                    "Smart Station · playlists and offline downloads"
+                } else {
+                    "Live broadcast"
+                }
+                .into();
+                self.address = "127.0.0.1:8787".into();
+                self.connected_address = self.address.clone();
+                self.send(Command::Connect(
+                    self.address.clone(),
+                    self.password.clone(),
+                ));
+                self.message = "Starting your station. Reading the library…".into();
+            }
+            Err(e) => self.message = e,
+        }
+    }
+    fn listen(&mut self, url: &str) {
+        if let Some(mut previous) = self.radio.take() {
+            let _ = previous.kill();
+            let _ = previous.wait();
+        }
+        let mut command = amp_core::command("ffplay");
+        command
+            .args(["-nodisp", "-autoexit", "-loglevel", "error", "-i", url])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match command.spawn() {
+            Ok(child) => self.radio = Some(child),
+            Err(e) => self.message = format!("Could not play station: {e}"),
+        }
+    }
+    pub fn show(&mut self, ui: &mut egui::Ui, root: &std::path::Path, ready: bool) {
+        self.poll();
+        if let Some(child) = &mut self.host
+            && let Ok(Some(code)) = child.try_wait()
+        {
+            self.host = None;
+            self.hosting.clear();
+            self.host_broadcast = false;
+            self.message = format!(
+                "Station could not stay running ({code}). Check cast-host/server.log or whether port 8787 is already in use."
+            );
+        }
+        if self.host.is_some()
+            && self.connected_address == "127.0.0.1:8787"
+            && self.snapshot.is_some()
+        {
+            let expected = crate::theme::settings_path()
+                .and_then(|p| std::fs::read(p.with_file_name("cast-host").join("server.json")).ok())
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|v| v["server_id"].as_str().map(str::to_owned));
+            if expected.as_deref() != self.snapshot.as_ref().map(|s| s.status.server_id.as_str()) {
+                self.snapshot = None;
+                self.message = "Waiting for your selected station to start…".into();
+            }
+        }
+        if self.host_broadcast
+            && self.connected_address == "127.0.0.1:8787"
+            && self.snapshot.is_some()
+        {
+            self.host_broadcast = false;
+            self.send(Command::Start);
+        }
+        if let Some(rx) = &self.download
+            && let Ok(result) = rx.try_recv()
+        {
+            self.message = result.map_or_else(
+                |e| e,
+                |p| format!("Saved offline with cues: {}", p.display()),
+            );
+            self.download = None;
+        }
+        if let Some(rx) = &self.radio_job
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok(stations) => {
+                    self.radio_results = stations;
+                    self.message = format!("{} broadcast stations found", self.radio_results.len());
+                }
+                Err(e) => self.message = e,
+            }
+            self.radio_job = None;
+        }
+        ui.heading("AMP Cast");
+        ui.horizontal_wrapped(|ui| {
+            for (index, title) in ["Find Stations", "Broadcast", "Host Smart Station"]
+                .into_iter()
+                .enumerate()
+            {
+                ui.selectable_value(&mut self.section, index, title);
             }
         });
-        egui::CollapsingHeader::new("Server settings / manual address").show(ui, |ui| {
+        ui.separator();
+        if self.section == 0 {
             ui.horizontal_wrapped(|ui| {
-                ui.label("Server address");
-                ui.add(egui::TextEdit::singleline(&mut self.address).desired_width(175.));
-                ui.label("Admin password");
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.password)
-                        .password(true)
-                        .desired_width(140.),
-                );
                 if ui
-                    .add_enabled(!self.busy, egui::Button::new("Connect / apply"))
+                    .add_enabled(
+                        self.discovery.is_none(),
+                        egui::Button::new("Search LAN stations"),
+                    )
                     .clicked()
                 {
-                    self.connected_address = self.address.trim().into();
-                    self.snapshot = None;
-                    self.send(Command::Connect(
-                        self.address.clone(),
-                        self.password.clone(),
-                    ));
-                }
-            });
-        });
-        let mut chosen = None;
-        for server in &self.servers {
-            if ui
-                .button(format!("{} · {}", server.info.name, server.address))
-                .clicked()
-            {
-                chosen = Some(server.address.clone());
-            }
-        }
-        if let Some(address) = chosen {
-            self.address = address;
-            self.password.clear();
-            self.connected_address = self.address.clone();
-            self.snapshot = None;
-            self.send(Command::Connect(
-                self.address.clone(),
-                self.password.clone(),
-            ));
-        }
-        ui.add_space(8.);
-        ui.horizontal_top(|ui| {
-            skin::panel(ui, true, |ui| {
-                ui.set_width(140.);
-                ui.set_min_height(565.);
-                ui.label(RichText::new("AMP CAST").size(20.).strong().color(skin::accent(ui)));
-                ui.add_space(15.);
-                for (index, title) in ["Dashboard", "Queue", "Streaming", "Settings"].into_iter().enumerate() {
-                    ui.add_space(8.);
-                    ui.selectable_value(&mut self.section, index, title);
-                    ui.separator();
-                }
-                ui.add_space(25.);
-                ui.label(RichText::new(if self.snapshot.is_some() { "SERVER ONLINE" } else { "NOT CONNECTED" }).color(if self.snapshot.is_some() { skin::signal(ui) } else { skin::foreground(ui) }));
-            });
-            ui.vertical(|ui| {
-                ui.set_width(ui.available_width());
-        let running = self.snapshot.as_ref().is_some_and(|s| s.status.running);
-        let connected = self.snapshot.is_some();
-        if self.section == 0 || self.section == 2 {
-            ui.columns(2, |columns| {
-                skin::panel(&mut columns[0], true, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.set_min_height(160.);
-                    ui.label(
-                        RichText::new("NOW BROADCASTING")
-                            .color(skin::accent(ui))
-                            .strong(),
-                    );
-                    ui.add_space(12.);
-                    let title = self
-                        .snapshot
-                        .as_ref()
-                        .and_then(|s| s.status.now_playing.as_deref())
-                        .unwrap_or(if connected {
-                            "Station stopped"
-                        } else {
-                            "Connect to your Cast server"
-                        });
-                    ui.label(RichText::new(title).size(24.).strong());
-                    ui.label("MP3 / 128 kbps / 44.1 kHz / Stereo");
-                    ui.add_space(12.);
-                    ui.label("The independent server owns playback and prepared cue points.");
-                });
-                skin::panel(&mut columns[1], true, |ui| {
-                    ui.set_min_width(ui.available_width());
-                    ui.set_min_height(160.);
-                    ui.label(
-                        RichText::new("STREAMING STATUS")
-                            .strong()
-                            .color(skin::accent(ui)),
-                    );
-                    ui.label(format!(
-                        "Station: {}",
-                        if running {
-                            "ON AIR"
-                        } else if connected {
-                            "OFF AIR"
-                        } else {
-                            "UNAVAILABLE"
-                        }
-                    ));
-                    ui.label(format!("Server: {}", self.connected_address));
-                    ui.label(format!(
-                        "Listeners: {}",
-                        self.snapshot
-                            .as_ref()
-                            .map(|s| s.status.listeners.to_string())
-                            .unwrap_or_else(|| "--".into())
-                    ));
-                    ui.horizontal(|ui| {
-                        if ui
-                            .add_enabled(
-                                connected && !running && !self.busy,
-                                egui::Button::new("Start broadcast"),
-                            )
-                            .clicked()
-                        {
-                            self.send(Command::Start);
-                        }
-                        if ui
-                            .add_enabled(
-                                connected && running && !self.busy,
-                                egui::Button::new("Stop broadcast"),
-                            )
-                            .clicked()
-                        {
-                            self.send(Command::Stop);
-                        }
+                    let (tx, rx) = mpsc::channel();
+                    self.discovery = Some(rx);
+                    std::thread::spawn(move || {
+                        let _ = tx.send(amp_core::discovery::discover());
                     });
-                    if connected {
-                        ui.hyperlink_to(
-                            "Open browser listener",
-                            format!("http://{}", self.connected_address),
-                        );
+                }
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.search)
+                        .hint_text("Find a broadcast station by name")
+                        .desired_width(280.),
+                );
+                if ui
+                    .add_enabled(
+                        self.radio_job.is_none() && !self.search.trim().is_empty(),
+                        egui::Button::new("Search radio"),
+                    )
+                    .clicked()
+                {
+                    let query = self.search.clone();
+                    let (tx, rx) = mpsc::channel();
+                    self.radio_job = Some(rx);
+                    std::thread::spawn(move || {
+                        let _ = tx.send(search_radio(&query));
+                    });
+                }
+            });
+            let mut chosen = None;
+            for server in &self.servers {
+                if ui
+                    .button(format!("{} · Connect", server.info.name))
+                    .clicked()
+                {
+                    chosen = Some(server.address.clone());
+                }
+            }
+            if let Some(address) = chosen {
+                self.address = address;
+                self.connected_address = self.address.clone();
+                self.snapshot = None;
+                self.send(Command::Connect(
+                    self.address.clone(),
+                    self.password.clone(),
+                ));
+            }
+            let mut play = None;
+            for station in &self.radio_results {
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} · {}", station.name, station.country));
+                    if ui.button("Listen").clicked() {
+                        play = Some(station.url_resolved.clone());
+                    }
+                });
+            }
+            if let Some(url) = play {
+                self.listen(&url);
+            }
+            egui::CollapsingHeader::new("Connect by address / access code").show(ui, |ui| {
+                ui.horizontal_wrapped(|ui| {
+                    ui.text_edit_singleline(&mut self.address);
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.password)
+                            .password(true)
+                            .hint_text("Access code, if needed"),
+                    );
+                    if ui.button("Connect").clicked() {
+                        self.connected_address = self.address.clone();
+                        self.snapshot = None;
+                        self.send(Command::Connect(
+                            self.address.clone(),
+                            self.password.clone(),
+                        ));
                     }
                 });
             });
-            ui.add_space(10.);
-        }
-        if self.section == 0 || self.section == 1 {
-            skin::panel(ui, true, |ui| {
-                ui.set_min_width(ui.available_width());
-                ui.set_min_height(205.);
-                ui.horizontal(|ui| {
-                    ui.label(
-                        RichText::new("PLAYLIST / QUEUE")
-                            .strong()
-                            .color(skin::accent(ui)),
-                    );
-                    ui.label(format!(
-                        "{} tracks",
-                        self.snapshot.as_ref().map(|s| s.status.tracks).unwrap_or(0)
-                    ));
-                });
-                ui.add(egui::TextEdit::singleline(&mut self.search).hint_text("Search songs in this station…").desired_width(ui.available_width()));
-                egui::ScrollArea::vertical()
-                    .id_salt("cast-queue")
-                    .max_height(245.)
-                    .show(ui, |ui| {
-                        if let Some(snapshot) = &self.snapshot {
-                            egui::Grid::new("cast-tracks")
-                                .num_columns(3)
-                                .striped(true)
-                                .min_col_width(90.)
-                                .show(ui, |ui| {
-                                    ui.strong("#");
-                                    ui.strong("Title");
-                                    ui.strong("Prepared cues");
-                                    ui.end_row();
-                                    for track in snapshot.queue.tracks.iter().filter(|t|t.title.to_lowercase().contains(&self.search.to_lowercase())) {
-                                        let active = running
-                                            && snapshot.status.current_index == Some(track.index);
-                                        ui.label(
-                                            RichText::new(format!(
-                                                "{} {}",
-                                                if active { ">" } else { " " },
-                                                track.index + 1
-                                            ))
-                                            .color(
-                                                if active {
-                                                    skin::signal(ui)
-                                                } else {
-                                                    skin::foreground(ui)
-                                                },
-                                            ),
-                                        );
-                                        ui.label(&track.title);
-                                        ui.label(format!(
-                                            "{:.2}s / {}",
-                                            track.cue_in,
-                                            track
-                                                .cue_out
-                                                .map(|v| format!("{v:.2}s"))
-                                                .unwrap_or_else(|| "End".into())
-                                        ));
-                                        ui.end_row();
-                                    }
-                                });
-                            if snapshot.queue.tracks.is_empty() {
-                                ui.label("The server music folder is empty.");
-                            }
-                        } else {
-                            ui.label("Connect to load the server queue.");
-                        }
-                    });
-            });
-            ui.add_space(10.);
-        }
-        skin::panel(ui, false, |ui| {
-            ui.set_min_width(ui.available_width());
-            ui.label(
-                RichText::new("AUTO DJ / PREPARED SEQUENTIAL LOOP")
-                    .strong()
-                    .color(skin::accent(ui)),
-            );
-            ui.label(if running {
-                "Running on server / folder order with cue IN/OUT"
+        } else {
+            ui.heading(if self.section == 1 {
+                "Broadcast live audio"
             } else {
-                "Starts with the station / folder order with cue IN/OUT"
+                "Share playlists from this computer"
             });
-            ui.label("Beat sync, crossfade, tag rules and queue editing are future milestones.");
-            if self.section == 3 {
-                ui.separator();
-                ui.label("Start amp-cast with your music folder; use this window to connect, launch and stop its broadcast.");
-                ui.label("HTTP on your trusted LAN. Password is held in memory only. Server lifetime is independent of this window.");
-                ui.label(
-                    if self
-                        .snapshot
-                        .as_ref()
-                        .is_some_and(|s| s.status.password_required)
-                    {
-                        "Server requires an admin password."
-                    } else {
-                        "Server password status is available after connection."
-                    },
-                );
+            ui.label(if self.section==1 {"Other devices listen to the same live stream."}else{"Share saved normal and Smart Playlists on your LAN. Listeners can save original songs with your cues for offline listening."});
+            ui.label(format!("Music library: {}", root.display()));
+            if self.host.is_none() {
+                if ui
+                    .add_enabled(
+                        ready,
+                        egui::Button::new(if self.section == 1 {
+                            "Start broadcast"
+                        } else {
+                            "Host Smart Station"
+                        }),
+                    )
+                    .clicked()
+                {
+                    self.host(root, self.section == 2);
+                }
+                if !ready {
+                    ui.weak("Choose a music library and let its scan finish first.");
+                }
+            } else {
+                ui.label(&self.hosting);
+                if ui.button("Stop my station").clicked() {
+                    if let Some(mut child) = self.host.take() {
+                        let _ = child.kill();
+                        let _ = child.wait();
+                    }
+                    self.hosting.clear();
+                    self.host_broadcast = false;
+                    self.snapshot = None;
+                }
             }
-        });
-        if self.busy {
+            egui::CollapsingHeader::new("Access code (optional)").show(ui, |ui| {
+                ui.add(egui::TextEdit::singleline(&mut self.password).password(true));
+            });
+        }
+        ui.separator();
+        let mut download = None;
+        let mut listen_url = None;
+        let mut stop_remote = false;
+        if let Some(snapshot) = &self.snapshot {
+            ui.label(format!(
+                "{} songs · {} listeners",
+                snapshot.status.tracks, snapshot.status.listeners
+            ));
+            if snapshot.status.password_required && self.password.is_empty() {
+                ui.weak("This station needs its access code.");
+            }
+            egui::CollapsingHeader::new("Songs in live station").show(ui, |ui| {
+                for track in &snapshot.queue.tracks {
+                    ui.label(&track.title);
+                }
+            });
+            if self.section == 1
+                && snapshot.status.running
+                && self.host.is_none()
+                && ui.button("Stop broadcast").clicked()
+            {
+                stop_remote = true;
+            }
+            ui.strong(
+                snapshot
+                    .status
+                    .now_playing
+                    .as_deref()
+                    .unwrap_or("Station connected"),
+            );
+            if snapshot.status.running && ui.button("Listen to live station").clicked() {
+                listen_url = Some(format!("http://{}/listen.mp3", self.connected_address));
+            }
+            if let Some(manifest) = &snapshot.manifest {
+                ui.label("Playlists · songs and full cue metadata are included in offline copies");
+                if let Some(lists) = manifest["playlists"].as_array() {
+                    for playlist in lists {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(format!(
+                                "{} · {} songs",
+                                playlist["name"].as_str().unwrap_or("Playlist"),
+                                playlist["tracks"].as_array().map_or(0, Vec::len)
+                            ));
+                            if ui
+                                .add_enabled(
+                                    self.download.is_none(),
+                                    egui::Button::new("Save offline…"),
+                                )
+                                .clicked()
+                            {
+                                download = Some((manifest.clone(), playlist.clone()));
+                            }
+                        });
+                    }
+                }
+            } else if snapshot.status.capabilities["smart_sharing"].as_bool() != Some(true) {
+                ui.weak("Live station. Offline playlists are available from a Smart Station.");
+            }
+        }
+        if stop_remote {
+            self.send(Command::Stop);
+        }
+        if let Some(url) = listen_url {
+            self.listen(&url);
+        }
+        if self.radio.is_some()
+            && ui.button("Stop listening").clicked()
+            && let Some(mut child) = self.radio.take()
+        {
+            let _ = child.kill();
+            let _ = child.wait();
+        }
+        if let Some((manifest, playlist)) = download
+            && let Some(destination) = rfd::FileDialog::new()
+                .set_title("Save offline playlist and cues")
+                .pick_folder()
+        {
+            let (tx, rx) = mpsc::channel();
+            self.download = Some(rx);
+            let base = format!("http://{}", self.connected_address);
+            let password = self.password.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(crate::station_download::save(
+                    &base,
+                    &password,
+                    &manifest,
+                    &playlist,
+                    &destination,
+                ));
+            });
+        }
+        if self.busy
+            || self.discovery.is_some()
+            || self.radio_job.is_some()
+            || self.download.is_some()
+        {
             ui.spinner();
         }
         if !self.message.is_empty() {
-            ui.label(RichText::new(&self.message).color(skin::accent(ui)));
+            ui.label(&self.message);
         }
-        ui.label("Native AMP Cast / 0.1 prototype / Soundcard routing and listener analytics are planned.");
-            });
-        });
     }
 }
 
+impl Drop for Dashboard {
+    fn drop(&mut self) {
+        if let Some(mut radio) = self.radio.take() {
+            let _ = radio.kill();
+            let _ = radio.wait();
+        }
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "uses the public Radio Browser directory"]
+    fn radio_directory_returns_listenable_results() {
+        let results = search_radio("BBC").unwrap();
+        assert!(!results.is_empty());
+        assert!(results.iter().all(|r| !r.name.is_empty()
+            && (r.url_resolved.starts_with("https://") || r.url_resolved.starts_with("http://"))));
+    }
     #[test]
     fn native_client_controls_real_cast_and_reports_failures() {
         let temp = tempfile::tempdir().unwrap();

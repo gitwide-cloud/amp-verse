@@ -29,6 +29,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         config.station_id.clone(),
         config.station_name.clone(),
     );
+    cast.sharing.store(
+        std::env::var("AMP_CAST_SMART_SHARING").as_deref() == Ok("1"),
+        std::sync::atomic::Ordering::Relaxed,
+    );
     *cast.config_dir.lock().unwrap() = Some(config_dir);
     let enabled = if first_start {
         std::env::var("AMP_ANALYSIS_ENABLED")

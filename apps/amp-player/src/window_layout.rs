@@ -244,6 +244,11 @@ pub fn resize_edges(ui: &mut egui::Ui) {
         );
     }
 }
+/// Physical viewport dimensions keep scaled small windows from selecting the roomy layout.
+pub fn dj_pads_below(size: egui::Vec2, expanded: bool) -> bool {
+    expanded && size.x >= 1200. && size.y >= 850.
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -359,9 +364,4 @@ mod tests {
         assert!(!touching(a, a.translate(egui::vec2(0., 117.))));
         assert!(!touching(a, a.translate(egui::vec2(100., 100.))));
     }
-}
-
-/// Physical viewport dimensions keep scaled small windows from selecting the roomy layout.
-pub fn dj_pads_below(size: egui::Vec2, expanded: bool) -> bool {
-    expanded && size.x >= 1200. && size.y >= 850.
 }

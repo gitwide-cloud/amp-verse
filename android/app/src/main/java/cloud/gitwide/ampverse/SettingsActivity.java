@@ -35,7 +35,7 @@ public final class SettingsActivity extends Activity {
         CheckBox repeat=new CheckBox(this);repeat.setText("Repeat queue");repeat.setTag("repeat");repeat.setTextColor(colors.text);repeat.setButtonTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{colors.accent,colors.muted}));repeat.setChecked(prefs.getBoolean("repeat",false));repeat.setOnCheckedChangeListener((v,checked)->prefs.edit().putBoolean("repeat",checked).apply());page.addView(repeat);
         label("Sequential playback uses locally saved songs. Changes apply when you return to the player.",14,colors.muted);
         button("Android notification settings",()->startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE,getPackageName())));
-        label("Local storage",20,colors.text);label("Phone-file imports are separate from the planned radio offline library. Radio downloads will be saved from desktop songs/playlists through Remote. Existing phone imports and originals are retained.",14,colors.muted);
+        label("Local storage",20,colors.text);label("Phone-folder music stays separate from station downloads. In AMP Cast, connect to a Smart Station and save its playlists with cues for offline listening. Offline cue changes stay local.",14,colors.muted);
         label("App updater",20,colors.text);label(updateStatus,14,colors.muted);
         button(checking?"Checking…":"Check for updates",()->{if(!checking)checkUpdates();});
         button("Open GitHub Releases / Download",()->open(RELEASES));

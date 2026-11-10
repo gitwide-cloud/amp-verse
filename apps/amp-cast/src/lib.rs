@@ -1,5 +1,6 @@
 pub mod analysis_worker;
 pub mod config;
+pub mod sharing;
 use amp_core::{Library, Track};
 use axum::{
     Json, Router,
@@ -34,6 +35,7 @@ pub struct Cast {
     station_id: String,
     station_name: String,
     pub analysis: Arc<analysis_worker::Worker>,
+    pub sharing: std::sync::atomic::AtomicBool,
     root: PathBuf,
     tracks: Vec<Track>,
     password: Option<String>,
@@ -59,6 +61,7 @@ impl Cast {
         station_id: String,
         station_name: String,
     ) -> Arc<Self> {
+        let root = root.canonicalize().unwrap_or(root);
         let (audio, _) = broadcast::channel(256);
         Arc::new(Self {
             library_id: amp_core::coordination::library_id(&root).ok(),
@@ -67,6 +70,7 @@ impl Cast {
             station_id,
             station_name,
             analysis: analysis_worker::Worker::new(),
+            sharing: std::sync::atomic::AtomicBool::new(false),
             root,
             tracks: library.tracks,
             password,
@@ -124,6 +128,7 @@ pub fn router(cast: Arc<Cast>) -> Router {
             "/",
             get(|| async { Html(include_str!("../web/index.html")) }),
         )
+        .merge(sharing::routes())
         .route("/api/status", get(status))
         .route(
             "/app-icon.png",
@@ -156,7 +161,7 @@ async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
             .pause_for_radio
             .load(std::sync::atomic::Ordering::Relaxed);
     Json(
-        serde_json::json!({"library_id":cast.library_id,"capabilities":{"coordination_version":1,"stations_per_server":1,"google_cast":false,"hls":false},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":cast.station_name,"analysis":analysis,"running":station.running,"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
+        serde_json::json!({"library_id":cast.library_id,"capabilities":{"coordination_version":1,"stations_per_server":1,"google_cast":false,"hls":false,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":cast.station_name,"analysis":analysis,"running":station.running,"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
     )
 }
 async fn pause_analysis(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {

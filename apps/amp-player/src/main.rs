@@ -28,6 +28,7 @@ mod side_deck;
 mod skin;
 mod smart_actions;
 mod smart_preview;
+mod station_download;
 mod theme;
 mod waveform;
 mod window_layout;
@@ -2692,7 +2693,16 @@ impl Player {
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
             self.header(ui, "AMP Cast", true);
-            self.cast.show(ui);
+            egui::ScrollArea::vertical()
+                .id_salt("cast-content")
+                .max_height(ui.available_height())
+                .show(ui, |ui| {
+                    self.cast.show(
+                        ui,
+                        &self.root,
+                        self.library.is_some() && self.scan.is_none(),
+                    );
+                });
         });
     }
     fn addons_ui(&mut self, ui: &mut egui::Ui) {
