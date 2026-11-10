@@ -705,7 +705,7 @@ impl Player {
         }
     }
     fn auto_crossfade(&mut self) {
-        if self.run.profile.is_some() && !self.audio.as_ref().is_some_and(|a| a.fading()) {
+        if self.run.profile.is_some() {
             if let Err(error) = self.execute_control(control::Action::MixNext { immediate: true }) {
                 self.status = error;
             }

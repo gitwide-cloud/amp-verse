@@ -408,12 +408,17 @@ impl Player {
                 self.run.ducked = None;
             }
             Action::AutoFade => {
-                self.preload_smart()?;
-                let d = self.run.preloaded.unwrap().0;
-                self.run.pending_at = None;
-                self.run.pending = Some((d, Instant::now()));
+                self.execute_control(Action::MixNext { immediate: true })?;
             }
             Action::MixNext { immediate } => {
+                // Repeated requests must not restart or cancel the in-flight handoff.
+                // Keep its incoming track until completion, then refill the freed deck.
+                if self.run.transition.is_some() || self.audio.as_ref().is_some_and(|a| a.fading())
+                {
+                    self.status =
+                        "Mix in progress; the next song will load after the handoff".into();
+                    return Ok(());
+                }
                 self.preload_smart()?;
                 let d = self.run.preloaded.unwrap().0;
                 let active = self.active_deck();
@@ -1115,9 +1120,24 @@ mod tests {
             0.25
         );
         player.auto_crossfade();
+        wait(&mut player, |p| p.run.transition.is_some());
+        // Pressing the centre button again during the fade used to cancel Auto Mix.
+        player.auto_crossfade();
+        assert!(player.run.auto);
+        assert!(player.run.transition.is_some());
+        player
+            .execute_control(Action::MixNext { immediate: true })
+            .unwrap();
+        assert!(
+            player.run.pending.is_none(),
+            "Do not schedule the same incoming voice twice"
+        );
         wait(&mut player, |p| {
             p.loaded[p.active_deck()] == Some(2) && p.run.transition.is_none()
         });
+        wait(&mut player, |p| p.run.preloaded.is_some());
+        assert_eq!(player.run.preloaded.unwrap().0, 1 - player.active_deck());
+        assert_ne!(player.run.preloaded.unwrap().1, 2);
         assert!(
             player.run.auto,
             "Mix Now must not disable continuous Auto Mix"
