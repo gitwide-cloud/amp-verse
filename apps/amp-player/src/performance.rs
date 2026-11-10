@@ -456,6 +456,10 @@ impl Player {
                 style,
                 energy,
             } => {
+                if self.scan.is_some() {
+                    return Err("Your music library is still scanning. Wait for the tracks to appear before starting Auto DJ.".into());
+                }
+
                 if energy.is_some_and(|e| !e.is_finite() || !(1. ..=10.).contains(&e)) {
                     return Err("Energy must be 1–10".into());
                 }
@@ -921,6 +925,23 @@ mod tests {
         assert_eq!(player.run.playlist.as_deref(), Some("walk-in"));
         assert!(player.run.auto);
         assert!(player.audio.is_none());
+    }
+    #[test]
+    fn smart_load_reports_scan_in_progress_without_changing_the_session() {
+        let (_sender, receiver) = std::sync::mpsc::channel();
+        let mut player = Player {
+            scan: Some(receiver),
+            ..Default::default()
+        };
+        let result = player.execute_control(Action::LoadSmartPlaylist {
+            playlist: "recognition".into(),
+            execution: Execution::PlayNow,
+            style: None,
+            energy: None,
+        });
+        assert!(result.unwrap_err().contains("still scanning"));
+        assert!(!player.run.auto);
+        assert!(player.run.profile.is_none());
     }
     #[test]
     fn auto_mix_failed_start_stays_off_and_locked_stop_remains_available() {

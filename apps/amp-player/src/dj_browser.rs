@@ -138,7 +138,7 @@ impl Player {
                         .hint_text("Search this source"),
                 );
                 let Some(lib) = &self.library else {
-                    ui.weak("Add music sources in AMP Library.");
+                    ui.weak(if self.scan.is_some() { "Scanning your music folders. Tracks will appear when the scan finishes." } else { "Add music sources in AMP Library." });
                     return;
                 };
                 let mut indices: Vec<usize> = match self.dj_browser.source {
