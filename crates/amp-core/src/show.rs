@@ -154,7 +154,13 @@ impl Settings {
         Ok(())
     }
     pub fn load(root: &Path) -> Result<Self, String> {
-        match std::fs::read(root.join(".ampverse/show.json")) {
+        match std::fs::read(root.join("ampdj/smart-playlists.json")).or_else(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                std::fs::read(root.join(".ampverse/show.json"))
+            } else {
+                Err(e)
+            }
+        }) {
             Ok(b) => {
                 let mut value: serde_json::Value =
                     serde_json::from_slice(&b).map_err(|e| e.to_string())?;
@@ -172,7 +178,7 @@ impl Settings {
         let mut portable = self.clone();
         portable.normalize();
         portable.validate()?;
-        let file = root.join(".ampverse/show.json");
+        let file = root.join("ampdj/smart-playlists.json");
         let proposed = serde_json::to_value(&portable).map_err(|e| e.to_string())?;
         let result = (|| {
             let id = crate::coordination::library_id(root)?;
@@ -338,7 +344,7 @@ mod tests {
         let mut s = Settings::default();
         s.playlists[0].folders = vec![PathBuf::from("Music\\Sets")];
         s.save(d.path()).unwrap();
-        let text = std::fs::read_to_string(d.path().join(".ampverse/show.json")).unwrap();
+        let text = std::fs::read_to_string(d.path().join("ampdj/smart-playlists.json")).unwrap();
         assert!(text.contains("Music/Sets"));
         Settings::load(d.path()).unwrap().validate().unwrap();
     }

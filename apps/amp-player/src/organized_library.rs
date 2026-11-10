@@ -219,7 +219,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                     )
                     .clicked()
                 {
-                    let directory = self.root.join(".ampverse/playlists");
+                    let directory = self.root.join("ampdj/playlists");
                     match std::fs::create_dir_all(&directory) {
                         Ok(()) => {
                             let filename: String = name
@@ -680,7 +680,7 @@ mod tests {
         let directory = tempfile::tempdir().unwrap();
         let root = directory.path();
         std::fs::write(root.join("song.mp3"), b"fixture").unwrap();
-        let folder = root.join(".ampverse/playlists");
+        let folder = root.join("ampdj/playlists");
         std::fs::create_dir_all(&folder).unwrap();
         let path = folder.join("Friday.json");
         let mut player = Player {

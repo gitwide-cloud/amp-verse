@@ -28,7 +28,7 @@ pub fn scan(root: &Path) -> Result<Snapshot, String> {
     let library = amp_core::scan(root).map_err(|e| e.to_string())?;
     let settings = amp_core::show::Settings::load(root).ok();
     let mut playlists = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(root.join(".ampverse/playlists")) {
+    if let Ok(entries) = std::fs::read_dir(root.join("ampdj/playlists")) {
         for entry in entries.flatten() {
             let path = entry.path();
             if path.extension().is_some_and(|e| e == "json")
@@ -59,8 +59,7 @@ fn valid(snapshot: &Snapshot, root: &Path) -> bool {
             .all(|t| relative(&t.path) && t.preparation.validate().is_ok())
         && valid_folder(&snapshot.library.tree, snapshot.library.tracks.len())
         && snapshot.playlists.iter().all(|(p, list)| {
-            p.starts_with(root.join(".ampverse/playlists"))
-                && list.tracks.iter().all(|t| relative(t))
+            p.starts_with(root.join("ampdj/playlists")) && list.tracks.iter().all(|t| relative(t))
         })
 }
 fn valid_folder(folder: &amp_core::Folder, tracks: usize) -> bool {
@@ -77,7 +76,12 @@ fn load_at(file: &Path, root: &Path) -> Option<Snapshot> {
     if bytes.len() > 128 * 1024 * 1024 {
         return None;
     }
-    let snapshot = serde_json::from_slice(&bytes).ok()?;
+    let mut snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
+    for (path, _) in &mut snapshot.playlists {
+        if let Ok(relative) = path.strip_prefix(root.join(".ampverse/playlists")) {
+            *path = root.join("ampdj/playlists").join(relative);
+        }
+    }
     valid(&snapshot, root).then_some(snapshot)
 }
 pub fn load(root: &Path) -> Option<Snapshot> {

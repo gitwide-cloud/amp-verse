@@ -6,11 +6,19 @@ fn main() {
     }
 }
 fn run() -> Result<(), String> {
-    let mut args = std::env::args_os().skip(1);
+    let mut args = std::env::args_os().skip(1).collect::<Vec<_>>().into_iter();
     let root = args
         .next()
         .map(std::path::PathBuf::from)
         .ok_or("Usage: amp-prepare MUSIC_FOLDER [--jobs N]")?;
+    if args.clone().any(|arg| arg == "--organize") {
+        let count = amp_core::storage::organize(&root)?;
+        if root.join("ampdj/smart-playlists.json").is_file() {
+            amp_core::storage::export_rules(&root)?;
+        }
+        println!("Organized {count} metadata files into ampdj; original music unchanged");
+        return Ok(());
+    }
     let mut requested = 0;
     let mut force = false;
     let mut watch = None;

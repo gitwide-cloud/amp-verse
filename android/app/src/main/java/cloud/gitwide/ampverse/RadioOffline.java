@@ -24,7 +24,7 @@ final class RadioOffline {
                     String name="track-"+id+"."+extension;File audio=new File(stage,name);
                     client.download(id,audio,meta.getLong("bytes"),meta.getString("sha256"));
                     JSONObject preparation=meta.getJSONObject("preparation");preparation.put("source_sha256",meta.getString("sha256"));
-                    File metadata=new File(stage,".ampverse/tracks/"+name+".json");if(!metadata.getParentFile().isDirectory()&&!metadata.getParentFile().mkdirs())throw new IOException("Cannot save cues");
+                    File metadata=new File(stage,"ampdj/tracks/"+name+".json");if(!metadata.getParentFile().isDirectory()&&!metadata.getParentFile().mkdirs())throw new IOException("Cannot save cues");
                     Files.write(metadata.toPath(),preparation.toString().getBytes(StandardCharsets.UTF_8));
                     item=new JSONObject().put("file",name).put("title",entry.optString("title","Song")).put("preparation",preparation);copied.put(id,item);
                 }

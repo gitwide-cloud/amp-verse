@@ -19,6 +19,7 @@ public class FolderScanDeviceTest {
         assertEquals("song-a",DocumentsContract.getDocumentId(audio.get(0)));
         assertEquals("song-b",DocumentsContract.getDocumentId(audio.get(1)));
         assertFalse(FolderScanner.audio("notes.txt","text/plain"));
+        for(Uri song:audio){org.json.JSONObject prep=new org.json.JSONObject(FolderScanner.preparation(InstrumentationRegistry.getInstrumentation().getTargetContext().getContentResolver(),root,song));assertEquals(7.25,prep.getDouble("cue_in"),0.001);assertEquals(128,prep.getInt("bpm"));assertTrue(prep.getBoolean("manual_override"));}
         }finally{InstrumentationRegistry.getInstrumentation().getUiAutomation().dropShellPermissionIdentity();}
     }
 }

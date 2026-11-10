@@ -175,7 +175,7 @@ mod tests {
         std::fs::write(&audio, b"untouched").unwrap();
         let error = analyze_with(None, dir.path(), Path::new("song.wav"), None).unwrap_err();
         assert!(error.contains("optional AMP Analysis Engine"));
-        assert!(!dir.path().join(".ampverse").exists());
+        assert!(!dir.path().join("ampdj").exists());
         assert_eq!(std::fs::read(audio).unwrap(), b"untouched");
     }
     #[test]
@@ -190,6 +190,6 @@ mod tests {
             )
             .is_err()
         );
-        assert!(!dir.path().join(".ampverse").exists());
+        assert!(!dir.path().join("ampdj").exists());
     }
 }

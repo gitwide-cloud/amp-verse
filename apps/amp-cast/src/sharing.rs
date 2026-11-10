@@ -13,7 +13,7 @@ pub fn routes() -> Router<Arc<Cast>> {
 }
 fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
     let mut result = Vec::new();
-    let settings = if cast.root.join(".ampverse/show.json").is_file() {
+    let settings = if cast.root.join("ampdj/smart-playlists.json").is_file() {
         amp_core::show::Settings::load(&cast.root)?
     } else {
         amp_core::show::Settings {
@@ -32,7 +32,7 @@ fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
             .collect();
         result.push(json!({"id":format!("smart_{}",p.id),"name":p.name,"kind":"smart","rules":p,"tracks":ordered}));
     }
-    let directory = cast.root.join(".ampverse/playlists");
+    let directory = cast.root.join("ampdj/playlists");
     if directory.exists() {
         let directory = directory.canonicalize().map_err(|e| e.to_string())?;
         if !directory.starts_with(&cast.root) {
@@ -174,17 +174,14 @@ mod tests {
             .save(dir.path())
             .unwrap();
         let library = amp_core::scan(dir.path()).unwrap();
-        std::fs::create_dir_all(dir.path().join(".ampverse/playlists")).unwrap();
+        std::fs::create_dir_all(dir.path().join("ampdj/playlists")).unwrap();
         amp_core::Playlist {
             sync: None,
             version: 1,
             name: "My saved playlist".into(),
             tracks: vec!["song.mp3".into(), "song.mp3".into()],
         }
-        .save_in_library(
-            &dir.path().join(".ampverse/playlists/test.json"),
-            dir.path(),
-        )
+        .save_in_library(&dir.path().join("ampdj/playlists/test.json"), dir.path())
         .unwrap();
         let cast = Cast::new(dir.path().into(), library, Some("access".into()));
         let app = router(cast.clone());

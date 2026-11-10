@@ -296,6 +296,7 @@ public final class MainActivity extends Activity {
                     String extension = name.lastIndexOf('.') >= 0 ? name.substring(name.lastIndexOf('.')).replaceAll("[^.a-zA-Z0-9]", "") : ".audio";
                     target = new File(dir, UUID.randomUUID() + extension);
                     try (InputStream input = getContentResolver().openInputStream(uri); OutputStream output = new FileOutputStream(target)) { if (input == null) throw new IOException("Cannot open audio"); byte[] bytes = new byte[65536]; int size; while ((size = input.read(bytes)) != -1) output.write(bytes, 0, size); }
+                    if(tree!=null){String prep=FolderScanner.preparation(getContentResolver(),tree,uri);if(prep!=null){File metadata=new File(getFilesDir(),"ampdj/tracks/"+target.getName()+".json");if(!metadata.getParentFile().isDirectory()&&!metadata.getParentFile().mkdirs())throw new IOException("Cannot save preparation");java.nio.file.Files.write(metadata.toPath(),prep.getBytes(java.nio.charset.StandardCharsets.UTF_8));}}
                     added.add(LibraryStore.item(target, name));
                     importedSources.put(uri.toString(),target.getName());
                     final int count=added.size();runOnUiThread(()->{message="Saving local songs… "+count;refresh();});

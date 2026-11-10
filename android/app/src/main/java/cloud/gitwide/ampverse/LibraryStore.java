@@ -16,7 +16,8 @@ import java.util.List;
 final class LibraryStore {
     static List<MediaItem> read(Context context) {
         List<MediaItem> items = new ArrayList<>();
-        File index = new File(context.getFilesDir(), "library.json");
+        File index = new File(context.getFilesDir(), "ampdj/library.json");
+        if(!index.exists())index=new File(context.getFilesDir(),"library.json");
         if (!index.exists()) return items;
         try {
             JSONArray array = new JSONArray(new String(Files.readAllBytes(index.toPath()), StandardCharsets.UTF_8));
@@ -30,8 +31,10 @@ final class LibraryStore {
         return items;
     }
     static MediaItem item(File file, String title) {
-        return new MediaItem.Builder().setMediaId(file.getName()).setUri(Uri.fromFile(file))
-                .setMediaMetadata(new MediaMetadata.Builder().setTitle(title).setArtist("Local audio").build()).build();
+        MediaMetadata.Builder metadata=new MediaMetadata.Builder().setTitle(title).setArtist("Local audio");
+        File prep=new File(file.getParentFile().getParentFile(),"ampdj/tracks/"+file.getName()+".json");
+        if(prep.isFile())try{android.os.Bundle extras=new android.os.Bundle();extras.putString("amp-preparation",new String(Files.readAllBytes(prep.toPath()),StandardCharsets.UTF_8));metadata.setExtras(extras);}catch(Exception error){throw new IllegalStateException("Cannot read prepared cues",error);}
+        return new MediaItem.Builder().setMediaId(file.getName()).setUri(Uri.fromFile(file)).setMediaMetadata(metadata.build()).build();
     }
     static void write(Context context, List<MediaItem> items) throws Exception {
         JSONArray array = new JSONArray();
@@ -39,8 +42,9 @@ final class LibraryStore {
             File file = new File(item.localConfiguration.uri.getPath());
             array.put(new JSONObject().put("file", "audio/" + file.getName()).put("title", item.mediaMetadata.title));
         }
-        File pending = new File(context.getFilesDir(), "library.pending");
+        File directory=new File(context.getFilesDir(),"ampdj");if(!directory.isDirectory()&&!directory.mkdirs())throw new java.io.IOException("Cannot create ampdj metadata folder");
+        File pending = new File(directory, "library.pending");
         Files.write(pending.toPath(), array.toString().getBytes(StandardCharsets.UTF_8));
-        Files.move(pending.toPath(), new File(context.getFilesDir(), "library.json").toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
+        Files.move(pending.toPath(), new File(directory, "library.json").toPath(), java.nio.file.StandardCopyOption.REPLACE_EXISTING, java.nio.file.StandardCopyOption.ATOMIC_MOVE);
     }
 }

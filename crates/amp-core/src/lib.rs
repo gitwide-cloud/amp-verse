@@ -11,6 +11,7 @@ pub mod preparation;
 pub mod review;
 pub mod show;
 pub mod smart;
+pub mod storage;
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -95,6 +96,7 @@ pub fn sidecar(path: &Path) -> PathBuf {
 
 pub fn scan(root: &Path) -> io::Result<Library> {
     let root = root.canonicalize()?;
+    storage::register(&root);
     let mut tracks = Vec::new();
     fn visit(dir: &Path, root: &Path, tracks: &mut Vec<Track>) -> io::Result<Folder> {
         let mut folder = Folder {
@@ -111,7 +113,7 @@ pub fn scan(root: &Path) -> io::Result<Library> {
                 continue;
             }
             let path = entry.path();
-            if ty.is_dir() && entry.file_name() == ".ampverse" {
+            if ty.is_dir() && (entry.file_name() == "ampdj" || entry.file_name() == ".ampverse") {
                 continue;
             }
             if ty.is_dir() {

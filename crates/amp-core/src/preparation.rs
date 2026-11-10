@@ -122,37 +122,56 @@ pub fn fingerprint(path: &Path) -> Result<String, String> {
 }
 /// Preferred portable store. Legacy adjacent sidecars remain readable.
 pub fn portable(path: &Path) -> std::path::PathBuf {
+    let root = crate::storage::root_for(path);
+    let relative = path.strip_prefix(&root).unwrap_or(path);
+    let mut name = relative.as_os_str().to_os_string();
+    name.push(".json");
+    root.join("ampdj/tracks").join(name)
+}
+fn legacy(path: &Path) -> std::path::PathBuf {
     let mut name = path.file_name().unwrap_or_default().to_os_string();
     name.push(".json");
     path.parent()
         .unwrap_or(Path::new("."))
-        .join(".ampverse")
-        .join("tracks")
+        .join(".ampverse/tracks")
         .join(name)
 }
+fn record(path: &Path) -> std::io::Result<Vec<u8>> {
+    let mut error = None;
+    for candidate in [portable(path), legacy(path), sidecar(path)] {
+        match fs::read(candidate) {
+            Ok(bytes) => return Ok(bytes),
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::NotADirectory =>
+            {
+                error = Some(e)
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    Err(error.unwrap())
+}
 pub fn revision(path: &Path) -> Option<Vec<u8>> {
-    fs::read(portable(path))
-        .or_else(|_| fs::read(sidecar(path)))
-        .ok()
+    record(path).ok()
 }
 pub fn load(path: &Path) -> Result<Preparation, String> {
     load_with_revision(path).map(|(p, _)| p)
 }
 pub fn load_with_revision(path: &Path) -> Result<(Preparation, Option<Vec<u8>>), String> {
-    match fs::read(portable(path)).or_else(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
-            fs::read(sidecar(path))
-        } else {
-            Err(e)
-        }
-    }) {
+    match record(path) {
         Ok(bytes) => {
             let mut p: Preparation = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             assign_numbers(&mut p);
             p.validate()?;
             Ok((p, Some(bytes)))
         }
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok((Preparation::default(), None)),
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.kind() == std::io::ErrorKind::NotADirectory =>
+        {
+            Ok((Preparation::default(), None))
+        }
         Err(e) => Err(e.to_string()),
     }
 }
@@ -190,8 +209,9 @@ fn save_record(
     {
         return Err("Audio changed since preparation; analyze it again".into());
     }
+    crate::storage::register(&root.canonicalize().map_err(|e| e.to_string())?);
     let target = portable(&audio);
-    let metadata_folder = audio.parent().unwrap().join(".ampverse");
+    let metadata_folder = root.join("ampdj");
     if fs::symlink_metadata(&metadata_folder).is_ok_and(|m| m.file_type().is_symlink())
         || fs::symlink_metadata(target.parent().unwrap()).is_ok_and(|m| m.file_type().is_symlink())
     {
@@ -203,15 +223,9 @@ fn save_record(
         .unwrap()
         .canonicalize()
         .map_err(|e| e.to_string())?
-        .starts_with(
-            audio
-                .parent()
-                .unwrap()
-                .canonicalize()
-                .map_err(|e| e.to_string())?,
-        )
+        .starts_with(root.canonicalize().map_err(|e| e.to_string())?)
     {
-        return Err("Portable metadata must stay beside its music folder".into());
+        return Err("Portable metadata must stay inside its library".into());
     }
 
     let device = if let Some(lease) = lease {

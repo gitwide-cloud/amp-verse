@@ -67,7 +67,7 @@ impl Editor {
             self.source_labels.clear();
             self.preview_order.clear();
             self.cache_bytes.clear();
-            if saved.sync.is_none() && !root.join(".ampverse/show.json").exists() {
+            if saved.sync.is_none() && !root.join("ampdj/smart-playlists.json").exists() {
                 for playlist in &mut self.draft.as_mut().unwrap().playlists {
                     set_source_mode(playlist, SourceMode::Folders);
                 }
@@ -768,9 +768,9 @@ fn save_rules(root: &std::path::Path, settings: &mut Settings, saved: &mut Setti
     if root.as_os_str().is_empty() {
         return "Choose a music root first".into();
     }
-    let current = root.join(".ampverse/show.json");
+    let current = root.join("ampdj/smart-playlists.json");
     if current.is_file() {
-        let backup = root.join(".ampverse/backups");
+        let backup = root.join("ampdj/backups");
         let stamp = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
@@ -787,6 +787,11 @@ fn save_rules(root: &std::path::Path, settings: &mut Settings, saved: &mut Setti
                 *settings = fresh;
             }
             *saved = settings.clone();
+            if !cfg!(test)
+                && let Err(error) = amp_core::storage::export_rules(root)
+            {
+                return format!("Shared rules saved; Documents copy could not be written: {error}");
+            }
             "Saved. Active performances keep their loaded rules.".into()
         }
         Err(error) => error,
@@ -997,7 +1002,7 @@ mod tests {
         set_source_mode(&mut draft.playlists[0], SourceMode::Folders);
         draft.playlists[0].folders.push("Recognition".into());
         draft.playlists[0].restrict_allowed = false;
-        let before = std::fs::read(root.path().join(".ampverse/show.json")).unwrap();
+        let before = std::fs::read(root.path().join("ampdj/smart-playlists.json")).unwrap();
         assert!(
             merge_rules(&base, &draft, &current, false)
                 .err()
@@ -1005,7 +1010,7 @@ mod tests {
                 .contains("music source")
         );
         assert_eq!(
-            std::fs::read(root.path().join(".ampverse/show.json")).unwrap(),
+            std::fs::read(root.path().join("ampdj/smart-playlists.json")).unwrap(),
             before
         );
         let mut reviewed = merge_rules(&base, &draft, &current, true).unwrap();
@@ -1138,7 +1143,7 @@ mod tests {
         assert_eq!(restored.draft.playlists[0].name, "Local name");
         assert_eq!(restored.draft.playlists[0].style, Style::Chill);
         assert_eq!(restored.draft.playlists[0].target_energy, Some(3.));
-        assert!(!dir.path().join(".ampverse/show.json").exists());
+        assert!(!dir.path().join("ampdj/smart-playlists.json").exists());
     }
 
     #[test]
@@ -1223,7 +1228,7 @@ mod tests {
         });
         output.textures_delta.clear();
         assert_eq!(saved.playlists[0].name, "Recognition");
-        assert!(!directory.path().join(".ampverse/show.json").exists());
+        assert!(!directory.path().join("ampdj/smart-playlists.json").exists());
     }
     #[test]
     fn switching_inline_playlists_keeps_unsaved_drafts_and_viewport_constrained() {

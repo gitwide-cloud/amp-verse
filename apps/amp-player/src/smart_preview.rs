@@ -188,7 +188,7 @@ mod tests {
         assert!(preview.status.contains("finished"), "{}", preview.status);
         assert_eq!(std::fs::read(dir.path().join("tone.wav")).unwrap(), before);
         assert_eq!(serde_json::to_value(&profile).unwrap(), original);
-        assert!(!dir.path().join(".ampverse/show.json").exists());
+        assert!(!dir.path().join("ampdj/smart-playlists.json").exists());
     }
     #[test]
     fn preview_excerpts_preserve_original_preparation() {

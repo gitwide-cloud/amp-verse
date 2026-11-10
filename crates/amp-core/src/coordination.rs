@@ -185,7 +185,8 @@ pub fn library_id(root: &Path) -> Result<String, String> {
     if !root.is_dir() {
         return Err("Library unavailable; coordination paused".into());
     }
-    identity(&root.join(".ampverse/library.json"))
+    crate::storage::enroll(root)?;
+    identity(&root.join("ampdj/library.json"))
 }
 pub fn device_config_dir() -> Result<PathBuf, String> {
     #[cfg(test)]
@@ -1115,7 +1116,7 @@ mod tests {
     #[test]
     fn legacy_rules_enroll_without_losing_concurrent_edit_protection() {
         let root = fixture();
-        let file = root.path().join(".ampverse/show.json");
+        let file = root.path().join("ampdj/smart-playlists.json");
         fs::write(
             &file,
             serde_json::to_vec(&crate::show::Settings::default()).unwrap(),
