@@ -9,6 +9,7 @@ use std::{
 mod addons;
 mod cast;
 mod control;
+mod crossfade_settings;
 mod dj_browser;
 mod dj_mixer;
 mod docking;
@@ -218,7 +219,7 @@ impl Default for Player {
             pitch: [0.; 2],
             channel_gain: [1.; 2],
             fader: 0.,
-            fade_seconds: 8.,
+            fade_seconds: crossfade_settings::load(),
             jog_resume: [None; 2],
             jog_angle: [0.; 2],
             mixer_panel: Default::default(),
@@ -1866,9 +1867,7 @@ impl Player {
                 .id_salt("dj-advanced")
                 .show(ui, |ui| {
                     ui.toggle_value(&mut self.run.scratch_assist, "Scratch assist");
-                    ui.add(
-                        egui::Slider::new(&mut self.fade_seconds, 0.5..=30.).text("Mix seconds"),
-                    );
+
                     ui.add(
                         egui::Slider::new(&mut self.wave_span, 4. ..=60.).text("Waveform seconds"),
                     );
@@ -1935,7 +1934,7 @@ impl Player {
                                             ui.set_min_height(logical.y - 18.);
                                             egui::ScrollArea::vertical()
                                                 .id_salt("dj-channel-controls")
-                                                .max_height((logical.y - 300.).max(160.))
+                                                .max_height((logical.y - 350.).max(120.))
                                                 .auto_shrink([false, true])
                                                 .show(ui, |ui| self.inline_mixer(ui));
                                             let fading =
@@ -1993,6 +1992,46 @@ impl Player {
                                                 }
                                                 ui.label("B");
                                             });
+                                            let previous = self.fade_seconds;
+                                            ui.horizontal(|ui| {
+                                                ui.label("Mix time");
+                                                if ui
+                                                    .button("−")
+                                                    .on_hover_text("Shorten by 0.5 seconds")
+                                                    .clicked()
+                                                {
+                                                    self.fade_seconds -= 0.5;
+                                                }
+                                                ui.add(
+                                                    egui::DragValue::new(&mut self.fade_seconds)
+                                                        .range(0.5..=30.)
+                                                        .speed(0.1)
+                                                        .fixed_decimals(1)
+                                                        .suffix(" s"),
+                                                );
+                                                if ui
+                                                    .button("+")
+                                                    .on_hover_text("Lengthen by 0.5 seconds")
+                                                    .clicked()
+                                                {
+                                                    self.fade_seconds += 0.5;
+                                                }
+                                            });
+                                            ui.add(
+                                                egui::Slider::new(
+                                                    &mut self.fade_seconds,
+                                                    0.5..=30.,
+                                                )
+                                                .show_value(false),
+                                            );
+                                            self.fade_seconds = self.fade_seconds.clamp(0.5, 30.);
+                                            if previous != self.fade_seconds
+                                                && let Err(error) =
+                                                    crossfade_settings::save(self.fade_seconds)
+                                            {
+                                                self.status =
+                                                    format!("Could not save mix time: {error}");
+                                            }
                                             ui.separator();
                                             ui.columns(2, |columns| {
                                                 for (deck, column) in columns.iter_mut().enumerate()

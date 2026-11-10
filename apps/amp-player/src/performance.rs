@@ -863,11 +863,7 @@ impl Player {
                     let seconds = if scratch_handoff {
                         0.25
                     } else {
-                        match self.run.style {
-                            Style::Hype => 3.,
-                            Style::Steady => self.fade_seconds,
-                            Style::Chill => 10.,
-                        }
+                        self.fade_seconds
                     };
                     match a.crossfade(seconds) {
                         Ok(()) => self.run.transition = Some(incoming),
@@ -900,11 +896,7 @@ impl Player {
         {
             let active = self.active_deck();
             let remaining = self.audio.as_ref().and_then(|a| a.remaining(active));
-            let mix_seconds = match self.run.style {
-                Style::Hype => 3.,
-                Style::Steady => self.fade_seconds,
-                Style::Chill => 10.,
-            };
+            let mix_seconds = self.fade_seconds;
             if self
                 .audio
                 .as_ref()

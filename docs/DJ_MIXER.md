@@ -75,3 +75,7 @@ When the library is enlarged, the mixer can be scrolled to reach its lower contr
 ## Prepared stem controls
 
 AMP DJ now supports optional prepared vocal/instrumental separation with independent Level, Mute and Solo controls on each deck. This is separate from frequency EQ. See [STEMS.md](STEMS.md) for setup, preparation and device-local cache behavior.
+
+## Crossfade duration
+
+Mix time sits below the crossfader with minus/plus buttons (0.5-second steps), a directly editable seconds value, and a slider. Changes are saved automatically as a device preference and restored after restarting. The selected time applies to manual Auto Crossfade and Smart AutoMix in Hype, Steady, and Chill styles. It affects subsequent fades; an active fade finishes its current timing. The engine can shorten a fade when a track has less audio remaining, and scratch-assist handoffs keep their short safety fade.
