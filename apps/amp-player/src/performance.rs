@@ -22,6 +22,7 @@ pub struct Run {
     pub scratch_assist: bool,
     scratch_bridge: Option<(usize, Instant)>,
     pub future_candidates: VecDeque<usize>,
+    failed_songs: Vec<String>,
     pub locked: bool,
     pub progression: Option<show::Progression>,
     planned_progression: Option<show::EnergyPlan>,
@@ -48,6 +49,7 @@ impl Default for Run {
             scratch_assist: true,
             scratch_bridge: None,
             future_candidates: VecDeque::new(),
+            failed_songs: Vec::new(),
             locked: false,
             progression: None,
             planned_progression: None,
@@ -260,12 +262,13 @@ impl Player {
                 return Ok(());
             }
         }
-        let p = self
+        let mut p = self
             .run
             .profile
             .as_ref()
             .ok_or("Load a Smart Playlist first")?
             .clone();
+        p.excluded.extend(self.run.failed_songs.iter().cloned());
         let current = self.loaded[self.active_deck()];
         let recent: Vec<_> = self.run.recent.iter().cloned().collect();
         let tracks = &self.library.as_ref().ok_or("Library unavailable")?.tracks;
@@ -288,18 +291,47 @@ impl Player {
                 return self.call_track(index, None, Deck::Auto, Execution::LoadOnly);
             }
         }
-        let index = show::choose_with_snapshot(
-            &p,
-            tracks,
-            current,
-            &recent,
-            target,
-            alternate,
-            self.loaded_track(self.active_deck())
-                .map(|t| &t.preparation),
-        )
-        .ok_or("No eligible next song in this Smart Playlist")?;
-        self.call_track(index, None, Deck::Auto, Execution::LoadOnly)
+        loop {
+            let tracks = &self.library.as_ref().ok_or("Library unavailable")?.tracks;
+            let index = show::choose_with_snapshot(
+                &p, tracks, current, &recent, target, alternate,
+                self.loaded_track(self.active_deck()).map(|t| &t.preparation),
+            ).ok_or("Auto Mix stopped: no playable next song matches this playlist's source and repeat rules")?;
+            match self.call_track(index, None, Deck::Auto, Execution::LoadOnly) {
+                Ok(()) => return Ok(()),
+                Err(error) => {
+                    let track = &self.library.as_ref().unwrap().tracks[index];
+                    let id = show::song_id(track);
+                    self.status = format!("Skipping {}: {error}", track.title);
+                    p.excluded.push(id.clone());
+                    self.run.failed_songs.push(id);
+                }
+            }
+        }
+    }
+    pub(super) fn recover_failed_song(&mut self, deck: usize, error: &str) {
+        if let Some(track) = self.loaded_track(deck) {
+            let id = show::song_id(track);
+            self.status = format!("Skipping {}: {error}", track.title);
+            if !self.run.failed_songs.contains(&id) {
+                self.run.failed_songs.push(id);
+            }
+        } else {
+            self.status = error.into();
+        }
+        if let Some(audio) = &mut self.audio {
+            audio.stop(deck);
+        }
+        if self.run.preloaded.is_some_and(|(d, _)| d == deck) {
+            self.run.preloaded = None;
+            self.run.pending = None;
+            self.run.pending_at = None;
+            self.run.transition = None;
+        } else if self.run.transition.is_some() {
+            // An outgoing decoder failed: the prepared incoming deck can take over.
+            self.run.pending = self.run.preloaded.map(|(d, _)| (d, Instant::now()));
+            self.run.transition = None;
+        }
     }
     pub(super) fn execute_control(&mut self, action: Action) -> Result<(), String> {
         if self.run.locked
@@ -484,6 +516,7 @@ impl Player {
                 }) {
                     return Err("This saved Smart Playlist has no matching songs. Choose its Music Source in Library, then Save Playlist.".into());
                 }
+                self.run.failed_songs.clear();
                 self.run.choice = p.id.clone();
                 self.run.planned_progression = p.energy_progression.clone();
                 self.run.planned_force = false;
@@ -640,6 +673,10 @@ impl Player {
                 if enabled && self.run.playlist.is_none() {
                     return Err("Load a Smart Playlist first".into());
                 }
+                // An explicit restart retries songs skipped by the previous run.
+                if enabled {
+                    self.run.failed_songs.clear();
+                }
                 // Do not claim ON until loading/starting the first song succeeds.
                 self.run.auto = false;
                 if enabled
@@ -728,6 +765,18 @@ impl Player {
             audio.scratch(deck, false, 1.);
         }
 
+        if self.run.auto
+            && let Some((deck, _)) = self.run.preloaded
+            && self.audio.as_ref().is_some_and(|a| {
+                a.load_current(deck) && a.controls.finished[deck].load(Relaxed) && !a.playing(deck)
+            })
+        {
+            self.recover_failed_song(
+                deck,
+                "No playable audio at the saved cue; trying another song",
+            );
+        }
+
         if (self.run.auto || self.run.planned_force)
             && self.run.transition.is_none()
             && self.run.progression.is_none()
@@ -750,8 +799,10 @@ impl Player {
                     .is_some_and(|a| a.source_position(self.active_deck()) >= due)
             });
             if !ready && started.elapsed() > Duration::from_secs(15) {
-                self.status = "Incoming deck did not become ready; outgoing audio retained".into();
-                self.run.cancel_automation();
+                self.recover_failed_song(
+                    incoming,
+                    "Incoming deck did not become ready; trying another song",
+                );
             } else if ready && due {
                 let outgoing = 1 - incoming;
                 let bridge_needed = self.run.scratch_assist
@@ -794,7 +845,13 @@ impl Player {
                 }
 
                 let a = self.audio.as_ref().unwrap();
-                if !a.playing(1 - incoming) {
+                if !a.playing(1 - incoming)
+                    || a.remaining(1 - incoming)
+                        .is_some_and(|remaining| remaining < 0.15)
+                {
+                    // The outgoing song may end between the UI tick and fade request.
+                    // A ready next song can take over without disabling continuous mixing.
+                    a.controls.play[1 - incoming].store(false, Relaxed);
                     a.controls.play[incoming].store(true, Relaxed);
                     a.set_fader(incoming as f32);
                     self.complete_change(incoming);
@@ -815,8 +872,10 @@ impl Player {
                     match a.crossfade(seconds) {
                         Ok(()) => self.run.transition = Some(incoming),
                         Err(e) => {
-                            self.status = e;
-                            self.run.auto = false;
+                            self.status = format!("Waiting for a safe handoff: {e}");
+                            // Keep the incoming track and retry next tick, including
+                            // a direct handoff if the outgoing song finishes meanwhile.
+                            return;
                         }
                     }
                 }
@@ -846,7 +905,10 @@ impl Player {
                 Style::Steady => self.fade_seconds,
                 Style::Chill => 10.,
             };
-            if self.audio.as_ref().is_some_and(|a| a.playing(active))
+            if self
+                .audio
+                .as_ref()
+                .is_some_and(|a| a.playing(active) || a.controls.finished[active].load(Relaxed))
                 && self.run.preloaded.is_none()
                 && let Err(e) = self.preload_smart()
             {
@@ -898,7 +960,7 @@ impl Player {
             json!({"deck":if d==0{"A"}else{"B"},"loaded":engine_loaded,"ready":engine_loaded&&a.is_some_and(|a|a.controls.ready[d].load(Relaxed)),"playing":playing,"state":if playing{"playing"}else if engine_loaded{"paused"}else{"stopped"},"song_id":if engine_loaded{t.map(show::song_id)}else{None},"title":if engine_loaded{t.map(|t|t.title.as_str())}else{None},"artist":if engine_loaded{t.and_then(|t|t.preparation.extensions.get("artist")).cloned()}else{None},"position":if engine_loaded{a.map(|a|a.source_position(d))}else{None},"remaining":if engine_loaded{a.and_then(|a|a.remaining(d))}else{None}})
         }).collect();
         let fading = a.is_some_and(|a| a.fading() || a.controls.level_fading.load(Relaxed));
-        json!({"version":1,"amp":{"connected":true,"playback_state":tracks[active]["state"],"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active==0{"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"manual_dj_locked":self.run.locked},"decks":tracks,"cue_decks":self.sides.iter().map(|side|side.snapshot()).collect::<Vec<_>>()})
+        json!({"version":1,"amp":{"connected":true,"status":self.status,"playback_state":tracks[active]["state"],"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active==0{"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"manual_dj_locked":self.run.locked},"decks":tracks,"cue_decks":self.sides.iter().map(|side|side.snapshot()).collect::<Vec<_>>()})
     }
 }
 
@@ -1031,6 +1093,104 @@ mod tests {
         assert!(player.run.scratch_bridge.is_none());
         assert!(!player.audio.as_ref().unwrap().controls.scratching[0].load(Relaxed));
         assert!(player.audio.as_ref().unwrap().take_error().is_none());
+    }
+    #[test]
+    #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
+    fn auto_mix_skips_broken_song_and_survives_late_handoff() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
+        for i in 0..4 {
+            let path = dir.path().join(format!("song{i}.wav"));
+            if i == 1 {
+                std::fs::write(&path, b"broken audio").unwrap();
+            } else {
+                std::fs::copy(&fixture, &path).unwrap();
+            }
+            amp_core::preparation::save(
+                dir.path(),
+                std::path::Path::new(&format!("song{i}.wav")),
+                &amp_core::Preparation {
+                    cue_in: 0.25,
+                    cue_out: Some(2.),
+                    bpm: Some(120.),
+                    manual_override: true,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut player = Player {
+            root: dir.path().into(),
+            library: Some(amp_core::scan(dir.path()).unwrap()),
+            channel_gain: [0.; 2],
+            fade_seconds: 0.2,
+            ..Default::default()
+        };
+        let before: Vec<_> = player
+            .library
+            .as_ref()
+            .unwrap()
+            .tracks
+            .iter()
+            .map(|t| amp_core::preparation::revision(&dir.path().join(&t.path)))
+            .collect();
+        player.run.crossfade = false;
+        player
+            .execute_control(Action::LoadSmartPlaylist {
+                playlist: "everyday".into(),
+                execution: Execution::PlayNow,
+                style: Some(Style::Steady),
+                energy: None,
+            })
+            .unwrap();
+        wait(&mut player, |p| {
+            p.run.preloaded.is_some_and(|(d, i)| {
+                i == 2 && p.audio.as_ref().unwrap().controls.ready[d].load(Relaxed)
+            })
+        });
+        assert!(
+            player.run.auto,
+            "Bad incoming audio must not stop Auto Mix: {}",
+            player.status
+        );
+        assert_eq!(player.run.failed_songs.len(), 1);
+        // Let the UI request arrive too late for the old 100ms fade safety check.
+        let active = player.active_deck();
+        let until = Instant::now() + Duration::from_secs(5);
+        while player.audio.as_ref().unwrap().remaining(active).unwrap() > 0.07 {
+            assert!(Instant::now() < until);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        player.auto_crossfade();
+        wait(&mut player, |p| {
+            p.loaded[p.active_deck()] == Some(2)
+                && p.run.pending.is_none()
+                && p.run.transition.is_none()
+        });
+        assert!(
+            player.run.auto,
+            "Late handoff must not turn Auto Mix off: {}",
+            player.status
+        );
+        player.run.crossfade = true;
+        for _ in 0..5 {
+            let previous = player.loaded[player.active_deck()];
+            wait(&mut player, |p| {
+                p.loaded[p.active_deck()] != previous && p.run.transition.is_none()
+            });
+            assert_ne!(player.loaded[player.active_deck()], Some(1));
+            assert!(
+                player.run.auto,
+                "Stopped during continuous playback: {}",
+                player.status
+            );
+        }
+        for (i, t) in player.library.as_ref().unwrap().tracks.iter().enumerate() {
+            assert_eq!(
+                amp_core::preparation::revision(&dir.path().join(&t.path)),
+                before[i]
+            );
+        }
     }
     #[test]
     #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
@@ -1212,7 +1372,12 @@ mod tests {
             if check(player) {
                 break;
             }
-            assert!(Instant::now() < until, "Timed out: {}", player.status);
+            assert!(
+                Instant::now() < until,
+                "Timed out: {} {}",
+                player.status,
+                player.control_snapshot()
+            );
             std::thread::sleep(Duration::from_millis(5));
         }
     }

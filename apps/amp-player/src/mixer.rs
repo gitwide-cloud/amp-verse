@@ -52,6 +52,7 @@ pub struct Controls {
     pub underruns: [AtomicU64; 2],
     pub rendered: AtomicU64,
     pub error: Mutex<Option<String>>,
+    pub decode_errors: Mutex<Vec<(usize, u64, String)>>,
 }
 impl Default for Controls {
     fn default() -> Self {
@@ -85,6 +86,7 @@ impl Default for Controls {
             underruns: std::array::from_fn(|_| AtomicU64::new(0)),
             rendered: AtomicU64::new(0),
             error: Mutex::new(None),
+            decode_errors: Mutex::new(Vec::new()),
         }
     }
 }
@@ -645,6 +647,7 @@ impl Engine {
         let errors = self.controls.clone();
         let stopped = cancel.clone();
         let eof = done.clone();
+        let generation = self.requested_generation[deck] + 1;
         std::thread::spawn(move || {
             let result = (|| {
                 if duration_worker.load(Relaxed) == 0
@@ -751,14 +754,13 @@ impl Engine {
             })();
             if let Err(error) = result
                 && !stopped.load(Relaxed)
-                && let Ok(mut message) = errors.error.lock()
+                && let Ok(mut messages) = errors.decode_errors.lock()
             {
-                *message = Some(error);
+                messages.push((deck, generation, error));
             }
             eof.store(true, std::sync::atomic::Ordering::Release);
         });
         self.cancel[deck] = Some(cancel);
-        let generation = self.requested_generation[deck] + 1;
         self.send(Command::Load(
             deck,
             Source {
@@ -960,6 +962,19 @@ impl Engine {
     }
     pub fn peak(&self, deck: usize) -> f32 {
         get(&self.controls.peak[deck])
+    }
+    pub fn take_decode_errors(&self) -> Vec<(usize, String)> {
+        self.controls
+            .decode_errors
+            .lock()
+            .map(|mut errors| {
+                errors
+                    .drain(..)
+                    .filter(|(deck, generation, _)| self.requested_generation[*deck] == *generation)
+                    .map(|(deck, _, error)| (deck, error))
+                    .collect()
+            })
+            .unwrap_or_default()
     }
     pub fn take_error(&self) -> Option<String> {
         self.controls.error.lock().ok()?.take()

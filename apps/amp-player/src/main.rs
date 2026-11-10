@@ -533,6 +533,14 @@ impl Player {
         } else {
             self.playing = [false; 2];
         }
+        let decode_errors = self
+            .audio
+            .as_ref()
+            .map(|audio| audio.take_decode_errors())
+            .unwrap_or_default();
+        for (deck, error) in decode_errors {
+            self.recover_failed_song(deck, &error);
+        }
         if self.auto
             && (self.loaded[0].is_none()
                 || self.audio.as_ref().is_some_and(|a| {
