@@ -364,3 +364,12 @@ Final Android 0.1.12 results: main/test APK build and lint passed. The 17-case P
 Read-only diagnosis found Recognition saved with an empty allow restriction, while the local draft selected an existing music folder containing 788 direct audio files. The draft/baseline had no revision metadata; shared show.json had revision 2. No personal shared rules were modified during diagnosis.
 
 Regression tests cover the stale legacy baseline, independent shared cue-preference preservation, atomic source-group conflicts, explicit reviewed publication, unchanged playlist IDs, source eligibility after save, and refusal to overwrite an update made after review. Player suite: 59 passed, 11 optional native/environment tests skipped; strict Clippy passed. Personal source choice remains in its local draft for explicit review/save after restarting the updated desktop.
+
+
+### Live desktop recovery and Save-button regression
+
+Confirmed the screenshot came from the pre-update running process. With both main decks paused, closed that process normally and opened the installed fix. Reviewed the empty shared Recognition source against the preserved folder draft, then saved through the application's revision-aware review action (which backs up the prior rules). The completed scan indexed 4,404 songs; Recognition now displays 1,168 eligible tracks including subfolders in the actual DJ Library.
+
+Verified `load_smart_playlist`, preload, and actual Smart Playlist playback against the recovered library with master volume first acknowledged at zero. Disabled Auto DJ and paused both decks afterward, then restored the prior master volume. Left Recognition selected in the visible DJ Library for user testing.
+
+Live clicking also caught a second Save button overwriting the header Save click result. Both buttons now combine their click results; an actual egui press/release regression test verifies the top button publishes the draft. Final player suite: 60 passed, 11 optional tests skipped; strict Clippy and release build passed. Installed the correction without terminating the now-working paused session.

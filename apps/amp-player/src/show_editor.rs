@@ -203,7 +203,7 @@ impl Editor {
                 ui.colored_label(crate::ORANGE,"Shared rules changed. Review before saving your draft.");
                 ui.add(egui::Label::new(&self.status).wrap());
                 egui::CollapsingHeader::new("Compare saved and proposed sources").default_open(true).show(ui,|ui|{
-                    for mine in &proposed.playlists { if let Some(theirs)=shared.playlists.iter().find(|p|p.id==mine.id) && serde_json::to_value(mine).ok()!=serde_json::to_value(theirs).ok(){ui.strong(&mine.name);ui.label(format!("Saved: {} · folders: {}",source_summary(theirs),theirs.folders.iter().map(|p|p.display().to_string()).collect::<Vec<_>>().join(", ")));ui.label(format!("Proposed: {} · folders: {} · {} selected songs",source_summary(mine),mine.folders.iter().map(|p|p.display().to_string()).collect::<Vec<_>>().join(", "),mine.allowed.len()));if let (Ok(local),Ok(saved))=(serde_json::to_value(mine),serde_json::to_value(theirs)){for (key,value) in local.as_object().unwrap(){if !["folders","restrict_folders","allowed","restrict_allowed","id"].contains(&key.as_str())&&*value!=saved[key]{ui.label(format!("{key}: saved {} → proposed {value}",saved[key]));}}}}}
+                    for mine in &proposed.playlists { if let Some(theirs)=shared.playlists.iter().find(|p|p.id==mine.id) && serde_json::to_value(mine).ok()!=serde_json::to_value(theirs).ok(){ui.strong(&mine.name);ui.label(format!("Saved: {} · folders: {}",source_summary(theirs),theirs.folders.iter().map(|p|p.display().to_string()).collect::<Vec<_>>().join(", ")));ui.label(format!("Proposed: {} · folders: {}{}",source_summary(mine),mine.folders.iter().map(|p|p.display().to_string()).collect::<Vec<_>>().join(", "),if mine.restrict_allowed {format!(" · {} allowed songs",mine.allowed.len())}else{String::new()}));if let (Ok(local),Ok(saved))=(serde_json::to_value(mine),serde_json::to_value(theirs)){for (key,value) in local.as_object().unwrap(){if !["folders","restrict_folders","allowed","restrict_allowed","id"].contains(&key.as_str())&&*value!=saved[key]{ui.label(format!("{key}: saved {} → proposed {value}",saved[key]));}}}}}
                 });
                 approve_review=ui.button("Save reviewed draft changes").clicked();
                 cancel_review=ui.button("Cancel review · keep both versions").clicked();
@@ -227,7 +227,7 @@ impl Editor {
                     });
                 });
                 if dirty { ui.colored_label(crate::ORANGE,"Unsaved changes · DJ still uses the saved version"); }
-                ui.horizontal_wrapped(|ui|{save|=ui.button("Save Playlist").clicked();if !self.status.is_empty(){ui.add(egui::Label::new(&self.status).wrap());}});
+                ui.horizontal_wrapped(|ui|{let button=ui.button("Save Playlist");save|=button.clicked();#[cfg(test)]ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique("smart-top-save"),button.rect));if !self.status.is_empty(){ui.add(egui::Label::new(&self.status).wrap());}});
                 ui.add_space(16.);
                 ui.strong("Music source");
                 let count = library.map(|lib| lib.tracks.iter().filter(|track|amp_core::show::eligible(p,track)).count());
@@ -444,7 +444,7 @@ impl Editor {
                 });
                 ui.add_space(18.);
                 ui.horizontal_wrapped(|ui| {
-                    save = ui.add_sized([180.,38.],egui::Button::new(egui::RichText::new("Save Playlist").color(egui::Color32::BLACK)).fill(crate::skin::accent(ui)).wrap()).clicked();
+                    save |= ui.add_sized([180.,38.],egui::Button::new(egui::RichText::new("Save Playlist").color(egui::Color32::BLACK)).fill(crate::skin::accent(ui)).wrap()).clicked();
                     if ui.add_enabled(self.preview_active || (library.is_some() && !self.audition_blocked),egui::Button::new(if self.preview_active {"Stop Preview"} else {"Preview Mix"}).min_size(egui::vec2(140.,38.))).on_hover_text("Short audio mix using this draft; available when live playback is stopped").clicked() {
                         if self.preview_active { self.stop_preview=true; }
                         else if let Some(lib)=library {
@@ -940,6 +940,50 @@ fn source_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn top_save_button_publishes_the_draft_even_with_a_lower_save_button() {
+        let root = tempfile::tempdir().unwrap();
+        Settings::default().save(root.path()).unwrap();
+        let mut saved = Settings::load(root.path()).unwrap();
+        let mut editor = Editor::default();
+        editor.open_playlist("recognition", root.path(), &saved);
+        editor.draft.as_mut().unwrap().playlists[0].name = "Saved by top button".into();
+        let context = egui::Context::default();
+        let mut draw = |position: egui::Pos2, pressed: Option<bool>| {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(900., 700.),
+                )),
+                ..Default::default()
+            };
+            raw.events.push(egui::Event::PointerMoved(position));
+            if let Some(pressed) = pressed {
+                raw.events.push(egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed,
+                    modifiers: Default::default(),
+                });
+            }
+            let mut output =
+                context.run_ui(raw, |ui| editor.show(ui, root.path(), &mut saved, None));
+            output.textures_delta.clear();
+        };
+        draw(egui::pos2(0., 0.), None);
+        let target = context
+            .data(|data| data.get_temp::<egui::Rect>(egui::Id::unique("smart-top-save")))
+            .unwrap()
+            .center();
+        draw(target, None);
+        draw(target, Some(true));
+        draw(target, Some(false));
+        assert_eq!(
+            Settings::load(root.path()).unwrap().playlists[0].name,
+            "Saved by top button"
+        );
+        assert!(!editor.has_unsaved());
+    }
     #[test]
     fn stale_draft_merges_unrelated_updates_but_requires_source_review() {
         let root = tempfile::tempdir().unwrap();
