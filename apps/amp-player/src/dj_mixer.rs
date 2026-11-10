@@ -53,7 +53,7 @@ pub(super) fn dial(
     range: std::ops::RangeInclusive<f32>,
     accent: egui::Color32,
 ) -> egui::Response {
-    let dial_size = ((ui.available_height() - 290.) / 8.).clamp(24., 42.);
+    let dial_size = ui.spacing().interact_size.y.clamp(24., 44.);
     let (rect, mut response) = ui.allocate_exact_size(
         egui::vec2(dial_size + 4., dial_size),
         egui::Sense::click_and_drag(),
@@ -123,7 +123,7 @@ pub(super) fn dial(
     response.on_hover_text(format!("{label}: {value:.1}\nDrag up/down or scroll; double-click resets. Arrow keys adjust; Home resets."))
 }
 impl Player {
-    pub(super) fn inline_mixer(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn inline_mixer(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.spacing_mut().item_spacing.y = 1.;
         ui.strong("MIXER");
         ui.columns(2, |columns| {
@@ -142,7 +142,7 @@ impl Player {
                     }
                     ui.horizontal(|ui| { dial(ui, "Filter (left: low-pass; right: high-pass)", &mut self.mixer_panel.sweep[d], -1. ..=1., accent); ui.label("Filter"); });
                     ui.horizontal(|ui| {
-                        let fader_height = ((ui.available_height() - 270.) * 0.35).clamp(70., 160.);
+                        let fader_height = ((height - 500.) * 0.4).clamp(70., 180.);
                         ui.spacing_mut().slider_width = fader_height;
                         if ui.add(egui::Slider::new(&mut self.channel_gain[d], 0. ..=1.).vertical().show_value(false)).changed()
                             && let Some(audio) = &self.audio { audio.set_gain(d, self.channel_gain[d]); }

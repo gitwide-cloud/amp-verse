@@ -1961,11 +1961,13 @@ impl Player {
                                         skin::panel(ui, true, |ui| {
                                             ui.set_width(logical.x - 18.);
                                             ui.set_min_height(logical.y - 18.);
+                                            ui.spacing_mut().interact_size.y =
+                                                ((logical.y - 220.) / 14.).clamp(24., 44.);
                                             egui::ScrollArea::vertical()
                                                 .id_salt("dj-channel-controls")
                                                 .max_height((logical.y - 350.).max(120.))
                                                 .auto_shrink([false, true])
-                                                .show(ui, |ui| self.inline_mixer(ui));
+                                                .show(ui, |ui| self.inline_mixer(ui, logical.y));
                                             let fading =
                                                 self.audio.as_ref().is_some_and(|a| a.fading());
                                             let fade = ui.add_sized(
