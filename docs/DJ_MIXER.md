@@ -37,3 +37,10 @@ Main decks and auxiliary Cue Decks show eight numbered hot-cue pads. Click an em
 Explicit pad edits are saved in portable preparation metadata using revision checks. A same-slot change from another device is rejected until the track is reloaded; unrelated newer fields are preserved. Cue names, IDs and custom fields survive position replacements. Editing pads does not reload the active beatgrid, tempo or cue-in/out snapshot. These jumps still use replacement decoders: sample-instant stutter, cue quantization and key-lock are not implemented.
 
 The side Cue Deck remains an independent audio deck with its own transport and output selection. Send A is amber; Send B is cyan. Mixed In Key results are not imported by installing that application: an explicit compatible importer is still required.
+
+
+## Continuous Smart Auto Mix
+
+Select a saved Smart Playlist, then turn Auto Mix ON. It starts a prepared song and preloads a different eligible song into the idle deck immediately. Selection is recalculated after every handoff using current energy (or the requested energy progression), BPM, harmonic key, source restrictions and repeat rules. It is not fixed playlist order. At the outgoing cue-out/end it crossfades, then refills the freed deck and continues. Changing the target energy invalidates and recalculates the next choice. A playlist with no eligible next track reports that condition rather than silently blending the same pair.
+
+With a Smart Playlist loaded, the centre Auto crossfade button requests the next prepared playlist song and keeps continuous Auto Mix enabled if it was already on. Without a Smart Playlist it remains a two-deck crossfade. The incoming song starts at its prepared cue-in (or the preferred approved Hype cue). Prepared BPMs are speed-matched when the ratio is within +/-16%; metadata is never rewritten. Speed matching changes pitch and does not provide beat-phase alignment or key-preserving time stretch.

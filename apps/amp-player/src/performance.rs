@@ -176,15 +176,31 @@ impl Player {
         }
         track.preparation.validate()?;
         self.ensure_audio()?;
-        let engine = self.audio.as_mut().unwrap();
-        let rate = track
+        let saved_rate = track
             .preparation
             .extensions
             .get("playback_rate")
             .and_then(|v| v.as_f64())
             .unwrap_or(1.)
-            .clamp(0.84, 1.16) as f32;
+            .clamp(0.84, 1.16);
+        // Match only the incoming voice. Never change the sounding deck or saved metadata.
+        let matched_rate = if self.run.profile.is_some()
+            && d != active
+            && self.audio.as_ref().is_some_and(|a| a.playing(active))
+        {
+            self.loaded_track(active)
+                .and_then(|t| t.preparation.bpm)
+                .zip(track.preparation.bpm)
+                .map(|(outgoing, incoming)| {
+                    outgoing * (1. + self.pitch[active] as f64 / 100.) / incoming
+                })
+                .filter(|ratio| ratio.is_finite() && (0.84..=1.16).contains(ratio))
+        } else {
+            None
+        };
+        let rate = matched_rate.unwrap_or(saved_rate) as f32;
         self.pitch[d] = (rate - 1.) * 100.;
+        let engine = self.audio.as_mut().unwrap();
         engine.set_rate(d, rate);
         engine.load(d, &self.root, &track, execution == Execution::PlayNow)?;
         self.loaded_snapshot[d] = Some(track.clone());
@@ -194,6 +210,9 @@ impl Player {
         match execution {
             Execution::LoadOnly => self.run.preloaded = Some((d, index)),
             Execution::PlayNow => {
+                self.run.preloaded = None;
+                self.run.pending = None;
+                self.run.pending_at = None;
                 engine.set_fader(d as f32);
                 if engine.playing(1 - d) {
                     engine.controls.play[1 - d].store(false, Relaxed);
@@ -763,7 +782,6 @@ impl Player {
                 Style::Chill => 10.,
             };
             if self.audio.as_ref().is_some_and(|a| a.playing(active))
-                && remaining.is_some_and(|r| r < self.fade_seconds.max(10.) + 10.)
                 && self.run.preloaded.is_none()
                 && let Err(e) = self.preload_smart()
             {
@@ -777,6 +795,7 @@ impl Player {
             if (finished || (self.run.crossfade && remaining.is_some_and(|r| r <= mix_seconds)))
                 && let Some((incoming, _)) = self.run.preloaded
             {
+                self.run.pending_at = None;
                 self.run.pending = Some((incoming, Instant::now()));
             }
         }
@@ -874,6 +893,111 @@ mod tests {
         );
     }
     use super::*;
+    #[test]
+    #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
+    fn smart_auto_mix_advances_reorders_and_refills_without_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
+        for (i, energy) in [8., 8.1, 8.2, 3.].into_iter().enumerate() {
+            let path = dir.path().join(format!("song{i}.wav"));
+            std::fs::copy(&fixture, &path).unwrap();
+            let mut prep = amp_core::Preparation {
+                cue_in: 0.25,
+                cue_out: Some(2.25),
+                bpm: Some(120. + i as f64),
+                harmonic_key: Some("8A".into()),
+                manual_override: true,
+                ..Default::default()
+            };
+            prep.extensions
+                .insert("energy".into(), json!((energy - 1.) / 9.));
+            amp_core::preparation::save(
+                dir.path(),
+                std::path::Path::new(&format!("song{i}.wav")),
+                &prep,
+            )
+            .unwrap();
+        }
+        let library = amp_core::scan(dir.path()).unwrap();
+        let before: Vec<_> = library
+            .tracks
+            .iter()
+            .map(|t| amp_core::preparation::revision(&dir.path().join(&t.path)))
+            .collect();
+        let mut player = Player {
+            root: dir.path().into(),
+            library: Some(library),
+            channel_gain: [0.; 2],
+            fade_seconds: 0.2,
+            ..Default::default()
+        };
+        player
+            .execute_control(Action::LoadSmartPlaylist {
+                playlist: "everyday".into(),
+                execution: Execution::PlayNow,
+                style: Some(Style::Steady),
+                energy: None,
+            })
+            .unwrap();
+        assert!(
+            player.run.preloaded.is_none(),
+            "The starting voice is not the next voice"
+        );
+        wait(&mut player, |p| p.run.preloaded.is_some());
+        assert_eq!(player.loaded[player.active_deck()], Some(0));
+        let (incoming, next) = player.run.preloaded.unwrap();
+        assert_ne!(incoming, player.active_deck());
+        assert_eq!(
+            next, 1,
+            "Choose the nearest energy rather than playlist order"
+        );
+        assert!((player.pitch[incoming] - ((120. / 121. - 1.) * 100.) as f32).abs() < 0.01);
+        wait(&mut player, |p| {
+            p.loaded[p.active_deck()] == Some(1) && p.run.transition.is_none()
+        });
+        wait(&mut player, |p| p.run.preloaded.is_some());
+        assert!(player.run.auto);
+        assert_eq!(player.run.preloaded.unwrap().1, 2);
+        // Changing the requested energy invalidates the old next choice, without stopping music.
+        player
+            .execute_control(Action::SetEnergy { target: 3. })
+            .unwrap();
+        wait(&mut player, |p| p.run.preloaded.is_some());
+        assert_eq!(player.run.preloaded.unwrap().1, 3);
+        wait(&mut player, |p| {
+            p.loaded[p.active_deck()] == Some(3) && p.run.transition.is_none()
+        });
+        wait(&mut player, |p| p.run.preloaded.is_some());
+        assert_eq!(
+            player.run.preloaded.unwrap().1,
+            2,
+            "Refill the freed deck after another automatic transition"
+        );
+        assert!(player.run.auto);
+        // The centre button uses the Smart Playlist handoff too, then keeps running.
+        let next_deck = player.run.preloaded.unwrap().0;
+        assert_eq!(
+            player.loaded_track(next_deck).unwrap().preparation.cue_in,
+            0.25
+        );
+        player.auto_crossfade();
+        wait(&mut player, |p| {
+            p.loaded[p.active_deck()] == Some(2) && p.run.transition.is_none()
+        });
+        assert!(
+            player.run.auto,
+            "Mix Now must not disable continuous Auto Mix"
+        );
+        player
+            .execute_control(Action::AutoDj { enabled: false })
+            .unwrap();
+        for (i, track) in player.library.as_ref().unwrap().tracks.iter().enumerate() {
+            assert_eq!(
+                amp_core::preparation::revision(&dir.path().join(&track.path)),
+                before[i]
+            );
+        }
+    }
     #[test]
     #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; muted"]
     fn playing_deck_keeps_snapshot_until_explicit_reload() {

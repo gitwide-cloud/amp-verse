@@ -702,6 +702,15 @@ impl Player {
         }
     }
     fn auto_crossfade(&mut self) {
+        if self.run.profile.is_some() && !self.audio.as_ref().is_some_and(|a| a.fading()) {
+            if let Err(error) = self.execute_control(control::Action::MixNext { immediate: true }) {
+                self.status = error;
+            }
+            return;
+        }
+        if self.audio.as_ref().is_some_and(|a| a.fading()) {
+            self.run.cancel_automation();
+        }
         self.auto = false;
         if let Some(audio) = &self.audio {
             let cancel = audio.fading();
@@ -1659,10 +1668,11 @@ impl Player {
                 } else {
                     self.execute_control(control::Action::LoadSmartPlaylist {
                         playlist: selected.clone(),
-                        execution: control::Execution::PlayNow,
+                        execution: control::Execution::LoadOnly,
                         style: None,
                         energy: None,
                     })
+                    .and_then(|()| self.execute_control(control::Action::AutoDj { enabled: true }))
                 };
                 if let Err(e) = result {
                     self.status = e;
