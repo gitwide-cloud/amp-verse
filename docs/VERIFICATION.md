@@ -343,3 +343,17 @@ No claim of new beat-phase synchronization, key lock or analysis capabilities is
 - Deterministic mixer test verifies looping sampler playback across its end and independent stop while main playback continues. Independent bank replacement, old-bank decoding, names/loop persistence, side preferences, and additive control command parsing are covered.
 - Existing narrow/short/attached-window bounds and scaled pointer tests pass with both side panels present. Visually inspected the 900x600 modern-dark DJ screenshot (`test-output/dual-side-dj.png`): both side panels, main controls and bottom library remain inside the viewport. Small windows scale the complete mixer, so larger windows are preferable for touch use.
 - Cue routing offers CPAL output-device selection. Physical headphone separation and every OS Explorer drag source were not exercised on external hardware; no arbitrary multichannel/ASIO mapping is claimed. Queue drops remain limited to indexed library songs and respect active Auto Mix eligibility.
+
+
+## 2026-11-09 — Android 0.1.12
+
+- Built main/test APKs and ran Android lint: zero errors (existing/style warnings remain). Installed in place on authorized Pixel 7 `31160DLH200078`; imports/settings retained, no uninstall or data reset.
+- Native DJ instrumentation uses generated silent WAV files and muted player outputs. It verifies independent A/B/cue playback, staged replacements, preserved service-owned transport through activity recreation, and a real timed Auto DJ transition to the second deck.
+- Local playlist tests verify ordered regular membership, whole-source Smart inclusion, empty-source safety and local persistence. Existing phone search tests verify filtered selection keeps the original queue position.
+- Connected Android over an explicitly scoped USB reverse port to an isolated desktop instance with generated music. Verified real catalog reads, paused A loading, idempotent command IDs, right Cue Deck loading/state and rejection of invalid sampler destinations. No personal desktop playback/library was used.
+- All three Android themes were captured on the Pixel and visually inspected. UI instrumentation switches decks, measures square pad dimensions and scrolls to the bottom DJ music search. Light-theme deck text uses darker amber/cyan for readable contrast.
+- Playback/EQ/radio, folder scanning, discovery, Settings and integrated Lab processing/session tests were run on hardware. Cast streaming is checked separately with an isolated station/fixture, rather than a production radio server.
+- Hardware headphone bus separation, Bluetooth endurance, Android audio-analysis parity and full NAS edit/offline synchronization are not claimed. See docs/ANDROID.md for remaining parity limits.
+
+
+Final Android 0.1.12 results: main/test APK build and lint passed. The 17-case Pixel run completed without failures; its conditional live Cast case was then explicitly exercised using `castUrl` against the isolated server, and both Cast cases passed. The three-theme layout check and native Auto DJ transition are included in that run. Phone screenshots are under test-output (not committed). Test-only USB reverse ports and helper processes were removed after verification.

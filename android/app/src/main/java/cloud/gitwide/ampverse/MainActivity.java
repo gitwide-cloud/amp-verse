@@ -29,6 +29,9 @@ import java.util.concurrent.Executors;
 public final class MainActivity extends Activity {
     private MediaController player;
     private CastPanel castPanel;
+    private DjPanel djPanel;
+    private RemotePanel remotePanel;
+    private int effectSide, effectPad;
     private ListenableFuture<MediaController> connection;
     private final Handler handler = new Handler(Looper.getMainLooper());
     private SharedPreferences prefs;
@@ -51,14 +54,14 @@ public final class MainActivity extends Activity {
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
         prefs = getSharedPreferences("settings", MODE_PRIVATE);
-        if (state != null) { module=state.getString("module","AMP Player"); library=module.equals("AMP Library"); }
+        if (state != null) { module=state.getString("module","AMP Player"); library=module.equals("AMP Library");effectSide=state.getInt("effectSide",0);effectPad=state.getInt("effectPad",0); }
         if(state==null&&getIntent().hasExtra("module")){module=getIntent().getStringExtra("module");library=module.equals("AMP Library");}
         draw();
         if (android.os.Build.VERSION.SDK_INT >= 33 && checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != android.content.pm.PackageManager.PERMISSION_GRANTED)
             requestPermissions(new String[]{android.Manifest.permission.POST_NOTIFICATIONS}, 2);
     }
     @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);if(intent.hasExtra("module"))selectModule(intent.getStringExtra("module"));}
-    @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state); state.putString("module", module); }
+    @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state); state.putString("module", module);state.putInt("effectSide",effectSide);state.putInt("effectPad",effectPad); }
     @Override public void onStart() {
         super.onStart();
         connection = new MediaController.Builder(this, new SessionToken(this, new ComponentName(this, PlaybackService.class))).buildAsync();
@@ -80,7 +83,9 @@ public final class MainActivity extends Activity {
         handler.post(tick);
     }
     @Override public void onStop() {
+        if(djPanel!=null)djPanel.engine.checkpoint();
         if(castPanel!=null){castPanel.close();castPanel=null;}
+        if(remotePanel!=null){remotePanel.close();remotePanel=null;}
         handler.removeCallbacks(tick);
         if (connection != null) MediaController.releaseFuture(connection);
         connection = null;
@@ -103,10 +108,12 @@ public final class MainActivity extends Activity {
     private void selectModule(String name) { if(name.equals("AMP Lab")){if(player!=null)player.pause();startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;library=name.equals("AMP Library");draw(); }
     private void openSettings(){startActivity(new Intent(this,SettingsActivity.class));}
     private void draw() {
+        djPanel=null;
+        if(remotePanel!=null){remotePanel.close();remotePanel=null;}
         if(castPanel!=null){castPanel.close();castPanel=null;}
         appearance=new Appearance(this);bg=appearance.background;panel=appearance.surface;text=appearance.text;muted=appearance.muted;accent=appearance.accent;
         title=null;clock=null;durationLabel=null;details=null;artwork=null;artworkKey="";displayedArtwork=null;playerRows.clear();seek=null;play=null;status=null;shuffleButton=null;repeatButton=null;
-        getWindow().setStatusBarColor(bg);getWindow().setNavigationBarColor(bg);
+        getWindow().setStatusBarColor(bg);getWindow().setNavigationBarColor(bg);getWindow().getDecorView().setSystemUiVisibility(Color.red(bg)>200?View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR:0);
         root=new LinearLayout(this);root.setOrientation(LinearLayout.VERTICAL);root.setBackground(Chrome.panel(appearance,false));
         root.setOnApplyWindowInsetsListener((view,insets)->{view.setPadding(dp(6)+insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),dp(6)+insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;});setContentView(root);
         Button brand=button("ϟ AMP VERSE  ▾",()->{
@@ -116,14 +123,15 @@ public final class MainActivity extends Activity {
         });brand.setTag("module-menu");brand.setTextSize(18);brand.setGravity(android.view.Gravity.START|android.view.Gravity.CENTER_VERTICAL);if(appearance.classic){brand.setBackground(Chrome.panel(appearance,false));brand.setTextColor(Color.WHITE);}brand.setTypeface(null,Typeface.BOLD_ITALIC);brand.setContentDescription("AMP Verse module dropdown");root.addView(brand,new LinearLayout.LayoutParams(-1,dp(36)));
         page=new LinearLayout(this);page.setOrientation(LinearLayout.VERTICAL);
         if(module.equals("AMP Player"))root.addView(page,new LinearLayout.LayoutParams(-1,0,1));
-        else {ScrollView scroll=new ScrollView(this);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));scroll.addView(page);LinearLayout caption=card();caption.addView(label(module,18,accent));}
+        else {ScrollView scroll=new ScrollView(this);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));scroll.addView(page);if(!module.equals("AMP DJ")){LinearLayout caption=card();caption.addView(label(module,18,accent));}}
         if(module.equals("AMP Player"))drawPlayer();
         else if(library)drawLibrary();
         else if(module.equals("AMP DJ")){
-            LinearLayout dj=card();dj.addView(label("Prepared playback · early preview",17,text));
-            dj.addView(label("Local sequential queue playback is available. Mixing decks, cue editing, beat sync and stems are not implemented yet.",14,muted));
-            CheckBox repeat=new CheckBox(this);repeat.setText("Repeat local queue");repeat.setTextColor(text);repeat.setChecked(prefs.getBoolean("repeat",false));repeat.setOnCheckedChangeListener((v,value)->{prefs.edit().putBoolean("repeat",value).apply();if(player!=null)player.setRepeatMode(value?Player.REPEAT_MODE_ALL:Player.REPEAT_MODE_OFF);});dj.addView(repeat);
-            dj.addView(button("Open player",()->selectModule("AMP Player")));drawQueue(false);
+            DjEngine engine=PlaybackService.dj();
+            if(engine==null){LinearLayout waiting=card();waiting.addView(label("Connecting to audio service…",16,text));}
+            else {djPanel=new DjPanel(this,appearance,engine,new DjPanel.Host(){public void effect(int side,int pad){effectSide=side;effectPad=pad;startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT).setType("audio/*").addCategory(Intent.CATEGORY_OPENABLE),70);}public void beforeMainPlay(){if(player!=null)player.pause();}public void equalizer(){MainActivity.this.equalizer();}});page.addView(djPanel);}
+        }else if(module.equals("AMP Remote")){
+            remotePanel=new RemotePanel(this,appearance);page.addView(remotePanel);
         }else if(module.equals("AMP Cast")){
             castPanel=new CastPanel(this,appearance,new CastPanel.Listener(){
                 public void listen(String url,String name){
@@ -172,12 +180,13 @@ public final class MainActivity extends Activity {
     private void drawLibrary(){
         LinearLayout files=card();files.addView(label("Add music",17,accent));
         LinearLayout actions=new LinearLayout(this);rowButton(actions,importing?"Scanning…":"Scan folder",this::scanFolder);rowButton(actions,"Add songs",this::importSongs);files.addView(actions);
+        page.addView(new PhoneLibraryPanel(this,appearance,items->{if(player!=null&&!items.isEmpty()){player.setMediaItems(items);player.prepare();player.play();message="Playlist playing";}}));
         drawQueue(true);
     }
     private void drawQueue(boolean editable){
         LinearLayout queue=card();queue.addView(label(editable?"Songs":"Now Playing",16,accent));
         final boolean radio=isRadio();final List<MediaItem> localItems=new ArrayList<>();
-        try{if(radio)localItems.addAll(LibraryStore.read(this));else if(player!=null)for(int i=0;i<player.getMediaItemCount();i++)localItems.add(player.getMediaItemAt(i));}catch(Exception error){message="Cannot read local library: "+error.getMessage();}
+        try{if(radio||editable)localItems.addAll(LibraryStore.read(this));else if(player!=null)for(int i=0;i<player.getMediaItemCount();i++)localItems.add(player.getMediaItemAt(i));}catch(Exception error){message="Cannot read local library: "+error.getMessage();}
         EditText search=new EditText(this);search.setSingleLine(true);search.setHint("Search your songs");search.setTextColor(text);search.setHintTextColor(muted);search.setContentDescription("Search phone music");search.setText(musicQuery);queue.addView(search);
         LinearLayout rows=new LinearLayout(this);rows.setOrientation(LinearLayout.VERTICAL);queue.addView(rows);
         Runnable filter=()->{rows.removeAllViews();drawMusicRows(rows,localItems,radio,editable,search.getText().toString().trim().toLowerCase(Locale.ROOT));};
@@ -190,8 +199,8 @@ public final class MainActivity extends Activity {
             String description=String.valueOf(candidate.mediaMetadata.title)+" "+String.valueOf(candidate.mediaMetadata.artist)+" "+String.valueOf(candidate.mediaMetadata.albumTitle);
             if(!description.toLowerCase(Locale.ROOT).contains(query))continue;matches++;if(shown++>=queueLimit)continue;
             final int index=i;MediaItem item=localItems.get(i);LinearLayout row=new LinearLayout(this);
-            Button song=button((i+1)+". "+item.mediaMetadata.title,()->{if(player==null)return;if(radio)player.setMediaItems(localItems);player.seekTo(index,0);player.prepare();player.play();draw();});song.setGravity(android.view.Gravity.START|android.view.Gravity.CENTER_VERTICAL);song.setTextSize(14);row.addView(song,new LinearLayout.LayoutParams(0,dp(46),1));
-            if(editable){Button remove=button("−",()->{if(player!=null){if(radio){try{localItems.remove(index);LibraryStore.write(this,localItems);}catch(Exception error){message=error.getMessage();}}else{player.removeMediaItem(index);saveQueue();}draw();}});remove.setContentDescription("Remove "+item.mediaMetadata.title+" from library");row.addView(remove,new LinearLayout.LayoutParams(dp(44),dp(46)));}rows.addView(row);
+            Button song=button((i+1)+". "+item.mediaMetadata.title,()->{if(player==null)return;if(radio||editable)player.setMediaItems(localItems);player.seekTo(index,0);player.prepare();player.play();draw();});song.setGravity(android.view.Gravity.START|android.view.Gravity.CENTER_VERTICAL);song.setOnLongClickListener(v->{PhoneLibraryPanel.trackDetails(this,item);return true;});song.setTextSize(14);row.addView(song,new LinearLayout.LayoutParams(0,dp(46),1));
+            if(editable){Button remove=button("−",()->{if(player!=null){try{localItems.remove(index);LibraryStore.write(this,localItems);if(!radio){for(int n=player.getMediaItemCount()-1;n>=0;n--)if(player.getMediaItemAt(n).mediaId.equals(item.mediaId))player.removeMediaItem(n);}}catch(Exception error){message=error.getMessage();}draw();}});remove.setContentDescription("Remove "+item.mediaMetadata.title+" from library");row.addView(remove,new LinearLayout.LayoutParams(dp(44),dp(46)));}rows.addView(row);
         }
         if(matches>queueLimit)rows.addView(button("Show 100 more songs",()->{queueLimit+=100;draw();}));
         if(matches==0)rows.addView(label(localItems.isEmpty()?"No songs yet. Scan a music folder to begin.":"No songs match your search.",14,muted));
@@ -216,7 +225,7 @@ public final class MainActivity extends Activity {
     }
     static String time(long millis) { return String.format(Locale.ROOT, "%02d:%02d", Math.max(0,millis)/60000, Math.max(0,millis)/1000%60); }
     private void syncSavedLibrary() {
-        if(isRadio())return;
+        if(isRadio() || (player!=null&&player.getMediaItemCount()>0))return;
         try {
             List<MediaItem> saved = LibraryStore.read(this);
             boolean same = saved.size() == player.getMediaItemCount();
@@ -259,6 +268,7 @@ public final class MainActivity extends Activity {
     }
     @Override public void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
+        if(request==70){if(result==RESULT_OK&&data!=null&&data.getData()!=null)importEffect(data.getData(),effectSide,effectPad);return;}
         if ((request != 1 && request != 3) || result != RESULT_OK || data == null) return;
         final Uri tree = request == 3 ? data.getData() : null;
         if(request==3 && tree==null)return;
@@ -276,7 +286,7 @@ public final class MainActivity extends Activity {
             if(tree!=null)try{uris.clear();uris.addAll(FolderScanner.scan(getContentResolver(),tree));}catch(Exception failure){error="Could not scan folder: "+failure.getMessage();uris.clear();}
             final android.content.SharedPreferences sources=getSharedPreferences("import-sources",MODE_PRIVATE);
             for (Uri uri : uris) {
-                if(savedIds.contains(sources.getString(uri.toString(),""))){skipped++;continue;}
+                if(savedIds.contains(sources.getString(uri.toString(),""))){if(tree!=null)getSharedPreferences("phone-folders",0).edit().putString(sources.getString(uri.toString(),""),android.provider.DocumentsContract.getTreeDocumentId(tree)).apply();skipped++;continue;}
                 File target = null;
                 try {
                     String name = "Imported audio";
@@ -296,6 +306,7 @@ public final class MainActivity extends Activity {
                 // Persist from the current saved library if the activity controller was stopped by the picker.
                 try {
                     List<MediaItem> items = LibraryStore.read(this); items.addAll(added); LibraryStore.write(this, items);
+                    if(tree!=null){String folder=android.provider.DocumentsContract.getTreeDocumentId(tree);android.content.SharedPreferences.Editor folders=getSharedPreferences("phone-folders",0).edit();for(MediaItem item:added)folders.putString(item.mediaId,folder);folders.apply();}
                     android.content.SharedPreferences.Editor sourceEditor=sources.edit();for(Map.Entry<String,String> entry:importedSources.entrySet())sourceEditor.putString(entry.getKey(),entry.getValue());sourceEditor.apply();
                     if (player != null && !isRadio()) player.addMediaItems(added);
                     message = "Saved " + added.size() + " songs offline." + (skippedCount>0?" Skipped "+skippedCount+" already imported.":"") + (failure.isEmpty() ? "" : " "+failure);
@@ -304,4 +315,18 @@ public final class MainActivity extends Activity {
             }); worker.shutdown();
         });
     }
+    private void importEffect(Uri uri,int side,int pad){
+        java.util.concurrent.ExecutorService worker=Executors.newSingleThreadExecutor();
+        worker.execute(()->{File target=null;String error="",name="Effect";
+            try{try(Cursor cursor=getContentResolver().query(uri,new String[]{OpenableColumns.DISPLAY_NAME},null,null,null)){if(cursor!=null&&cursor.moveToFirst())name=cursor.getString(0);}
+                File folder=new File(getFilesDir(),"dj-effects");if(!folder.isDirectory()&&!folder.mkdirs())throw new IOException("Cannot create effects folder");
+                target=new File(folder,UUID.randomUUID()+".audio");
+                try(InputStream input=getContentResolver().openInputStream(uri);OutputStream output=new FileOutputStream(target)){if(input==null)throw new IOException("Cannot read effect");byte[] bytes=new byte[32768];int size,total=0;while((size=input.read(bytes))!=-1){total+=size;if(total>8*1024*1024)throw new IOException("Use a short sound effect under 8 MB");output.write(bytes,0,size);}}
+                android.media.MediaMetadataRetriever metadata=new android.media.MediaMetadataRetriever();try{metadata.setDataSource(target.getAbsolutePath());String duration=metadata.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_DURATION);if(duration!=null&&Long.parseLong(duration)>5000)throw new IOException("Sampler effects must be 5 seconds or shorter. Use AMP Lab to trim this sound.");}finally{metadata.release();}
+            }catch(Exception failure){error=failure.getMessage();if(target!=null)target.delete();target=null;}
+            final File file=target;final String problem=error,title=name;
+            runOnUiThread(()->{DjEngine engine=PlaybackService.dj();if(file!=null&&engine!=null){engine.assign(side,pad,file.getAbsolutePath(),title);if(djPanel!=null)djPanel.redraw();}else Toast.makeText(this,problem.isEmpty()?"Audio service unavailable":problem,Toast.LENGTH_LONG).show();});worker.shutdown();
+        });
+    }
+
 }
