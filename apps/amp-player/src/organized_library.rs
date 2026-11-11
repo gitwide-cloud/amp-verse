@@ -159,6 +159,16 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 },
             );
         });
+        if let Some((root, playlist)) = self.show_editor.connect_import.take() {
+            if let Ok(saved) = amp_core::show::Settings::load(&root) {
+                self.connect_music_root(root);
+                self.run.settings = saved;
+                self.show_editor
+                    .stage_import(playlist, &self.root, &self.run.settings);
+            } else {
+                self.status="Could not load the original library. Import kept in the current editing draft.".into();
+            }
+        }
         if self.show_editor.refresh_sources && self.scan.is_none() {
             self.show_editor.refresh_sources = false;
             self.scan();

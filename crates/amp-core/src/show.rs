@@ -34,6 +34,14 @@ pub struct EnergyPlan {
 pub struct SmartPlaylist {
     pub id: String,
     pub name: String,
+    /// Imported sources stay bound to their originating library until explicitly remapped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_library: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_root_hint: Option<PathBuf>,
+    // Keep the conservative state in device-local startup caches; shared loads recompute it.
+    #[serde(default)]
+    pub source_unavailable: bool,
     pub style: Style,
     #[serde(default)]
     pub folders: Vec<PathBuf>,
@@ -83,6 +91,9 @@ impl Default for Settings {
                 .map(|(id, name, style)| SmartPlaylist {
                     id: id.into(),
                     name: name.into(),
+                    source_library: None,
+                    source_root_hint: None,
+                    source_unavailable: false,
                     style,
                     folders: vec![],
                     restrict_folders: false,
@@ -102,6 +113,21 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    pub fn resolve_sources(&mut self, root: &Path) {
+        if self.playlists.iter().all(|p| p.source_library.is_none()) {
+            for p in &mut self.playlists {
+                p.source_unavailable = false;
+            }
+            return;
+        }
+        let identity = crate::coordination::library_id(root).ok();
+        for p in &mut self.playlists {
+            p.source_unavailable = p
+                .source_library
+                .as_ref()
+                .is_some_and(|id| Some(id) != identity.as_ref());
+        }
+    }
     fn normalize(&mut self) {
         for p in &mut self.playlists {
             if !p.allowed.is_empty() {
@@ -149,6 +175,7 @@ impl Settings {
             let mut s: Self = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             s.normalize();
             s.validate()?;
+            s.resolve_sources(root);
             return Ok(s);
         }
         match std::fs::read(root.join("ampdj/smart-playlists.json")).or_else(|e| {
@@ -165,6 +192,7 @@ impl Settings {
                 let mut s: Self = serde_json::from_value(value).map_err(|e| e.to_string())?;
                 s.normalize();
                 s.validate()?;
+                s.resolve_sources(root);
                 Ok(s)
             }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Self::default()),
@@ -191,10 +219,81 @@ impl Settings {
         })
     }
 }
+/// Small settings-only exchange file. Audio, analysis and shared revision tokens are excluded.
+#[derive(Serialize, Deserialize)]
+pub struct SmartPlaylistExport {
+    format: String,
+    version: u32,
+    pub playlist: SmartPlaylist,
+}
+impl SmartPlaylistExport {
+    pub const MAX_BYTES: u64 = 4 * 1024 * 1024;
+    pub fn encode(playlist: &SmartPlaylist, root: &Path) -> Result<Vec<u8>, String> {
+        let mut playlist = playlist.clone();
+        if playlist.source_library.is_none() {
+            playlist.source_library = Some(crate::coordination::library_id(root)?);
+            playlist.source_root_hint = Some(root.to_path_buf());
+        }
+        let package = Self {
+            format: "ampverse-smart-playlist".into(),
+            version: 1,
+            playlist,
+        };
+        package.validate()?;
+        let bytes = serde_json::to_vec_pretty(&package).map_err(|e| e.to_string())?;
+        if bytes.len() as u64 > Self::MAX_BYTES {
+            return Err("Playlist export is too large".into());
+        }
+        Ok(bytes)
+    }
+    fn validate(&self) -> Result<(), String> {
+        if self.format != "ampverse-smart-playlist" || self.version != 1 {
+            return Err("Unsupported AMP Smart Playlist file".into());
+        }
+        let p = &self.playlist;
+        // Check both separator spellings, regardless of the importing operating system.
+        if p.folders.iter().any(|f| {
+            let s = f.to_string_lossy().replace('\\', "/");
+            s.starts_with('/') || s.contains(':') || s.split('/').any(|c| c == "..")
+        }) {
+            return Err("Export contains an unsafe source folder".into());
+        }
+        if p.source_library.as_ref().is_none_or(|s| s.is_empty()) {
+            return Err("Export has no source library identity".into());
+        }
+        Settings {
+            sync: None,
+            version: 1,
+            playlists: vec![p.clone()],
+        }
+        .validate()
+    }
+    pub fn decode(bytes: &[u8], root: &Path) -> Result<SmartPlaylist, String> {
+        if bytes.len() as u64 > Self::MAX_BYTES {
+            return Err("Playlist file is too large".into());
+        }
+        let package: Self = serde_json::from_slice(bytes)
+            .map_err(|e| format!("Invalid Smart Playlist file: {e}"))?;
+        package.validate()?;
+        let mut settings = Settings {
+            sync: None,
+            version: 1,
+            playlists: vec![package.playlist],
+        };
+        settings.normalize();
+        settings.resolve_sources(root);
+        let mut playlist = settings.playlists.remove(0);
+        playlist.id = format!("imported-{}", uuid::Uuid::new_v4());
+        Ok(playlist)
+    }
+}
 pub fn energy(p: &Preparation) -> Option<f64> {
     crate::smart::energy(p).map(|e| 1. + e * 9.)
 }
 pub fn eligible(p: &SmartPlaylist, t: &Track) -> bool {
+    if p.source_unavailable {
+        return false;
+    }
     let id = song_id(t);
     // Folder sources include all descendants. Older drafts used restrict_allowed as
     // an empty-source guard; do not require per-song Allow ticks after a folder is chosen.
@@ -451,5 +550,120 @@ mod tests {
             choose_with_snapshot(&p, &tracks, Some(0), &[], None, 0, Some(&snapshot)),
             Some(1)
         );
+    }
+}
+
+#[cfg(test)]
+mod portable_playlist_tests {
+    use super::*;
+    #[test]
+    fn roundtrip_all_rules_and_new_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let mut p = Settings::default().playlists.remove(0);
+        p.name = "Portable mix".into();
+        p.style = Style::Hype;
+        p.folders = vec!["Dance/House".into()];
+        p.restrict_folders = true;
+        p.allowed = vec!["song_allowed".into()];
+        p.restrict_allowed = true;
+        p.excluded = vec!["song_excluded".into()];
+        p.preferred = vec!["song_preferred".into()];
+        p.recognition_song = Some("song_recognition".into());
+        p.target_energy = Some(8.);
+        p.recent_repeat = 17;
+        p.fallback = Fallback::Stop;
+        p.use_manual_cues = false;
+        p.energy_progression = Some(EnergyPlan {
+            target: 9.,
+            transitions: 6,
+            hold: true,
+        });
+        let bytes = SmartPlaylistExport::encode(&p, root.path()).unwrap();
+        let imported = SmartPlaylistExport::decode(&bytes, root.path()).unwrap();
+        assert_ne!(p.id, imported.id);
+        assert!(!imported.source_unavailable);
+        let mut actual = serde_json::to_value(imported).unwrap();
+        let mut expected = serde_json::to_value(p).unwrap();
+        for key in ["id", "source_library", "source_root_hint"] {
+            actual.as_object_mut().unwrap().remove(key);
+            expected.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(actual, expected);
+        assert!(bytes.len() < 4096);
+    }
+    #[test]
+    fn unavailable_import_retains_settings_and_blocks_unrelated_music() {
+        let source = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        let p = Settings::default().playlists.remove(0);
+        let bytes = SmartPlaylistExport::encode(&p, source.path()).unwrap();
+        let imported = SmartPlaylistExport::decode(&bytes, other.path()).unwrap();
+        assert!(imported.source_unavailable);
+        let cached: SmartPlaylist =
+            serde_json::from_slice(&serde_json::to_vec(&imported).unwrap()).unwrap();
+        assert!(cached.source_unavailable);
+        assert_eq!(imported.name, p.name);
+        let t = Track {
+            path: "song.mp3".into(),
+            title: "song".into(),
+            preparation: Preparation::default(),
+        };
+        assert!(!eligible(&imported, &t));
+        let mut settings = Settings {
+            sync: None,
+            version: 1,
+            playlists: vec![imported],
+        };
+        settings.save(other.path()).unwrap();
+        settings = Settings::load(other.path()).unwrap();
+        assert!(settings.playlists[0].source_unavailable);
+        settings.resolve_sources(source.path());
+        assert!(eligible(&settings.playlists[0], &t));
+    }
+    #[test]
+    fn rejects_unsupported_unsafe_and_oversized_packages() {
+        let root = tempfile::tempdir().unwrap();
+        let p = Settings::default().playlists.remove(0);
+        let bytes = SmartPlaylistExport::encode(&p, root.path()).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        for field in ["../outside", "C:\\music", "/music", "..\\outside"] {
+            let mut invalid = value.clone();
+            invalid["playlist"]["folders"] = serde_json::json!([field]);
+            assert!(
+                SmartPlaylistExport::decode(&serde_json::to_vec(&invalid).unwrap(), root.path())
+                    .is_err()
+            );
+        }
+        let mut future = value;
+        future["version"] = 2.into();
+        assert!(
+            SmartPlaylistExport::decode(&serde_json::to_vec(&future).unwrap(), root.path())
+                .is_err()
+        );
+        assert!(SmartPlaylistExport::decode(b"not a playlist", root.path()).is_err());
+        assert!(
+            SmartPlaylistExport::decode(
+                &vec![b' '; SmartPlaylistExport::MAX_BYTES as usize + 1],
+                root.path()
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn duplicate_imports_are_independent_and_share_identity_survives_relocation() {
+        let source = tempfile::tempdir().unwrap();
+        let relocated = tempfile::tempdir().unwrap();
+        let p = Settings::default().playlists.remove(0);
+        let bytes = SmartPlaylistExport::encode(&p, source.path()).unwrap();
+        std::fs::create_dir_all(relocated.path().join("ampdj")).unwrap();
+        std::fs::copy(
+            source.path().join("ampdj/library.json"),
+            relocated.path().join("ampdj/library.json"),
+        )
+        .unwrap();
+        let a = SmartPlaylistExport::decode(&bytes, relocated.path()).unwrap();
+        let b = SmartPlaylistExport::decode(&bytes, relocated.path()).unwrap();
+        assert_ne!(a.id, b.id);
+        assert!(!a.source_unavailable);
     }
 }

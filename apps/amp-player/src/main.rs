@@ -875,31 +875,34 @@ impl Player {
     }
     fn choose_folder(&mut self) {
         if let Some(root) = rfd::FileDialog::new().pick_folder() {
-            if let Some(audio) = &mut self.audio {
-                audio.stop(0);
-                audio.stop(1);
-            }
-            self.auto = false;
-            self.loaded = [None; 2];
-            self.loaded_snapshot = [None, None];
-            self.waveforms = Default::default();
-            self.preview_wave = Default::default();
-            self.run.cancel_automation();
-            self.playing = [false; 2];
-            self.selected = None;
-            self.queue.clear();
-            self.queue_selected = None;
-            self.library = None;
-            self.show_editor.open = false;
-            self.scan = None; // Discard any previous root's in-flight result.
-            self.root = root;
-            let pref = library_preference();
-            if let Some(parent) = pref.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            let _ = std::fs::write(pref, self.root.to_string_lossy().as_bytes());
-            self.scan();
+            self.connect_music_root(root);
         }
+    }
+    fn connect_music_root(&mut self, root: PathBuf) {
+        if let Some(audio) = &mut self.audio {
+            audio.stop(0);
+            audio.stop(1);
+        }
+        self.auto = false;
+        self.loaded = [None; 2];
+        self.loaded_snapshot = [None, None];
+        self.waveforms = Default::default();
+        self.preview_wave = Default::default();
+        self.run.cancel_automation();
+        self.playing = [false; 2];
+        self.selected = None;
+        self.queue.clear();
+        self.queue_selected = None;
+        self.library = None;
+        self.show_editor.open = false;
+        self.scan = None; // Discard any previous root's in-flight result.
+        self.root = root;
+        let pref = library_preference();
+        if let Some(parent) = pref.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = std::fs::write(pref, self.root.to_string_lossy().as_bytes());
+        self.scan();
     }
     fn create_playlist_at(&mut self, path: PathBuf, name: &str) -> Result<(), String> {
         let name = name.trim();

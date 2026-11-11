@@ -46,6 +46,7 @@ pub struct Editor {
     pub preview_active: bool,
     pub stop_preview: bool,
     pub refresh_sources: bool,
+    pub connect_import: Option<(std::path::PathBuf, amp_core::show::SmartPlaylist)>,
     pub mix_request: Option<(amp_core::show::SmartPlaylist, Vec<usize>)>,
     pub preview_status: String,
     pub preview: Option<(std::path::PathBuf, f64)>,
@@ -86,6 +87,7 @@ impl Editor {
                     "Restored your local editing draft. Save Playlist publishes changes.".into();
             }
         }
+        self.draft.as_mut().unwrap().resolve_sources(root);
         self.selected = self
             .draft
             .as_ref()
@@ -170,6 +172,29 @@ impl Editor {
         settings.playlists.push(playlist);
         self.selected = settings.playlists.len() - 1;
     }
+    pub fn stage_import(
+        &mut self,
+        mut playlist: amp_core::show::SmartPlaylist,
+        root: &std::path::Path,
+        saved: &Settings,
+    ) {
+        self.open_playlist("", root, saved);
+        playlist.source_unavailable = false;
+        let settings = self.draft.as_mut().unwrap();
+        if settings.playlists.len() >= 1000 {
+            self.status = "This library already has 1,000 Smart Playlists.".into();
+            return;
+        }
+        if settings.playlists.iter().any(|p| p.name == playlist.name) {
+            playlist.name.push_str(" (imported)");
+        }
+        settings.playlists.push(playlist);
+        self.selected = settings.playlists.len() - 1;
+        self.status =
+            "Connected to the imported music library. Save Playlist to use this import in DJ."
+                .into();
+        self.cache_draft();
+    }
     pub fn playlists(&self, saved: &Settings) -> Vec<amp_core::show::SmartPlaylist> {
         self.draft.as_ref().unwrap_or(saved).playlists.clone()
     }
@@ -187,6 +212,39 @@ impl Editor {
         if self.draft.is_none() || self.root != root {
             self.open_playlist("", root, saved);
         }
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Export Smart Playlist…").on_hover_text("Export this draft's settings and source folders; no audio files").clicked()
+                && let Some(p)=self.draft.as_ref().and_then(|s|s.playlists.get(self.selected)) {
+                match amp_core::show::SmartPlaylistExport::encode(p,root) {
+                    Ok(bytes)=> {
+                        let name:String=p.name.chars().map(|c|if c.is_alphanumeric() || c==' ' || c=='-' {c}else{'_'}).take(80).collect();
+                        if let Some(path)=rfd::FileDialog::new().add_filter("AMP Smart Playlist", &["ampsmart"]).set_file_name(format!("{name}.ampsmart")).save_file() {
+                            self.status=match save_draft_bytes(&path,&bytes) {Ok(())=>format!("Exported {}. Contains settings only; music stays in its library.",path.display()),Err(e)=>format!("Could not export: {e}")};
+                        }
+                    }
+                    Err(e)=>self.status=e,
+                }
+            }
+            if ui.button("Import Smart Playlist…").clicked()
+                && let Some(path)=rfd::FileDialog::new().add_filter("AMP Smart Playlist", &["ampsmart"]).pick_file() {
+                let result=(|| {
+                    use std::io::Read;
+                    let mut bytes=Vec::new();
+                    std::fs::File::open(&path).map_err(|e|e.to_string())?.take(amp_core::show::SmartPlaylistExport::MAX_BYTES+1).read_to_end(&mut bytes).map_err(|e|e.to_string())?;
+                    amp_core::show::SmartPlaylistExport::decode(&bytes,root)
+                })();
+                match result {
+                    Ok(mut p)=> {
+                        let settings=self.draft.as_mut().unwrap();
+                        if settings.playlists.len()>=1000 {self.status="This library already has the maximum number of Smart Playlists.".into();return;}
+                        if settings.playlists.iter().any(|old|old.name==p.name){p.name.push_str(" (imported)");}
+                        self.status=if p.source_unavailable {"Settings imported. Original library is not selected; reconnect it in Library > Sources, or choose a replacement Music Source below. Save Playlist to keep this import.".into()}else{"Imported with matching library sources. Save Playlist to use it in DJ.".into()};
+                        settings.playlists.push(p);self.selected=settings.playlists.len()-1;self.refresh_sources=true;
+                    }
+                    Err(e)=>self.status=e,
+                }
+            }
+        });
         let dirty = self.has_unsaved();
         let settings = self.draft.as_mut().unwrap();
         let height = ui.available_height().max(180.);
@@ -231,7 +289,23 @@ impl Editor {
                 ui.horizontal_wrapped(|ui|{let button=ui.button("Save Playlist");save|=button.clicked();#[cfg(test)]ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique("smart-top-save"),button.rect));if !self.status.is_empty(){ui.add(egui::Label::new(&self.status).wrap());}});
                 ui.add_space(16.);
                 ui.strong("Music source");
-                if let Some(lib)=library {normalize_folder_spelling(p,&lib.tree);}
+                if p.source_unavailable {
+                    ui.colored_label(crate::ORANGE,"Source library not connected · settings retained, playback paused for this playlist");
+                    if let Some(hint)=&p.source_root_hint {
+                        ui.label(format!("Original music library: {}",hint.display()));
+                        if ui.add_enabled(!self.audition_blocked,egui::Button::new("Connect original library and keep import")).on_hover_text("Open the original music library; available while playback is stopped").clicked(){
+                            match hint.is_dir().then(||amp_core::coordination::library_id(hint)).transpose() {
+                                Ok(Some(id)) if p.source_library.as_ref()==Some(&id)=>self.connect_import=Some((hint.clone(),p.clone())),
+                                _=>self.status="Original library is unavailable or its identity differs. Settings retained; choose its mounted folder through Sources, or reconnect to the current library below.".into(),
+                            }
+                        }
+                    }
+                    if ui.button("Use current library with these folder rules").on_hover_text("Explicitly reconnect these relative folders and song selections to the current library").clicked(){
+                        p.source_library=amp_core::coordination::library_id(root).ok();p.source_root_hint=Some(root.to_path_buf());p.source_unavailable=false;self.refresh_sources=true;
+                        self.status="Source reconnected to current library. Review the song count, then Save Playlist.".into();
+                    }
+                }
+                if !p.source_unavailable && let Some(lib)=library {normalize_folder_spelling(p,&lib.tree);}
                 let count = library.map(|lib| lib.tracks.iter().filter(|track|amp_core::show::eligible(p,track)).count());
                 let source = self.source_labels.get(&p.id).cloned().unwrap_or_else(|| source_summary(p));
                 ui.add(egui::Label::new(format!("{} — {}", source, count.map_or("waiting for library scan".into(), |count|format!("{count} songs")))).wrap());
@@ -506,7 +580,6 @@ impl Editor {
         self.cache_draft();
     }
 }
-
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DraftCache {
     draft: Settings,
@@ -756,7 +829,6 @@ fn preview_mix(p: &amp_core::show::SmartPlaylist, library: &amp_core::Library) -
     }
     order
 }
-
 /// Three-way edits preserve unrelated shared changes; source selectors form one atomic group.
 fn merge_rules(
     base: &Settings,
@@ -766,7 +838,14 @@ fn merge_rules(
 ) -> Result<Settings, String> {
     use serde_json::Value;
     let mut merged = current.clone();
-    let fields = ["folders", "restrict_folders", "allowed", "restrict_allowed"];
+    let fields = [
+        "folders",
+        "restrict_folders",
+        "allowed",
+        "restrict_allowed",
+        "source_library",
+        "source_root_hint",
+    ];
     let mut conflicts = Vec::new();
     for old in &base.playlists {
         if !draft.playlists.iter().any(|p| p.id == old.id)
@@ -858,7 +937,6 @@ fn merge_rules(
     merged.validate()?;
     Ok(merged)
 }
-
 fn save_rules(root: &std::path::Path, settings: &mut Settings, saved: &mut Settings) -> String {
     if root.as_os_str().is_empty() {
         return "Choose a music root first".into();
@@ -899,6 +977,9 @@ enum SourceMode {
     Songs,
 }
 fn set_source_mode(p: &mut amp_core::show::SmartPlaylist, mode: SourceMode) {
+    p.source_library = None;
+    p.source_root_hint = None;
+    p.source_unavailable = false;
     p.folders.clear();
     p.allowed.clear();
     p.restrict_folders = mode == SourceMode::Folders;
@@ -1048,7 +1129,6 @@ mod tests {
         settings.playlists.push(second);
         settings
     }
-
     #[test]
     fn choosing_music_root_includes_all_nested_songs_and_keeps_exclusions() {
         let dir = tempfile::tempdir().unwrap();
@@ -1345,7 +1425,6 @@ mod tests {
         assert_eq!(restored.draft.playlists[0].target_energy, Some(3.));
         assert!(!dir.path().join("ampdj/smart-playlists.json").exists());
     }
-
     #[test]
     fn empty_source_selection_never_expands_to_entire_library() {
         let track = amp_core::Track {
