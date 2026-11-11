@@ -268,6 +268,7 @@ mod tests {
         let library = amp_core::scan(dir.path()).unwrap();
         std::fs::create_dir_all(dir.path().join("ampdj/playlists")).unwrap();
         amp_core::Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: "My saved playlist".into(),
@@ -377,6 +378,7 @@ mod catalog_station_tests {
             .unwrap();
         let normal = root.path().join("ampdj/playlists/test.json");
         amp_core::Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: "Saved normal".into(),

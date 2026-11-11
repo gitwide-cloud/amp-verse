@@ -2,10 +2,10 @@
 use super::*;
 use std::sync::atomic::Ordering::Relaxed;
 pub struct Panel {
-    gain: [f32; 2],
-    kill: [[bool; 3]; 2],
-    sweep: [f32; 2],
-    cue: [bool; 2],
+    gain: [f32; 6],
+    kill: [[bool; 3]; 6],
+    sweep: [f32; 6],
+    cue: [bool; 6],
     cue_mix: f32,
     cue_volume: f32,
     output: Option<String>,
@@ -16,10 +16,10 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
-            gain: [0.; 2],
-            kill: [[false; 3]; 2],
-            sweep: [0.; 2],
-            cue: [false; 2],
+            gain: [0.; 6],
+            kill: [[false; 3]; 6],
+            sweep: [0.; 6],
+            cue: [false; 6],
             cue_mix: 0.,
             cue_volume: 0.5,
             output: None,
@@ -30,12 +30,15 @@ impl Default for Panel {
     }
 }
 impl Panel {
+    pub fn set_filter(&mut self, deck: usize, value: f32) {
+        self.sweep[deck] = value;
+    }
     pub fn toggle_cue(&mut self, deck: usize) {
         self.cue[deck] = !self.cue[deck];
     }
     pub fn apply(&self, engine: &mixer::Engine) {
         let controls = &engine.controls;
-        for d in 0..2 {
+        for d in 0..6 {
             controls.trim_db[d].store(self.gain[d].to_bits(), Relaxed);
             controls.sweep[d].store(self.sweep[d].to_bits(), Relaxed);
             controls.cue[d].store(self.cue[d], Relaxed);
@@ -56,7 +59,7 @@ pub(super) fn dial(
     range: std::ops::RangeInclusive<f32>,
     accent: egui::Color32,
 ) -> egui::Response {
-    let dial_size = ui.spacing().interact_size.y.clamp(24., 44.);
+    let dial_size = ui.spacing().interact_size.y.clamp(32., 44.);
     let (rect, mut response) = ui.allocate_exact_size(
         egui::vec2(dial_size + 4., dial_size),
         egui::Sense::click_and_drag(),
@@ -130,10 +133,11 @@ impl Player {
         ui.spacing_mut().item_spacing.y = 1.;
         ui.strong("MIXER");
         ui.columns(2, |columns| {
-            for (d, column) in columns.iter_mut().enumerate() {
-                let accent = if d == 0 { ORANGE } else { CYAN };
+            for (side, column) in columns.iter_mut().enumerate() {
+                let d = if self.rack.six { self.rack.live[side] } else { side };
+                let accent = if d % 2 == 0 { ORANGE } else { CYAN };
                 column.push_id(("mixer-channel", d), |ui| {
-                    ui.colored_label(accent, if d == 0 { "A" } else { "B" });
+                    ui.colored_label(accent, crate::deck_rack::NAMES[d]);
                     ui.horizontal(|ui| { dial(ui, "Gain dB", &mut self.mixer_panel.gain[d], -12. ..=12., accent); ui.label("Gain"); });
                     for (band, label) in [(2,"High"),(1,"Mid"),(0,"Low")] {
                         ui.horizontal(|ui| {

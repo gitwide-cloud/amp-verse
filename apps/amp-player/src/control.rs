@@ -1,7 +1,7 @@
 //! Local show-control gateway. The GUI owns performance; disconnecting never touches audio.
 use axum::{
     Json, Router,
-    extract::{State, WebSocketUpgrade, ws::Message},
+    extract::{Query, State, WebSocketUpgrade, ws::Message},
     http::{HeaderMap, StatusCode},
     response::IntoResponse,
     routing::{get, post},
@@ -25,6 +25,12 @@ pub enum Deck {
     Auto,
     A,
     B,
+    A1,
+    A2,
+    A3,
+    B1,
+    B2,
+    B3,
 }
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
@@ -37,6 +43,80 @@ pub enum Execution {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    SaveMusicScene {
+        name: String,
+    },
+    RecallMusicScene {
+        scene: String,
+        #[serde(default)]
+        execution: Execution,
+    },
+    HotCue {
+        deck: Deck,
+        slot: u16,
+    },
+    DeckFilter {
+        deck: Deck,
+        value: f32,
+    },
+    StopSampler {
+        side: usize,
+        pad: usize,
+    },
+    GoogleCast {
+        operation: crate::google_cast::Operation,
+    },
+    BroadcastLevel {
+        level: f32,
+        #[serde(default)]
+        muted: bool,
+    },
+    DeckKeyLock {
+        deck: Deck,
+        enabled: bool,
+    },
+    SelectLive {
+        deck: Deck,
+    },
+    AssignCrossfadePair {
+        a: Deck,
+        b: Deck,
+    },
+    MasterClock {
+        bpm: f32,
+        quantization: u32,
+    },
+    DeckSync {
+        deck: Deck,
+        enabled: bool,
+    },
+    DeckLoop {
+        deck: Deck,
+        enabled: bool,
+        #[serde(default = "four_beats")]
+        beats: u32,
+    },
+    DeckGain {
+        deck: Deck,
+        value: f32,
+    },
+    DeckStems {
+        deck: Deck,
+        levels: [f32; 3],
+    },
+    CrossfadeDuration {
+        seconds: f32,
+    },
+    QuantizedLaunch {
+        deck: Deck,
+    },
+    StopAllDecks,
+    EmergencyMute,
+    StopSamplers {
+        #[serde(default)]
+        side: Option<usize>,
+    },
+
     TransitionSettings {
         enabled: bool,
         techniques: [bool; 6],
@@ -192,6 +272,9 @@ pub enum Action {
         pad: usize,
     },
 }
+fn four_beats() -> u32 {
+    4
+}
 fn yes() -> bool {
     true
 }
@@ -338,6 +421,9 @@ impl Control {
                     .route("/api/v1/info", get(info))
                     .route("/api/v1/state", get(state))
                     .route("/api/v1/catalog", get(catalog))
+                    .route("/api/v1/resources", get(resources))
+                    .route("/api/v1/resources/playlists", get(resource_playlists))
+                    .route("/api/v1/resources/scenes", get(resource_scenes))
                     .route("/api/v1/command", post(command))
                     .route("/api/v1/events", get(events))
                     .with_state(server);
@@ -369,7 +455,7 @@ impl Control {
     }
 }
 fn protocol(s: &Shared) -> Value {
-    json!({"protocol":1,"service":"amp-control","session":s.session,"password_required":s.password.is_some(),"discovery_available":s.discovery_ready.load(Ordering::Relaxed),"capabilities":["player","dj","catalog","websocket","energy","progression","song_requests","samplers"]})
+    json!({"protocol":1,"service":"amp-control","session":s.session,"password_required":s.password.is_some(),"discovery_available":s.discovery_ready.load(Ordering::Relaxed),"capabilities":["player","dj","catalog","websocket","energy","progression","song_requests","samplers","six_decks","master_clock","scoped_resources"]})
 }
 fn snapshot(s: &Shared) -> Value {
     let mut value = s.snapshot.borrow().clone();
@@ -415,6 +501,61 @@ async fn catalog(State(s): State<Arc<Shared>>, h: HeaderMap) -> axum::response::
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(s.catalog.lock().map(|v| v.clone()).unwrap_or(Value::Null)).into_response()
+}
+async fn resources(
+    State(s): State<Arc<Shared>>,
+    h: HeaderMap,
+    Query(query): Query<crate::resources::Query>,
+) -> axum::response::Response {
+    if !authorized(&s, &h) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let result = s
+        .catalog
+        .lock()
+        .map_err(|_| "Catalog temporarily unavailable".to_string())
+        .and_then(|c| crate::resources::page(&c, &query));
+    match result {
+        Ok(mut value) => {
+            value["session"] = json!(s.session);
+            Json(value).into_response()
+        }
+        Err(error) => (StatusCode::BAD_REQUEST, Json(json!({"error":error}))).into_response(),
+    }
+}
+async fn resource_scenes(State(s): State<Arc<Shared>>, h: HeaderMap) -> axum::response::Response {
+    if !authorized(&s, &h) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let scenes = s
+        .catalog
+        .lock()
+        .ok()
+        .and_then(|c| c["scenes"].as_array().cloned())
+        .unwrap_or_default();
+    Json(json!({"scenes":scenes,"session":s.session})).into_response()
+}
+async fn resource_playlists(
+    State(s): State<Arc<Shared>>,
+    h: HeaderMap,
+) -> axum::response::Response {
+    if !authorized(&s, &h) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let lists: Vec<Value> = s
+        .catalog
+        .lock()
+        .ok()
+        .and_then(|c| c["resource_playlists"].as_array().cloned())
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|p| p["available"] == true)
+        .map(|mut p| {
+            p.as_object_mut().unwrap().remove("tracks");
+            p
+        })
+        .collect();
+    Json(json!({"playlists":lists,"session":s.session})).into_response()
 }
 async fn events(
     State(s): State<Arc<Shared>>,
@@ -543,6 +684,20 @@ async fn command(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn six_deck_and_cast_commands_have_round_trip_contracts() {
+        for value in [
+            json!({"action":"google_cast","operation":{"operation":"discover"}}),
+            json!({"action":"google_cast","operation":{"operation":"start","receiver":"speaker-id","address":"127.0.0.1:8787"}}),
+            json!({"action":"google_cast","operation":{"operation":"volume","level":0.3,"muted":false}}),
+            json!({"action":"deck_key_lock","deck":"b3","enabled":true}),
+            json!({"action":"deck_stems","deck":"a2","levels":[0,1,1]}),
+        ] {
+            let action: Action = serde_json::from_value(value).unwrap();
+            let encoded = serde_json::to_value(action).unwrap();
+            serde_json::from_value::<Action>(encoded).unwrap();
+        }
+    }
     #[test]
     fn auxiliary_commands_preserve_existing_protocol() {
         let request: Request = serde_json::from_value(

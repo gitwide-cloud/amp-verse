@@ -333,6 +333,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                             .as_ref()
                             .map_or("New playlist", |(_, p)| p.name.as_str()),
                     );
+                    if let Some((_,p))=&mut self.playlist_snapshot {ui.checkbox(&mut p.companion_available,"Available in Companion").on_hover_text("Save playlist to publish this preference.");}
                     ui.weak(format!("{} tracks", self.queue.len()));
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Add songs from Library").clicked() { self.library_page = 0; self.status = "Select songs with the library checkboxes, or use Add folder. Then save the playlist queue.".into(); }
@@ -808,8 +809,8 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx, theme::Theme::ModernDark);
         let mut player = Player {
-            loaded: [Some(3), None],
-            playing: [true, false],
+            loaded: [Some(3), None, None, None, None, None],
+            playing: [true, false, false, false, false, false],
             queue: vec![3, 2, 3],
             ..Default::default()
         };
@@ -825,7 +826,7 @@ mod tests {
         let rect = ctx
             .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique(("navigation-button", "Sources"))))
             .unwrap();
-        for pressed in [true, false] {
+        for pressed in [true, false, false, false, false, false] {
             let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(screen),
@@ -845,8 +846,8 @@ mod tests {
             output.textures_delta.clear();
         }
         assert_eq!(player.library_page, 5);
-        assert_eq!(player.loaded, [Some(3), None]);
-        assert_eq!(player.playing, [true, false]);
+        assert_eq!(player.loaded, [Some(3), None, None, None, None, None]);
+        assert_eq!(player.playing, [true, false, false, false, false, false]);
         assert_eq!(player.queue, vec![3, 2, 3]);
     }
 }

@@ -288,6 +288,7 @@ impl Editor {
                 if dirty { ui.colored_label(crate::ORANGE,"Unsaved changes · DJ still uses the saved version"); }
                 ui.horizontal_wrapped(|ui|{let button=ui.button("Save Playlist");save|=button.clicked();#[cfg(test)]ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique("smart-top-save"),button.rect));if !self.status.is_empty(){ui.add(egui::Label::new(&self.status).wrap());}});
                 ui.add_space(16.);
+                ui.checkbox(&mut p.companion_available,"Available in Companion").on_hover_text("Discover this playlist and its eligible songs. Save Playlist to publish.");
                 ui.strong("Music sources");
                 if p.source_unavailable {
                     ui.colored_label(crate::ORANGE,"Source library not connected · settings retained, playback paused for this playlist");
@@ -1523,6 +1524,7 @@ mod tests {
             },
         };
         let list = amp_core::Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: "Source".into(),

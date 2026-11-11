@@ -6,8 +6,60 @@ pub struct Deck {
     pub path: PathBuf,
     pub position: f64,
 }
+fn default_pair() -> [usize; 2] {
+    [0, 1]
+}
+fn deck_slots<'de, D: serde::Deserializer<'de>>(d: D) -> Result<[Option<Deck>; 6], D::Error> {
+    let slots = Vec::<Option<Deck>>::deserialize(d)?;
+    if slots.len() != 2 && slots.len() != 6 {
+        return Err(serde::de::Error::custom(
+            "Expected two legacy or six deck slots",
+        ));
+    }
+    let mut result = std::array::from_fn(|_| None);
+    for (index, value) in slots.into_iter().enumerate() {
+        result[index] = value;
+    }
+    Ok(result)
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct DeckSettings {
+    gain: f32,
+    pitch: f32,
+    eq: [f32; 3],
+    filter: f32,
+    key_lock: bool,
+    synced: bool,
+    stems: [f32; 3],
+}
+impl DeckSettings {
+    fn valid(&self) -> bool {
+        self.gain.is_finite()
+            && (0. ..=1.).contains(&self.gain)
+            && self.pitch.is_finite()
+            && (-50. ..=100.).contains(&self.pitch)
+            && self
+                .eq
+                .iter()
+                .all(|v| v.is_finite() && (-24. ..=12.).contains(v))
+            && self.filter.is_finite()
+            && (200. ..=22000.).contains(&self.filter)
+            && self
+                .stems
+                .iter()
+                .all(|v| v.is_finite() && (0. ..=1.).contains(v))
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    deck_settings: Option<[DeckSettings; 6]>,
+    #[serde(default)]
+    clock: Option<(f32, u32)>,
+    #[serde(default)]
+    rack: deck_rack::Rack,
+    #[serde(default = "default_pair")]
+    pair: [usize; 2],
     #[serde(default)]
     sizes: [Option<[f32; 2]>; 6],
     #[serde(default)]
@@ -22,7 +74,8 @@ pub struct Snapshot {
     automatic_restore: bool,
     version: u32,
     root: PathBuf,
-    decks: [Option<Deck>; 2],
+    #[serde(deserialize_with = "deck_slots")]
+    decks: [Option<Deck>; 6],
     queue: Vec<PathBuf>,
     playlist: Option<(PathBuf, Playlist)>,
     requests: Vec<String>,
@@ -124,14 +177,29 @@ impl Recovery {
 }
 impl Snapshot {
     fn valid(&self, root: &Path) -> bool {
-        self.sizes.iter().flatten().all(|size| {
-            size.iter()
-                .all(|n| n.is_finite() && *n >= 80. && *n <= 16384.)
-        }) && self
-            .splits
-            .iter()
-            .flatten()
-            .all(|n| n.is_finite() && *n >= 0. && *n <= 16384.)
+        self.deck_settings
+            .as_ref()
+            .is_none_or(|decks| decks.iter().all(DeckSettings::valid))
+            && self.clock.is_none_or(|(b, q)| {
+                b.is_finite() && (40. ..=240.).contains(&b) && [0, 1, 4, 8, 16, 32].contains(&q)
+            })
+            && self.rack.live[0] < 6
+            && self.rack.live[1] < 6
+            && self.rack.live[0].is_multiple_of(2)
+            && self.rack.live[1] % 2 == 1
+            && self.pair[0] < 6
+            && self.pair[1] < 6
+            && self.pair[0].is_multiple_of(2)
+            && self.pair[1] % 2 == 1
+            && self.sizes.iter().flatten().all(|size| {
+                size.iter()
+                    .all(|n| n.is_finite() && *n >= 80. && *n <= 16384.)
+            })
+            && self
+                .splits
+                .iter()
+                .flatten()
+                .all(|n| n.is_finite() && *n >= 0. && *n <= 16384.)
             && self.version == 1
             && self.root == root
             && self.volume <= 100
@@ -219,6 +287,39 @@ impl Player {
     }
     fn session_snapshot(&self) -> Snapshot {
         Snapshot {
+            deck_settings: Some(std::array::from_fn(|d| DeckSettings {
+                gain: self.channel_gain[d],
+                pitch: self.pitch[d],
+                eq: self.eq[d],
+                filter: self.filter[d],
+                key_lock: self.audio.as_ref().is_some_and(|a| {
+                    a.controls.key_lock[d].load(std::sync::atomic::Ordering::Relaxed)
+                }),
+                synced: self.audio.as_ref().is_some_and(|a| {
+                    a.controls.synced[d].load(std::sync::atomic::Ordering::Relaxed)
+                }),
+                stems: std::array::from_fn(|i| {
+                    self.audio.as_ref().map_or(1., |a| {
+                        f32::from_bits(
+                            a.controls.stem_level[d][i].load(std::sync::atomic::Ordering::Relaxed),
+                        )
+                    })
+                }),
+            })),
+            clock: self.audio.as_ref().map(|a| {
+                (
+                    f32::from_bits(
+                        a.controls
+                            .master_bpm
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    ),
+                    a.controls
+                        .quantization
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                )
+            }),
+            rack: self.rack.clone(),
+            pair: self.pair(),
             sizes: self.recovery.sizes,
             splits: self.recovery.splits,
             hidden: self.dj_library_hidden,
@@ -306,7 +407,7 @@ impl Player {
         let active = self
             .audio
             .as_ref()
-            .is_some_and(|a| a.playing(0) || a.playing(1));
+            .is_some_and(|a| (0..6).any(|d| a.playing(d)));
         let mut restore = false;
         let mut discard = false;
         ui.horizontal_wrapped(|ui| {
@@ -333,7 +434,7 @@ impl Player {
             || self
                 .audio
                 .as_ref()
-                .is_some_and(|a| a.playing(0) || a.playing(1) || a.fading())
+                .is_some_and(|a| (0..6).any(|d| a.playing(d)) || a.fading())
         {
             return;
         }
@@ -348,11 +449,44 @@ impl Player {
             return;
         }
         let mut errors = Vec::new();
+        if snapshot.pair != self.pair()
+            && let Err(e) = self
+                .ensure_audio()
+                .and_then(|_| self.audio.as_ref().unwrap().assign_pair(snapshot.pair))
+        {
+            self.recovery.error = Some(e);
+            return;
+        }
+        self.rack = snapshot.rack.clone();
         for (deck, saved) in snapshot.decks.iter().enumerate() {
             if let Some(saved) = saved
                 && let Err(e) = self.safe_load_path(deck, saved.path.clone(), Some(saved.position))
             {
                 errors.push(e);
+            }
+        }
+        if let Some(a) = &self.audio {
+            if let Some((bpm, quantization)) = snapshot.clock {
+                let _ = a.set_clock(bpm, quantization);
+            }
+            if let Some(settings) = &snapshot.deck_settings {
+                for (d, saved) in settings.iter().enumerate() {
+                    self.channel_gain[d] = saved.gain;
+                    self.pitch[d] = saved.pitch;
+                    self.eq[d] = saved.eq;
+                    self.filter[d] = saved.filter;
+                    a.set_gain(d, saved.gain);
+                    a.set_rate(d, 1. + saved.pitch / 100.);
+                    for (band, value) in saved.eq.into_iter().enumerate() {
+                        a.set_eq(d, band, value);
+                    }
+                    a.set_filter(d, saved.filter);
+                    use std::sync::atomic::Ordering::Relaxed;
+                    a.controls.key_lock[d].store(saved.key_lock, Relaxed);
+                    let _ = a.restore_stems(d, saved.stems);
+                    // Sync is restored while paused; loading never starts playback.
+                    let _ = a.sync(d, saved.synced);
+                }
             }
         }
         self.queue = snapshot

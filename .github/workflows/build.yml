@@ -88,6 +88,9 @@ jobs:
         run: |
           mkdir -p dist
           cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} target/release/amp-prepare${{ matrix.suffix }} dist/
+          if [ "${{ runner.os }}" = "Windows" ]; then cp target/release/amp-keylock.dll dist/; fi
+          mkdir -p dist/licenses/signalsmith
+          cp -r apps/amp-player/vendor/signalsmith/* dist/licenses/signalsmith/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
           cp -r docs dist/
           cp -r licenses dist/
@@ -110,6 +113,26 @@ jobs:
         with:
           name: amp-analysis-engine-${{ runner.os }}
           path: engine-dist/
+
+  companion:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: integrations/companion/package-lock.json
+      - run: npm ci
+        working-directory: integrations/companion
+      - run: npm test
+        working-directory: integrations/companion
+      - run: npm run package
+        working-directory: integrations/companion
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ampverse-companion
+          path: integrations/companion/*.tgz
 
   release:
     if: startsWith(github.ref, 'refs/tags/v')

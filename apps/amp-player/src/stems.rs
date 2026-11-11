@@ -312,9 +312,9 @@ pub struct Panel {
     batch_rx: Option<mpsc::Receiver<(usize, usize, String)>>,
     batch_progress: (usize, usize),
     batch_status: String,
-    status: [String; 2],
-    level: [[f32; 3]; 2],
-    generation: [u64; 2],
+    status: [String; 6],
+    level: [[f32; 3]; 6],
+    generation: [u64; 6],
 }
 impl Default for Panel {
     fn default() -> Self {
@@ -326,8 +326,8 @@ impl Default for Panel {
             batch_progress: (0, 0),
             batch_status: String::new(),
             status: Default::default(),
-            level: [[0.; 3]; 2],
-            generation: [0; 2],
+            level: [[0.; 3]; 6],
+            generation: [0; 6],
         }
     }
 }
@@ -490,6 +490,44 @@ impl Panel {
         }
         ui.label(&self.batch_status);
     }
+    pub fn live_knobs(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        audio: Option<&crate::mixer::Engine>,
+    ) -> Option<[f32; 3]> {
+        let active = audio.is_some_and(|a| a.controls.stems_loaded[deck].load(Relaxed));
+        if let Some(a) = audio {
+            for i in 0..3 {
+                self.level[deck][i] = f32::from_bits(a.controls.stem_knobs[deck][i].load(Relaxed));
+            }
+        }
+        let previous = self.level[deck];
+        ui.add_enabled_ui(active, |ui| {
+            ui.horizontal(|ui| {
+                for (stem, label) in [(0, "VOC"), (2, "BEAT"), (1, "INST")] {
+                    ui.vertical(|ui| {
+                        crate::dj_mixer::dial(
+                            ui,
+                            label,
+                            &mut self.level[deck][stem],
+                            -1. ..=1.,
+                            if deck.is_multiple_of(2) {
+                                crate::ORANGE
+                            } else {
+                                crate::CYAN
+                            },
+                        );
+                        ui.small(label);
+                    });
+                }
+            });
+        });
+        if !active {
+            ui.small("Prepare stems in Library");
+        }
+        (previous != self.level[deck]).then_some(self.level[deck])
+    }
     pub fn show(
         &mut self,
         ui: &mut egui::Ui,
@@ -521,12 +559,12 @@ impl Panel {
         let mut reload = false;
         let response = ui.push_id(("deck-stems", deck), |ui| {
             ui.colored_label(
-                if deck == 0 {
+                if deck.is_multiple_of(2) {
                     crate::ORANGE
                 } else {
                     crate::CYAN
                 },
-                if deck == 0 {
+                if deck.is_multiple_of(2) {
                     "A · STEMS"
                 } else {
                     "B · STEMS"
@@ -592,7 +630,7 @@ impl Panel {
                             name,
                             &mut self.level[deck][stem],
                             -1. ..=1.,
-                            if deck == 0 {
+                            if deck.is_multiple_of(2) {
                                 crate::ORANGE
                             } else {
                                 crate::CYAN

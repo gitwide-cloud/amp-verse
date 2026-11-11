@@ -37,6 +37,8 @@ pub struct PlaylistSource {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartPlaylist {
+    #[serde(default)]
+    pub companion_available: bool,
     pub id: String,
     pub name: String,
     /// Imported sources stay bound to their originating library until explicitly remapped.
@@ -96,6 +98,7 @@ impl Default for Settings {
             playlists: [("demo", "Demo", Style::Steady)]
                 .into_iter()
                 .map(|(id, name, style)| SmartPlaylist {
+                    companion_available: false,
                     id: id.into(),
                     name: name.into(),
                     source_library: None,

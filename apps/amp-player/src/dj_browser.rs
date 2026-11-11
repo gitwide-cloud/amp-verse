@@ -32,7 +32,9 @@ fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
 }
 impl Player {
     pub(super) fn dj_library_ui(&mut self, ui: &mut egui::Ui) {
-        let height = ui.available_height().max(180.);
+        let height = ui
+            .available_height()
+            .max(if self.rack.six { 80. } else { 180. });
         let sidebar_id = egui::Id::unique("dj-source-width");
         let sidebar_max = (ui.available_width() * 0.35).clamp(150., 400.);
         let mut sidebar_width = ui
@@ -40,23 +42,28 @@ impl Player {
             .data_mut(|d| d.get_persisted::<f32>(sidebar_id))
             .unwrap_or(195.)
             .clamp(150., sidebar_max);
-        skin::label(ui, "DJ Library");
+
         let mut auto = self.run.auto;
         let mut toggle = false;
         let mut queue_drop = None;
         let mut open_playlist = false;
         let mut load = None;
         let mut request = None;
-        let requests = ui.add(
-            egui::Label::new(
-                egui::RichText::new(format!(
-                    "Song requests ({}) · click to view",
-                    self.run.requests.len()
-                ))
-                .weak(),
-            )
-            .sense(egui::Sense::click()),
-        );
+        let requests = ui
+            .horizontal(|ui| {
+                skin::label(ui, "DJ Library");
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "Song requests ({}) · click to view",
+                            self.run.requests.len()
+                        ))
+                        .weak(),
+                    )
+                    .sense(egui::Sense::click()),
+                )
+            })
+            .inner;
         let mut cancel_request = None;
         egui::Popup::menu(&requests).show(|ui| {
             if self.run.requests.is_empty() {
@@ -258,8 +265,8 @@ impl Player {
                 ui.separator();
                 egui::ScrollArea::vertical()
                     .id_salt("dj-source-tracks")
-                    .max_height((height - 155.).max(80.))
-                    .min_scrolled_height((height - 155.).max(80.))
+                    .max_height((height - if self.rack.six {110.} else {155.}).max(if self.rack.six {34.}else{80.}))
+                    .min_scrolled_height((height - if self.rack.six {110.} else {155.}).max(if self.rack.six {34.}else{80.}))
                     .show_rows(ui, 34., indices.len(), |ui, range| {
                         for row in range {
                             let i = indices[row];
@@ -406,7 +413,7 @@ impl Player {
                 .and_then(|library| library.tracks.get(index))
             {
                 let path = self.root.join(&track.path);
-                if let Err(error) = self.safe_load_path(deck, path, None) {
+                if let Err(error) = self.safe_load_path(self.rack.live[deck], path, None) {
                     self.status = error;
                 }
             }
@@ -439,6 +446,7 @@ mod tests {
             },
         };
         let playlist = Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: "Show".into(),

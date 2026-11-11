@@ -14,6 +14,7 @@ final class RemotePanel extends LinearLayout {
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     private final EditText address,password,search;private final TextView status,now;
     private final LinearLayout songs,controls;
+    private JSONObject latestState=new JSONObject();
     private JSONArray catalog=new JSONArray(),playlists=new JSONArray();
     private String base="",secret="",session="",deck="a";private boolean closed,connected;
     private static String rememberedBase="",rememberedSecret="";
@@ -37,6 +38,8 @@ final class RemotePanel extends LinearLayout {
         row(controls,button("Hype",()->command("set_style","style","hype")),button("Steady",()->command("set_style","style","steady")),button("Chill",()->command("set_style","style","chill")));
         controls.addView(label("Target energy",15));SeekBar energy=new SeekBar(a);energy.setMax(100);energy.setProgress(50);energy.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){command("set_energy","target",1.+9.*b.getProgress()/100.);}public void onProgressChanged(SeekBar b,int value,boolean user){}});controls.addView(energy);
         controls.addView(button("Desktop Smart Playlists",this::choosePlaylist));
+        controls.addView(button("Deck tools · sync, stems and loops",this::deckTools));
+        controls.addView(button("Google speakers on desktop",this::googleSpeakers));
         row(controls,button("Master −",()->command("adjust_volume","delta",-0.05)),button("Master +",()->command("adjust_volume","delta",0.05)));
         row(controls,button("Seek −10s",()->command("seek_relative","deck",deck,"seconds",-10)),button("Seek +10s",()->command("seek_relative","deck",deck,"seconds",10)));
         row(controls,button("Previous",()->command("previous")),button("Next",()->command("player_next")));
@@ -79,12 +82,31 @@ final class RemotePanel extends LinearLayout {
     }
     private void lost(int expected,Throwable error){if(closed||expected!=generation)return;connected=false;controls.setVisibility(GONE);status.setText("Connection lost · "+describe(error)+" · reconnecting (commands are not replayed)");handler.postDelayed(()->{if(!closed&&expected==generation)connect();},3000);}
     private void showState(JSONObject state){
+        if(state!=null)latestState=state;
         JSONObject amp=state==null?null:state.optJSONObject("amp");if(amp==null){now.setText("Status unavailable");return;}
         StringBuilder text=new StringBuilder(amp.isNull("current_song")?"No track":amp.optString("current_song"));
         text.append(" · ").append(amp.optString("playback_state","stopped")).append(" · ").append(amp.optBoolean("auto_dj_enabled")?"Auto DJ ON":"Auto DJ OFF").append(" · ").append(amp.optBoolean("manual_dj_locked")?"DJ locked":"DJ unlocked");
         text.append("\nPlaylist: ").append(amp.isNull("playlist")?"None":amp.optString("playlist")).append(" · Master ").append(Math.round(amp.optDouble("master_level",0)*100)).append('%');
         JSONArray decks=state.optJSONArray("decks");if(decks!=null)for(int i=0;i<decks.length();i++){JSONObject d=decks.optJSONObject(i);if(d==null)continue;text.append("\n").append(d.optString("deck")).append(": ").append(d.optBoolean("loaded")?d.optString("title"):"Empty").append(" · ").append(d.optString("state"));}
         now.setText(text);
+    }
+    private void deckTools(){
+        LinearLayout panel=new LinearLayout(activity);panel.setOrientation(VERTICAL);panel.setPadding(20,12,20,12);
+        panel.addView(label("Selected LIVE deck "+deck.toUpperCase(Locale.ROOT),18));
+        row(panel,button("Sync ON",()->command("deck_sync","deck",deck,"enabled",true)),button("Sync OFF",()->command("deck_sync","deck",deck,"enabled",false)));
+        row(panel,button("Key Lock ON",()->command("deck_key_lock","deck",deck,"enabled",true)),button("Key Lock OFF",()->command("deck_key_lock","deck",deck,"enabled",false)));
+        row(panel,button("Launch on grid",()->command("quantized_launch","deck",deck)),button("4-beat loop",()->command("deck_loop","deck",deck,"enabled",true,"beats",4)),button("Loop OFF",()->command("deck_loop","deck",deck,"enabled",false,"beats",4)));
+        panel.addView(label("Prepared stems · processing stays on desktop",14));
+        double[] levels={1,1,1};String[] names={"Vocals","Instruments","Beats"};
+        JSONArray selected=latestState.optJSONArray("decks");if(selected!=null)for(int i=0;i<selected.length();i++){JSONObject d=selected.optJSONObject(i);if(d!=null&&d.optString("deck").equalsIgnoreCase(deck)){JSONArray saved=d.optJSONArray("stem_levels");if(saved!=null)for(int j=0;j<3;j++)levels[j]=saved.optDouble(j,1);}}
+        for(int i=0;i<3;i++){final int band=i;panel.addView(label(names[i],14));SeekBar slider=new SeekBar(activity);slider.setMax(100);slider.setProgress((int)(levels[i]*100));slider.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){}public void onProgressChanged(SeekBar b,int value,boolean user){if(user)levels[band]=value/100.;}public void onStopTrackingTouch(SeekBar b){JSONArray values=new JSONArray();for(double level:levels)values.put((Object)Double.valueOf(level));command("deck_stems","deck",deck,"levels",values);}});panel.addView(slider);}
+        new AlertDialog.Builder(activity).setTitle("Desktop deck controls").setView(panel).setPositiveButton("Done",null).show();
+    }
+    private void googleCommand(String operation,String receiver,String address){try{JSONObject value=new JSONObject().put("operation",operation);if(receiver!=null)value.put("receiver",receiver);if(address!=null)value.put("address",address);command("google_cast","operation",value);}catch(JSONException e){status.setText(e.getMessage());}}
+    private void googleSpeakers(){
+        JSONObject cast=latestState.optJSONObject("google_cast");JSONArray receivers=cast==null?null:cast.optJSONArray("receivers");
+        ArrayList<String> names=new ArrayList<>();names.add("Search for speakers");names.add("Stop casting");names.add("Refresh this list");if(receivers!=null)for(int i=0;i<receivers.length();i++)names.add(receivers.optJSONObject(i).optString("name"));final JSONArray choices=receivers;
+        new AlertDialog.Builder(activity).setTitle("Desktop Google Cast output").setItems(names.toArray(new String[0]),(dialog,n)->{if(n==0)googleCommand("discover",null,null);else if(n==1)googleCommand("stop",null,null);else if(n==2)googleSpeakers();else if(choices!=null){String server=activity.getSharedPreferences("settings",0).getString("cast-server","");if(server.isEmpty()){status.setText("Choose an AMP Cast server on the Cast screen first");return;}try{URI uri=new URI(new CastClient(server,"").base);String host=uri.getHost();if(host==null)host=server;googleCommand("start",choices.optJSONObject(n-3).optString("id"),host+":"+(uri.getPort()>0?uri.getPort():8787));}catch(Exception e){status.setText("Choose a valid Cast server address");}}}).setNegativeButton("Close",null).show();
     }
     private void command(String action,Object...fields){try{JSONObject body=new JSONObject().put("id","android-"+UUID.randomUUID()).put("action",action);for(int i=0;i<fields.length;i+=2)body.put(fields[i].toString(),fields[i+1]);String endpoint=base,credential=secret,identity=session;if(endpoint.isEmpty()||!connected)throw new IllegalArgumentException("Connect first");submit(()->{JSONObject reply=request(endpoint,credential,"/api/v1/command",body,identity);if(!reply.optBoolean("ok"))throw new IOException(reply.optString("error","Command rejected"));return request(endpoint,credential,"/api/v1/state",null);},state->{status.setText("Accepted · "+action);showState(state);});}catch(Exception error){status.setText(error.getMessage());}}
     private void cue(int side,String operation,Object...fields){try{JSONObject value=new JSONObject().put("operation",operation);for(int i=0;i<fields.length;i+=2)value.put(fields[i].toString(),fields[i+1]);command("cue_deck","side",side,"operation",value);}catch(Exception error){status.setText(error.getMessage());}}

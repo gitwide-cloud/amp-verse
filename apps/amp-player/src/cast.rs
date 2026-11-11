@@ -186,7 +186,7 @@ struct Update {
     control_error: Option<String>,
 }
 pub struct Dashboard {
-    google: crate::google_cast::Output,
+    pub(super) google: crate::google_cast::Output,
     listen_after_play: bool,
     pub live_action: Option<bool>,
     pub live_active: bool,
@@ -335,6 +335,7 @@ impl Dashboard {
         }
     }
     pub fn poll(&mut self) {
+        self.google.poll();
         if let Some(rx) = &self.discovery
             && let Ok(result) = rx.try_recv()
         {

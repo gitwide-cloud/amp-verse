@@ -10,17 +10,63 @@ use std::{
         mpsc,
     },
 };
+type Peaks = Arc<[[f32; 2]]>;
 const BIN: usize = 160; // 20 ms, independent of device sample rate.
 #[derive(Default)]
 pub struct Lane {
     pub height: Option<f32>,
     pub overview: bool,
+    pub hide_caption: bool,
     pub seek: Option<f64>,
     path: Option<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
-    rx: Option<mpsc::Receiver<Result<Vec<[f32; 2]>, String>>>,
-    peaks: Vec<[f32; 2]>,
+    rx: Option<mpsc::Receiver<Result<Peaks, String>>>,
+    peaks: Arc<[[f32; 2]]>,
     error: Option<String>,
+}
+#[derive(Default)]
+struct CacheEntry {
+    peaks: Option<std::sync::Weak<[[f32; 2]]>>,
+    building: bool,
+}
+fn shared_decode(path: &Path, cancel: &AtomicBool) -> Result<Arc<[[f32; 2]]>, String> {
+    use std::sync::{Condvar, Mutex, OnceLock};
+    type Entry = Arc<(Mutex<CacheEntry>, Condvar)>;
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, Entry>>> = OnceLock::new();
+    let entry = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "Waveform cache unavailable")?
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new((Mutex::new(CacheEntry::default()), Condvar::new())))
+        .clone();
+    let mut state = entry.0.lock().map_err(|_| "Waveform cache unavailable")?;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Waveform replaced".into());
+        }
+        if let Some(peaks) = state.peaks.as_ref().and_then(std::sync::Weak::upgrade) {
+            return Ok(peaks);
+        }
+        if !state.building {
+            state.building = true;
+            break;
+        }
+        state = entry
+            .1
+            .wait_timeout(state, std::time::Duration::from_millis(100))
+            .map_err(|_| "Waveform cache unavailable")?
+            .0;
+    }
+    drop(state);
+    let result = decode(path, cancel).map(Arc::<[[f32; 2]]>::from);
+    let mut state = entry.0.lock().map_err(|_| "Waveform cache unavailable")?;
+    state.building = false;
+    if let Ok(peaks) = &result {
+        state.peaks = Some(Arc::downgrade(peaks));
+    }
+    entry.1.notify_all();
+    result
 }
 fn decode(path: &Path, cancel: &AtomicBool) -> Result<Vec<[f32; 2]>, String> {
     let mut child = amp_core::command("ffmpeg")
@@ -88,22 +134,14 @@ fn graph_rect(rect: egui::Rect) -> egui::Rect {
     )
 }
 impl Lane {
-    pub fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        root: &Path,
-        track: Option<&amp_core::Track>,
-        position: f64,
-        span: f64,
-        deck: usize,
-    ) {
+    fn prepare(&mut self, ui: &egui::Ui, root: &Path, track: Option<&amp_core::Track>) {
         let path = track.and_then(|t| amp_core::resolve(root, &t.path).ok());
         if path != self.path {
             if let Some(cancel) = self.cancel.take() {
                 cancel.store(true, Ordering::Relaxed);
             }
             self.path = path.clone();
-            self.peaks.clear();
+            self.peaks = Arc::default();
             self.error = None;
             self.rx = None;
             if let Some(path) = path {
@@ -112,7 +150,7 @@ impl Lane {
                 let (tx, rx) = mpsc::channel();
                 self.rx = Some(rx);
                 std::thread::spawn(move || {
-                    let _ = tx.send(decode(&path, &cancel));
+                    let _ = tx.send(shared_decode(&path, &cancel));
                 });
             }
         }
@@ -135,7 +173,52 @@ impl Lane {
                 }
             }
         }
-        let color = if deck == 0 {
+    }
+    pub fn thumbnail(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &Path,
+        track: Option<&amp_core::Track>,
+        position: f64,
+        accent: egui::Color32,
+    ) {
+        self.prepare(ui, root, track);
+        let (rect, _) =
+            ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.), egui::Sense::hover());
+        let n = self.peaks.len();
+        if n > 0 {
+            let count = (rect.width().max(1.) as usize).min(n);
+            for x in 0..count {
+                let index = x * n / count;
+                let peak = self.peaks[index];
+                let px = rect.left() + x as f32 * rect.width() / count as f32;
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(px, rect.center().y + -peak[0] * rect.height() * 0.45),
+                        egui::pos2(px, rect.center().y - peak[1] * rect.height() * 0.45),
+                    ],
+                    egui::Stroke::new(1., accent),
+                );
+            }
+            let duration = n as f64 / 50.;
+            let x = rect.left() + (position / duration).clamp(0., 1.) as f32 * rect.width();
+            ui.painter().line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(1., egui::Color32::WHITE),
+            );
+        }
+    }
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &Path,
+        track: Option<&amp_core::Track>,
+        position: f64,
+        span: f64,
+        deck: usize,
+    ) {
+        self.prepare(ui, root, track);
+        let color = if deck.is_multiple_of(2) {
             super::skin::ORANGE
         } else {
             super::skin::CYAN
@@ -269,6 +352,9 @@ impl Lane {
                         label_edge[row] = x + short.len() as f32 * 6. + 12.;
                     }
                     if response.hover_pos().is_some_and(|p| (p.x - x).abs() < 5.) {
+                        if response.clicked() {
+                            self.seek = Some(*seconds);
+                        }
                         response
                             .clone()
                             .on_hover_text(format!("{label} · {seconds:.3} s (source)"));
@@ -284,17 +370,19 @@ impl Lane {
             ],
             Stroke::new(2., Color32::WHITE),
         );
-        let name = track.map_or("Load a track", |t| t.title.as_str());
-        painter.text(
-            rect.left_top() + egui::vec2(5., 2.),
-            egui::Align2::LEFT_TOP,
-            format!(
-                "{} · {position:.2}s · {name}",
-                if deck == 0 { "A" } else { "B" }
-            ),
-            egui::FontId::monospace(12.),
-            color,
-        );
+        if !self.hide_caption {
+            let name = track.map_or("Load a track", |t| t.title.as_str());
+            painter.text(
+                rect.left_top() + egui::vec2(5., 2.),
+                egui::Align2::LEFT_TOP,
+                format!(
+                    "{} · {position:.2}s · {name}",
+                    if deck.is_multiple_of(2) { "A" } else { "B" }
+                ),
+                egui::FontId::monospace(12.),
+                color,
+            );
+        }
         if self.peaks.is_empty() && track.is_some() {
             painter.text(
                 graph.center(),

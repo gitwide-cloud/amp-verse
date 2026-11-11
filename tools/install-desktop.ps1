@@ -14,6 +14,12 @@ $binaries=if($WithCast -and !$PlayerOnly){@('amp-player.exe','amp-cast.exe','amp
 foreach ($name in $binaries) {
     Copy-Item -LiteralPath (Join-Path $repo "target/release/$name") -Destination $Destination -Force
 }
+$keyLock = Join-Path $repo 'target/release/amp-keylock.dll'
+if (!(Test-Path -LiteralPath $keyLock)) { throw 'Key Lock backend is missing; rebuild the desktop package before installing.' }
+Copy-Item -LiteralPath $keyLock -Destination $Destination -Force
+$keyLockNotices=Join-Path $Destination 'licenses/signalsmith'
+New-Item -ItemType Directory -Force -Path $keyLockNotices | Out-Null
+Copy-Item -Path (Join-Path $repo 'apps/amp-player/vendor/signalsmith/*') -Destination $keyLockNotices -Recurse -Force
 if ($WithAnalysis) {
     $addons = Join-Path $Destination 'addons'
     New-Item -ItemType Directory -Force -Path $addons | Out-Null

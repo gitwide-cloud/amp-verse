@@ -13,6 +13,7 @@ pub type Frames = Arc<[[f32; 2]]>;
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct Bank {
+    favorites: [usize; 4],
     paths: [Option<PathBuf>; 9],
     gains: [f32; 9],
     master: f32,
@@ -24,6 +25,7 @@ struct Bank {
 impl Default for Bank {
     fn default() -> Self {
         Self {
+            favorites: [0, 1, 2, 3],
             paths: Default::default(),
             gains: [1.; 9],
             master: 0.7,
@@ -206,6 +208,100 @@ impl Sampler {
             self.status = format!("Sampler settings were not saved: {error}");
         }
     }
+    pub fn inline_pads(
+        &mut self,
+        ui: &mut egui::Ui,
+        engine: Option<&Engine>,
+        all: bool,
+    ) -> Vec<Action> {
+        let count = if all { 9 } else { 4 };
+        let mut actions = Vec::new();
+        ui.horizontal(|ui| {
+            for favorite in 0..count {
+                let pad = if all {
+                    favorite
+                } else {
+                    self.bank.favorites[favorite].min(8)
+                };
+                let name = if self.bank.paths[pad].is_none() {
+                    "+".into()
+                } else if self.bank.names[pad].is_empty() {
+                    format!("S{}", pad + 1)
+                } else {
+                    self.bank.names[pad].clone()
+                };
+                let playing = engine.is_some_and(|a| {
+                    a.controls.sample_playing[pad].load(std::sync::atomic::Ordering::Relaxed)
+                });
+                let response = ui.add_sized(
+                    [
+                        ((ui.available_width() - 24.) / (count - favorite) as f32).max(34.),
+                        30.,
+                    ],
+                    egui::Button::new(name)
+                        .selected(playing)
+                        .stroke(egui::Stroke::new(1., egui::Color32::from_rgb(150, 85, 180))),
+                );
+                if response.clicked() {
+                    actions.push(if self.bank.paths[pad].is_none() {
+                        Action::Load(pad)
+                    } else {
+                        Action::Trigger(pad)
+                    });
+                }
+                response.context_menu(|ui| {
+                    ui.label(format!("Bank pad {}", pad + 1));
+                    if !all {
+                        ui.menu_button("Favorite assignment", |ui| {
+                            for candidate in 0..9 {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.bank.favorites[favorite],
+                                        candidate,
+                                        format!(
+                                            "Pad {} · {}",
+                                            candidate + 1,
+                                            self.bank.names[candidate]
+                                        ),
+                                    )
+                                    .changed()
+                                {
+                                    self.save();
+                                }
+                            }
+                        });
+                    }
+                    if ui.text_edit_singleline(&mut self.bank.names[pad]).changed() {
+                        self.save();
+                    }
+                    if ui
+                        .checkbox(&mut self.bank.loops[pad], "Loop sample")
+                        .changed()
+                    {
+                        self.save();
+                    }
+                    if ui
+                        .add(egui::Slider::new(&mut self.bank.gains[pad], 0. ..=1.).text("Volume"))
+                        .changed()
+                    {
+                        self.save();
+                    }
+                    for (label, action) in [
+                        ("Replace", Action::Load(pad)),
+                        ("Stop", Action::Stop(pad)),
+                        ("Remove", Action::Clear(pad)),
+                    ] {
+                        if ui.button(label).clicked() {
+                            actions.push(action);
+                            ui.close();
+                        }
+                    }
+                    ui.label(format!("Companion: side sampler, pad {}", pad + 1));
+                });
+            }
+        });
+        actions
+    }
     pub fn compact(
         &mut self,
         ui: &mut egui::Ui,
@@ -250,7 +346,11 @@ impl Sampler {
                                     .load(std::sync::atomic::Ordering::Relaxed)
                             });
                             let name = if self.bank.names[pad].is_empty() {
-                                format!("PAD {}", pad + 1)
+                                if self.bank.paths[pad].is_none() {
+                                    "+".into()
+                                } else {
+                                    format!("PAD {}", pad + 1)
+                                }
                             } else {
                                 self.bank.names[pad].clone()
                             };

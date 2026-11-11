@@ -11,6 +11,7 @@ mod cast;
 mod control;
 mod controllers;
 mod crossfade_settings;
+mod deck_rack;
 mod dj_browser;
 mod dj_mixer;
 mod docking;
@@ -20,6 +21,7 @@ mod engine_download;
 mod google_cast;
 mod hot_cues;
 mod icons;
+mod key_lock;
 mod lab;
 mod lab_editor;
 mod library_cache;
@@ -28,9 +30,11 @@ mod mashup;
 mod mix_schedule;
 mod mixer;
 mod monitor;
+mod music_scenes;
 mod organized_library;
 mod performance;
 mod preparer;
+mod resources;
 mod sample_editor;
 mod sampler;
 mod section_controls;
@@ -112,6 +116,7 @@ fn capture(ctx: &egui::Context, path: PathBuf) {
 }
 
 struct Player {
+    rack: deck_rack::Rack,
     recovery: session::Recovery,
     root: PathBuf,
     library: Option<Library>,
@@ -126,12 +131,12 @@ struct Player {
     right_sampler: sampler::Sampler,
     right_sample_audio: Option<mixer::Engine>,
     sides: [side_deck::SideDeck; 2],
-    pending_load: [Option<(PathBuf, Option<f64>)>; 2],
-    loaded_origin: [Option<PathBuf>; 2],
+    pending_load: [Option<(PathBuf, Option<f64>)>; 6],
+    loaded_origin: [Option<PathBuf>; 6],
     dj_browser: dj_browser::Browser,
     dj_tab: usize,
     dj_library_hidden: bool,
-    dj_cues: [bool; 2],
+    dj_cues: [bool; 6],
     player_mode: u8,
     player_on_top: bool,
     run: performance::Run,
@@ -145,26 +150,26 @@ struct Player {
     control_password: String,
     catalog_updated: std::time::Instant,
     last_master: u8,
-    waveforms: [waveform::Lane; 2],
+    waveforms: [waveform::Lane; 6],
     wave_span: f64,
-    pitch: [f32; 2],
-    channel_gain: [f32; 2],
+    pitch: [f32; 6],
+    channel_gain: [f32; 6],
     fader: f32,
     fade_seconds: f32,
-    jog_resume: [Option<(bool, egui::ViewportId)>; 2],
-    jog_angle: [f32; 2],
-    jog_target: [f64; 2],
-    jog_auto: [bool; 2],
+    jog_resume: [Option<(bool, egui::ViewportId)>; 6],
+    jog_angle: [f32; 6],
+    jog_target: [f64; 6],
+    jog_auto: [bool; 6],
     mixer_panel: dj_mixer::Panel,
     controllers: controllers::Panel,
     stem_panel: stems::Panel,
     eq_open: bool,
     fx_open: bool,
-    eq: [[f32; 3]; 2],
-    filter: [f32; 2],
-    loaded: [Option<usize>; 2],
-    loaded_snapshot: [Option<amp_core::Track>; 2],
-    playing: [bool; 2],
+    eq: [[f32; 3]; 6],
+    filter: [f32; 6],
+    loaded: [Option<usize>; 6],
+    loaded_snapshot: [Option<amp_core::Track>; 6],
+    playing: [bool; 6],
     volume: u8,
     new_playlist_name: Option<String>,
     playlist_snapshot: Option<(PathBuf, Playlist)>,
@@ -194,6 +199,7 @@ struct Player {
 impl Default for Player {
     fn default() -> Self {
         Self {
+            rack: Default::default(),
             recovery: Default::default(),
             root: std::env::args_os()
                 .nth(1)
@@ -221,7 +227,7 @@ impl Default for Player {
             dj_browser: Default::default(),
             dj_tab: 0,
             dj_library_hidden: false,
-            dj_cues: [false; 2],
+            dj_cues: [false; 6],
             player_mode: 0,
             player_on_top: load_player_on_top(),
             run: Default::default(),
@@ -238,24 +244,24 @@ impl Default for Player {
             last_master: 75,
             waveforms: Default::default(),
             wave_span: 16.,
-            pitch: [0.; 2],
-            channel_gain: [1.; 2],
+            pitch: [0.; 6],
+            channel_gain: [1.; 6],
             fader: 0.,
             fade_seconds: crossfade_settings::load(),
-            jog_resume: [None; 2],
-            jog_angle: [0.; 2],
-            jog_target: [0.; 2],
-            jog_auto: [false; 2],
+            jog_resume: [None; 6],
+            jog_angle: [0.; 6],
+            jog_target: [0.; 6],
+            jog_auto: [false; 6],
             mixer_panel: Default::default(),
             controllers: Default::default(),
             stem_panel: Default::default(),
             eq_open: false,
             fx_open: false,
-            eq: [[0.; 3]; 2],
-            filter: [22000.; 2],
-            loaded: [None; 2],
-            loaded_snapshot: [None, None],
-            playing: [false; 2],
+            eq: [[0.; 3]; 6],
+            filter: [22000.; 6],
+            loaded: [None; 6],
+            loaded_snapshot: Default::default(),
+            playing: [false; 6],
             volume: 75,
             new_playlist_name: None,
             playlist_snapshot: None,
@@ -576,8 +582,16 @@ impl Player {
                             if std::env::var_os("AMP_WAVEFORM_SMOKE").is_some() {
                                 self.selected = Some(0);
                                 self.volume = 0;
-                                self.load_deck(0, 0, false);
-                                self.load_deck(1, 0, false);
+                                for d in 0..if self.rack.six { 6 } else { 2 } {
+                                    self.load_deck(
+                                        d,
+                                        d % self
+                                            .library
+                                            .as_ref()
+                                            .map_or(1, |l| l.tracks.len().max(1)),
+                                        false,
+                                    );
+                                }
                             }
 
                             if self.screenshot_view == "preparation"
@@ -601,7 +615,7 @@ impl Player {
             }
         }
         if let Some(audio) = &self.audio {
-            self.playing = [audio.playing(0), audio.playing(1)];
+            self.playing = std::array::from_fn(|d| audio.playing(d));
             self.fader = audio.fader();
             if self.volume != self.last_master {
                 audio.set_master(self.volume as f32 / 100.);
@@ -609,13 +623,13 @@ impl Player {
                 self.volume = (audio.master_level() * 100.).round().clamp(0., 100.) as u8;
             }
             self.last_master = self.volume;
-            self.channel_gain = [audio.channel_level(0), audio.channel_level(1)];
+            self.channel_gain = std::array::from_fn(|d| audio.channel_level(d));
             if let Some(error) = audio.take_error() {
                 self.run.cancel_automation();
                 self.status = error;
             }
         } else {
-            self.playing = [false; 2];
+            self.playing = [false; 6];
         }
         let decode_errors = self
             .audio
@@ -638,7 +652,7 @@ impl Player {
         if self.audio.is_none() {
             let audio = mixer::Engine::new()?;
             audio.set_master(self.volume as f32 / 100.);
-            for d in 0..2 {
+            for d in 0..6 {
                 audio.set_gain(d, self.channel_gain[d]);
                 audio.set_rate(d, 1. + self.pitch[d] / 100.);
                 for b in 0..3 {
@@ -652,7 +666,7 @@ impl Player {
         Ok(())
     }
     fn load_deck(&mut self, deck: usize, index: usize, play: bool) {
-        self.run.cancel_automation();
+        self.cancel_deck_automation(deck);
         if deck == 0 && !play {
             self.auto = false;
         }
@@ -691,7 +705,7 @@ impl Player {
                             a.set_rate(deck, 1. + self.pitch[deck] / 100.);
                         }
                     }
-                    if !play {
+                    if !play && self.pair().contains(&deck) {
                         self.run.preloaded = Some((deck, index));
                     }
                     if play {
@@ -714,7 +728,7 @@ impl Player {
         self.load_deck(deck, index, true);
     }
     fn play_cue(&mut self, deck: usize, index: usize, seconds: f64) {
-        self.run.cancel_automation();
+        self.cancel_deck_automation(deck);
         if let Some(_track) = self
             .library
             .as_ref()
@@ -749,8 +763,13 @@ impl Player {
             }
         }
     }
+    fn cancel_deck_automation(&mut self, deck: usize) {
+        if self.pair().contains(&deck) {
+            self.run.cancel_automation();
+        }
+    }
     fn stop(&mut self, deck: usize) {
-        self.run.cancel_automation();
+        self.cancel_deck_automation(deck);
         if let Some(audio) = &mut self.audio {
             audio.stop(deck);
         }
@@ -761,12 +780,20 @@ impl Player {
         self.status = format!("Deck {} stopped", deck + 1);
     }
     fn toggle_deck(&mut self, deck: usize) {
-        self.run.cancel_automation();
+        self.cancel_deck_automation(deck);
         if let Some(audio) = &self.audio
             && audio.loaded(deck)
             && !audio.controls.finished[deck].load(std::sync::atomic::Ordering::Relaxed)
         {
-            audio.toggle(deck);
+            if !audio.playing(deck)
+                && audio.controls.synced[deck].load(std::sync::atomic::Ordering::Relaxed)
+            {
+                if let Err(e) = audio.launch(deck) {
+                    self.status = e;
+                }
+            } else {
+                audio.toggle(deck);
+            }
         } else if let Some(track) = self.loaded_snapshot[deck].clone() {
             let root = self.loaded_origin[deck].as_deref().unwrap_or(&self.root);
             if let Some(audio) = &mut self.audio
@@ -779,22 +806,17 @@ impl Player {
         }
     }
     fn sync_deck(&mut self, deck: usize) {
-        let bpm = |d: usize| self.loaded_track(d).and_then(|t| t.preparation.bpm);
-        if let (Some(own), Some(other)) = (bpm(deck), bpm(1 - deck)) {
-            let target = other * (1. + self.pitch[1 - deck] as f64 / 100.);
-            let requested = ((target / own - 1.) * 100.) as f32;
-            self.pitch[deck] = requested.clamp(-16., 16.);
-            if let Some(audio) = &self.audio {
-                audio.set_rate(deck, 1. + self.pitch[deck] / 100.);
-            }
-            self.status = if requested.abs() > 16. {
-                "Tempo request exceeds pitch range; limited to +/-16%."
-            } else {
-                "Tempo matched. Beat phase and key lock are not implemented."
-            }
-            .into();
-        } else {
-            self.status = "Prepare both tracks with BPM metadata before tempo matching.".into();
+        if let Some(a) = &self.audio {
+            let enabled = !a.controls.synced[deck].load(std::sync::atomic::Ordering::Relaxed);
+            self.status = match a.sync(deck, enabled) {
+                Ok(()) => if enabled {
+                    "Master clock sync enabled; optional Key Lock is under Advanced"
+                } else {
+                    "Deck sync disabled"
+                }
+                .into(),
+                Err(e) => e,
+            };
         }
     }
     fn auto_crossfade(&mut self) {
@@ -892,12 +914,12 @@ impl Player {
             audio.stop(1);
         }
         self.auto = false;
-        self.loaded = [None; 2];
-        self.loaded_snapshot = [None, None];
+        self.loaded = [None; 6];
+        self.loaded_snapshot = Default::default();
         self.waveforms = Default::default();
         self.preview_wave = Default::default();
         self.run.cancel_automation();
-        self.playing = [false; 2];
+        self.playing = [false; 6];
         self.selected = None;
         self.queue.clear();
         self.queue_selected = None;
@@ -924,6 +946,7 @@ impl Player {
             return Err("A playlist already exists there. Choose a different filename.".into());
         }
         let list = Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: name.into(),
@@ -970,6 +993,10 @@ impl Player {
             return;
         };
         let list = Playlist {
+            companion_available: self
+                .playlist_snapshot
+                .as_ref()
+                .is_some_and(|(_, p)| p.companion_available),
             sync: self
                 .playlist_snapshot
                 .as_ref()
@@ -1131,7 +1158,13 @@ impl Player {
                 if p == 0 {
                     135.
                 } else if p == 2 {
-                    (if expanded_dj { 1100. } else { 920. }) + (wave_height - 72.).max(0.) * 2.
+                    (if self.rack.six {
+                        1000.
+                    } else if expanded_dj {
+                        1100.
+                    } else {
+                        920.
+                    }) + (wave_height - 72.).max(0.) * 2.
                 } else {
                     680.
                 }
@@ -1150,7 +1183,11 @@ impl Player {
             };
             let scale = (available.x / minimum_width)
                 .min(available.y / minimum_height)
-                .min(1.);
+                .min(if self.rack.six && panes == [2] {
+                    f32::INFINITY
+                } else {
+                    1.
+                });
             let logical = available / scale;
             for &pane in &panes {
                 ui.ctx().data_mut(|d| {
@@ -1891,6 +1928,10 @@ impl Player {
         }
     }
     fn dj_ui(&mut self, ui: &mut egui::Ui) {
+        if self.rack.six {
+            self.six_deck_ui(ui);
+            return;
+        }
         self.release_jog_wheels(ui.ctx());
         if !ui.ctx().egui_wants_keyboard_input() && ui.input(|input| input.focused) {
             for event in ui.input(|input| input.events.clone()) {
@@ -1950,6 +1991,9 @@ impl Player {
             ui.ctx()
                 .data_mut(|d| d.insert_persisted(wave_id, wave_height));
             ui.horizontal_wrapped(|ui| {
+                if ui.small_button("Six-deck layout").clicked() {
+                    self.rack.six = true;
+                }
                 let previous = self.run.transitions;
                 if transition_controls::show(
                     ui,
@@ -2338,17 +2382,7 @@ impl Player {
                 self.sides[side].seek(cue)?;
             }
             side_deck::Operation::Send { deck } => {
-                let target = match deck {
-                    control::Deck::A => 0,
-                    control::Deck::B => 1,
-                    control::Deck::Auto => {
-                        if !self.playing[0] {
-                            0
-                        } else {
-                            1
-                        }
-                    }
-                };
+                let target = self.requested_deck(deck, true);
                 let path = self.sides[side]
                     .config
                     .path
@@ -2418,7 +2452,7 @@ impl Player {
             .as_mut()
             .unwrap()
             .load(deck, &root, &track, false)?;
-        self.run.cancel_automation();
+        self.cancel_deck_automation(deck);
         self.auto = false;
         self.loaded[deck] = path.strip_prefix(&self.root).ok().and_then(|relative| {
             self.library
@@ -2444,7 +2478,7 @@ impl Player {
             if let Err(error) = audio.load(deck, root, &track, false) {
                 self.status = error;
             }
-            self.run.cancel_automation();
+            self.cancel_deck_automation(deck);
             self.auto = false;
         }
     }
@@ -2585,7 +2619,7 @@ impl Player {
         }
     }
     fn deck_ui(&mut self, ui: &mut egui::Ui, deck: usize, width: f32, height: f32) {
-        let accent = if deck == 0 { ORANGE } else { CYAN };
+        let accent = if deck.is_multiple_of(2) { ORANGE } else { CYAN };
         let platter_side = (height - 274.).clamp(64., 260.);
         let area=ui.allocate_ui_with_layout(egui::vec2(width,0.),egui::Layout::top_down(egui::Align::Center),|ui|{
             skin::panel(ui,true,|ui|{ui.set_width(width-18.);
@@ -2661,8 +2695,17 @@ impl Player {
         }
     }
     fn main_hot_cues(&mut self, ui: &mut egui::Ui, deck: usize, accent: egui::Color32) {
+        self.main_hot_cues_count(ui, deck, accent, 8);
+    }
+    fn main_hot_cues_count(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        accent: egui::Color32,
+        count: usize,
+    ) {
         let prep = self.loaded_track(deck).map(|t| t.preparation.clone());
-        if let Some(action) = hot_cues::pads(ui, prep.as_ref(), accent) {
+        if let Some(action) = hot_cues::pads_count(ui, prep.as_ref(), accent, count) {
             let position = self.audio.as_ref().map_or(0., |a| a.source_position(deck));
             match action {
                 hot_cues::Action::Jump(seconds) => {
@@ -2709,7 +2752,7 @@ impl Player {
             .map(|a| a.duration));
         let position = (audio.source_position(deck) + delta).max(0.);
         track.preparation.cue_in = end.map_or(position, |end| position.min((end - 0.02).max(0.)));
-        self.run.cancel_automation();
+        self.cancel_deck_automation(deck);
         self.auto = false;
         if let Some(audio) = &mut self.audio
             && let Err(error) = audio.load(
@@ -2767,7 +2810,9 @@ impl Player {
             self.run.cancel_effects(audio);
             self.jog_angle[deck] = angle;
             self.jog_target[deck] = audio.position(deck);
-            self.run.cancel_automation();
+            if audio.controls.pair_indices().contains(&deck) {
+                self.run.cancel_automation();
+            }
             self.auto = false;
             if audio.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed) {
                 let _ = audio.loop_toggle(deck, 2.);
@@ -2800,7 +2845,7 @@ impl Player {
         if ctx.input(|i| i.pointer.primary_down() && i.viewport().focused.unwrap_or(true)) {
             return;
         }
-        for deck in 0..2 {
+        for deck in 0..6 {
             if self.jog_resume[deck].is_some_and(|(_, viewport)| viewport != ctx.viewport_id())
                 && self.dj_open
             {
@@ -3206,7 +3251,10 @@ fn main() -> eframe::Result {
     if !player.root.as_os_str().is_empty() {
         player.scan();
     }
-    let size = match player.screenshot_view.as_str() {
+    if std::env::var_os("AMP_SCREENSHOT_EXPANDED").is_some() {
+        player.rack.expanded = true;
+    }
+    let mut size = match player.screenshot_view.as_str() {
         "combined" => [1100., 900.],
         "library" | "playlists" | "analysis" | "devices" => [1280., 860.],
         "preparation" | "rules" => [1200., 830.],
@@ -3222,6 +3270,14 @@ fn main() -> eframe::Result {
         "player" => [1100., 170.],
         _ => [1280., 900.],
     };
+    if let Ok(value) = std::env::var("AMP_SCREENSHOT_SIZE")
+        && let Some((w, h)) = value.split_once('x')
+        && let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>())
+        && (300. ..=3840.).contains(&w)
+        && (160. ..=2160.).contains(&h)
+    {
+        size = [w, h];
+    }
     eframe::run_native(
         "AMP VERSE",
         eframe::NativeOptions {
@@ -3241,6 +3297,12 @@ fn main() -> eframe::Result {
         },
         Box::new(|cc| {
             skin::configure(&cc.egui_ctx);
+            if let Ok(scale) = std::env::var("AMP_SCREENSHOT_SCALE")
+                && let Ok(scale) = scale.parse::<f32>()
+                && (1. ..=2.).contains(&scale)
+            {
+                cc.egui_ctx.set_zoom_factor(scale);
+            }
             Ok(Box::new(player))
         }),
     )
@@ -3253,7 +3315,13 @@ mod window_tests {
     fn appearance_choices_are_visible_and_clickable_inside_module_menu() {
         for selected in theme::Theme::ALL {
             let ctx = egui::Context::default();
-            let mut player = Player::default();
+            let mut player = Player {
+                rack: deck_rack::Rack {
+                    six: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
             let mut draw = |position: egui::Pos2, pressed: Option<bool>| {
                 let mut raw = egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
@@ -3298,6 +3366,10 @@ mod window_tests {
     fn short_player_module_menu_is_visible_and_clickable() {
         let ctx = egui::Context::default();
         let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
             library_open: false,
             dj_open: false,
             ..Default::default()
@@ -3439,12 +3511,16 @@ mod window_tests {
             tree: tree(),
         };
         let mut player = Player {
-            loaded: [Some(1), None],
-            loaded_snapshot: [Some(old.tracks[1].clone()), None],
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            loaded: [Some(1), None, None, None, None, None],
+            loaded_snapshot: [Some(old.tracks[1].clone()), None, None, None, None, None],
             selected: Some(0),
             queue: vec![2, 1, 1, 0],
             queue_selected: Some(2),
-            playing: [true, false],
+            playing: [true, false, false, false, false, false],
             auto: true,
             library: Some(old),
             ..Default::default()
@@ -3460,7 +3536,7 @@ mod window_tests {
             ],
             tree: tree(),
         });
-        assert_eq!(player.loaded, [Some(2), None]);
+        assert_eq!(player.loaded, [Some(2), None, None, None, None, None]);
         assert_eq!(player.queue, vec![0, 2, 2, 1]);
         assert_eq!(player.queue_selected, Some(2));
         assert_eq!(player.selected, Some(1));
@@ -3476,8 +3552,12 @@ mod window_tests {
     fn small_player_modes_preserve_session_and_magnetic_layout() {
         let ctx = egui::Context::default();
         let mut player = Player {
-            loaded: [Some(4), Some(6)],
-            playing: [true, false],
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            loaded: [Some(4), Some(6), None, None, None, None],
+            playing: [true, false, false, false, false, false],
             queue: vec![4, 6],
             library_open: true,
             library_page: 0,
@@ -3487,8 +3567,8 @@ mod window_tests {
         let parent = player.layout.parent;
         for mode in [1, 2, 0] {
             player.set_player_mode(&ctx, mode);
-            assert_eq!(player.loaded, [Some(4), Some(6)]);
-            assert_eq!(player.playing, [true, false]);
+            assert_eq!(player.loaded, [Some(4), Some(6), None, None, None, None]);
+            assert_eq!(player.playing, [true, false, false, false, false, false]);
             assert_eq!(player.queue, vec![4, 6]);
             assert_eq!(player.layout.parent, parent);
             assert!(player.library_open);
@@ -3497,7 +3577,13 @@ mod window_tests {
     #[test]
     fn expanded_dj_moves_banks_below_and_restore_returns_them_to_sides() {
         let ctx = egui::Context::default();
-        let mut player = Player::default();
+        let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         for (size, expanded, below) in [
             (egui::vec2(1920., 1080.), true, true),
             (egui::vec2(1440., 900.), true, true),
@@ -3550,7 +3636,13 @@ mod window_tests {
     #[test]
     fn resized_mixer_controls_stay_inside_the_viewport() {
         let ctx = egui::Context::default();
-        let mut player = Player::default();
+        let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         for size in [
             egui::vec2(2560., 1550.),
             egui::vec2(1200., 900.),
@@ -3607,6 +3699,10 @@ mod window_tests {
             },
         };
         let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
             library: Some(Library {
                 tracks: vec![track.clone()],
                 tree: Folder {
@@ -3619,14 +3715,14 @@ mod window_tests {
                     tracks: vec![],
                 },
             }),
-            loaded: [Some(0), Some(0)],
-            loaded_snapshot: [Some(track.clone()), Some(track)],
+            loaded: [Some(0), Some(0), None, None, None, None],
+            loaded_snapshot: [Some(track.clone()), Some(track), None, None, None, None],
             ..Default::default()
         };
         player.run.settings.playlists[0].name = "Long Smart Playlist name ".repeat(30);
         player.run.choice = player.run.settings.playlists[0].id.clone();
         for smart in [false, true] {
-            player.dj_cues = [smart; 2];
+            player.dj_cues = [smart; 6];
             player.dj_browser = Default::default();
             if smart {
                 player.dj_browser.select_smart(&player.run.choice);
@@ -3667,7 +3763,13 @@ mod window_tests {
     #[test]
     fn dj_library_drag_moves_boundary_and_fills_bottom_in_scaled_fullscreen() {
         let ctx = egui::Context::default();
-        let mut player = Player::default();
+        let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let size = egui::vec2(1920., 1080.);
         let bounds = |id: &str| {
             let (rect, layer) = ctx
@@ -3734,7 +3836,13 @@ mod window_tests {
     #[test]
     fn enlarged_waveforms_and_library_remain_inside_the_window() {
         let ctx = egui::Context::default();
-        let mut player = Player::default();
+        let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         ctx.data_mut(|d| {
             d.insert_persisted(egui::Id::unique("dj-wave-height"), 140_f32);
             d.insert_persisted(egui::Id::unique("dj-library-height"), 600_f32);
@@ -3767,7 +3875,13 @@ mod window_tests {
     #[test]
     fn dj_container_fits_a_short_viewport() {
         let ctx = egui::Context::default();
-        let mut player = Player::default();
+        let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -3805,6 +3919,10 @@ mod window_tests {
     fn dj_below_attached_library_has_finite_reachable_bounds() {
         let ctx = egui::Context::default();
         let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
             library_open: true,
             library_page: 0,
             playback_history: Vec::new(),
@@ -3841,6 +3959,10 @@ mod window_tests {
     fn library_can_merge_into_dj_instead_of_player() {
         let ctx = egui::Context::default();
         let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
             library_open: true,
             library_page: 0,
             playback_history: Vec::new(),
@@ -3861,6 +3983,10 @@ mod window_tests {
     fn actual_magnet_and_detach_buttons_change_window_ownership() {
         let ctx = egui::Context::default();
         let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
             library_open: true,
             library_page: 0,
             playback_history: Vec::new(),

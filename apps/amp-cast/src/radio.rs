@@ -191,7 +191,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
                 .collect()
         })
         .unwrap_or_else(|| (0..cast.tracks.len()).collect());
-    let profile: Option<SmartPlaylist> = selection
+    let mut profile: Option<SmartPlaylist> = selection
         .as_ref()
         .and_then(|v| serde_json::from_value(v["rules"].clone()).ok());
     let mut cursor = 0;
@@ -277,6 +277,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
         frames: 0,
     };
     let mut consumed = 0;
+    let mut mix_revision = 0;
     loop {
         {
             let mut station = cast.station.lock().await;
@@ -285,6 +286,39 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             }
             station.now_playing = Some(cast.tracks[current.index].title.clone());
             station.current_index = Some(current.index);
+        }
+        let requested = cast.mix.lock().unwrap().clone();
+        if requested.revision != mix_revision {
+            if profile.is_none() {
+                let mut rules = show::Settings::default().playlists.remove(0);
+                rules.allowed = indices
+                    .iter()
+                    .map(|i| show::song_id(&cast.tracks[*i]))
+                    .collect();
+                rules.restrict_allowed = true;
+                rules.fallback = show::Fallback::RelaxRecent;
+                profile = Some(rules);
+            }
+            if let Some(rules) = &mut profile {
+                if let Some(style) = requested.style {
+                    rules.style = style;
+                }
+                rules.target_energy = requested.target;
+                target = requested.target;
+            }
+            progression = requested
+                .transitions
+                .map(|n| {
+                    show::Progression::new(
+                        show::energy(&current.preparation).unwrap_or(5.),
+                        requested.target.unwrap_or(5.),
+                        n,
+                        requested.hold,
+                    )
+                })
+                .transpose()?;
+            mix_revision = requested.revision;
+            cast.station.lock().await.mix_revision = mix_revision;
         }
         recent.push(show::song_id(&cast.tracks[current.index]));
         if recent.len() > 100 {

@@ -220,6 +220,8 @@ pub fn resolve(root: &Path, relative: &Path) -> io::Result<PathBuf> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Playlist {
+    #[serde(default)]
+    pub companion_available: bool,
     #[serde(default, rename = "_amp_sync", skip_serializing_if = "Option::is_none")]
     pub sync: Option<coordination::Revision>,
     pub version: u32,
@@ -466,6 +468,7 @@ mod tests {
         assert_eq!(library.tree.folders[0].tracks, [0]);
         assert_eq!(library.tracks[0].preparation, prep);
         let list = Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: "Evening".into(),

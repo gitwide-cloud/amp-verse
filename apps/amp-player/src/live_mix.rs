@@ -4,10 +4,12 @@ use std::{
     process::{Child, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU32, Ordering::Relaxed},
     },
 };
 pub struct Broadcast {
+    level: Arc<AtomicU32>,
+    muted: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     child: Arc<Mutex<Child>>,
     pub status: Arc<Mutex<String>>,
@@ -21,6 +23,12 @@ impl Drop for Broadcast {
     }
 }
 impl Broadcast {
+    pub fn levels(&self) -> (f32, bool) {
+        (
+            f32::from_bits(self.level.load(Relaxed)),
+            self.muted.load(Relaxed),
+        )
+    }
     pub fn start(
         audio: &crate::mixer::Engine,
         aux: &crate::mixer::Engine,
@@ -61,6 +69,10 @@ impl Broadcast {
             .map_err(|e| e.to_string())?;
         let mut input = child.stdin.take().ok_or("Encoder input unavailable")?;
         let mut output = child.stdout.take().ok_or("Encoder output unavailable")?;
+        let level = Arc::new(AtomicU32::new(1f32.to_bits()));
+        let writer_level = level.clone();
+        let muted = Arc::new(AtomicBool::new(false));
+        let writer_muted = muted.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let child = Arc::new(Mutex::new(child));
@@ -97,7 +109,14 @@ impl Broadcast {
                             let aux = samples.pop().unwrap_or([0.; 2]);
                             for ch in 0..2 {
                                 bytes.extend_from_slice(
-                                    &(frame[ch] + aux[ch]).clamp(-0.98, 0.98).to_le_bytes(),
+                                    &((frame[ch] + aux[ch])
+                                        * if writer_muted.load(Relaxed) {
+                                            0.
+                                        } else {
+                                            f32::from_bits(writer_level.load(Relaxed))
+                                        })
+                                    .clamp(-0.98, 0.98)
+                                    .to_le_bytes(),
                                 );
                             }
                         }
@@ -145,10 +164,20 @@ impl Broadcast {
             }
         });
         Ok(Self {
+            level,
+            muted,
             stop,
             child,
             status,
         })
+    }
+    pub fn set_level(&self, level: f32, muted: bool) -> Result<(), String> {
+        if !level.is_finite() || !(0. ..=1.).contains(&level) {
+            return Err("Broadcast level must be 0–1".into());
+        }
+        self.level.store(level.to_bits(), Relaxed);
+        self.muted.store(muted, Relaxed);
+        Ok(())
     }
     pub fn running(&self) -> bool {
         !self.stop.load(Relaxed)
