@@ -22,6 +22,20 @@ fn scratch_phrase(seconds: f32, flourish: bool) -> f32 {
         _ => 1.,
     }
 }
+// Relative cuts preserve the user's saved EQ rather than resetting it to noon.
+// Bass crosses once at the midpoint; highs enter first, then the mids.
+fn blend_eq(progress: f32, original: [[f32; 3]; 2]) -> [[f32; 3]; 2] {
+    let p = progress.clamp(0., 1.);
+    let ramp = |start: f32, end: f32| ((p - start) / (end - start)).clamp(0., 1.);
+    let bass = ramp(0.4, 0.6);
+    let highs = ramp(0., 0.4);
+    let mids = ramp(0.4, 0.9);
+    let cuts = [
+        [24. * bass, 12. * mids, 9. * highs],
+        [24. * (1. - bass), 9. * (1. - mids), 6. * (1. - highs)],
+    ];
+    std::array::from_fn(|d| std::array::from_fn(|b| (original[d][b] - cuts[d][b]).max(-24.)))
+}
 pub struct Run {
     pub requests: VecDeque<String>,
     pub transitions: crate::transition_styles::Settings,
@@ -95,6 +109,32 @@ impl Run {
             return None;
         }
         let progress = f32::from_bits(audio.controls.fade_progress.load(Relaxed)).clamp(0., 1.);
+        if effect.style == crate::transition_styles::Style::BassSwap {
+            if !effect.engaged {
+                effect.original_eq = std::array::from_fn(|d| {
+                    std::array::from_fn(|b| {
+                        f32::from_bits(
+                            audio.controls.eq[if d == 0 { effect.deck } else { 1 - effect.deck }]
+                                [b]
+                                .load(Relaxed),
+                        )
+                    })
+                });
+                effect.engaged = true;
+            }
+            for (side, bands) in blend_eq(progress, effect.original_eq).iter().enumerate() {
+                let deck = if side == 0 {
+                    effect.deck
+                } else {
+                    1 - effect.deck
+                };
+                for (band, value) in bands.iter().enumerate() {
+                    audio.set_eq(deck, band, *value);
+                }
+            }
+            self.effect_bridge = Some(effect);
+            return Some("EQ blend / bass swap transition".into());
+        }
         let window = effect.seconds.min(0.8);
         let elapsed = progress * effect.seconds - (effect.seconds - window);
         if elapsed >= 0. {
@@ -111,9 +151,6 @@ impl Run {
                     crate::transition_styles::Style::Filter => {
                         f32::from_bits(audio.controls.cutoff[effect.deck].load(Relaxed))
                     }
-                    crate::transition_styles::Style::BassSwap => {
-                        f32::from_bits(audio.controls.eq[effect.deck][0].load(Relaxed))
-                    }
                     _ => 0.,
                 };
                 effect.engaged = true;
@@ -122,11 +159,6 @@ impl Run {
             if effect.style == crate::transition_styles::Style::Filter {
                 audio.controls.cutoff[effect.deck].store(
                     (effect.original * (1. - amount) + 180. * amount).to_bits(),
-                    Relaxed,
-                );
-            } else if effect.style == crate::transition_styles::Style::BassSwap {
-                audio.controls.eq[effect.deck][0].store(
-                    (effect.original * (1. - amount) - 24. * amount).to_bits(),
                     Relaxed,
                 );
             }
@@ -150,7 +182,16 @@ impl Run {
             } else if effect.style == crate::transition_styles::Style::Filter {
                 audio.controls.cutoff[effect.deck].store(effect.original.to_bits(), Relaxed);
             } else if effect.style == crate::transition_styles::Style::BassSwap {
-                audio.controls.eq[effect.deck][0].store(effect.original.to_bits(), Relaxed);
+                for (side, bands) in effect.original_eq.iter().enumerate() {
+                    let deck = if side == 0 {
+                        effect.deck
+                    } else {
+                        1 - effect.deck
+                    };
+                    for (band, value) in bands.iter().enumerate() {
+                        audio.set_eq(deck, band, *value);
+                    }
+                }
             } else {
                 audio.scratch(effect.deck, false, 1.);
             }
@@ -175,6 +216,7 @@ struct EffectBridge {
     grain: f32,
     engaged: bool,
     original: f32,
+    original_eq: [[f32; 3]; 2],
 }
 impl Player {
     fn active_deck(&self) -> usize {
@@ -1092,6 +1134,7 @@ impl Player {
                                     grain,
                                     engaged: false,
                                     original: 0.,
+                                    original_eq: [[0.; 3]; 2],
                                 });
                             }
                         }
@@ -1191,6 +1234,23 @@ impl Player {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn eq_blend_swaps_bass_and_stages_the_other_bands_relative_to_user_eq() {
+        let original = [[-2., 1., 3.], [2., -1., -3.]];
+        let begin = super::blend_eq(0., original);
+        assert_eq!(begin[0], original[0]);
+        assert_eq!(begin[1][0], -22.);
+        let middle = super::blend_eq(0.5, original);
+        assert!((middle[0][0] + 14.).abs() < 0.0001);
+        assert!((middle[1][0] + 10.).abs() < 0.0001);
+        assert_eq!(middle[1][2], original[1][2]);
+        assert!(middle[1][1] < original[1][1]);
+        let end = super::blend_eq(1., original);
+        assert_eq!(end[1], original[1]);
+        assert_eq!(end[0][0], -24.);
+        assert_eq!(super::blend_eq(-1., original), begin);
+        assert_eq!(super::blend_eq(2., original), end);
+    }
+    #[test]
     fn requests_reserve_a_bounded_live_window_without_rewriting_saved_rules() {
         let mut player = Player {
             library: Some(amp_core::Library {
@@ -1285,6 +1345,12 @@ mod tests {
             player.run.transitions.style = style;
             player.run.transitions.every = 2;
             player.run.completed_handoffs = 1;
+            let original_eq = [[-2., 1., 3.], [2., -1., -3.]];
+            for (deck, bands) in original_eq.iter().enumerate() {
+                for (band, value) in bands.iter().enumerate() {
+                    player.audio.as_ref().unwrap().set_eq(deck, band, *value);
+                }
+            }
             player
                 .execute_control(Action::MixNext { immediate: true })
                 .unwrap();
@@ -1296,6 +1362,14 @@ mod tests {
             assert_eq!(player.fade_seconds, 0.8);
             assert!(player.run.effect_bridge.is_none());
             let audio = player.audio.as_ref().unwrap();
+            for (deck, bands) in original_eq.iter().enumerate() {
+                for (band, value) in bands.iter().enumerate() {
+                    assert_eq!(
+                        f32::from_bits(audio.controls.eq[deck][band].load(Relaxed)),
+                        *value
+                    );
+                }
+            }
             assert!(audio.controls.scratching.iter().all(|v| !v.load(Relaxed)));
             // Loop stop is an audio-thread command; allow its acknowledgement.
             wait(&mut player, |p| {
