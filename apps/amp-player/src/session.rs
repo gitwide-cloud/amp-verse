@@ -45,6 +45,9 @@ pub struct Snapshot {
 pub struct Recovery {
     file: Option<PathBuf>,
     key: String,
+    // Stable viewport-builder inputs. Live checkpoint measurements must never
+    // become resize commands on the following frame.
+    initial_sizes: [Option<[f32; 2]>; 6],
     automatic_restore: bool,
     attempted: bool,
     sizes: [Option<[f32; 2]>; 6],
@@ -182,6 +185,11 @@ impl Player {
                 i.raw
                     .viewports
                     .get(&window_layout::viewport(pane))
+                    .filter(|v| {
+                        !v.maximized.unwrap_or(false)
+                            && !v.fullscreen.unwrap_or(false)
+                            && !v.minimized.unwrap_or(false)
+                    })
                     .and_then(|v| v.inner_rect)
             }) {
                 self.recovery.sizes[pane] = Some([rect.width(), rect.height()]);
@@ -200,7 +208,7 @@ impl Player {
         monitor: Option<egui::Vec2>,
     ) -> [f32; 2] {
         let fallback = window_layout::initial_size(pane, monitor);
-        let Some(saved) = self.recovery.sizes[pane] else {
+        let Some(saved) = self.recovery.initial_sizes[pane] else {
             return fallback;
         };
         let bound = monitor.unwrap_or(egui::vec2(3840., 2160.)) - egui::vec2(48., 80.);
@@ -384,6 +392,7 @@ impl Player {
         self.eq_open = snapshot.eq_open;
         self.fx_open = snapshot.fx_open;
         self.recovery.sizes = snapshot.sizes;
+        self.recovery.initial_sizes = snapshot.sizes;
         self.recovery.splits = snapshot.splits;
         for (key, value) in ["dj-wave-height", "dj-library-height", "dj-source-width"]
             .into_iter()
@@ -511,10 +520,50 @@ mod tests {
     #[test]
     fn window_recovery_clamps_to_available_monitor() {
         let mut player = Player::default();
-        player.recovery.sizes[2] = Some([5000., 4000.]);
+        player.recovery.initial_sizes[2] = Some([5000., 4000.]);
         assert_eq!(
             player.recovered_window_size(2, Some(egui::vec2(1280., 720.))),
             [1232., 640.]
         );
+    }
+    #[test]
+    fn live_resize_does_not_change_viewport_builder_size() {
+        let mut player = Player::default();
+        player.recovery.initial_sizes[2] = Some([1100., 800.]);
+        let monitor = Some(egui::vec2(2560., 1440.));
+        let initial = player.recovered_window_size(2, monitor);
+        let ctx = egui::Context::default();
+        for (size, maximized, fullscreen) in [
+            ([1300., 900.], false, false),
+            ([2560., 1400.], true, false),
+            ([2560., 1440.], false, true),
+            ([1000., 700.], false, false),
+        ] {
+            let mut raw = egui::RawInput::default();
+            raw.viewports.insert(
+                window_layout::viewport(2),
+                egui::ViewportInfo {
+                    inner_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(size[0], size[1]),
+                    )),
+                    maximized: Some(maximized),
+                    fullscreen: Some(fullscreen),
+                    ..Default::default()
+                },
+            );
+            let mut output = ctx.run_ui(raw, |ui| player.capture_session_layout(ui.ctx()));
+            output.textures_delta.clear();
+            assert_eq!(
+                player.recovered_window_size(2, monitor),
+                initial,
+                "Live measurements must not emit another native resize"
+            );
+            if !maximized && !fullscreen {
+                assert_eq!(player.recovery.sizes[2], Some(size));
+            } else {
+                assert_eq!(player.recovery.sizes[2], Some([1300., 900.]));
+            }
+        }
     }
 }

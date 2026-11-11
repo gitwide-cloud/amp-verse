@@ -135,7 +135,9 @@ pub fn fitted_content(
 
 /// Borderless native windows need explicit resize hit areas.
 pub fn resize_edges(ui: &mut egui::Ui) {
-    if ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false)) {
+    if ui.ctx().input(|i| {
+        i.viewport().maximized.unwrap_or(false) || i.viewport().fullscreen.unwrap_or(false)
+    }) {
         return;
     }
     let rect = ui.ctx().viewport_rect();
