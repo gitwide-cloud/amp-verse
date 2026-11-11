@@ -223,6 +223,9 @@ impl Sampler {
     ) -> Vec<Action> {
         let count = if all { 9 } else { 4 };
         let mut actions = Vec::new();
+        let pad_width = ((ui.available_width() - ui.spacing().item_spacing.x * (count - 1) as f32)
+            / count as f32)
+            .max(30.);
         ui.horizontal(|ui| {
             for favorite in 0..count {
                 let pad = if all {
@@ -231,7 +234,7 @@ impl Sampler {
                     self.bank.favorites[favorite].min(8)
                 };
                 let name = if self.bank.paths[pad].is_none() {
-                    "+".into()
+                    format!("+ S{}", pad + 1)
                 } else if self.bank.names[pad].is_empty() {
                     format!("S{}", pad + 1)
                 } else {
@@ -241,11 +244,9 @@ impl Sampler {
                     a.controls.sample_playing[pad].load(std::sync::atomic::Ordering::Relaxed)
                 });
                 let response = ui.add_sized(
-                    [
-                        ((ui.available_width() - 24.) / (count - favorite) as f32).max(34.),
-                        30.,
-                    ],
+                    [pad_width, 30.],
                     egui::Button::new(name)
+                        .truncate()
                         .selected(playing)
                         .stroke(egui::Stroke::new(1., egui::Color32::from_rgb(150, 85, 180))),
                 );

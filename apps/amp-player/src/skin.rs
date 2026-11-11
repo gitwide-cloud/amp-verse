@@ -136,6 +136,49 @@ pub fn display<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R
         .inner
 }
 
+/// Original vector chrome; no raster skin or proprietary artwork.
+pub fn rack_panel<R>(
+    ui: &mut egui::Ui,
+    selected: Option<C>,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let theme = crate::theme::current(ui.ctx());
+    let p = theme.palette();
+    let background = ui.painter().add(egui::Shape::Noop);
+    let response = egui::Frame::new()
+        .inner_margin(6)
+        .corner_radius(6)
+        .stroke(Stroke::new(
+            if selected.is_some() { 1.7 } else { 1. },
+            selected.unwrap_or(p.border),
+        ))
+        .show(ui, body);
+    let rect = response.response.rect;
+    if theme == crate::theme::Theme::Classic {
+        ui.painter().set(
+            background,
+            gradient(ui.painter(), rect, p.elevated, p.background),
+        );
+        ui.painter().rect_stroke(
+            rect.shrink(2.),
+            4.,
+            Stroke::new(1., BLACK),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().line_segment(
+            [
+                rect.left_top() + Vec2::splat(3.),
+                rect.right_top() + Vec2::new(-3., 3.),
+            ],
+            Stroke::new(1., C::from_rgb(125, 137, 149)),
+        );
+    } else {
+        ui.painter()
+            .set(background, egui::Shape::rect_filled(rect, 6., p.surface));
+    }
+    response
+}
+
 #[derive(Clone, Copy)]
 pub struct Magnet {
     pub enabled: bool,
@@ -553,7 +596,29 @@ pub fn deck_button(
     if primary {
         button = button.fill(C::from_rgb(105, 75, 12));
     }
-    ui.add_sized([width, 42.], button)
+    if crate::theme::current(ui.ctx()) == crate::theme::Theme::Classic {
+        let background = ui.painter().add(egui::Shape::Noop);
+        let response = ui.add_sized([width, 42.], button.fill(C::TRANSPARENT));
+        let (top, bottom) = if primary {
+            (C::from_rgb(135, 100, 20), C::from_rgb(60, 42, 9))
+        } else {
+            (C::from_rgb(48, 55, 63), C::from_rgb(13, 17, 23))
+        };
+        ui.painter().set(
+            background,
+            gradient(ui.painter(), response.rect, top, bottom),
+        );
+        ui.painter().line_segment(
+            [
+                response.rect.left_top() + Vec2::splat(3.),
+                response.rect.right_top() + Vec2::new(-3., 3.),
+            ],
+            Stroke::new(1., C::from_rgb(134, 145, 158)),
+        );
+        response
+    } else {
+        ui.add_sized([width, 42.], button)
+    }
 }
 
 pub fn bolt(painter: &egui::Painter, rect: Rect, color: C) {

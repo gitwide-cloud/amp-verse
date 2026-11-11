@@ -1160,7 +1160,7 @@ impl Player {
                     135.
                 } else if p == 2 {
                     (if self.rack.six {
-                        1000.
+                        700.
                     } else if expanded_dj {
                         1100.
                     } else {
@@ -1172,7 +1172,9 @@ impl Player {
             };
             let minimum_height: f32 = panes.iter().map(|&p| preferred(p) + 8.).sum();
             let available = ui.available_size().max(egui::vec2(1., 1.));
-            let minimum_width = if panes.contains(&2) {
+            let minimum_width = if panes == [2] && self.rack.six {
+                980.
+            } else if panes.contains(&2) {
                 900. + self
                     .sides
                     .iter()
@@ -1184,11 +1186,7 @@ impl Player {
             };
             let scale = (available.x / minimum_width)
                 .min(available.y / minimum_height)
-                .min(if self.rack.six && panes == [2] {
-                    f32::INFINITY
-                } else {
-                    1.
-                });
+                .min(1.);
             let logical = available / scale;
             for &pane in &panes {
                 ui.ctx().data_mut(|d| {
@@ -1770,19 +1768,25 @@ impl Player {
     }
     fn performance_controls(&mut self, ui: &mut egui::Ui) {
         let original_style = ui.style().clone();
-        ui.style_mut()
-            .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(16.));
-        ui.style_mut()
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(16.));
-        ui.spacing_mut().button_padding = egui::vec2(12., 10.);
+        ui.style_mut().text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::proportional(if self.rack.six { 14. } else { 16. }),
+        );
+        ui.style_mut().text_styles.insert(
+            egui::TextStyle::Body,
+            egui::FontId::proportional(if self.rack.six { 14. } else { 16. }),
+        );
+        ui.spacing_mut().button_padding = if self.rack.six {
+            egui::vec2(8., 6.)
+        } else {
+            egui::vec2(12., 10.)
+        };
 
         let mut selected = self.run.choice.clone();
         let mut context_edit = None;
         ui.horizontal_wrapped(|ui| {
             let selector = egui::ComboBox::from_id_salt("performance-playlist")
-                .width(180.)
+                .width(if self.rack.six { 145. } else { 180. })
                 .truncate()
                 .selected_text(
                     self.run
@@ -1850,33 +1854,19 @@ impl Player {
                 self.status = e;
             }
             skin::switch(ui, &mut self.run.crossfade, "Auto Crossfade");
-            if ui
-                .checkbox(&mut self.run.locked, "Manual DJ Lock")
-                .changed()
-                && self.run.locked
-            {
-                self.run.cancel_automation();
-            }
-            if self.run.locked {
-                ui.weak("Unlock Manual DJ Lock to enable Auto Mix");
-            }
-            let mut style = self.run.style;
-            egui::ComboBox::from_id_salt("dj-mixing-style")
-                .width(180.)
-                .selected_text(format!("{:?}", style))
-                .show_ui(ui, |ui| {
-                    for value in [
-                        amp_core::show::Style::Hype,
-                        amp_core::show::Style::Steady,
-                        amp_core::show::Style::Chill,
-                    ] {
-                        ui.selectable_value(&mut style, value, format!("{:?}", value));
-                    }
-                });
-            if style != self.run.style
-                && let Err(error) = self.execute_control(control::Action::SetStyle { style })
-            {
-                self.status = error;
+            if self.rack.six {
+                ui.menu_button(
+                    format!(
+                        "{:?}{}",
+                        self.run.style,
+                        if self.run.locked { " | LOCK" } else { "" }
+                    ),
+                    |ui| self.performance_mix_options(ui),
+                )
+                .response
+                .on_hover_text("Mixing style and Manual DJ Lock");
+            } else {
+                self.performance_mix_options(ui);
             }
         });
         ui.set_style(original_style);
@@ -1886,6 +1876,36 @@ impl Player {
         self.run.choice = selected;
         if let Some((id, action)) = context_edit {
             self.smart_playlist_action(ui, &id, action);
+        }
+    }
+    fn performance_mix_options(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .checkbox(&mut self.run.locked, "Manual DJ Lock")
+            .changed()
+            && self.run.locked
+        {
+            self.run.cancel_automation();
+        }
+        if self.run.locked {
+            ui.weak("Unlock Manual DJ Lock to enable Auto Mix");
+        }
+        let mut style = self.run.style;
+        egui::ComboBox::from_id_salt("dj-mixing-style")
+            .width(if self.rack.six { 145. } else { 180. })
+            .selected_text(format!("{:?}", style))
+            .show_ui(ui, |ui| {
+                for value in [
+                    amp_core::show::Style::Hype,
+                    amp_core::show::Style::Steady,
+                    amp_core::show::Style::Chill,
+                ] {
+                    ui.selectable_value(&mut style, value, format!("{:?}", value));
+                }
+            });
+        if style != self.run.style
+            && let Err(error) = self.execute_control(control::Action::SetStyle { style })
+        {
+            self.status = error;
         }
     }
     fn sampler_ui(&mut self, ui: &mut egui::Ui) {
@@ -2709,7 +2729,12 @@ impl Player {
         count: usize,
     ) {
         let prep = self.loaded_track(deck).map(|t| t.preparation.clone());
-        if let Some(action) = hot_cues::pads_count(ui, prep.as_ref(), accent, count) {
+        let action = if self.rack.six {
+            hot_cues::pads_count_named(ui, prep.as_ref(), accent, count, false)
+        } else {
+            hot_cues::pads_count(ui, prep.as_ref(), accent, count)
+        };
+        if let Some(action) = action {
             let position = self.audio.as_ref().map_or(0., |a| a.source_position(deck));
             match action {
                 hot_cues::Action::Jump(seconds) => {

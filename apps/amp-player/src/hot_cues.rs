@@ -26,8 +26,17 @@ pub fn pads_count(
     accent: egui::Color32,
     count: usize,
 ) -> Option<Action> {
+    pads_count_named(ui, p, accent, count, true)
+}
+pub fn pads_count_named(
+    ui: &mut egui::Ui,
+    p: Option<&Preparation>,
+    accent: egui::Color32,
+    count: usize,
+    heading: bool,
+) -> Option<Action> {
     let mut action = None;
-    if count == 8 {
+    if count == 8 && heading {
         ui.label("HOT CUES");
     }
     let columns = if ui.available_width() < 210. { 2 } else { 4 };

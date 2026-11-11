@@ -111,7 +111,9 @@ impl Player {
                     } else {
                         "Auto Mix: OFF"
                     };
-                    toggle = ui.toggle_value(&mut auto, label).changed();
+                    if self.rack.six {
+                        ui.label(egui::RichText::new(label).color(if auto { skin::signal(ui) } else { ui.visuals().weak_text_color() }));
+                    } else { toggle = ui.toggle_value(&mut auto, label).changed(); }
                     ui.separator();
                     ui.selectable_value(
                         &mut self.dj_browser.source,

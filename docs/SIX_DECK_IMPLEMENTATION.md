@@ -19,7 +19,7 @@ Branch: `feature/six-deck-controls`. This is a development preview, not a produc
 
 ## Verification
 
-- Player default tests: 131 passed; 33 hardware/codec/benchmark tests explicitly excluded from the default run. Workspace tests and strict Clippy passed. Relevant codec/native tests also run explicitly.
+- Player default tests: 132 passed; 33 hardware/codec/benchmark tests explicitly excluded from the default run. Workspace tests and strict Clippy passed. Relevant codec/native tests also run explicitly.
 - Pitch test: 116% varispeed corrected from about 510 Hz back to 440 Hz. Dry/wet impulse peaks match at 2176 frames. Section handoffs retain processor history; EOF drains the delayed tail.
 - Synthetic DSP matrix: two/six dry decks, six synchronized Key Lock streams, prepared stems, loops, effects and pair Auto DJ with four layers. Two seconds rendered in 232-786 ms in the debug build, finite signal and zero test underruns. Six Key Lock streams rendered five seconds in about 1.87 seconds.
 - Real release process: six generated WAV decoders play; LIVE preserves routing; unsafe pair changes reject; independent fade and Auto DJ handoff/pause/resume preserve background decks; scoped pages and emergency stops pass.
@@ -59,3 +59,6 @@ Generated rhythmic WAV fixtures, paused transports, muted master, no simulated w
 ![Compact desktop](screenshots/six-deck/compact.png)
 
 ![Expanded desktop](screenshots/six-deck/expanded.png)
+
+
+The responsive/simplification follow-up is documented in [DJ UX audit](DJ_UX_AUDIT.md), including updated real screenshots and the short-window browser/readability regression.

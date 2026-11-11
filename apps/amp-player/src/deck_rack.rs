@@ -61,10 +61,25 @@ fn transport_button(
         },
         egui::Color32::BLACK,
     );
+    #[cfg(test)]
+    if size.y >= 38. {
+        let transform = ui
+            .ctx()
+            .layer_transform_to_global(ui.layer_id())
+            .unwrap_or_default();
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::unique(("rack-main-play", deck)),
+                transform * response.rect,
+            )
+        });
+    }
     response
 }
 impl Player {
     pub(super) fn six_deck_ui(&mut self, ui: &mut egui::Ui) {
+        let compact = ui.available_width() < 1280. || ui.available_height() < 900.;
+        ui.spacing_mut().item_spacing.y = if compact { 3. } else { 5. };
         let scope = self
             .audio
             .as_ref()
@@ -82,18 +97,46 @@ impl Player {
         ui.ctx()
             .data_mut(|data| data.insert_temp(egui::Id::unique("six-deck-header-scope"), scope));
         self.header(ui, "AMP DJ", true);
-        ui.horizontal_wrapped(|ui|{
+        ui.horizontal_wrapped(|ui| {
             self.performance_controls(ui);
-            self.clock_controls(ui);
-            let previous=self.run.transitions;
-            if transition_controls::show(ui,&mut self.run.transitions,&mut self.wave_span,self.run.pending.is_none() && !self.audio.as_ref().is_some_and(|a|a.fading())) { self.run.force_mashup=true;if let Err(error)=self.execute_control(control::Action::AutoFade){self.run.force_mashup=false;self.status=error;} }
-            if previous!=self.run.transitions {let _=transition_styles::save(self.run.transitions);}
-            self.run.scratch_assist=self.run.transitions.enabled;
-            if ui.selectable_label(self.rack.expanded,"Expanded").clicked(){self.rack.expanded = !self.rack.expanded;}
-            ui.menu_button("Setup",|ui|{
-                if ui.button("Use original two-deck layout").clicked(){self.rack.six=false;ui.close();}
-                if ui.button("Assign crossfader to LIVE pair").on_hover_text("Pause both the current and requested pair first. Background layers keep playing. Auto DJ must be off.").clicked(){self.status=if self.run.auto{"Stop Auto DJ before assigning a different pair".into()}else if let Err(e)=self.ensure_audio().and_then(|_|self.audio.as_ref().unwrap().assign_pair(self.rack.live)){e}else{"Crossfade assignment queued; applies only if both pairs remain paused".into()};}
-            });
+            if compact {
+                let bpm = self.audio.as_ref().map_or(120., |a| {
+                    f32::from_bits(a.controls.master_bpm.load(Relaxed))
+                });
+                ui.menu_button(format!("{bpm:.1} BPM"), |ui| self.clock_controls(ui))
+                    .response
+                    .on_hover_text("Master tempo, quantization and Sync All");
+            } else {
+                self.clock_controls(ui);
+            }
+            let previous = self.run.transitions;
+            if transition_controls::show(
+                ui,
+                &mut self.run.transitions,
+                &mut self.wave_span,
+                self.run.pending.is_none() && !self.audio.as_ref().is_some_and(|a| a.fading()),
+            ) {
+                self.run.force_mashup = true;
+                if let Err(error) = self.execute_control(control::Action::AutoFade) {
+                    self.run.force_mashup = false;
+                    self.status = error;
+                }
+            }
+            if previous != self.run.transitions {
+                let _ = transition_styles::save(self.run.transitions);
+            }
+            self.run.scratch_assist = self.run.transitions.enabled;
+            if compact {
+                ui.menu_button("View", |ui| self.rack_view_options(ui, true));
+            } else {
+                if ui
+                    .selectable_label(self.rack.expanded, "Expanded")
+                    .clicked()
+                {
+                    self.rack.expanded = !self.rack.expanded;
+                }
+                ui.menu_button("Setup", |ui| self.rack_view_options(ui, false));
+            }
         });
         ui.separator();
         ui.columns(2, |columns| {
@@ -106,15 +149,22 @@ impl Player {
                             .strong()
                             .color(accent(d)),
                     );
-                    ui.add_sized(
-                        [(ui.available_width() - 190.).max(80.), 20.],
-                        egui::Label::new(
-                            egui::RichText::new(self.title(d))
-                                .size(15.)
-                                .strong()
-                                .color(accent(d)),
-                        )
-                        .truncate(),
+                    let title_width = (ui.available_width() - 190.).max(80.);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(title_width, 20.),
+                        egui::Layout::left_to_right(egui::Align::Center),
+                        |ui| {
+                            ui.set_min_width(title_width);
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(self.title(d))
+                                        .size(15.)
+                                        .strong()
+                                        .color(accent(d)),
+                                )
+                                .truncate(),
+                            );
+                        },
                     );
                     if let Some(track) = self.loaded_track(d) {
                         ui.colored_label(
@@ -137,7 +187,13 @@ impl Player {
                     .as_ref()
                     .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
                 self.waveforms[d].hide_caption = true;
-                self.waveforms[d].height = Some(if self.rack.expanded { 110. } else { 86. });
+                self.waveforms[d].height = Some(if compact {
+                    56.
+                } else if self.rack.expanded {
+                    100.
+                } else {
+                    82.
+                });
                 self.waveforms[d].show(
                     column,
                     self.loaded_origin[d].as_deref().unwrap_or(&self.root),
@@ -154,24 +210,25 @@ impl Player {
         });
         ui.add_space(6.);
         let library_id = egui::Id::unique("dj-library-height");
-        let max_library = (ui.available_height() - 380.).max(160.);
+        let minimum_library = if compact { 112. } else { 160. };
+        let max_library = (ui.available_height() - 370.).max(minimum_library);
         let mut library_height = ui
             .ctx()
             .data_mut(|d| d.get_persisted::<f32>(library_id))
-            .unwrap_or(210.)
-            .clamp(160., max_library);
+            .unwrap_or(if compact { 145. } else { 230. })
+            .clamp(minimum_library, max_library);
         let height = (ui.available_height()
             - if self.dj_library_hidden {
                 40.
             } else {
-                library_height + 58.
+                library_height + 52.
             })
-        .max(320.);
-        let strips = if self.rack.expanded { 190. } else { 155. };
-        let mixer = 136.;
-        let jog_width = ((ui.available_width() - strips * 2. - mixer - 40.) / 2.).max(220.);
+        .max(if compact { 290. } else { 320. });
+        let strips = if compact { 132. } else { 170. };
+        let mixer = if compact { 126. } else { 146. };
+        let jog_width = ((ui.available_width() - strips * 2. - mixer - 28.) / 2.).max(240.);
         ui.horizontal_top(|ui| {
-            self.deck_strips(ui, 0, strips, height);
+            self.deck_strips(ui, 0, strips, height, compact);
             ui.push_id(("live-jog", self.rack.live[0]), |ui| {
                 self.jog_section(ui, self.rack.live[0], jog_width, height)
             });
@@ -179,7 +236,7 @@ impl Player {
             ui.push_id(("live-jog", self.rack.live[1]), |ui| {
                 self.jog_section(ui, self.rack.live[1], jog_width, height)
             });
-            self.deck_strips(ui, 1, strips, height);
+            self.deck_strips(ui, 1, strips, height, compact);
         });
         ui.horizontal_wrapped(|ui| {
             if ui
@@ -210,14 +267,38 @@ impl Player {
                 ui,
                 "dj-library-divider",
                 &mut library_height,
-                160. ..=max_library,
+                minimum_library..=max_library,
                 false,
                 -1.,
-                18.,
+                12.,
             );
             ui.ctx()
                 .data_mut(|d| d.insert_persisted(library_id, library_height));
+            #[cfg(test)]
+            {
+                let transform = ui
+                    .ctx()
+                    .layer_transform_to_global(ui.layer_id())
+                    .unwrap_or_default();
+                let top = transform * ui.next_widget_position();
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(egui::Id::unique("rack-library-top"), top.y));
+            }
             self.dj_library_ui(ui);
+        }
+    }
+    fn rack_view_options(&mut self, ui: &mut egui::Ui, include_expand: bool) {
+        if include_expand {
+            ui.toggle_value(&mut self.rack.expanded, "Expanded controls");
+        }
+        if ui.button("Use original two-deck layout").clicked() {
+            self.rack.six = false;
+            ui.close();
+        }
+        if ui.button("Assign crossfader to LIVE pair").on_hover_text("Pause both the current and requested pair first; stop Auto DJ. Background layers keep playing.").clicked() {
+            self.status=if self.run.auto {"Stop Auto DJ before assigning a different pair".into()}
+            else if let Err(e)=self.ensure_audio().and_then(|_|self.audio.as_ref().unwrap().assign_pair(self.rack.live)) {e}
+            else {"Crossfade assignment queued; applies only if both pairs remain paused".into()};
         }
     }
     fn clock_controls(&mut self, ui: &mut egui::Ui) {
@@ -273,35 +354,65 @@ impl Player {
             }
         }
     }
-    fn deck_strips(&mut self, ui: &mut egui::Ui, side: usize, width: f32, height: f32) {
-        ui.allocate_ui_with_layout(egui::vec2(width,height),egui::Layout::top_down(egui::Align::Min),|ui|{
-            for d in (side..6).step_by(2){ui.push_id(("strip",d),|ui|{
-                let selected=self.rack.live[side]==d;
-                let frame=egui::Frame::group(ui.style()).corner_radius(7).fill(theme::current(ui.ctx()).palette().surface).stroke(egui::Stroke::new(if selected{2.}else{1.},if selected{accent(d)}else{ui.visuals().widgets.noninteractive.bg_stroke.color})).show(ui,|ui|{
-                    ui.set_width(width-18.);
-                    ui.horizontal(|ui|{
-                        ui.colored_label(accent(d),NAMES[d]);
-                        ui.menu_button("···",|ui|self.strip_options(ui,d));
-                        if ui.add(egui::Button::new(egui::RichText::new("LIVE").color(if selected { egui::Color32::BLACK } else { accent(d) })).fill(if selected { accent(d) } else { ui.visuals().widgets.inactive.bg_fill })).on_hover_text("Select this deck for the jog wheel. Its timeline and crossfade routing stay unchanged.").clicked(){self.rack.live[side]=d;}
-                        if transport_button(ui,d,self.playing[d],egui::vec2(26.,24.)).clicked(){self.toggle_deck(d);}
+    fn deck_strips(
+        &mut self,
+        ui: &mut egui::Ui,
+        side: usize,
+        width: f32,
+        height: f32,
+        compact: bool,
+    ) {
+        ui.allocate_ui_with_layout(egui::vec2(width, height), egui::Layout::top_down(egui::Align::Min), |ui| {
+            for d in (side..6).step_by(2) {
+                ui.push_id(("strip", d), |ui| {
+                    let selected = self.rack.live[side] == d;
+                    let frame = skin::rack_panel(ui, selected.then_some(accent(d)), |ui| {
+                        ui.set_width(width - 18.);
+                        ui.horizontal(|ui| {
+                            ui.label(egui::RichText::new(NAMES[d]).strong().color(accent(d)));
+                            if ui.add(egui::Button::new(egui::RichText::new("LIVE").size(11.).color(if selected {egui::Color32::BLACK} else {accent(d)}))
+                                .fill(if selected {accent(d)} else {ui.visuals().widgets.inactive.bg_fill}))
+                                .on_hover_text("Control this deck with the jog wheel; keep its audio routing unchanged.").clicked() { self.rack.live[side] = d; }
+                            if transport_button(ui, d, self.playing[d], egui::vec2(24.,24.)).on_hover_text(if self.playing[d] {"Pause deck"} else {"Play deck"}).clicked() { self.toggle_deck(d); }
+                        });
+                        ui.add(egui::Label::new(self.title(d)).truncate());
+                        let track=self.loaded_snapshot[d].as_ref().or_else(||self.loaded[d].and_then(|i|self.library.as_ref()?.tracks.get(i)));
+                        self.waveforms[d].thumbnail(ui,self.loaded_origin[d].as_deref().unwrap_or(&self.root),track,self.audio.as_ref().map_or(0.,|a|a.source_position(d)),accent(d));
+                        if !compact {
+                        ui.horizontal(|ui| {
+                            if ui.small_button("LOOP").on_hover_text("Toggle a four-beat loop on this deck").clicked() { self.rack_loop(d); }
+                            ui.menu_button("More", |ui| self.strip_options(ui,d));
+                        });
+                        ui.spacing_mut().slider_width = width - 28.;
+                        if ui.add(egui::Slider::new(&mut self.channel_gain[d],0. ..=1.).show_value(false)).on_hover_text("This deck's volume").changed()
+                            && let Some(a)=&self.audio { a.set_gain(d,self.channel_gain[d]); }
+                        }
                     });
-                    ui.add(egui::Label::new(self.title(d)).truncate());
-                    let track=self.loaded_snapshot[d].as_ref().or_else(||self.loaded[d].and_then(|i|self.library.as_ref()?.tracks.get(i)));
-                    self.waveforms[d].thumbnail(ui,self.loaded_origin[d].as_deref().unwrap_or(&self.root),track,self.audio.as_ref().map_or(0.,|a|a.source_position(d)),accent(d));
-                    ui.horizontal(|ui|{
-                        if ui.small_button("L").on_hover_text("Toggle an independent four-beat loop").clicked(){self.rack_loop(d);}
-                        if ui.small_button("SYNC").clicked(){self.sync_deck(d);}
-                        if ui.small_button("Fade").clicked()&& let Some(a)=&self.audio{let _=a.fade_deck(d,0.,self.fade_seconds,true);}
-                    });
-                    if ui.add(egui::Slider::new(&mut self.channel_gain[d],0. ..=1.).show_value(false)).changed() && let Some(a)=&self.audio{a.set_gain(d,self.channel_gain[d]);}
-                    if self.rack.expanded {ui.small(if self.audio.as_ref().is_some_and(|a|a.controls.looping[d].load(Relaxed)){"LOOPING"}else if self.playing[d]{"PLAYING"}else{"PAUSED"});}
-
+                    if let Some(path)=dragdrop::target(&frame.response,accent(d)) && let Err(e)=self.safe_load_path(d,path,None) {self.status=e;}
                 });
-                if let Some(path)=dragdrop::target(&frame.response,accent(d)) && let Err(e)=self.safe_load_path(d,path,None){self.status=e;}
-            });}
+            }
         });
     }
     fn strip_options(&mut self, ui: &mut egui::Ui, d: usize) {
+        ui.label(format!("{} controls", NAMES[d]));
+        if ui
+            .add(egui::Slider::new(&mut self.channel_gain[d], 0. ..=1.).text("Volume"))
+            .changed()
+            && let Some(audio) = &self.audio
+        {
+            audio.set_gain(d, self.channel_gain[d]);
+        }
+        if ui.button("Toggle four-beat loop").clicked() {
+            self.rack_loop(d);
+        }
+        if ui.button("Sync to master").clicked() {
+            self.sync_deck(d);
+        }
+        if ui.button("Fade out this deck").clicked()
+            && let Some(audio) = &self.audio
+        {
+            let _ = audio.fade_deck(d, 0., self.fade_seconds, true);
+        }
         if ui.button("Load selected Library song").clicked() {
             if let Some(i) = self.selected {
                 self.load_deck(d, i, false);
@@ -361,168 +472,150 @@ impl Player {
         }
     }
     fn jog_section(&mut self, ui: &mut egui::Ui, d: usize, width: f32, height: f32) {
+        let expanded_cues = (self.rack.expanded || self.dj_cues[d]) && height >= 440.;
+        let full_bank = self.rack.expanded && width >= 380.;
         ui.allocate_ui_with_layout(
             egui::vec2(width, height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
-                egui::Frame::group(ui.style())
-                    .corner_radius(8)
-                    .stroke(egui::Stroke::new(
-                        1.5,
-                        theme::current(ui.ctx()).palette().border,
-                    ))
-                    .fill(theme::current(ui.ctx()).palette().surface)
-                    .show(ui, |ui| {
-                        ui.set_width(width - 18.);
-                        ui.horizontal(|ui| {
+                skin::rack_panel(ui, None, |ui| {
+                    ui.set_width(width - 18.);
+                    ui.horizontal(|ui| {
+                        ui.vertical(|ui| {
+                            ui.small("PITCH");
+                            ui.spacing_mut().slider_width =
+                                (height - if expanded_cues { 290. } else { 210. }).clamp(80., 300.);
+                            if ui
+                                .add(
+                                    egui::Slider::new(&mut self.pitch[d], -16. ..=16.)
+                                        .vertical()
+                                        .show_value(false),
+                                )
+                                .changed()
+                                && let Some(a) = &self.audio
+                            {
+                                let _ = a.sync(d, false);
+                                a.set_rate(d, 1. + self.pitch[d] / 100.);
+                            }
+                            ui.small(format!("{:+.1}%", self.pitch[d]));
+                        });
+                        let wheel_size = (width - if width > 335. { 180. } else { 55. })
+                            .max(110.)
+                            .min((height - if expanded_cues { 290. } else { 210. }).max(110.))
+                            .min(340.);
+                        let wheel = skin::vinyl_platter(
+                            ui,
+                            wheel_size,
+                            accent(d),
+                            self.playing[d],
+                            self.audio.as_ref().map_or(0., |a| a.source_position(d)) as f32,
+                        );
+                        self.jog_wheel(ui, d, &wheel);
+                        if width > 335. {
                             ui.vertical(|ui| {
-                                ui.small("PITCH");
-                                ui.spacing_mut().slider_width = (height - 185.)
-                                    .clamp(100., if self.rack.expanded { 150. } else { 220. });
-                                if ui
-                                    .add(
-                                        egui::Slider::new(&mut self.pitch[d], -16. ..=16.)
-                                            .vertical()
-                                            .show_value(false),
-                                    )
-                                    .changed()
-                                    && let Some(a) = &self.audio
-                                {
-                                    let _ = a.sync(d, false);
-                                    a.set_rate(d, 1. + self.pitch[d] / 100.);
-                                }
-                                ui.small(format!("{:+.1}%", self.pitch[d]));
-                            });
-                            let wheel_size = ((width - 180.).max(115.))
-                                .min((height - 160.).max(115.))
-                                .min(if self.rack.expanded { 200. } else { 240. });
-                            let wheel = skin::vinyl_platter(
-                                ui,
-                                wheel_size,
-                                accent(d),
-                                self.playing[d],
-                                self.audio.as_ref().map_or(0., |a| a.source_position(d)) as f32,
-                            );
-                            self.jog_wheel(ui, d, &wheel);
-                            if width > 335. {
-                                ui.vertical(|ui| {
-                                    self.rack_stem_knobs(ui, d);
-                                    ui.separator();
-                                    ui.horizontal(|ui| {
-                                        for (band, name) in [(0, "LOW"), (1, "MID"), (2, "HIGH")] {
-                                            ui.vertical(|ui| {
-                                                if dj_mixer::dial(
-                                                    ui,
-                                                    name,
-                                                    &mut self.eq[d][band],
-                                                    -24. ..=12.,
-                                                    accent(d),
-                                                )
-                                                .changed()
-                                                    && let Some(a) = &self.audio
-                                                {
-                                                    a.set_eq(d, band, self.eq[d][band]);
-                                                }
-                                                ui.small(name);
-                                            });
-                                        }
-                                    });
-                                });
-                            }
-                        });
-                        ui.horizontal(|ui| {
-                            if skin::deck_button(ui, "CUE", accent(d), 55., false).clicked() {
-                                self.recue_deck(d);
-                            }
-                            if transport_button(ui, d, self.playing[d], egui::vec2(65., 38.))
-                                .clicked()
-                            {
-                                self.toggle_deck(d);
-                            }
-                            if skin::deck_button(ui, "SYNC", accent(d), 55., false).clicked() {
-                                self.sync_deck(d);
-                            }
-                            if skin::deck_button(ui, "LOOP", accent(d), 55., false).clicked() {
-                                self.rack_loop(d);
-                            }
-                        });
-                        ui.menu_button("Advanced", |ui| {
-                            if self.mixer_panel.deck_tools(ui, d, accent(d))
-                                && let Some(audio) = &self.audio
-                            {
-                                if self.pair().contains(&d) {
-                                    self.run.cancel_effects(audio);
-                                }
-                                self.mixer_panel.apply(audio);
-                            }
-                            if width <= 335. {
                                 self.rack_stem_knobs(ui, d);
-                            }
-                            if ui.button("Stop deck").clicked() {
-                                self.stop(d);
-                            }
-                            if let Some(a) = &self.audio {
-                                let mut enabled = a.controls.key_lock[d].load(Relaxed);
-                                if ui
-                                    .add_enabled(
-                                        a.loaded(d)
-                                            && a.controls.key_lock_available[d].load(Relaxed),
-                                        egui::Checkbox::new(
-                                            &mut enabled,
-                                            "Key Lock · preserve pitch",
-                                        ),
-                                    )
-                                    .changed()
-                                {
-                                    a.controls.key_lock[d].store(enabled, Relaxed);
-                                }
-                                ui.small("Signalsmith Stretch · vinyl scratch bypasses Key Lock");
-                            }
-                            if let Some(a) = &self.audio {
-                                ui.small(format!(
-                                    "Underruns: {}",
-                                    a.controls.underruns[d].load(Relaxed)
-                                ));
-                            }
-                        });
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    for (band, name) in [(0, "LOW"), (1, "MID"), (2, "HIGH")] {
+                                        ui.vertical(|ui| {
+                                            if dj_mixer::dial(
+                                                ui,
+                                                name,
+                                                &mut self.eq[d][band],
+                                                -24. ..=12.,
+                                                accent(d),
+                                            )
+                                            .changed()
+                                                && let Some(a) = &self.audio
+                                            {
+                                                a.set_eq(d, band, self.eq[d][band]);
+                                            }
+                                            ui.small(name);
+                                        });
+                                    }
+                                });
+                            });
+                        }
                     });
+                    ui.horizontal(|ui| {
+                        if skin::deck_button(
+                            ui,
+                            "CUE",
+                            accent(d),
+                            if width <= 335. { 50. } else { 60. },
+                            false,
+                        )
+                        .clicked()
+                        {
+                            self.recue_deck(d);
+                        }
+                        if transport_button(ui, d, self.playing[d], egui::vec2(60., 38.)).clicked()
+                        {
+                            self.toggle_deck(d);
+                        }
+                        if skin::deck_button(
+                            ui,
+                            "SYNC",
+                            accent(d),
+                            if width <= 335. { 50. } else { 60. },
+                            false,
+                        )
+                        .clicked()
+                        {
+                            self.sync_deck(d);
+                        }
+                        if skin::deck_button(
+                            ui,
+                            "LOOP",
+                            accent(d),
+                            if width <= 335. { 50. } else { 60. },
+                            false,
+                        )
+                        .clicked()
+                        {
+                            self.rack_loop(d);
+                        }
+                        ui.menu_button(if width <= 335. { "..." } else { "Controls" }, |ui| {
+                            self.rack_deck_controls(ui, d, width)
+                        })
+                        .response
+                        .on_hover_text(
+                            "Deck volume, filter, EQ, stems, headphone cue and Key Lock",
+                        );
+                    });
+                });
                 ui.horizontal(|ui| {
-                    ui.small(if self.rack.expanded || self.dj_cues[d] {
+                    ui.small(if expanded_cues {
                         "Hot Cues (1–8)"
                     } else {
                         "Hot Cues (1–4)"
                     });
-                    ui.toggle_value(&mut self.dj_cues[d], "Expand");
+                    if height < 440. {
+                        let button = ui.button("8 cues");
+                        egui::Popup::menu(&button).show(|ui| {
+                            ui.set_width(310.);
+                            self.main_hot_cues_count(ui, d, accent(d), 8);
+                        });
+                    } else if !self.rack.expanded {
+                        ui.toggle_value(&mut self.dj_cues[d], "8 cues");
+                    }
                 });
-                self.main_hot_cues_count(
-                    ui,
-                    d,
-                    accent(d),
-                    if self.dj_cues[d] || self.rack.expanded {
-                        8
-                    } else {
-                        4
-                    },
-                );
+                self.main_hot_cues_count(ui, d, accent(d), if expanded_cues { 8 } else { 4 });
                 ui.horizontal(|ui| {
-                    ui.small(if self.rack.expanded {
+                    ui.small(if full_bank {
                         "Sampler · full bank"
                     } else {
                         "Sampler · favorites"
                     });
-                    ui.menu_button("Expand / Cue Deck", |ui| {
+                    ui.menu_button("Bank / Cue Deck", |ui| {
                         self.side_panel(ui, d % 2, width - 30., 300., true);
                     });
                 });
                 let actions = if d.is_multiple_of(2) {
-                    self.sampler
-                        .inline_pads(ui, self.audio.as_ref(), self.rack.expanded)
+                    self.sampler.inline_pads(ui, self.audio.as_ref(), full_bank)
                 } else {
-                    self.right_sampler.inline_pads(
-                        ui,
-                        self.right_sample_audio.as_ref(),
-                        self.rack.expanded,
-                    )
+                    self.right_sampler
+                        .inline_pads(ui, self.right_sample_audio.as_ref(), full_bank)
                 };
                 for action in actions {
                     self.side_sample_action(d % 2, action);
@@ -530,26 +623,91 @@ impl Player {
             },
         );
     }
+    fn rack_deck_controls(&mut self, ui: &mut egui::Ui, d: usize, width: f32) {
+        if ui.button("Fade out this deck").clicked()
+            && let Err(error) = self.execute_control(control::Action::Fade {
+                deck: control::Deck::PHYSICAL[d],
+                master: false,
+                target: 0.,
+                seconds: self.fade_seconds,
+                stop_after: true,
+            })
+        {
+            self.status = error;
+        }
+        if ui
+            .add(egui::Slider::new(&mut self.channel_gain[d], 0. ..=1.).text("Deck volume"))
+            .changed()
+            && let Some(audio) = &self.audio
+        {
+            audio.set_gain(d, self.channel_gain[d]);
+        }
+        if self.mixer_panel.deck_tools(ui, d, accent(d))
+            && let Some(audio) = &self.audio
+        {
+            if self.pair().contains(&d) {
+                self.run.cancel_effects(audio);
+            }
+            self.mixer_panel.apply(audio);
+        }
+        if width <= 335. {
+            self.rack_stem_knobs(ui, d);
+            for (band, label) in [(0, "Low EQ"), (1, "Mid EQ"), (2, "High EQ")] {
+                if ui
+                    .add(egui::Slider::new(&mut self.eq[d][band], -24. ..=12.).text(label))
+                    .changed()
+                    && let Some(audio) = &self.audio
+                {
+                    if self.pair().contains(&d) {
+                        self.run.cancel_effects(audio);
+                    }
+                    audio.set_eq(d, band, self.eq[d][band]);
+                }
+            }
+        }
+        if ui.button("Stop deck").clicked() {
+            self.stop(d);
+        }
+        if let Some(a) = &self.audio {
+            let mut enabled = a.controls.key_lock[d].load(Relaxed);
+            if ui
+                .add_enabled(
+                    a.loaded(d) && a.controls.key_lock_available[d].load(Relaxed),
+                    egui::Checkbox::new(&mut enabled, "Key Lock · preserve pitch"),
+                )
+                .changed()
+            {
+                a.controls.key_lock[d].store(enabled, Relaxed);
+            }
+            ui.small("Pitch stays fixed when tempo changes; scratching follows your hand.");
+        }
+        if let Some(a) = &self.audio {
+            ui.small(format!(
+                "Audio dropouts: {}",
+                a.controls.underruns[d].load(Relaxed)
+            ));
+        }
+    }
     fn rack_mixer(&mut self, ui: &mut egui::Ui, width: f32, height: f32) {
         let pair = self.pair();
         ui.allocate_ui_with_layout(
             egui::vec2(width, height),
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
-                egui::Frame::group(ui.style())
-                    .fill(theme::current(ui.ctx()).palette().surface)
-                    .show(ui, |ui| {
-                        ui.set_width(width - 18.);
-                        ui.horizontal(|ui| {
-                            for d in pair {
-                                ui.vertical(|ui| {
-                                    ui.colored_label(accent(d), NAMES[d]);
+                skin::rack_panel(ui, None, |ui| {
+                    ui.set_width(width - 18.);
+                    ui.horizontal(|ui| {
+                        for d in pair {
+                            ui.vertical(|ui| {
+                                ui.colored_label(accent(d), NAMES[d]);
+                                ui.horizontal(|ui| {
                                     skin::meter(
                                         ui,
                                         self.audio.as_ref().map_or(0., |a| a.peak(d)),
-                                        egui::vec2(18., (height - 185.).clamp(90., 230.)),
+                                        egui::vec2(18., (height - 190.).clamp(90., 250.)),
                                     );
-                                    ui.spacing_mut().slider_width = 80.;
+                                    ui.spacing_mut().slider_width =
+                                        (height - 190.).clamp(90., 250.);
                                     if ui
                                         .add(
                                             egui::Slider::new(&mut self.channel_gain[d], 0. ..=1.)
@@ -562,52 +720,53 @@ impl Player {
                                         a.set_gain(d, self.channel_gain[d]);
                                     }
                                 });
-                            }
-                        });
-                        if ui
-                            .add_sized(
-                                [width - 24., 52.],
-                                egui::Button::new(
-                                    egui::RichText::new("Auto Crossfade").color(ORANGE).strong(),
-                                )
-                                .fill(egui::Color32::from_rgb(65, 48, 12))
-                                .stroke(egui::Stroke::new(1., ORANGE)),
-                            )
-                            .clicked()
-                        {
-                            self.auto_crossfade();
+                            });
                         }
-                        ui.spacing_mut().slider_width = 90.;
-                        if ui
-                            .add(egui::Slider::new(&mut self.fader, 0. ..=1.).show_value(false))
-                            .changed()
-                            && let Some(a) = &self.audio
-                        {
-                            self.run.cancel_automation();
-                            a.set_fader(self.fader);
-                        }
-                        let previous = self.fade_seconds;
-                        ui.horizontal(|ui| {
-                            if ui.small_button("−").clicked() {
-                                self.fade_seconds -= 0.5;
-                            }
-                            ui.add(
-                                egui::DragValue::new(&mut self.fade_seconds)
-                                    .range(0.5..=30.)
-                                    .suffix("s"),
-                            );
-                            if ui.small_button("+").clicked() {
-                                self.fade_seconds += 0.5;
-                            }
-                        });
-                        self.fade_seconds = self.fade_seconds.clamp(0.5, 30.);
-                        if previous != self.fade_seconds {
-                            let _ = crossfade_settings::save(self.fade_seconds);
-                        }
-                        ui.menu_button("Headphones", |ui| {
-                            self.inline_mixer(ui, 600.);
-                        });
                     });
+                    if ui
+                        .add_sized(
+                            [width - 24., 52.],
+                            egui::Button::new(
+                                egui::RichText::new("Auto Crossfade").color(ORANGE).strong(),
+                            )
+                            .fill(egui::Color32::from_rgb(65, 48, 12))
+                            .stroke(egui::Stroke::new(1., ORANGE)),
+                        )
+                        .clicked()
+                    {
+                        self.auto_crossfade();
+                    }
+                    ui.spacing_mut().slider_width = 90.;
+                    if ui
+                        .add(egui::Slider::new(&mut self.fader, 0. ..=1.).show_value(false))
+                        .changed()
+                        && let Some(a) = &self.audio
+                    {
+                        self.run.cancel_automation();
+                        a.set_fader(self.fader);
+                    }
+                    let previous = self.fade_seconds;
+                    ui.horizontal(|ui| {
+                        if ui.small_button("−").clicked() {
+                            self.fade_seconds -= 0.5;
+                        }
+                        ui.add(
+                            egui::DragValue::new(&mut self.fade_seconds)
+                                .range(0.5..=30.)
+                                .suffix("s"),
+                        );
+                        if ui.small_button("+").clicked() {
+                            self.fade_seconds += 0.5;
+                        }
+                    });
+                    self.fade_seconds = self.fade_seconds.clamp(0.5, 30.);
+                    if previous != self.fade_seconds {
+                        let _ = crossfade_settings::save(self.fade_seconds);
+                    }
+                    ui.menu_button("Headphones", |ui| {
+                        self.headphone_output(ui);
+                    });
+                });
             },
         );
     }
@@ -675,6 +834,49 @@ mod tests {
                 });
                 output.textures_delta.clear();
             }
+        }
+    }
+    #[test]
+    fn reduced_window_keeps_readable_transport_and_a_visible_library() {
+        let ctx = egui::Context::default();
+        theme::apply(&ctx, theme::Theme::ModernDark);
+        let mut player = Player::default();
+        for (size, expanded, locked) in [
+            (egui::vec2(1000., 700.), false, false),
+            (egui::vec2(1000., 700.), false, true),
+            (egui::vec2(1000., 700.), true, false),
+            (egui::vec2(1280., 800.), false, false),
+            (egui::vec2(1570., 1000.), false, false),
+            (egui::vec2(1570., 1000.), true, false),
+        ] {
+            player.rack.expanded = expanded;
+            player.run.locked = locked;
+            for _ in 0..3 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |ui| player.group_ui(ui, 2),
+                );
+                output.textures_delta.clear();
+            }
+            let play = ctx
+                .data(|data| {
+                    data.get_temp::<egui::Rect>(egui::Id::unique(("rack-main-play", 0usize)))
+                })
+                .unwrap();
+            let library = ctx
+                .data(|data| data.get_temp::<f32>(egui::Id::unique("rack-library-top")))
+                .unwrap();
+            assert!(
+                play.height() >= 37.,
+                "Transport was shrunk at {size:?}: {play:?}"
+            );
+            assert!(
+                library <= size.y - 140.,
+                "The music browser was pushed out at {size:?}: {library}"
+            );
         }
     }
 }
