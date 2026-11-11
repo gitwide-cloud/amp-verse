@@ -25,7 +25,7 @@ Source of truth: REVISED_BUILD_SPEC.md. This milestone delivers desktop show con
 ## Remaining work
 
 - Packaged AMP Verse Companion module, importable pages/presets and SDK-specific feedback mappings; current integration uses Generic HTTP Requests and the documented API.
-- OSC/MIDI/Hercules and multi-deck hardware mappings.
+- Full hardware mappings, OSC, HID, scripted Mixxx adapters and LED feedback. Partial direct Mixxx MIDI XML import and native MIDI input are available; see CONTROLLERS.md. Physical hardware verification remains pending.
 - Music Scene editing/recall and prepared FX preset actions.
 - Automatic section/phrase/energy-curve classification and confidence-based choice among richer transition methods. Current transitions are the buffered crossfade fallback.
 - Saved-loop preparation/playback workflow and stem-level mixing; existing references/extensions remain preserved.

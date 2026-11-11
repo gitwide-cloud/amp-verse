@@ -48,7 +48,7 @@ impl Player {
                     0 => self.organized_music(ui,height),
                     1 => self.organized_smart(ui,height),
                     2 => self.organized_playlists(ui,height),
-                    3 => {ui.heading("Devices");ui.weak("Find AMP Cast servers on your LAN or connect by address.");self.cast.show(ui, &self.root, self.library.is_some() && self.scan.is_none());},
+                    3 => {egui::ScrollArea::vertical().max_height(height-50.).show(ui,|ui| {self.controllers.show(ui);ui.separator();ui.heading("AMP Cast devices");self.cast.show(ui, &self.root, self.library.is_some() && self.scan.is_none());});},
                     4 => {ui.heading("Playback history");ui.weak("Tracks started by this desktop session. A start does not mean the full track was played.");egui::ScrollArea::vertical().max_height(height-80.).show(ui,|ui|{for (deck,title) in self.playback_history.iter().rev(){ui.label(format!("Deck {}    {title}",deck+1));}if self.playback_history.is_empty(){ui.weak("Play a song to begin your session history.");}});},
                     5 => {ui.heading("Music sources");ui.label("Local folders and mounted network libraries");ui.label(self.root.display().to_string());ui.horizontal(|ui|{if ui.button("Browse music folder").clicked(){self.choose_folder();}
 if ui.add_enabled(self.scan.is_none(),egui::Button::new("Rescan")).clicked(){self.scan();}});ui.separator();ui.heading("Remote control");ui.label(&self.control_status);ui.label("Listen address");ui.text_edit_singleline(&mut self.control_bind);ui.label("Optional password");ui.add(egui::TextEdit::singleline(&mut self.control_password).password(true));ui.horizontal(|ui|{if ui.button("Start / restart control").clicked(){self.start_control(ui.ctx());}

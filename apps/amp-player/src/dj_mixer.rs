@@ -30,6 +30,9 @@ impl Default for Panel {
     }
 }
 impl Panel {
+    pub fn toggle_cue(&mut self, deck: usize) {
+        self.cue[deck] = !self.cue[deck];
+    }
     pub fn apply(&self, engine: &mixer::Engine) {
         let controls = &engine.controls;
         for d in 0..2 {

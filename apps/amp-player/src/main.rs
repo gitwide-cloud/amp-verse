@@ -9,6 +9,7 @@ use std::{
 mod addons;
 mod cast;
 mod control;
+mod controllers;
 mod crossfade_settings;
 mod dj_browser;
 mod dj_mixer;
@@ -146,6 +147,7 @@ struct Player {
     jog_resume: [Option<(bool, egui::ViewportId)>; 2],
     jog_angle: [f32; 2],
     mixer_panel: dj_mixer::Panel,
+    controllers: controllers::Panel,
     stem_panel: stems::Panel,
     eq_open: bool,
     fx_open: bool,
@@ -232,6 +234,7 @@ impl Default for Player {
             jog_resume: [None; 2],
             jog_angle: [0.; 2],
             mixer_panel: Default::default(),
+            controllers: Default::default(),
             stem_panel: Default::default(),
             eq_open: false,
             fx_open: false,
@@ -2136,9 +2139,8 @@ impl Player {
                                                 && let Some(audio) = &self.audio
                                             {
                                                 self.run.cancel_effects(audio);
-                                                for (stem, gain) in stems::remix_gains(knobs)
-                                                    .iter()
-                                                    .enumerate()
+                                                for (stem, gain) in
+                                                    stems::remix_gains(knobs).iter().enumerate()
                                                 {
                                                     audio.controls.stem_level[deck][stem].store(
                                                         gain.to_bits(),
@@ -2993,6 +2995,7 @@ impl eframe::App for Player {
         self.poll();
         self.release_jog_wheels(ui.ctx());
         self.poll_control();
+        self.poll_controllers();
         self.performance_tick();
         if let Some(c) = &self.control {
             c.publish(self.control_snapshot());
