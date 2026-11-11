@@ -1,5 +1,7 @@
 # Mixxx MIDI mapping import
 
+Physical timecode vinyl/DVS is a separate audio-input feature and is not implemented by this importer. The accepted vinyl-control requirement is tracked in VINYL_CONTROL.md.
+
 Desktop Library → Devices → DJ controllers → Import Mixxx mapping. Choose a `.midi.xml` file, expand the compatibility report, then find MIDI devices, choose the controller's MIDI input and press Connect supported controls. Disconnect before changing devices; reconnect after unplugging. Nothing connects automatically on startup. Saved imports live in the local `controllers.ampdb` file beside the player's settings, outside the shared music catalog.
 
 This is partial input-format compatibility, not the complete Mixxx controller runtime. Import accepts a single controller with schema 1 in either `MixxxMIDIPreset` or `MixxxControllerPreset` XML. It imports only recognized direct assignments and shows the skipped entries. XML is size/node bounded and DTDs/external entities are rejected. It does not evaluate JavaScript or read referenced script paths. Ambiguous duplicate MIDI assignments are skipped together. HID, SysEx, LED/output feedback, relative encoders, 14-bit paired CCs, deck layers, scripted jog wheels and unknown options need separate AMP adapters. Ordinary pitch-bend messages support their native 14-bit value. Mappings that use scripts may therefore have very few compatible controls.

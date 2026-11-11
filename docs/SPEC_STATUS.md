@@ -24,6 +24,7 @@ Source of truth: REVISED_BUILD_SPEC.md. This milestone delivers desktop show con
 
 ## Remaining work
 
+- Physical timecode vinyl/DVS and ordinary-record passthrough. Mouse scratch and partial MIDI XML import do not implement these; see VINYL_CONTROL.md for the accepted requirement and hardware verification gates.
 - Packaged AMP Verse Companion module, importable pages/presets and SDK-specific feedback mappings; current integration uses Generic HTTP Requests and the documented API.
 - Full hardware mappings, OSC, HID, scripted Mixxx adapters and LED feedback. Partial direct Mixxx MIDI XML import and native MIDI input are available; see CONTROLLERS.md. Physical hardware verification remains pending.
 - Music Scene editing/recall and prepared FX preset actions.
