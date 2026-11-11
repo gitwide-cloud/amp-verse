@@ -25,11 +25,11 @@ Source of truth: REVISED_BUILD_SPEC.md. This milestone delivers desktop show con
 ## Remaining work
 
 - Physical timecode vinyl/DVS and ordinary-record passthrough. Mouse scratch and partial MIDI XML import do not implement these; see VINYL_CONTROL.md for the accepted requirement and hardware verification gates.
-- Section-based click-to-mix workflow with reviewed downbeats and audio-clock scheduling. Flow 8 Deck was inspected as a behavior reference; see FLOW_REFERENCE.md. Existing cue candidates and tempo Sync do not implement this complete workflow.
+- Section preparation is now inline in Library: portable energy curves, editable neutral sections and explicit section-to-DJ handoffs. Two-deck Auto DJ selects entry sections by local energy. Reviewed downbeats, semantic section recognition and audio-clock phrase scheduling remain unfinished; see ENERGY_PREPARATION.md and FLOW_REFERENCE.md.
 - Packaged AMP Verse Companion module, importable pages/presets and SDK-specific feedback mappings; current integration uses Generic HTTP Requests and the documented API.
 - Full hardware mappings, OSC, HID, scripted Mixxx adapters and LED feedback. Partial direct Mixxx MIDI XML import and native MIDI input are available; see CONTROLLERS.md. Physical hardware verification remains pending.
 - Music Scene editing/recall and prepared FX preset actions.
-- Automatic section/phrase/energy-curve classification and confidence-based choice among richer transition methods. Current transitions are the buffered crossfade fallback.
+- Semantic section/phrase classification and confidence-based choice among richer transition methods. Energy curves and neutral 16-beat sections are implemented; they do not identify verses, choruses or musical downbeats.
 - Saved-loop preparation/playback workflow and stem-level mixing; existing references/extensions remain preserved.
 - Android consumption of the new portable store, manual local overrides and remote UI; no heavyweight Android analysis is introduced.
 - Cast background preparation/control-worker integration. Cast reads the shared portable preparation on startup, but the new show-control gateway performs desktop DJ audio, not a Cast stream.

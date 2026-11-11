@@ -14,6 +14,11 @@ struct Update {
 }
 #[derive(Default)]
 pub struct Preparer {
+    wave: crate::waveform::Lane,
+    position: f64,
+    zoom: Option<f64>,
+    section: Option<String>,
+    pub mix_section: Option<(PathBuf, String)>,
     compact_job: Option<mpsc::Receiver<Result<usize, String>>>,
     stem_panel: crate::stems::Panel,
     stem_preview: Option<crate::mixer::Engine>,
@@ -37,6 +42,365 @@ pub struct Preparer {
     skipped: usize,
 }
 impl Preparer {
+    fn dirty(&self) -> bool {
+        self.editing_revision
+            .as_deref()
+            .and_then(|b| serde_json::from_slice::<Preparation>(b).ok())
+            .unwrap_or_default()
+            != self.draft
+    }
+    pub fn prepare_panel(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &std::path::Path,
+        track: Option<&Track>,
+        library: Option<&mut Library>,
+    ) {
+        let Some(track) = track else {
+            ui.heading("Prepare music");
+            ui.weak("Select a song below to prepare its waveform and energy sections.");
+            return;
+        };
+        if !self.busy()
+            && !self.title.is_empty()
+            && (self.root != root || self.path != track.path)
+            && self.dirty()
+        {
+            ui.heading(format!("Unsaved preparation: {}", self.title));
+            ui.weak("Save or discard this draft before preparing another song. Select the original song below to keep editing.");
+            ui.horizontal(|ui| {
+                if ui.button("Save current draft").clicked() {
+                    let same = self.root == root;
+                    self.save_inline(if same { library } else { None });
+                }
+                if ui.button("Discard draft").clicked() {
+                    self.title.clear();
+                }
+            });
+            return;
+        }
+        if !self.busy() && (self.root != root || self.path != track.path || self.title.is_empty()) {
+            self.edit(root, track);
+            self.open = false;
+            self.position = 0.;
+            self.section = None;
+        }
+        if !self.busy()
+            && self.root == root
+            && self.path == track.path
+            && !self.dirty()
+            && self.draft != track.preparation
+        {
+            self.edit(root, track);
+            self.open = false;
+        }
+        if self.root != root || self.path != track.path {
+            ui.weak("Finish the current analysis before changing the prepared track.");
+            return;
+        }
+        ui.horizontal_wrapped(|ui| {
+            ui.heading(&self.title);
+            ui.label(format!(
+                "BPM {} · Key {}",
+                self.draft.bpm.map_or("—".into(), |b| format!("{b:.1}")),
+                self.draft.harmonic_key.as_deref().unwrap_or("—")
+            ));
+            if ui
+                .add_enabled(!self.busy(), egui::Button::new("Analyze track"))
+                .clicked()
+            {
+                self.total = 1;
+                self.done = 0;
+                self.failures = 0;
+                self.start(
+                    self.root.clone(),
+                    vec![Track {
+                        path: self.path.clone(),
+                        title: self.title.clone(),
+                        preparation: self.draft.clone(),
+                    }],
+                    true,
+                );
+            }
+            if ui
+                .add_enabled(!self.busy(), egui::Button::new("Save preparation"))
+                .clicked()
+            {
+                self.save_inline(library);
+            }
+        });
+        if amp_core::review::proposal(&self.draft)
+            .is_some_and(|p| amp_core::energy_profile::read(&p).is_some())
+            && ui
+                .button("Use suggested energy profile (keep my other corrections)")
+                .clicked()
+        {
+            match amp_core::review::decide(
+                &self.draft,
+                &[amp_core::energy_profile::FIELD.into()],
+                true,
+            ) {
+                Ok(p) => self.draft = p,
+                Err(e) => self.status = e,
+            }
+        }
+        let profile = amp_core::energy_profile::read(&self.draft);
+        let duration = profile
+            .as_ref()
+            .map(|p| p.duration)
+            .or(self.draft.analysis.as_ref().map(|a| a.duration))
+            .or(self.draft.cue_out)
+            .unwrap_or(32.)
+            .max(0.1);
+        ui.horizontal(|ui| {
+            if self.draft.bpm.is_some() && self.draft.beat_offset.is_none() {
+                ui.weak("Tempo estimated; align the beatgrid before beat-sensitive mixing.");
+            }
+            if ui.button("Full track").clicked() {
+                self.zoom = None;
+            }
+            if ui.button("Zoom to cursor").clicked() {
+                self.zoom = Some(16.);
+            }
+            if ui
+                .add_enabled(
+                    self.draft.bpm.is_some(),
+                    egui::Button::new("Align beat to cursor"),
+                )
+                .clicked()
+                && let Some(bpm) = self.draft.bpm
+            {
+                self.draft.beat_offset = Some(self.position.rem_euclid(60. / bpm));
+            }
+        });
+        self.wave.overview = self.zoom.is_none();
+        self.wave.height = Some(100.);
+        self.wave.show(
+            ui,
+            root,
+            Some(&Track {
+                path: self.path.clone(),
+                title: self.title.clone(),
+                preparation: self.draft.clone(),
+            }),
+            self.position,
+            self.zoom.unwrap_or(duration),
+            0,
+        );
+        if let Some(at) = self.wave.seek.take() {
+            self.position = at.min(duration);
+        }
+        if let Some(mut p) = profile {
+            let (rect, response) =
+                ui.allocate_exact_size(egui::vec2(ui.available_width(), 38.), egui::Sense::click());
+            for section in &p.sections {
+                let r = egui::Rect::from_min_max(
+                    egui::pos2(
+                        rect.left() + rect.width() * (section.start / duration) as f32,
+                        rect.top(),
+                    ),
+                    egui::pos2(
+                        rect.left() + rect.width() * (section.end / duration) as f32,
+                        rect.bottom(),
+                    ),
+                );
+                let color = egui::Color32::from_rgb(
+                    (70. + 180. * section.energy) as u8,
+                    (90. + 70. * section.energy) as u8,
+                    45,
+                );
+                ui.painter().rect_filled(r.shrink(1.), 3., color);
+                if r.width() > 25. {
+                    ui.painter().text(
+                        r.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{:.0}", 1. + section.energy * 9.),
+                        egui::FontId::proportional(13.),
+                        egui::Color32::WHITE,
+                    );
+                }
+                if self.section.as_deref() == Some(&section.id) {
+                    ui.painter().rect_stroke(
+                        r.shrink(1.),
+                        3.,
+                        egui::Stroke::new(2., crate::GOLD),
+                        egui::StrokeKind::Inside,
+                    );
+                }
+                if response.clicked()
+                    && response
+                        .interact_pointer_pos()
+                        .is_some_and(|point| r.contains(point))
+                {
+                    self.section = Some(section.id.clone());
+                    self.position = section.start;
+                }
+            }
+            let mut changed = false;
+            if let Some(section) = p
+                .sections
+                .iter_mut()
+                .find(|s| Some(&s.id) == self.section.as_ref())
+            {
+                ui.horizontal_wrapped(|ui| {
+                    changed |= ui
+                        .add(egui::TextEdit::singleline(&mut section.name).desired_width(140.))
+                        .changed();
+                    ui.label(format!("{:.1}–{:.1}s", section.start, section.end));
+                    let mut energy = 1. + section.energy * 9.;
+                    if ui
+                        .add(
+                            egui::DragValue::new(&mut energy)
+                                .range(1. ..=10.)
+                                .speed(0.1)
+                                .prefix("Energy "),
+                        )
+                        .changed()
+                    {
+                        section.energy = (energy - 1.) / 9.;
+                        changed = true;
+                    }
+                    if ui
+                        .add_enabled(!self.preview_blocked, egui::Button::new("Preview section"))
+                        .clicked()
+                    {
+                        self.preview = Some((self.path.clone(), section.start));
+                    }
+                    let dirty = self.dirty() || changed;
+                    if ui
+                        .add_enabled(!dirty, egui::Button::new("Mix this section into DJ"))
+                        .clicked()
+                    {
+                        self.mix_section =
+                            Some((self.path.clone(), format!("energy-section:{}", section.id)));
+                    }
+                });
+            } else {
+                ui.weak("Click a section to select its entry point. Numbers show local energy from 1–10.");
+            }
+            let split = p
+                .sections
+                .iter()
+                .position(|s| self.position > s.start + 0.25 && self.position < s.end - 0.25);
+            if ui
+                .add_enabled(
+                    split.is_some(),
+                    egui::Button::new("Split section at cursor"),
+                )
+                .clicked()
+                && let Some(index) = split
+            {
+                let mut next = p.sections[index].clone();
+                next.id = format!("section-{}", amp_core::coordination::token());
+                next.name = "New section".into();
+                next.start = self.position;
+                p.sections[index].end = self.position;
+                self.section = Some(next.id.clone());
+                p.sections.insert(index + 1, next);
+                changed = true;
+            }
+            if changed {
+                self.draft.extensions.insert(
+                    amp_core::energy_profile::FIELD.into(),
+                    serde_json::to_value(p).unwrap(),
+                );
+            }
+        } else {
+            ui.weak("Analyze this song to build its energy curve and editable sections. Existing cues remain protected.");
+        }
+        ui.horizontal_wrapped(|ui| {
+            let mut allowed = amp_core::energy_profile::mixing_allowed(&self.draft);
+            if ui
+                .checkbox(&mut allowed, "Auto DJ: use energy sections")
+                .changed()
+            {
+                self.draft
+                    .extensions
+                    .insert("energy_section_mixing".into(), serde_json::json!(allowed));
+            }
+            let mut bpm = self.draft.bpm.unwrap_or(0.);
+            if let Some(values) = self
+                .draft
+                .extensions
+                .get("tempo_alternatives")
+                .and_then(|v| v.as_array())
+                .cloned()
+            {
+                ui.label("BPM pulse:");
+                for value in values.iter().filter_map(|v| v.as_f64()) {
+                    if ui.small_button(format!("{value:.1}")).clicked() {
+                        self.draft.bpm = Some(value);
+                        bpm = value;
+                    }
+                }
+            }
+            if ui
+                .add(
+                    egui::DragValue::new(&mut bpm)
+                        .range(0. ..=300.)
+                        .speed(0.1)
+                        .prefix("BPM "),
+                )
+                .changed()
+            {
+                self.draft.bpm = (bpm > 0.).then_some(bpm);
+            }
+            let mut offset = self.draft.beat_offset.unwrap_or(0.);
+            if ui
+                .add(
+                    egui::DragValue::new(&mut offset)
+                        .range(0. ..=duration)
+                        .speed(0.01)
+                        .prefix("Beat offset ")
+                        .suffix(" s"),
+                )
+                .changed()
+            {
+                self.draft.beat_offset = Some(offset);
+            }
+            if ui.button("More cue / stem edits…").clicked() {
+                self.open = true;
+            }
+            ui.label(&self.status);
+        });
+    }
+    fn save_inline(&mut self, library: Option<&mut Library>) {
+        let mut proposed = self.draft.clone();
+        let allowed = amp_core::energy_profile::mixing_allowed(&proposed);
+        proposed
+            .extensions
+            .insert("energy_section_mixing".into(), serde_json::json!(allowed));
+        proposed.manual_override = true;
+        proposed.schema_version = Some(1);
+        if let Some(a) = &mut proposed.analysis {
+            a.reviewed = true;
+        }
+        match preparation::save_if_unchanged(
+            &self.root,
+            &self.path,
+            &proposed,
+            self.editing_revision.as_deref(),
+        ) {
+            Ok(()) => match preparation::load_with_revision(&self.root.join(&self.path)) {
+                Ok((p, revision)) => {
+                    self.draft = p;
+                    self.editing_revision = revision;
+                    if let Some(t) =
+                        library.and_then(|l| l.tracks.iter_mut().find(|t| t.path == self.path))
+                    {
+                        t.preparation = self.draft.clone();
+                    }
+                    self.status =
+                        "Preparation saved; playing decks keep their loaded snapshot.".into();
+                }
+                Err(e) => self.status = e,
+            },
+            Err(e) => {
+                self.status =
+                    format!("{e}. Draft retained here; reload/review before replacing shared data.")
+            }
+        }
+    }
     pub fn guard_preview(&mut self, blocked: bool) {
         self.preview_blocked = blocked;
         if blocked {

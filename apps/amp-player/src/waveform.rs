@@ -14,6 +14,8 @@ const BIN: usize = 160; // 20 ms, independent of device sample rate.
 #[derive(Default)]
 pub struct Lane {
     pub height: Option<f32>,
+    pub overview: bool,
+    pub seek: Option<f64>,
     path: Option<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
     rx: Option<mpsc::Receiver<Result<Vec<[f32; 2]>, String>>>,
@@ -140,19 +142,28 @@ impl Lane {
         };
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), self.height.unwrap_or(80.)),
-            egui::Sense::hover(),
+            egui::Sense::click(),
         );
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3., Color32::from_rgb(5, 7, 10));
         let graph = graph_rect(rect);
-        let start = position - span * 0.3;
+        let camera = if self.overview { span * 0.3 } else { position };
+        let start = camera - span * 0.3;
+        if response.clicked()
+            && let Some(at) = response.interact_pointer_pos()
+        {
+            self.seek =
+                Some((start + (at.x - rect.left()) as f64 / rect.width() as f64 * span).max(0.));
+        }
         if let Some(t) = track {
-            if let Some(bpm) = t.preparation.bpm.filter(|b| *b > 0.) {
+            if let (Some(bpm), Some(offset)) = (
+                t.preparation.bpm.filter(|b| *b > 0.),
+                t.preparation.beat_offset,
+            ) {
                 let beat = 60. / bpm;
-                let offset = t.preparation.beat_offset.unwrap_or(0.);
                 let first = ((start - offset) / beat).ceil().max(0.) as usize;
                 for n in first..first + ((span / beat).ceil() as usize).min(1024) {
-                    let x = time_x(offset + n as f64 * beat, position, span, rect);
+                    let x = time_x(offset + n as f64 * beat, camera, span, rect);
                     painter.line_segment(
                         [egui::pos2(x, graph.top()), egui::pos2(x, graph.bottom())],
                         Stroke::new(1., Color32::from_gray(35)),
@@ -161,9 +172,12 @@ impl Lane {
             }
             let lo = (start.max(0.) * 50.) as usize;
             let hi = (((start + span).max(0.) * 50.).ceil() as usize).min(self.peaks.len());
-            for i in lo..hi {
-                let x = time_x(i as f64 / 50., position, span, rect);
-                let p = self.peaks[i];
+            let stride = ((span * 50. / rect.width().max(1.) as f64).ceil() as usize).max(1);
+            for i in (lo..hi).step_by(stride) {
+                let x = time_x(i as f64 / 50., camera, span, rect);
+                let p = self.peaks[i..(i + stride).min(hi)]
+                    .iter()
+                    .fold([0f32; 2], |a, b| [a[0].min(b[0]), a[1].max(b[1])]);
                 painter.line_segment(
                     [
                         egui::pos2(
@@ -177,6 +191,25 @@ impl Lane {
                     ],
                     Stroke::new((rect.width() / (span as f32 * 50.)).max(1.), color),
                 );
+            }
+            if self.overview
+                && let Some(profile) = amp_core::energy_profile::read(&t.preparation)
+            {
+                let points: Vec<_> = profile
+                    .curve
+                    .iter()
+                    .enumerate()
+                    .map(|(i, e)| {
+                        egui::pos2(
+                            time_x((i as f64 + 0.5) * profile.step, camera, span, rect),
+                            graph.bottom() - *e as f32 * graph.height(),
+                        )
+                    })
+                    .collect();
+                painter.add(egui::Shape::line(
+                    points,
+                    Stroke::new(1.5, Color32::LIGHT_GREEN),
+                ));
             }
             let mut markers: Vec<(f64, &str, Color32)> = t
                 .preparation
@@ -207,7 +240,7 @@ impl Lane {
             markers.sort_by(|a, b| a.0.total_cmp(&b.0));
             let mut label_edge = [f32::NEG_INFINITY; 2];
             for (i, (seconds, label, c)) in markers.iter().enumerate() {
-                let x = time_x(*seconds, position, span, rect);
+                let x = time_x(*seconds, camera, span, rect);
                 if rect.x_range().contains(x) {
                     painter.line_segment(
                         [
@@ -243,7 +276,7 @@ impl Lane {
                 }
             }
         }
-        let playhead = time_x(position, position, span, rect);
+        let playhead = time_x(position, camera, span, rect);
         painter.line_segment(
             [
                 egui::pos2(playhead, rect.top() + 16.),

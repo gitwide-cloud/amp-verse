@@ -357,6 +357,12 @@ impl Player {
     fn cue_seconds(&self, index: usize, cue: &str) -> Result<f64, String> {
         let track = self.fresh_track(index)?;
         let p = &track.preparation;
+        if let Some(id) = cue.strip_prefix("energy-section:")
+            && let Some(profile) = amp_core::energy_profile::read(p)
+            && let Some(section) = profile.sections.iter().find(|s| s.id == id)
+        {
+            return Ok(section.start);
+        }
         let cues: Vec<_> = p.manual_cues.iter().chain(&p.cues).collect();
         if let Ok(number) = cue.parse::<u16>() {
             return p
@@ -413,6 +419,25 @@ impl Player {
             })
         {
             track.preparation.cue_in = c.seconds;
+        } else if self.run.profile.is_some()
+            && amp_core::energy_profile::mixing_allowed(&track.preparation)
+            && let Some(profile) = amp_core::energy_profile::read(&track.preparation)
+            && let Some(target) = self
+                .run
+                .progression
+                .as_ref()
+                .map(|p| p.next())
+                .or(self.run.target)
+                .map(|e| ((e - 1.) / 9.).clamp(0., 1.))
+                .or_else(|| self.exit_energy())
+            && let Some(section) = profile.entry(
+                target,
+                amp_core::energy_profile::entry_bound(&track.preparation),
+                track.preparation.cue_out.unwrap_or(profile.duration),
+                (self.fade_seconds as f64 * 2.).max(8.),
+            )
+        {
+            track.preparation.cue_in = section.start;
         }
         track.preparation.validate()?;
         self.ensure_audio()?;
@@ -424,7 +449,7 @@ impl Player {
             .unwrap_or(1.)
             .clamp(0.84, 1.16);
         // Match only the incoming voice. Never change the sounding deck or saved metadata.
-        let matched_rate = if self.run.profile.is_some()
+        let matched_rate = if (self.run.profile.is_some() || execution == Execution::AutoFade)
             && d != active
             && self.audio.as_ref().is_some_and(|a| a.playing(active))
         {
@@ -542,9 +567,16 @@ impl Player {
         }
         loop {
             let tracks = &self.library.as_ref().ok_or("Library unavailable")?.tracks;
+            let mut snapshot = self
+                .loaded_track(self.active_deck())
+                .map(|t| t.preparation.clone());
+            if let (Some(p), Some(energy)) = (&mut snapshot, self.exit_energy()) {
+                p.extensions
+                    .insert("energy".into(), serde_json::json!(energy));
+            }
             let index = show::choose_with_snapshot(
                 &p, tracks, current, &recent, target, alternate,
-                self.loaded_track(self.active_deck()).map(|t| &t.preparation),
+                snapshot.as_ref(),
             ).ok_or("Auto Mix stopped: no playable next song matches this playlist's source and repeat rules")?;
             match self.call_track(index, None, Deck::Auto, Execution::LoadOnly) {
                 Ok(()) => return Ok(()),
@@ -1052,6 +1084,16 @@ impl Player {
         }
         Ok(())
     }
+    fn exit_energy(&self) -> Option<f64> {
+        let active = self.active_deck();
+        let t = self.loaded_track(active)?;
+        let profile = amp_core::energy_profile::read(&t.preparation)?;
+        let end = t.preparation.cue_out.unwrap_or(profile.duration);
+        profile.at(
+            (end - self.fade_seconds as f64 * (1. + self.pitch[active] as f64 / 100.))
+                .max(t.preparation.cue_in),
+        )
+    }
     fn current_energy(&self) -> Option<f64> {
         let active = self.active_deck();
         if !self
@@ -1061,8 +1103,16 @@ impl Player {
         {
             return None;
         }
-        self.loaded_track(active)
-            .and_then(|t| show::energy(&t.preparation))
+        self.loaded_track(active).and_then(|t| {
+            amp_core::energy_profile::read(&t.preparation)
+                .and_then(|p| {
+                    self.audio
+                        .as_ref()
+                        .and_then(|a| p.at(a.source_position(active)))
+                })
+                .map(|e| 1. + e * 9.)
+                .or_else(|| show::energy(&t.preparation))
+        })
     }
     pub(super) fn performance_tick(&mut self) {
         // Every temporary effect must release its transport when automation stops.
@@ -1350,6 +1400,79 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "uses AMP_ENERGY_FIXTURE_ROOT and native audio; both channels muted"]
+    fn real_energy_profile_two_deck_handoff_preserves_preparation_and_keeps_auto_running() {
+        let root = std::path::PathBuf::from(std::env::var_os("AMP_ENERGY_FIXTURE_ROOT").unwrap());
+        let mut library = amp_core::scan(&root).unwrap();
+        library.tracks.retain(|t| t.preparation.bpm.is_some());
+        assert!(library.tracks.len() >= 2);
+        let before: Vec<_> = library
+            .tracks
+            .iter()
+            .map(|t| amp_core::preparation::revision(&root.join(&t.path)))
+            .collect();
+        let mut player = Player {
+            root: root.clone(),
+            library: Some(library),
+            channel_gain: [0.; 2],
+            fade_seconds: 0.75,
+            ..Default::default()
+        };
+        player.run.profile = Some(player.run.settings.playlists[0].clone());
+        player.run.target = Some(7.);
+        let first = show::song_id(&player.library.as_ref().unwrap().tracks[0]);
+        let second = show::song_id(&player.library.as_ref().unwrap().tracks[1]);
+        player
+            .execute_control(Action::CallSong {
+                song: first,
+                cue: None,
+                deck: Deck::A,
+                execution: Execution::PlayNow,
+            })
+            .unwrap();
+        wait(&mut player, |p| {
+            p.audio.as_ref().is_some_and(|a| a.position(0) > 0.1)
+        });
+        player.run.auto = true;
+        player
+            .execute_control(Action::CallSong {
+                song: second,
+                cue: None,
+                deck: Deck::B,
+                execution: Execution::AutoFade,
+            })
+            .unwrap();
+        let t = &player.library.as_ref().unwrap().tracks[1];
+        let profile = amp_core::energy_profile::read(&t.preparation)
+            .expect("analyze fixture with engine v4 first");
+        let expected = profile
+            .entry(
+                (7. - 1.) / 9.,
+                amp_core::energy_profile::entry_bound(&t.preparation),
+                t.preparation.cue_out.unwrap_or(profile.duration),
+                8.,
+            )
+            .unwrap()
+            .start;
+        assert!((player.loaded_track(1).unwrap().preparation.cue_in - expected).abs() < 0.001);
+        let outgoing = player.loaded_track(0).unwrap().preparation.bpm.unwrap();
+        let incoming = player.loaded_track(1).unwrap().preparation.bpm.unwrap();
+        assert!((incoming * (1. + player.pitch[1] as f64 / 100.) - outgoing).abs() < 0.01);
+        wait(&mut player, |p| p.run.completed_handoffs == 1);
+        assert!(player.run.auto);
+        assert!(player.audio.as_ref().unwrap().playing(1));
+        assert_eq!(player.fade_seconds, 0.75);
+        for (i, t) in player.library.as_ref().unwrap().tracks.iter().enumerate() {
+            assert_eq!(
+                amp_core::preparation::revision(&root.join(&t.path)),
+                before[i]
+            );
+        }
+        println!(
+            "Energy section handoff completed on two decks; entry {expected:.2}s, Auto DJ retained, metadata unchanged"
+        );
+    }
     #[test]
     fn stem_handoff_preserves_muted_parts_and_brings_in_vocals_before_backing() {
         let original = [[0., 0.7, 1.], [0.8, 0., 0.6]];

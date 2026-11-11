@@ -6,6 +6,7 @@ pub mod batch;
 pub mod catalog_db;
 pub mod coordination;
 pub mod discovery;
+pub mod energy_profile;
 pub mod engine_api;
 pub mod offline;
 pub mod preparation;
@@ -68,6 +69,7 @@ impl Preparation {
         }
         preparation::validate(self)?;
         stem_mix::knobs(self)?;
+        energy_profile::validate(self)?;
         Ok(())
     }
 }

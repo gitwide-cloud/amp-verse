@@ -425,6 +425,46 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
         });
     }
     fn organized_music(&mut self, ui: &mut egui::Ui, height: f32) {
+        if self.selected.is_none() && self.library.as_ref().is_some_and(|l| !l.tracks.is_empty()) {
+            self.selected = Some(0);
+        }
+        let track = self
+            .selected
+            .and_then(|i| self.library.as_ref()?.tracks.get(i))
+            .cloned();
+        let prepare_height = (height * 0.4).clamp(150., 300.);
+        skin::panel(ui, false, |ui| {
+            egui::ScrollArea::vertical()
+                .id_salt("inline-prepare-panel")
+                .max_height(prepare_height)
+                .show(ui, |ui| {
+                    self.preparer.prepare_panel(
+                        ui,
+                        &self.root,
+                        track.as_ref(),
+                        self.library.as_mut(),
+                    );
+                });
+        });
+        if let Some((path, section)) = self.preparer.mix_section.take()
+            && let Some(t) = self
+                .library
+                .as_ref()
+                .and_then(|l| l.tracks.iter().find(|t| t.path == path))
+        {
+            let song = amp_core::show::song_id(t);
+            if let Err(e) = self.execute_control(control::Action::CallSong {
+                song,
+                cue: Some(section),
+                deck: control::Deck::Auto,
+                execution: control::Execution::AutoFade,
+            }) {
+                self.status = e;
+            } else {
+                self.dj_open = true;
+            }
+        }
+        let height = (height - prepare_height - 24.).max(180.);
         ui.horizontal(|ui| {
             let (search_icon, _) =
                 ui.allocate_exact_size(egui::vec2(24., 24.), egui::Sense::hover());
@@ -465,11 +505,16 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                     });
                     let mut play = None;
                     let mut edit = None;
+                    let list_height = if self.queue.is_empty() {
+                        (height - 120.).max(80.)
+                    } else {
+                        height * 0.34
+                    };
                     egui::ScrollArea::both()
                         .auto_shrink([false, false])
                         .id_salt("organized-tracks")
-                        .max_height(height * 0.34)
-                        .min_scrolled_height(height * 0.34)
+                        .max_height(list_height)
+                        .min_scrolled_height(list_height)
                         .show(ui, |ui| {
                             egui::Grid::new("organized-track-grid")
                                 .striped(true)
@@ -574,14 +619,6 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                             }
                         }
                     });
-                    egui::CollapsingHeader::new("Selected track waveform").show(ui, |ui| {
-                        let track = self
-                            .selected
-                            .and_then(|i| self.library.as_ref()?.tracks.get(i));
-                        let position = track.map_or(0., |t| t.preparation.cue_in);
-                        self.preview_wave
-                            .show(ui, &self.root, track, position, 32., 0);
-                    });
                     if let Some(i) = play {
                         self.play(0, i);
                         if let Some(a) = &self.audio {
@@ -592,7 +629,12 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                         self.preparer.edit(&self.root, track);
                     }
                 });
-                self.organized_queue(ui, (height * 0.28 - 54.).max(60.));
+                if self.queue.is_empty() {
+                    egui::CollapsingHeader::new("Playlist queue · 0 tracks")
+                        .show(ui, |ui| self.organized_queue(ui, 100.));
+                } else {
+                    self.organized_queue(ui, (height * 0.28 - 54.).max(60.));
+                }
             });
         });
     }

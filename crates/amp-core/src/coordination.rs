@@ -46,7 +46,16 @@ impl Lock {
         // Short record maintenance may briefly overlap another writer/process handoff.
         // Retry only contention; filesystem errors still fail immediately, and callers
         // must still perform their revision/ownership checks after obtaining the lock.
-        let deadline = std::time::Instant::now() + Duration::from_millis(250);
+        let catalog = record
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| matches!(n, "catalog-publication" | "catalog-migration"));
+        let deadline = std::time::Instant::now()
+            + if catalog {
+                Duration::from_secs(5)
+            } else {
+                Duration::from_millis(250)
+            };
         loop {
             if let Some(lock) = Self::try_acquire(record)? {
                 return Ok(lock);
@@ -54,7 +63,7 @@ impl Lock {
             if std::time::Instant::now() >= deadline {
                 return Err("Shared record busy; retry after reloading".into());
             }
-            std::thread::sleep(Duration::from_millis(2));
+            std::thread::sleep(Duration::from_millis(if catalog { 10 } else { 2 }));
         }
     }
     fn try_acquire(record: &Path) -> Result<Option<Self>, String> {

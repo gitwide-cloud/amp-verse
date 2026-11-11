@@ -129,6 +129,44 @@ mod rhythm;
 fn tempo(energy: &[f64]) -> (Option<f64>, Option<f64>, f64) {
     rhythm::estimate(energy, RATE / BLOCK as f64)
 }
+fn windowed_tempo(energy: &[f64]) -> (Option<f64>, Option<f64>, f64) {
+    let width = (RATE / BLOCK as f64 * 20.).round() as usize;
+    let votes: Vec<_> = energy
+        .chunks(width)
+        .filter_map(|part| {
+            let (bpm, _, confidence) = tempo(part);
+            bpm.map(|b| (if b > 160. { b / 2. } else { b }, confidence))
+        })
+        .collect();
+    if votes.len() < 2 {
+        return (None, None, 0.);
+    }
+    let best = votes
+        .iter()
+        .max_by_key(|(b, _)| {
+            votes
+                .iter()
+                .filter(|(other, _)| (other / b - 1.).abs() < 0.02)
+                .count()
+        })
+        .unwrap()
+        .0;
+    let mut cluster: Vec<_> = votes
+        .iter()
+        .filter(|(b, _)| (b / best - 1.).abs() < 0.02)
+        .copied()
+        .collect();
+    if cluster.len() < 2 || cluster.len() * 2 < votes.len() {
+        return (None, None, 0.);
+    }
+    cluster.sort_by(|a, b| a.0.total_cmp(&b.0));
+    // Local tempo agreement does not establish a phase-stable full-song beatgrid.
+    (
+        Some(cluster[cluster.len() / 2].0),
+        None,
+        cluster.iter().map(|(_, c)| c).sum::<f64>() / votes.len() as f64,
+    )
+}
 fn result(
     energy: &[f64],
     rhythmic: &[f64],
@@ -143,7 +181,29 @@ fn result(
         .position(|v| *v > threshold)
         .ok_or("No audible audio found")?;
     let last = energy.iter().rposition(|v| *v > threshold).unwrap();
-    let (bpm, offset, tempo_confidence) = tempo(rhythmic);
+    let mut high = tempo(rhythmic);
+    let mut broad = tempo(energy);
+    if high.0.is_none() {
+        high = windowed_tempo(rhythmic);
+    }
+    if broad.0.is_none() {
+        broad = windowed_tempo(energy);
+    }
+    // Bass/body onsets can be more stable than high-frequency hats on sparse tracks.
+    let (mut bpm, offset, tempo_confidence) =
+        if broad.0.is_some() && (high.0.is_none() || broad.2 > high.2 + 0.05) {
+            broad
+        } else {
+            high
+        };
+    let mut alternatives = Vec::new();
+    if let Some(value) = bpm
+        && value > 160.
+    {
+        alternatives.push(value);
+        alternatives.push(value / 2.);
+        bpm = Some(value / 2.); // Display the slower pulse; the double-time candidate remains reviewable.
+    }
     let (key, harmonic_key, key_confidence) = key(chroma);
     let audio_start = first as f64 * BLOCK as f64 / RATE;
     let mut energy_cues = energy_cues::candidates(energy, first, last);
@@ -158,6 +218,23 @@ fn result(
         .map_or(audio_start, |(seconds, _)| *seconds);
     let cue_out = ((last + 1) as f64 * BLOCK as f64 / RATE).min(duration);
     let mut p = existing.clone();
+    if !alternatives.is_empty() {
+        p.extensions
+            .insert("tempo_alternatives".into(), serde_json::json!(alternatives));
+    }
+    {
+        p.extensions.insert(
+            crate::energy_profile::FIELD.into(),
+            serde_json::to_value(crate::energy_profile::build(
+                energy,
+                RATE / BLOCK as f64,
+                duration,
+                bpm,
+                offset,
+            ))
+            .map_err(|e| e.to_string())?,
+        );
+    }
     p.schema_version = Some(1);
     // Relative loudness/activity proxy, not a calibrated perceptual energy detector.
     if !p.extensions.contains_key("energy") {
@@ -493,6 +570,8 @@ mod tests {
         assert_eq!(p.analysis, existing.analysis);
         assert_eq!(p.extensions["loops"], existing.extensions["loops"]);
         assert!(crate::review::proposal(&p).is_some());
+        assert!(!p.extensions.contains_key(crate::energy_profile::FIELD));
+        assert!(crate::energy_profile::read(&crate::review::proposal(&p).unwrap()).is_some());
         assert!(!crate::review::changes(&p).is_empty());
     }
     #[test]

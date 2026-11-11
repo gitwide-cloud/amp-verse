@@ -243,31 +243,50 @@ pub fn choose_with_snapshot(
         return None;
     }
     let wanted = target.or(p.target_energy).or(playing.and_then(energy));
-    candidates.sort_by(|(a, x), (b, y)| {
-        let score = |t: &Track| {
-            let e = match (wanted, energy(&t.preparation)) {
-                (Some(a), Some(b)) => (a - b).abs(),
-                _ => 3.,
+    let score = |t: &Track| {
+        let mut prepared = t.preparation.clone();
+        if let Some(profile) = crate::energy_profile::read(&prepared) {
+            let entry = if !crate::energy_profile::mixing_allowed(&prepared) {
+                profile.at(prepared.cue_in)
+            } else {
+                profile
+                    .entry(
+                        wanted.map_or(0.5, |e| (e - 1.) / 9.),
+                        crate::energy_profile::entry_bound(&prepared),
+                        prepared.cue_out.unwrap_or(profile.duration),
+                        8.,
+                    )
+                    .map(|s| s.energy)
             };
-            let tempo = playing
-                .and_then(|p| p.bpm)
-                .zip(t.preparation.bpm)
-                .map_or(1., |(a, b)| (a / b).ln().abs() * 5.);
-            e + tempo
-                + playing.map_or(1., |p| {
-                    crate::smart::cost(p, &t.preparation, wanted.map(|e| (e - 1.) / 9.))
-                })
-                - if p.preferred.contains(&song_id(t)) {
-                    0.25
-                } else {
-                    0.
-                }
+            if let Some(e) = entry {
+                prepared
+                    .extensions
+                    .insert("energy".into(), serde_json::json!(e));
+            }
+        }
+        let e = match (wanted, energy(&prepared)) {
+            (Some(a), Some(b)) => (a - b).abs(),
+            _ => 3.,
         };
-        score(x).total_cmp(&score(y)).then(a.cmp(b))
-    });
-    candidates
-        .get(alternate.min(candidates.len().saturating_sub(1)))
-        .map(|(i, _)| *i)
+        let tempo = playing
+            .and_then(|p| p.bpm)
+            .zip(t.preparation.bpm)
+            .map_or(1., |(a, b)| (a / b).ln().abs() * 5.);
+        e + tempo
+            + playing.map_or(1., |p| {
+                crate::smart::cost(p, &prepared, wanted.map(|e| (e - 1.) / 9.))
+            })
+            - if p.preferred.contains(&song_id(t)) {
+                0.25
+            } else {
+                0.
+            }
+    };
+    let mut scored: Vec<_> = candidates.iter().map(|(i, t)| (score(t), *i)).collect();
+    scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
+    scored
+        .get(alternate.min(scored.len().saturating_sub(1)))
+        .map(|(_, i)| *i)
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Progression {
@@ -307,6 +326,34 @@ impl Progression {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn selection_uses_entry_section_energy_instead_of_only_song_average() {
+        let make = |name: &str, average: f64, local: f64| {
+            let mut p = Preparation {
+                bpm: Some(120.),
+                cue_out: Some(60.),
+                ..Default::default()
+            };
+            p.extensions
+                .insert("energy".into(), serde_json::json!(average));
+            p.extensions.insert("energy_profile".into(),serde_json::json!({"version":1,"duration":60.,"step":2.,"curve":[local],"sections":[{"id":"one","name":"Main","start":0.,"end":60.,"energy":local}]}));
+            Track {
+                path: name.into(),
+                title: name.into(),
+                preparation: p,
+            }
+        };
+        let tracks = vec![
+            make("current.wav", 0.8, 0.8),
+            make("matched-section.wav", 0.1, 0.8),
+            make("wrong-section.wav", 0.8, 0.1),
+        ];
+        let profile = Settings::default().playlists.remove(0);
+        assert_eq!(
+            choose(&profile, &tracks, Some(0), &[], Some(8.2), 0),
+            Some(1)
+        );
+    }
     #[test]
     fn allow_exclude_and_recent_fallback_are_enforced() {
         let tracks = vec![

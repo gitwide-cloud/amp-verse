@@ -1,6 +1,7 @@
 //! Explicit field-level review; analysis never grants itself permission to replace approved data.
 use crate::Preparation;
-const FIELDS: [&str; 9] = [
+const FIELDS: [&str; 10] = [
+    "energy_profile",
     "cue_in",
     "cue_out",
     "bpm",
