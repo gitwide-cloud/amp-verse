@@ -30,6 +30,10 @@ fn run() -> Result<(), String> {
         println!("{}", amp_core::storage::export_rules(&root)?.display());
         return Ok(());
     }
+    if args.clone().any(|arg| arg == "--fence-catalog") {
+        amp_core::catalog_db::fence_legacy_clients(&root)?;
+        return Ok(());
+    }
     let mut requested = 0;
     let mut force = false;
     let mut watch = None;

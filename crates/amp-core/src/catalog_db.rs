@@ -11,6 +11,27 @@ fn error(e: impl std::fmt::Display) -> String {
 pub fn path(root: &Path) -> PathBuf {
     root.join("ampdj/catalog.ampdb")
 }
+/// Older JSON-only clients reject identity version 2 instead of creating stale metadata.
+pub fn fence_legacy_clients(root: &Path) -> Result<(), String> {
+    if !path(root).is_file() {
+        return Err("No converted catalog to protect".into());
+    }
+    let file = root.join("ampdj/library.json");
+    let _lock = crate::coordination::Lock::acquire(&file)?;
+    let mut value: serde_json::Value =
+        serde_json::from_slice(&fs::read(&file).map_err(error)?).map_err(error)?;
+    if !matches!(value["version"].as_u64(), Some(1 | 2))
+        || value["id"]
+            .as_str()
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .is_none()
+    {
+        return Err("Invalid library identity; unchanged".into());
+    }
+    value["version"] = serde_json::json!(2);
+    value["store"] = serde_json::json!("catalog.ampdb");
+    crate::coordination::atomic_write(&file, &value)
+}
 pub fn location(document: &Path) -> Option<(PathBuf, String)> {
     let root = crate::storage::root_for(document);
     let relative = document.strip_prefix(root.join("ampdj")).ok()?;
@@ -220,6 +241,7 @@ pub fn compact(root: &Path) -> Result<usize, String> {
     let canonical = root.canonicalize().map_err(error)?;
     let root = canonical.as_path();
     crate::storage::enroll(root)?;
+    crate::coordination::library_id(root)?;
     let _migration = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-migration"))?;
     let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
     if path(root).exists() {
@@ -338,6 +360,7 @@ pub fn compact(root: &Path) -> Result<usize, String> {
     }
     transaction.commit().map_err(error)?;
     publish(root, dir, db)?;
+    fence_legacy_clients(root)?;
     // The immutable recovery table retains the imported values before retiring loose JSON.
     // Never remove lock/lease files, source music, or a file changed by an older client.
     for (key, document) in &rows {
@@ -362,6 +385,16 @@ pub fn compact(root: &Path) -> Result<usize, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fresh_catalog_keeps_identity_and_demo_without_analysis() {
+        let root = tempfile::tempdir().unwrap();
+        assert_eq!(compact(root.path()).unwrap(), 0);
+        let id = crate::coordination::library_id(root.path()).unwrap();
+        assert_eq!(crate::coordination::library_id(root.path()).unwrap(), id);
+        let settings = crate::show::Settings::load(root.path()).unwrap();
+        assert_eq!(settings.playlists.len(), 1);
+        assert_eq!(settings.playlists[0].name, "Demo");
+    }
     #[test]
     fn local_database_retains_revisions_and_cues_without_a_server() {
         let root = tempfile::tempdir().unwrap();

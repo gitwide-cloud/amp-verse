@@ -161,7 +161,12 @@ fn identity(path: &Path) -> Result<String, String> {
     directory(path.parent().ok_or("Identity needs a parent")?)?;
     // Existing identities are immutable; avoid lock contention for ordinary reads.
     if let Some(id) = read::<Identity>(path)? {
-        if id.version != 1 || uuid::Uuid::parse_str(&id.id).is_err() {
+        let supported = id.version == 1
+            || (id.version == 2
+                && path
+                    .parent()
+                    .is_some_and(|p| p.join("catalog.ampdb").is_file()));
+        if !supported || uuid::Uuid::parse_str(&id.id).is_err() {
             return Err("Unsupported identity record".into());
         }
         return Ok(id.id);
