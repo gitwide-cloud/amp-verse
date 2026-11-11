@@ -9,6 +9,7 @@ import java.util.*;
 
 /** Iterative SAF tree traversal: chosen folder only, no storage-wide permission. */
 final class FolderScanner {
+    private static final ThreadLocal<Map<String,String>> packed = ThreadLocal.withInitial(HashMap::new);
     private static final ThreadLocal<Map<String,String>> paths = ThreadLocal.withInitial(HashMap::new);
     private static Uri child(ContentResolver resolver, Uri parent, String name)throws IOException {
         String id=DocumentsContract.getDocumentId(parent);
@@ -18,6 +19,7 @@ final class FolderScanner {
     }
     static String preparation(ContentResolver resolver,Uri tree,Uri audio)throws Exception {
         String relative=paths.get().get(audio.toString()); if(relative==null)return null;
+        String value=packed.get().get("tracks/"+relative+".json");if(value!=null)return value;
         Uri current=DocumentsContract.buildDocumentUriUsingTree(tree,DocumentsContract.getTreeDocumentId(tree));
         current=child(resolver,current,"ampdj"); if(current==null)return null;
         current=child(resolver,current,"tracks"); if(current==null)return null;
@@ -30,6 +32,23 @@ final class FolderScanner {
         }
     }
 
+    static void catalog(android.content.Context context,Uri tree)throws Exception {
+        packed.get().clear();
+        ContentResolver resolver=context.getContentResolver();
+        Uri root=DocumentsContract.buildDocumentUriUsingTree(tree,DocumentsContract.getTreeDocumentId(tree));
+        Uri folder=child(resolver,root,"ampdj");if(folder==null)return;
+        Uri catalog=child(resolver,folder,"catalog.ampdb");if(catalog==null)return;
+        java.io.File copy=java.io.File.createTempFile("amp-catalog-",".ampdb",context.getCacheDir());
+        try {
+            try(java.io.InputStream input=resolver.openInputStream(catalog);java.io.OutputStream output=new java.io.FileOutputStream(copy)) {
+                if(input==null)throw new IOException("Cannot read catalog");byte[] buffer=new byte[65536];int count;long total=0;
+                while((count=input.read(buffer))!=-1){total+=count;if(total>512L*1024*1024)throw new IOException("Catalog too large");output.write(buffer,0,count);}
+            }
+            try(android.database.sqlite.SQLiteDatabase db=android.database.sqlite.SQLiteDatabase.openDatabase(copy.getPath(),null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY);Cursor c=db.rawQuery("SELECT key,document FROM records WHERE key LIKE 'tracks/%'",null)) {
+                while(c.moveToNext()){String value=c.getString(1);org.json.JSONObject prep=new org.json.JSONObject(value);double cue=prep.optDouble("cue_in",0);if(!Double.isFinite(cue)||cue<0)throw new IOException("Invalid catalog cue");packed.get().put(c.getString(0),value);}
+            }
+        } finally {copy.delete();}
+    }
     static boolean audio(String name,String mime) {
         if(mime!=null&&mime.startsWith("audio/"))return true;
         return name!=null&&name.toLowerCase(Locale.ROOT).matches(".*\\.(mp3|wav|flac|ogg|opus|m4a|aac|aif|aiff|amr|wma)");

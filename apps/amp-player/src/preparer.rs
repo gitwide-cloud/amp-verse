@@ -14,6 +14,7 @@ struct Update {
 }
 #[derive(Default)]
 pub struct Preparer {
+    compact_job: Option<mpsc::Receiver<Result<usize, String>>>,
     stem_panel: crate::stems::Panel,
     stem_preview: Option<crate::mixer::Engine>,
     pub preview_blocked: bool,
@@ -46,7 +47,42 @@ impl Preparer {
         (self.done, self.total)
     }
     pub fn busy(&self) -> bool {
-        self.job.is_some()
+        self.job.is_some() || self.compact_job.is_some()
+    }
+    pub fn catalog_ui(&mut self, ui: &mut egui::Ui, root: &std::path::Path, blocked: bool) {
+        if let Some(rx) = &self.compact_job
+            && let Ok(result) = rx.try_recv()
+        {
+            self.status=result.map_or_else(|e|e,|n|format!("Consolidated {n} records. Catalog database ready; recovery values retained inside the database."));
+            self.compact_job = None;
+        }
+        ui.heading("Portable catalog");
+        ui.weak("One local catalog file for song analysis, cues and playlists. No database server needed. Close other AMP versions before converting a shared library.");
+        if amp_core::catalog_db::path(root).is_file() {
+            ui.label("This library uses ampdj/catalog.ampdb");
+        } else if ui
+            .add_enabled(
+                !blocked && !self.busy(),
+                egui::Button::new("Consolidate catalog into one file"),
+            )
+            .clicked()
+        {
+            let root = root.to_path_buf();
+            let (tx, rx) = mpsc::channel();
+            self.compact_job = Some(rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(amp_core::catalog_db::compact(&root));
+            });
+        }
+        if self.compact_job.is_some() {
+            ui.spinner();
+            ui.ctx()
+                .request_repaint_after(std::time::Duration::from_millis(100));
+        }
+        if blocked {
+            ui.weak("Stop playback and stem preparation before converting.");
+        }
+        ui.label(&self.status);
     }
     pub fn edit(&mut self, root: &std::path::Path, track: &Track) {
         self.stem_preview = None;

@@ -8,6 +8,9 @@ pub enum Style {
     Scratch,
     Stutter,
     Brake,
+    Filter,
+    BassSwap,
+    Beatmatch,
 }
 impl Style {
     pub fn label(self) -> &'static str {
@@ -17,6 +20,9 @@ impl Style {
             Self::Scratch => "Scratch",
             Self::Stutter => "Stutter",
             Self::Brake => "Tape brake",
+            Self::Filter => "Filter sweep",
+            Self::BassSwap => "Bass swap",
+            Self::Beatmatch => "Beatmatch",
         }
     }
 }
@@ -26,6 +32,7 @@ pub struct Settings {
     pub enabled: bool,
     pub style: Style,
     pub every: u32,
+    pub techniques: [bool; 6],
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -33,6 +40,7 @@ impl Default for Settings {
             enabled: true,
             style: Style::Variety,
             every: 4,
+            techniques: [true; 6],
         }
     }
 }
@@ -44,13 +52,26 @@ impl Settings {
         {
             return None;
         }
+        let all = [
+            Style::Scratch,
+            Style::Stutter,
+            Style::Brake,
+            Style::Filter,
+            Style::BassSwap,
+            Style::Beatmatch,
+        ];
+        let enabled: Vec<_> = all
+            .into_iter()
+            .zip(self.techniques)
+            .filter_map(|(s, yes)| yes.then_some(s))
+            .collect();
         match self.style {
             Style::Fade => None,
-            Style::Variety => Some(
-                [Style::Scratch, Style::Stutter, Style::Brake]
-                    [(completed / self.every % 3) as usize],
-            ),
-            style => Some(style),
+            Style::Variety if !enabled.is_empty() => {
+                Some(enabled[(completed / self.every) as usize % enabled.len()])
+            }
+            Style::Variety => None,
+            style => enabled.contains(&style).then_some(style),
         }
     }
 }
@@ -84,7 +105,17 @@ mod tests {
         assert_eq!(s.pick(3), Some(Style::Scratch));
         assert_eq!(s.pick(7), Some(Style::Stutter));
         assert_eq!(s.pick(11), Some(Style::Brake));
-        assert_eq!(s.pick(15), Some(Style::Scratch));
+        assert_eq!(s.pick(15), Some(Style::Filter));
+        assert_eq!(s.pick(19), Some(Style::BassSwap));
+        assert_eq!(s.pick(23), Some(Style::Beatmatch));
+        assert_eq!(
+            Settings {
+                techniques: [false; 6],
+                ..s
+            }
+            .pick(3),
+            None
+        );
         assert!(
             Settings {
                 enabled: false,

@@ -5,7 +5,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::{Read, Write},
+    io::Read,
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{
@@ -60,12 +60,17 @@ fn digest(path: &Path) -> Result<String, String> {
 fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 3]> {
     let id = stamp(source).ok()?;
     let dir = cache.join(&id);
-    let metadata = fs::metadata(dir.join("manifest.json")).ok()?;
-    if metadata.len() > 16384 {
-        return None;
-    }
-    let manifest: Value =
-        serde_json::from_slice(&fs::read(dir.join("manifest.json")).ok()?).ok()?;
+    let manifest: Value = if let Some(value) =
+        amp_core::catalog_db::local_record(&cache.join("stems.ampdb"), &id).ok()?
+    {
+        value
+    } else {
+        let metadata = fs::metadata(dir.join("manifest.json")).ok()?;
+        if metadata.len() > 16384 {
+            return None;
+        }
+        serde_json::from_slice(&fs::read(dir.join("manifest.json")).ok()?).ok()?
+    };
     if manifest["source_stamp"].as_str()? != id
         || manifest["audio"]["engine"] != "demucs-4.0.1/htdemucs-3stem"
     {
@@ -90,6 +95,49 @@ fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 3]> {
 pub fn ready(source: &Path) -> Option<[PathBuf; 3]> {
     ready_in(&cache_root()?, source)
 }
+fn restore_cached(cache: &Path, source: &Path) -> Result<bool, String> {
+    let archive = cache.join("stems.ampdb");
+    if !archive.is_file() {
+        return Ok(false);
+    }
+    let id = stamp(source)?;
+    let _lock = amp_core::coordination::Lock::acquire(&cache.join(&id))?;
+    if ready_in(cache, source).is_some() {
+        return Ok(true);
+    }
+    let hash = digest(source)?;
+    let stage = tempfile::Builder::new()
+        .prefix(".restore-")
+        .tempdir_in(cache)
+        .map_err(|e| e.to_string())?;
+    let Some(mut manifest) = amp_core::stem_archive::restore(&archive, &hash, stage.path())? else {
+        return Ok(false);
+    };
+    for name in ["vocals", "instrumental", "drums"] {
+        if digest(&stage.path().join(format!("{name}.wav")))?
+            != manifest["audio"]["files"][name]["sha256"]
+                .as_str()
+                .unwrap_or("")
+        {
+            return Err("Archived stem checksum failed".into());
+        }
+    }
+    if stamp(source)? != id {
+        return Err("Song changed while restoring stems".into());
+    }
+    manifest["source_stamp"] = json!(id);
+    let destination = cache.join(&id);
+    if destination.exists() {
+        fs::rename(
+            &destination,
+            cache.join(format!("{id}.previous-{}", amp_core::coordination::token())),
+        )
+        .map_err(|e| e.to_string())?;
+    }
+    fs::rename(stage.path(), destination).map_err(|e| e.to_string())?;
+    amp_core::catalog_db::save_local_record(&archive, &id, &manifest)?;
+    Ok(true)
+}
 type Process = Arc<Mutex<Option<Child>>>;
 pub(super) fn separate_clip(cache: &Path, source: &Path) -> Result<[PathBuf; 3], String> {
     let python = runtime().ok_or("Install the stem separator add-on first")?;
@@ -112,7 +160,25 @@ fn prepare(
     fs::create_dir_all(cache).map_err(|e| e.to_string())?;
     let id = stamp(source)?;
     let _lock = amp_core::coordination::Lock::acquire(&cache.join(&id))?;
-    if ready_in(cache, source).is_some() {
+    if let Some(paths) = ready_in(cache, source) {
+        let archive = cache.join("stems.ampdb");
+        if !amp_core::stem_archive::contains(&archive, &id) {
+            let mut manifest = amp_core::catalog_db::local_record(&archive, &id)?.unwrap_or(
+                serde_json::from_slice(
+                    &fs::read(paths[0].parent().unwrap().join("manifest.json")).unwrap_or_default(),
+                )
+                .unwrap_or_default(),
+            );
+            manifest["source_name"] =
+                json!(source.file_name().unwrap_or_default().to_string_lossy());
+            amp_core::stem_archive::store(
+                &archive,
+                &id,
+                &manifest,
+                paths[0].parent().unwrap(),
+                cancel,
+            )?;
+        }
         return Ok(());
     }
     let stage = tempfile::Builder::new()
@@ -197,13 +263,14 @@ fn prepare(
     if stamp(source)? != id || cancel.load(Relaxed) {
         return Err("Source changed or preparation canceled; result not published".into());
     }
-    let manifest = json!({"version":1,"source_stamp":id,"source_sha256":source_hash,"audio":audio});
-    let mut file =
-        fs::File::create(stage.path().join("manifest.json")).map_err(|e| e.to_string())?;
-    file.write_all(serde_json::to_string_pretty(&manifest).unwrap().as_bytes())
-        .map_err(|e| e.to_string())?;
-    file.sync_all().map_err(|e| e.to_string())?;
-    drop(file);
+    let manifest = json!({"version":1,"source_stamp":id,"source_name":source.file_name().unwrap_or_default().to_string_lossy(),"source_sha256":source_hash,"audio":audio});
+    amp_core::stem_archive::store(
+        &cache.join("stems.ampdb"),
+        &id,
+        &manifest,
+        stage.path(),
+        cancel,
+    )?;
     fs::remove_file(input).map_err(|e| format!("Remove staged input: {e}"))?;
     // A previously corrupted generation is retained, never overwritten silently.
     let destination = cache.join(&id);
@@ -215,7 +282,11 @@ fn prepare(
         .map_err(|e| e.to_string())?;
     }
     drop(command);
+    for file in ["audio.json", "worker.py", "worker.log"] {
+        let _ = fs::remove_file(stage.path().join(file));
+    }
     fs::rename(stage.path(), &destination).map_err(|e| format!("Publish stem cache: {e}"))?;
+    amp_core::catalog_db::save_local_record(&cache.join("stems.ampdb"), &id, &manifest)?;
     Ok(())
 }
 struct Job {
@@ -259,6 +330,9 @@ impl Default for Panel {
     }
 }
 impl Panel {
+    pub fn busy(&self) -> bool {
+        self.job.is_some() || self.batch.is_some()
+    }
     pub fn prepare_song(&mut self, ui: &mut egui::Ui, source: &Path) -> bool {
         if let Some(job) = &self.job
             && let Ok(result) = job.rx.try_recv()
@@ -267,6 +341,32 @@ impl Panel {
             self.job = None;
         }
         let prepared = ready(source).is_some();
+        if !prepared
+            && self.job.is_none()
+            && let Some(cache) = cache_root()
+            && cache.join("stems.ampdb").is_file()
+            && ui.button("Restore stems from portable archive").clicked()
+        {
+            let source = source.to_path_buf();
+            let cancel = Arc::new(AtomicBool::new(false));
+            let process = Arc::new(Mutex::new(None));
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let _ = tx.send(restore_cached(&cache, &source).and_then(|found| {
+                    if found {
+                        Ok(())
+                    } else {
+                        Err("No matching prepared audio in this archive".into())
+                    }
+                }));
+            });
+            self.job = Some(Job {
+                cancel,
+                process,
+                rx,
+                deck: 0,
+            });
+        }
         if let Some(job) = &self.job {
             ui.spinner();
             ui.label("Preparing stems…");
@@ -558,9 +658,11 @@ mod tests {
         let paths = ready_in(&cache, &source).unwrap();
         assert!(paths.iter().all(|p| p.is_file()));
         assert_eq!(digest(&source).unwrap(), before);
-        let manifest: Value = serde_json::from_slice(
-            &fs::read(paths[0].parent().unwrap().join("manifest.json")).unwrap(),
+        let manifest = amp_core::catalog_db::local_record(
+            &cache.join("stems.ampdb"),
+            &stamp(&source).unwrap(),
         )
+        .unwrap()
         .unwrap();
         assert_eq!(manifest["source_sha256"], before);
         assert!(manifest["audio"]["frames"].as_u64().unwrap() > 44100);
@@ -580,6 +682,16 @@ mod tests {
                 .map(|b| f32::from_le_bytes(*b))
                 .collect::<Vec<_>>()
         };
+        let transported = dir.path().join("transported");
+        fs::create_dir(&transported).unwrap();
+        fs::copy(cache.join("stems.ampdb"), transported.join("stems.ampdb")).unwrap();
+        let renamed = dir.path().join("renamed.wav");
+        fs::copy(&source, &renamed).unwrap();
+        assert!(restore_cached(&transported, &renamed).unwrap());
+        let restored = ready_in(&transported, &renamed).unwrap();
+        for (a, b) in paths.iter().zip(restored.iter()) {
+            assert_eq!(digest(a).unwrap(), digest(b).unwrap());
+        }
         let original = decode(&source);
         let vocals = decode(&paths[0]);
         let instruments = decode(&paths[1]);

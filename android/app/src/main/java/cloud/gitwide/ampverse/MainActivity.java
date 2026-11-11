@@ -53,6 +53,7 @@ public final class MainActivity extends Activity {
     private final Runnable tick = new Runnable() { public void run() { refresh(); handler.postDelayed(this, 500); } };
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        try{CatalogStore.migrate(this);}catch(Exception error){message=error.getMessage();}
         prefs = getSharedPreferences("settings", MODE_PRIVATE);
         if (state != null) { module=state.getString("module","AMP Player"); library=module.equals("AMP Library");effectSide=state.getInt("effectSide",0);effectPad=state.getInt("effectPad",0); }
         if(state==null&&getIntent().hasExtra("module")){module=getIntent().getStringExtra("module");library=module.equals("AMP Library");}
@@ -284,7 +285,7 @@ public final class MainActivity extends Activity {
             Map<String,String> importedSources=new HashMap<>();int skipped=0;
             Set<String> savedIds=new HashSet<>();
             try{for(MediaItem saved:LibraryStore.read(this))savedIds.add(saved.mediaId);}catch(Exception failure){error=failure.getMessage();}
-            if(tree!=null)try{uris.clear();uris.addAll(FolderScanner.scan(getContentResolver(),tree));}catch(Exception failure){error="Could not scan folder: "+failure.getMessage();uris.clear();}
+            if(tree!=null)try{uris.clear();uris.addAll(FolderScanner.scan(getContentResolver(),tree));FolderScanner.catalog(this,tree);}catch(Exception failure){error="Could not scan folder: "+failure.getMessage();uris.clear();}
             final android.content.SharedPreferences sources=getSharedPreferences("import-sources",MODE_PRIVATE);
             for (Uri uri : uris) {
                 if(savedIds.contains(sources.getString(uri.toString(),""))){if(tree!=null)getSharedPreferences("phone-folders",0).edit().putString(sources.getString(uri.toString(),""),android.provider.DocumentsContract.getTreeDocumentId(tree)).apply();skipped++;continue;}
@@ -296,7 +297,7 @@ public final class MainActivity extends Activity {
                     String extension = name.lastIndexOf('.') >= 0 ? name.substring(name.lastIndexOf('.')).replaceAll("[^.a-zA-Z0-9]", "") : ".audio";
                     target = new File(dir, UUID.randomUUID() + extension);
                     try (InputStream input = getContentResolver().openInputStream(uri); OutputStream output = new FileOutputStream(target)) { if (input == null) throw new IOException("Cannot open audio"); byte[] bytes = new byte[65536]; int size; while ((size = input.read(bytes)) != -1) output.write(bytes, 0, size); }
-                    if(tree!=null){String prep=FolderScanner.preparation(getContentResolver(),tree,uri);if(prep!=null){File metadata=new File(getFilesDir(),"ampdj/tracks/"+target.getName()+".json");if(!metadata.getParentFile().isDirectory()&&!metadata.getParentFile().mkdirs())throw new IOException("Cannot save preparation");java.nio.file.Files.write(metadata.toPath(),prep.getBytes(java.nio.charset.StandardCharsets.UTF_8));}}
+                    if(tree!=null){String prep=FolderScanner.preparation(getContentResolver(),tree,uri);if(prep!=null){CatalogStore.put(this,"tracks/"+target.getName()+".json",prep);}}
                     added.add(LibraryStore.item(target, name));
                     importedSources.put(uri.toString(),target.getName());
                     final int count=added.size();runOnUiThread(()->{message="Saving local songs… "+count;refresh();});

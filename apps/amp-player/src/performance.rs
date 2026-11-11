@@ -23,6 +23,7 @@ fn scratch_phrase(seconds: f32, flourish: bool) -> f32 {
     }
 }
 pub struct Run {
+    pub requests: VecDeque<String>,
     pub transitions: crate::transition_styles::Settings,
     effect_bridge: Option<EffectBridge>,
     effect_done: Option<Instant>,
@@ -55,6 +56,7 @@ impl Default for Run {
     fn default() -> Self {
         let transitions = crate::transition_styles::load();
         Self {
+            requests: VecDeque::new(),
             transitions,
             effect_bridge: None,
             effect_done: None,
@@ -105,7 +107,28 @@ impl Run {
                 {
                     return None;
                 }
+                effect.original = match effect.style {
+                    crate::transition_styles::Style::Filter => {
+                        f32::from_bits(audio.controls.cutoff[effect.deck].load(Relaxed))
+                    }
+                    crate::transition_styles::Style::BassSwap => {
+                        f32::from_bits(audio.controls.eq[effect.deck][0].load(Relaxed))
+                    }
+                    _ => 0.,
+                };
                 effect.engaged = true;
+            }
+            let amount = (elapsed / window).clamp(0., 1.);
+            if effect.style == crate::transition_styles::Style::Filter {
+                audio.controls.cutoff[effect.deck].store(
+                    (effect.original * (1. - amount) + 180. * amount).to_bits(),
+                    Relaxed,
+                );
+            } else if effect.style == crate::transition_styles::Style::BassSwap {
+                audio.controls.eq[effect.deck][0].store(
+                    (effect.original * (1. - amount) - 24. * amount).to_bits(),
+                    Relaxed,
+                );
             }
             if effect.style == crate::transition_styles::Style::Brake {
                 let rate = f32::from_bits(audio.controls.rate[effect.deck].load(Relaxed));
@@ -124,6 +147,10 @@ impl Run {
         {
             if effect.style == crate::transition_styles::Style::Stutter {
                 audio.loop_stop(effect.deck);
+            } else if effect.style == crate::transition_styles::Style::Filter {
+                audio.controls.cutoff[effect.deck].store(effect.original.to_bits(), Relaxed);
+            } else if effect.style == crate::transition_styles::Style::BassSwap {
+                audio.controls.eq[effect.deck][0].store(effect.original.to_bits(), Relaxed);
             } else {
                 audio.scratch(effect.deck, false, 1.);
             }
@@ -147,6 +174,7 @@ struct EffectBridge {
     seconds: f32,
     grain: f32,
     engaged: bool,
+    original: f32,
 }
 impl Player {
     fn active_deck(&self) -> usize {
@@ -309,6 +337,8 @@ impl Player {
     }
     fn record_song(&mut self, index: usize) {
         if let Some(t) = self.library.as_ref().and_then(|l| l.tracks.get(index)) {
+            let id = show::song_id(t);
+            self.run.requests.retain(|s| *s != id);
             self.run.recent.push_back(show::song_id(t));
             while self.run.recent.len() > 1000 {
                 self.run.recent.pop_front();
@@ -321,6 +351,19 @@ impl Player {
     fn preload_variant(&mut self, alternate: usize) -> Result<(), String> {
         if self.run.preloaded.is_some() {
             return Ok(());
+        }
+        while let Some(id) = self.run.requests.front().cloned() {
+            let index = self
+                .library
+                .as_ref()
+                .and_then(|l| l.tracks.iter().position(|t| show::song_id(t) == id));
+            if let Some(index) = index {
+                match self.call_track(index, None, Deck::Auto, Execution::LoadOnly) {
+                    Ok(()) => return Ok(()),
+                    Err(e) => self.status = format!("Requested song unavailable: {e}"),
+                }
+            }
+            self.run.requests.pop_front();
         }
         if self.run.profile.is_none() {
             let incoming = self.requested_deck(Deck::Auto, true);
@@ -425,6 +468,61 @@ impl Player {
             return Err("Manual DJ Lock prevents automated takeover".into());
         }
         match action {
+            Action::TransitionSettings {
+                enabled,
+                techniques,
+                every,
+            } => {
+                if !(2..=12).contains(&every) {
+                    return Err("Effect frequency must be 2–12 mixes".into());
+                }
+                let settings = crate::transition_styles::Settings {
+                    enabled,
+                    techniques,
+                    every,
+                    style: crate::transition_styles::Style::Variety,
+                };
+                crate::transition_styles::save(settings)?;
+                self.run.transitions = settings;
+                self.run.scratch_assist = enabled;
+            }
+            Action::RequestSong { song, within } => {
+                if !(1..=5).contains(&within) {
+                    return Err("Request window must be 1–5 songs".into());
+                }
+                if self.run.profile.is_none() {
+                    return Err("Load a Smart Playlist before accepting requests".into());
+                }
+                let index = self.find_song(&song)?;
+                let track = &self.library.as_ref().unwrap().tracks[index];
+                let id = show::song_id(track);
+                if self.run.requests.contains(&id) {
+                    return Err("That song is already requested".into());
+                }
+                let slot = self.run.requests.len()
+                    + 1
+                    + usize::from(
+                        self.run.preloaded.is_some()
+                            || self.run.pending.is_some()
+                            || self.run.transition.is_some(),
+                    );
+                if slot > within as usize {
+                    return Err(
+                        "That request window is full; choose a later slot or wait for the queue"
+                            .into(),
+                    );
+                }
+                self.run.requests.push_back(id.clone());
+                if let Some(p) = &mut self.run.profile
+                    && !p.allowed.contains(&id)
+                {
+                    p.allowed.push(id);
+                }
+                self.status = format!(
+                    "Requested {} · plays within {slot} songs while Auto DJ runs",
+                    track.title
+                );
+            }
             Action::CallSong {
                 song,
                 cue,
@@ -892,6 +990,9 @@ impl Player {
                     } else {
                         None
                     };
+                if chosen == Some(crate::transition_styles::Style::Beatmatch) {
+                    self.sync_deck(incoming);
+                }
                 let flourish = chosen == Some(crate::transition_styles::Style::Scratch);
                 let safe = self.audio.as_ref().is_some_and(|a| {
                     a.playing(outgoing)
@@ -905,6 +1006,8 @@ impl Player {
                         Some(
                             crate::transition_styles::Style::Stutter
                                 | crate::transition_styles::Style::Brake
+                                | crate::transition_styles::Style::Filter
+                                | crate::transition_styles::Style::BassSwap
                         )
                     ) {
                     let bpm = self
@@ -929,7 +1032,8 @@ impl Player {
                             self.run.transitions.style,
                             crate::transition_styles::Style::Variety
                                 | crate::transition_styles::Style::Scratch
-                        ) && chosen.is_none()
+                        ) && self.run.transitions.techniques[0]
+                            && chosen.is_none()
                             && self
                                 .loaded_track(outgoing)
                                 .and_then(|t| t.preparation.bpm)
@@ -987,6 +1091,7 @@ impl Player {
                                     seconds,
                                     grain,
                                     engaged: false,
+                                    original: 0.,
                                 });
                             }
                         }
@@ -1086,6 +1191,56 @@ impl Player {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn requests_reserve_a_bounded_live_window_without_rewriting_saved_rules() {
+        let mut player = Player {
+            library: Some(amp_core::Library {
+                tracks: (0..6)
+                    .map(|i| amp_core::Track {
+                        path: format!("{i}.wav").into(),
+                        title: format!("Song {i}"),
+                        preparation: Default::default(),
+                    })
+                    .collect(),
+                tree: amp_core::Folder {
+                    name: "music".into(),
+                    folders: vec![],
+                    tracks: vec![],
+                },
+            }),
+            ..Default::default()
+        };
+        player.run.profile = Some(player.run.settings.playlists[0].clone());
+        let saved = serde_json::to_value(&player.run.settings).unwrap();
+        assert!(
+            player
+                .execute_control(Action::RequestSong {
+                    song: "Song 0".into(),
+                    within: 0
+                })
+                .is_err()
+        );
+        for i in 0..5 {
+            player
+                .execute_control(Action::RequestSong {
+                    song: format!("Song {i}"),
+                    within: 5,
+                })
+                .unwrap();
+        }
+        assert!(
+            player
+                .execute_control(Action::RequestSong {
+                    song: "Song 5".into(),
+                    within: 5
+                })
+                .is_err()
+        );
+        assert_eq!(player.run.requests.len(), 5);
+        assert_eq!(serde_json::to_value(&player.run.settings).unwrap(), saved);
+        player.record_song(0);
+        assert_eq!(player.run.requests.len(), 4);
+    }
+    #[test]
     #[ignore = "native audio and AMP_WAVEFORM_FIXTURE; output muted"]
     fn stutter_and_brake_complete_and_release_all_temporary_controls() {
         use crate::transition_styles::Style as Fx;
@@ -1106,7 +1261,7 @@ mod tests {
             )
             .unwrap();
         }
-        for style in [Fx::Stutter, Fx::Brake] {
+        for style in [Fx::Stutter, Fx::Brake, Fx::Filter, Fx::BassSwap] {
             let mut player = Player {
                 root: dir.path().into(),
                 library: Some(amp_core::scan(dir.path()).unwrap()),
@@ -1116,7 +1271,7 @@ mod tests {
             };
             player
                 .execute_control(Action::LoadSmartPlaylist {
-                    playlist: "everyday".into(),
+                    playlist: "demo".into(),
                     execution: Execution::PlayNow,
                     style: Some(Style::Steady),
                     energy: None,
@@ -1183,7 +1338,7 @@ mod tests {
         };
         player
             .execute_control(Action::LoadSmartPlaylist {
-                playlist: "everyday".into(),
+                playlist: "demo".into(),
                 execution: Execution::PlayNow,
                 style: Some(Style::Steady),
                 energy: None,
@@ -1227,11 +1382,11 @@ mod tests {
             }),
             ..Default::default()
         };
-        player.run.profile = Some(player.run.settings.playlists[1].clone());
+        player.run.profile = Some(player.run.settings.playlists[0].clone());
         player.run.playlist = Some("walk-in".into());
         player.run.auto = true;
         let result = player.execute_control(Action::LoadSmartPlaylist {
-            playlist: "recognition".into(),
+            playlist: "demo".into(),
             execution: Execution::PlayNow,
             style: None,
             energy: None,
@@ -1249,7 +1404,7 @@ mod tests {
             ..Default::default()
         };
         let result = player.execute_control(Action::LoadSmartPlaylist {
-            playlist: "recognition".into(),
+            playlist: "demo".into(),
             execution: Execution::PlayNow,
             style: None,
             energy: None,
@@ -1268,7 +1423,7 @@ mod tests {
         });
         let error = player
             .execute_control(Action::LoadSmartPlaylist {
-                playlist: "recognition".into(),
+                playlist: "demo".into(),
                 execution: Execution::PlayNow,
                 style: None,
                 energy: None,
@@ -1337,7 +1492,7 @@ mod tests {
         };
         player
             .execute_control(Action::LoadSmartPlaylist {
-                playlist: "everyday".into(),
+                playlist: "demo".into(),
                 execution: Execution::PlayNow,
                 style: Some(Style::Steady),
                 energy: None,
@@ -1404,7 +1559,7 @@ mod tests {
         player.run.crossfade = false;
         player
             .execute_control(Action::LoadSmartPlaylist {
-                playlist: "everyday".into(),
+                playlist: "demo".into(),
                 execution: Execution::PlayNow,
                 style: Some(Style::Steady),
                 energy: None,
@@ -1499,7 +1654,7 @@ mod tests {
         };
         player
             .execute_control(Action::LoadSmartPlaylist {
-                playlist: "everyday".into(),
+                playlist: "demo".into(),
                 execution: Execution::PlayNow,
                 style: Some(Style::Steady),
                 energy: None,
@@ -1769,12 +1924,12 @@ mod tests {
             .settings
             .playlists
             .iter_mut()
-            .find(|p| p.id == "everyday")
+            .find(|p| p.id == "demo")
             .unwrap()
             .recent_repeat = 0;
         player
             .execute_control(Action::LoadSmartPlaylist {
-                playlist: "everyday".into(),
+                playlist: "demo".into(),
                 execution: Execution::LoadOnly,
                 style: Some(Style::Steady),
                 energy: None,

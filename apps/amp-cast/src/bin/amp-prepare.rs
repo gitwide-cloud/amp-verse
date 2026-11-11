@@ -19,6 +19,17 @@ fn run() -> Result<(), String> {
         println!("Organized {count} metadata files into ampdj; original music unchanged");
         return Ok(());
     }
+    if args.clone().any(|arg| arg == "--compact") {
+        println!(
+            "Packed {} records into ampdj/catalog.ampdb; recovery metadata retained inside the database",
+            amp_core::catalog_db::compact(&root)?
+        );
+        return Ok(());
+    }
+    if args.clone().any(|arg| arg == "--export-rules") {
+        println!("{}", amp_core::storage::export_rules(&root)?.display());
+        return Ok(());
+    }
     let mut requested = 0;
     let mut force = false;
     let mut watch = None;

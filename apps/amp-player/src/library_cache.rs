@@ -28,14 +28,9 @@ pub fn scan(root: &Path) -> Result<Snapshot, String> {
     let library = amp_core::scan(root).map_err(|e| e.to_string())?;
     let settings = amp_core::show::Settings::load(root).ok();
     let mut playlists = Vec::new();
-    if let Ok(entries) = std::fs::read_dir(root.join("ampdj/playlists")) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().is_some_and(|e| e == "json")
-                && let Ok(list) = Playlist::load(&path, root)
-            {
-                playlists.push((path, list));
-            }
+    for path in amp_core::catalog_db::playlist_paths(root)? {
+        if let Ok(list) = Playlist::load(&path, root) {
+            playlists.push((path, list));
         }
     }
     Ok(Snapshot {

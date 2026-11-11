@@ -37,6 +37,15 @@ pub enum Execution {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
+    TransitionSettings {
+        enabled: bool,
+        techniques: [bool; 6],
+        every: u32,
+    },
+    RequestSong {
+        song: String,
+        within: u32,
+    },
     CallSong {
         song: String,
         #[serde(default)]

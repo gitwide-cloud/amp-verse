@@ -46,6 +46,49 @@ impl Player {
         let mut queue_drop = None;
         let mut open_playlist = false;
         let mut load = None;
+        let mut request = None;
+        let requests = ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!(
+                    "Song requests ({}) · click to view",
+                    self.run.requests.len()
+                ))
+                .weak(),
+            )
+            .sense(egui::Sense::click()),
+        );
+        let mut cancel_request = None;
+        egui::Popup::menu(&requests).show(|ui| {
+            if self.run.requests.is_empty() {
+                ui.label("No pending requests. Right-click a song to request it.");
+            }
+            for (slot, id) in self.run.requests.iter().enumerate() {
+                let title = self
+                    .library
+                    .as_ref()
+                    .and_then(|l| l.tracks.iter().find(|t| amp_core::show::song_id(t) == *id))
+                    .map_or(id.as_str(), |t| t.title.as_str());
+                let prepared = self.run.preloaded.is_some_and(|(_, index)| {
+                    self.library
+                        .as_ref()
+                        .and_then(|l| l.tracks.get(index))
+                        .is_some_and(|t| amp_core::show::song_id(t) == *id)
+                });
+                ui.horizontal(|ui| {
+                    ui.label(format!("{} · {title}", slot + 1));
+                    if ui
+                        .add_enabled(!prepared, egui::Button::new("Remove request"))
+                        .on_hover_text("An already prepared handoff is kept intact")
+                        .clicked()
+                    {
+                        cancel_request = Some(id.clone());
+                    }
+                });
+            }
+        });
+        if let Some(id) = cancel_request {
+            self.run.requests.retain(|s| *s != id);
+        }
         let mut load_smart = false;
         let mut edit_smart = false;
         let mut context_edit = None;
@@ -235,6 +278,7 @@ impl Player {
 ;
                                 crate::dragdrop::source(&row,self.root.join(&t.path));
                                 if row.clicked() {self.selected=Some(i);}
+                                row.context_menu(|ui| { ui.label("Request in this live Smart Playlist"); for within in 1..=5 { if ui.button(format!("Play within {within} songs")).clicked() { request=Some((amp_core::show::song_id(t),within));ui.close(); } } });
                                 if row.double_clicked() {load=Some((self.dj_browser.destination,i));}
                                 let duration = t.preparation.analysis.as_ref().map(|a| a.duration).or(t.preparation.cue_out);
                                 for (value, width) in [
@@ -306,7 +350,7 @@ impl Player {
                 // Snapshot the chosen browser source for this session only. Never
                 // silently fall back to a different Smart Playlist or all folders.
                 if let Some(library) = &self.library {
-                    let mut profile = amp_core::show::Settings::default().playlists.remove(7);
+                    let mut profile = amp_core::show::Settings::default().playlists.remove(0);
                     profile.id = "browser-session".into();
                     profile.name = "DJ browser source".into();
                     if self.dj_browser.source == Source::Folders {
@@ -348,6 +392,11 @@ impl Player {
             if let Err(e) = self.execute_control(action) {
                 self.status = format!("Auto Mix could not start: {e}");
             }
+        }
+        if let Some((song, within)) = request
+            && let Err(error) = self.execute_control(control::Action::RequestSong { song, within })
+        {
+            self.status = error;
         }
         if let Some((deck, index)) = load {
             self.selected = Some(index);

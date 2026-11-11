@@ -54,7 +54,8 @@ with tempfile.TemporaryDirectory() as folder:
             assert process.poll() is None, "desktop exited"
             assert time.monotonic()<until, "show control did not become ready"
             time.sleep(.05)
-        assert len(value["playlists"])==8
+        assert len(value["playlists"])==1
+        assert value["playlists"][0]["name"]=="Demo"
         assert http(base,"/api/v1/state",password="wrong")[0]==401
         def command(action, **fields):
             body=dict(id=str(uuid.uuid4()),action=action,**fields);return body,http(base,"/api/v1/command",body)

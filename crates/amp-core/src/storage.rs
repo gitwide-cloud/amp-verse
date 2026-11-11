@@ -62,7 +62,7 @@ pub fn enroll(root: &Path) -> Result<(), String> {
     }
     Ok(())
 }
-/// JSON copy in Documents, grouped by persistent library ID to avoid library collisions.
+/// Embedded file copy in Documents, grouped by persistent library ID.
 pub fn export_rules(root: &Path) -> Result<PathBuf, String> {
     let id = crate::coordination::library_id(root)?;
     let docs = std::env::var_os("AMP_DOCUMENTS_DIR")
@@ -73,11 +73,29 @@ pub fn export_rules(root: &Path) -> Result<PathBuf, String> {
                 .map(|p| PathBuf::from(p).join("Documents"))
         })
         .ok_or("Documents folder unavailable")?;
-    let file = docs.join("ampdj").join(id).join("smart-playlists.json");
-    let bytes = fs::read(root.join("ampdj/smart-playlists.json")).map_err(|e| e.to_string())?;
+    let folder = docs.join("ampdj").join(id);
+    let file = folder.join("smart-playlists.ampdb");
+    let rules = root.join("ampdj/smart-playlists.json");
+    let bytes = if let Some(bytes) = crate::catalog_db::read(&rules)? {
+        bytes
+    } else {
+        fs::read(rules).map_err(|e| e.to_string())?
+    };
     let value: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
     ensure_parent(&file)?;
-    crate::coordination::atomic_write(&file, &value)?;
+    let old = folder.join("smart-playlists.json");
+    if old.is_file() {
+        let legacy: Value = serde_json::from_slice(&fs::read(&old).map_err(|e| e.to_string())?)
+            .map_err(|e| e.to_string())?;
+        crate::catalog_db::save_local_record(&file, "recovery/smart-playlists.json", &legacy)?;
+    }
+    crate::catalog_db::save_local_record(&file, "smart-playlists.json", &value)?;
+    if crate::catalog_db::local_record(&file, "smart-playlists.json")? != Some(value) {
+        return Err("Exported rules did not verify; original retained".into());
+    }
+    if old.is_file() {
+        fs::remove_file(old).map_err(|e| e.to_string())?;
+    }
     Ok(file)
 }
 

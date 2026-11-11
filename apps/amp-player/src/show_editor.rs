@@ -399,7 +399,7 @@ impl Editor {
                                                 == Some(id.as_str())
                                                 || p.recognition_song.as_deref()
                                                     == Some(t.title.as_str());
-                                            if ui.radio(assigned, "Recognition").clicked() {
+                                            if ui.radio(assigned, "Demo").clicked() {
                                                 p.recognition_song = Some(id.clone());
                                             }
                                         })
@@ -945,13 +945,22 @@ fn source_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn test_settings() -> Settings {
+        let mut settings = Settings::default();
+        let mut second = settings.playlists[0].clone();
+        second.id = "second".into();
+        second.name = "Second".into();
+        settings.playlists.push(second);
+        settings
+    }
+
     #[test]
     fn top_save_button_publishes_the_draft_even_with_a_lower_save_button() {
         let root = tempfile::tempdir().unwrap();
-        Settings::default().save(root.path()).unwrap();
+        test_settings().save(root.path()).unwrap();
         let mut saved = Settings::load(root.path()).unwrap();
         let mut editor = Editor::default();
-        editor.open_playlist("recognition", root.path(), &saved);
+        editor.open_playlist("demo", root.path(), &saved);
         editor.draft.as_mut().unwrap().playlists[0].name = "Saved by top button".into();
         let context = egui::Context::default();
         let mut draw = |position: egui::Pos2, pressed: Option<bool>| {
@@ -992,7 +1001,7 @@ mod tests {
     #[test]
     fn stale_draft_merges_unrelated_updates_but_requires_source_review() {
         let root = tempfile::tempdir().unwrap();
-        let base = Settings::default();
+        let base = test_settings();
         let mut shared = base.clone();
         shared.playlists[0].restrict_allowed = true;
         shared.playlists[0].use_manual_cues = false;
@@ -1000,7 +1009,7 @@ mod tests {
         let current = Settings::load(root.path()).unwrap();
         let mut draft = base.clone();
         set_source_mode(&mut draft.playlists[0], SourceMode::Folders);
-        draft.playlists[0].folders.push("Recognition".into());
+        draft.playlists[0].folders.push("Demo".into());
         draft.playlists[0].restrict_allowed = false;
         let before = std::fs::read(root.path().join("ampdj/smart-playlists.json")).unwrap();
         assert!(
@@ -1025,7 +1034,7 @@ mod tests {
         let mut saved = current.clone();
         assert!(save_rules(root.path(), &mut reviewed, &mut saved).starts_with("Saved."));
         let song = amp_core::Track {
-            path: "Recognition/song.mp3".into(),
+            path: "Demo/song.mp3".into(),
             title: "Song".into(),
             preparation: Default::default(),
         };
@@ -1038,7 +1047,7 @@ mod tests {
     #[test]
     fn reviewed_rules_cannot_overwrite_a_newer_shared_revision() {
         let root = tempfile::tempdir().unwrap();
-        let mut shared = Settings::default();
+        let mut shared = test_settings();
         let mut saved = shared.clone();
         assert!(save_rules(root.path(), &mut shared, &mut saved).starts_with("Saved."));
         let baseline = shared.clone();
@@ -1057,16 +1066,16 @@ mod tests {
     fn simple_folder_and_m3u_sources_include_music_without_song_checkboxes() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
-        std::fs::create_dir_all(root.join("Recognition/Subfolder")).unwrap();
-        std::fs::write(root.join("Recognition/a.mp3"), b"a").unwrap();
-        std::fs::write(root.join("Recognition/Subfolder/b.mp3"), b"b").unwrap();
+        std::fs::create_dir_all(root.join("Demo/Subfolder")).unwrap();
+        std::fs::write(root.join("Demo/a.mp3"), b"a").unwrap();
+        std::fs::write(root.join("Demo/Subfolder/b.mp3"), b"b").unwrap();
         std::fs::write(root.join("outside.mp3"), b"c").unwrap();
         let library = amp_core::scan(root).unwrap();
-        let mut profile = Settings::default().playlists.remove(0);
+        let mut profile = test_settings().playlists.remove(0);
         let original_id = profile.id.clone();
         profile.preferred = vec!["keep-preference".into()];
         profile.recognition_song = Some("keep-assignment".into());
-        select_folder(root, &root.join("Recognition"), &mut profile).unwrap();
+        select_folder(root, &root.join("Demo"), &mut profile).unwrap();
         assert_eq!(
             library
                 .tracks
@@ -1077,7 +1086,7 @@ mod tests {
         );
         assert!(profile.allowed.is_empty());
         assert!(!profile.restrict_allowed);
-        let playlist = root.join("Recognition/mix.m3u8");
+        let playlist = root.join("Demo/mix.m3u8");
         std::fs::write(
             &playlist,
             "\u{feff}#EXTM3U\nSubfolder/b.mp3\nmissing.mp3\na.mp3\n",
@@ -1101,8 +1110,8 @@ mod tests {
         assert_eq!(
             ordered,
             vec![
-                std::path::PathBuf::from("Recognition/Subfolder/b.mp3"),
-                std::path::PathBuf::from("Recognition/a.mp3")
+                std::path::PathBuf::from("Demo/Subfolder/b.mp3"),
+                std::path::PathBuf::from("Demo/a.mp3")
             ]
         );
         assert_eq!(profile.id, original_id);
@@ -1119,13 +1128,13 @@ mod tests {
     #[test]
     fn local_draft_persistence_and_new_playlist_keep_ids_and_saved_rules() {
         let dir = tempfile::tempdir().unwrap();
-        let saved = Settings::default();
+        let saved = test_settings();
         let mut editor = Editor::default();
         editor.new_playlist(dir.path(), &saved);
         let new = editor.draft.as_ref().unwrap().playlists.last().unwrap();
         assert!(new.restrict_folders && new.folders.is_empty());
         assert!(new.restrict_allowed);
-        assert_eq!(saved.playlists.len(), 8);
+        assert_eq!(saved.playlists.len(), 2);
         let mut draft = saved.clone();
         draft.playlists[0].name = "Local name".into();
         draft.playlists[0].style = Style::Chill;
@@ -1153,7 +1162,7 @@ mod tests {
             title: "Song".into(),
             preparation: Default::default(),
         };
-        let mut p = Settings::default().playlists.remove(0);
+        let mut p = test_settings().playlists.remove(0);
         set_source_mode(&mut p, SourceMode::Folders);
         assert!(!amp_core::show::eligible(&p, &track));
         p.folders.push("Dance".into());
@@ -1188,7 +1197,7 @@ mod tests {
             name: "Source".into(),
             tracks: vec!["Dance/a.mp3".into()],
         };
-        let mut settings = Settings::default();
+        let mut settings = test_settings();
         assert_eq!(
             import_source_playlist(&mut settings.playlists[0], &list, &lib).unwrap(),
             1
@@ -1213,7 +1222,7 @@ mod tests {
     #[test]
     fn unsaved_rule_draft_does_not_change_performance_configuration() {
         let directory = tempfile::tempdir().unwrap();
-        let mut saved = Settings::default();
+        let mut saved = test_settings();
         let mut draft = saved.clone();
         draft.playlists[0].name = "Unsaved change".into();
         let mut editor = Editor {
@@ -1227,13 +1236,13 @@ mod tests {
             editor.show(ui, directory.path(), &mut saved, None)
         });
         output.textures_delta.clear();
-        assert_eq!(saved.playlists[0].name, "Recognition");
+        assert_eq!(saved.playlists[0].name, "Demo");
         assert!(!directory.path().join("ampdj/smart-playlists.json").exists());
     }
     #[test]
     fn switching_inline_playlists_keeps_unsaved_drafts_and_viewport_constrained() {
         let root = tempfile::tempdir().unwrap();
-        let mut saved = Settings::default();
+        let mut saved = test_settings();
         let mut editor = Editor::default();
         let first = saved.playlists[0].id.clone();
         let second = saved.playlists[1].id.clone();
@@ -1262,6 +1271,6 @@ mod tests {
             screen.contains_rect(viewport),
             "Inline editor must fit parent viewport: {viewport:?}"
         );
-        assert_eq!(saved.playlists[0].name, "Recognition");
+        assert_eq!(saved.playlists[0].name, "Demo");
     }
 }

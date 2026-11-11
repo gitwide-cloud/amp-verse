@@ -137,6 +137,9 @@ fn legacy(path: &Path) -> std::path::PathBuf {
         .join(name)
 }
 fn record(path: &Path) -> std::io::Result<Vec<u8>> {
+    if let Some(bytes) = crate::catalog_db::read(&portable(path)).map_err(std::io::Error::other)? {
+        return Ok(bytes);
+    }
     let mut error = None;
     for candidate in [portable(path), legacy(path), sidecar(path)] {
         match fs::read(candidate) {
@@ -202,6 +205,8 @@ fn save_record(
     expected: Option<Option<&[u8]>>,
     lease: Option<&crate::coordination::Lease>,
 ) -> Result<(), String> {
+    crate::storage::enroll(root)?;
+    let _migration = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-migration"))?;
     p.validate()?;
     let audio = resolve(root, relative).map_err(|e| e.to_string())?;
     if let Some(expected) = &p.source_sha256
@@ -371,6 +376,22 @@ fn save_record(
     ));
     let temp = std::path::PathBuf::from(temp);
     let result = (|| {
+        if crate::catalog_db::write_guarded(
+            &target,
+            &serde_json::to_vec(&checked).map_err(|e| e.to_string())?,
+            || {
+                if let Some(lease) = lease {
+                    lease.verify_record_locked(&target, &library)
+                } else {
+                    Ok(())
+                }
+            },
+        )? {
+            if let Some(lease) = lease {
+                lease.finish_locked()?;
+            }
+            return Ok(());
+        }
         let mut f = fs::OpenOptions::new()
             .write(true)
             .create_new(true)

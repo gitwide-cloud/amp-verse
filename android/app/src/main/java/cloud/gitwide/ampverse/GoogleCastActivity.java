@@ -8,11 +8,25 @@ import com.google.android.gms.cast.framework.*;
 /** Native Google Cast picker; the speaker reads the station stream directly. */
 public final class GoogleCastActivity extends AppCompatActivity {
     private TextView status;
+    private final SessionManagerListener<CastSession> sessions=new SessionManagerListener<CastSession>() {
+        public void onSessionStarting(CastSession s){status.setText("Connecting to speaker...");}
+        public void onSessionStarted(CastSession s,String id){play();}
+        public void onSessionStartFailed(CastSession s,int code){status.setText("Speaker connection failed: "+code);}
+        public void onSessionEnding(CastSession s){}
+        public void onSessionEnded(CastSession s,int code){status.setText("Casting stopped");}
+        public void onSessionResuming(CastSession s,String id){status.setText("Reconnecting to speaker...");}
+        public void onSessionResumed(CastSession s,boolean suspended){status.setText("Speaker reconnected. Tap Play to resume this station.");}
+        public void onSessionResumeFailed(CastSession s,int code){status.setText("Speaker reconnect failed: "+code);}
+        public void onSessionSuspended(CastSession s,int reason){status.setText("Speaker disconnected; phone playback is unchanged.");}
+    };
+    @Override protected void onResume(){super.onResume();try{CastContext.getSharedInstance(this).getSessionManager().addSessionManagerListener(sessions,CastSession.class);}catch(Exception ignored){}}
+    @Override protected void onPause(){try{CastContext.getSharedInstance(this).getSessionManager().removeSessionManagerListener(sessions,CastSession.class);}catch(Exception ignored){}super.onPause();}
+
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
         LinearLayout content=new LinearLayout(this);content.setOrientation(LinearLayout.VERTICAL);int pad=(int)(20*getResources().getDisplayMetrics().density);content.setPadding(pad,pad,pad,pad);setContentView(content);
         TextView heading=new TextView(this);heading.setText("Google Home / Chromecast");heading.setTextSize(24);content.addView(heading);
-        status=new TextView(this);status.setText("1. Choose a speaker with the Cast button.\n2. Tap Play station on speaker.");status.setTextSize(17);content.addView(status);
+        status=new TextView(this);status.setText("Choose a speaker with the Cast button to play this station or live DJ broadcast.");status.setTextSize(17);content.addView(status);
         try {
             CastContext.getSharedInstance(this);
             MediaRouteButton route=new MediaRouteButton(this);route.setContentDescription("Choose Google Cast speaker");content.addView(route,new LinearLayout.LayoutParams(pad*3,pad*3));CastButtonFactory.setUpMediaRouteButton(this,route);

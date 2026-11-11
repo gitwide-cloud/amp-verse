@@ -7,11 +7,11 @@ import org.json.*;
 
 /** Phone drafts and overrides stay local; reconnection never publishes them to a NAS. */
 final class PhonePlaylists {
-    static JSONArray read(Context context){try{return new JSONArray(context.getSharedPreferences("phone-playlists",0).getString("lists","[]"));}catch(JSONException error){throw new IllegalStateException("Saved playlists could not be read",error);}}
+    static JSONArray read(Context context){try{return new JSONArray(context.getSharedPreferences("phone-playlists",0).getString("lists","[{\"id\":\"demo\",\"name\":\"Demo\",\"smart\":false,\"songs\":[]}]"));}catch(JSONException error){throw new IllegalStateException("Saved playlists could not be read",error);}}
     static void save(Context context,JSONObject list)throws JSONException {JSONArray all=read(context),next=new JSONArray();boolean found=false;for(int i=0;i<all.length();i++){JSONObject old=all.getJSONObject(i);if(old.getString("id").equals(list.getString("id"))){next.put(list);found=true;}else next.put(old);}if(!found)next.put(list);if(!context.getSharedPreferences("phone-playlists",0).edit().putString("lists",next.toString()).commit())throw new IllegalStateException("Playlist could not be saved");}
     static void remove(Context context,String id)throws JSONException{JSONArray next=new JSONArray(),all=read(context);for(int i=0;i<all.length();i++)if(!all.getJSONObject(i).getString("id").equals(id))next.put(all.getJSONObject(i));if(!context.getSharedPreferences("phone-playlists",0).edit().putString("lists",next.toString()).commit())throw new IllegalStateException("Playlist could not be removed");}
-    static double bpm(Context context,MediaItem item){return context.getSharedPreferences("phone-track-details",0).getFloat(item.mediaId+":bpm",0);}
-    static double energy(Context context,MediaItem item){return context.getSharedPreferences("phone-track-details",0).getFloat(item.mediaId+":energy",.5f);}
+    static double bpm(Context context,MediaItem item){return context.getSharedPreferences("phone-track-details",0).getFloat(item.mediaId+":bpm",(float)DjEngine.preparation(item).optDouble("bpm",0));}
+    static double energy(Context context,MediaItem item){return context.getSharedPreferences("phone-track-details",0).getFloat(item.mediaId+":energy",(float)DjEngine.preparation(item).optDouble("energy",.5));}
     static List<MediaItem> tracks(Context context,JSONObject list)throws JSONException{return tracks(context,list,new HashSet<>());}
     private static List<MediaItem> tracks(Context context,JSONObject list,Set<String> visited)throws JSONException {
         if(!visited.add(list.getString("id")))throw new IllegalArgumentException("Playlist sources cannot refer to each other in a loop");

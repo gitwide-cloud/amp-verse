@@ -25,11 +25,11 @@ with tempfile.TemporaryDirectory(prefix='amp-coordination-',dir=os.environ.get('
     for p in jobs:
         out,err=p.communicate(timeout=45);assert p.returncode==0,(out,err);outputs.append(out)
     assert sum(s.count('/ BPM ') for s in outputs)==6,outputs
-    records={p.name:p.read_bytes() for p in (music/'.ampverse/tracks').glob('*.json')}
+    records={p.name:p.read_bytes() for p in (music/'ampdj/tracks').glob('*.json')}
     assert len(records)==6
     repeat=subprocess.run([prepare,str(music),'--jobs','3'],env=envs[1],capture_output=True,text=True,timeout=30)
     assert repeat.returncode==0 and repeat.stdout.count('skipped Complete')==6,repeat.stdout+repeat.stderr
-    assert records=={p.name:p.read_bytes() for p in (music/'.ampverse/tracks').glob('*.json')}
+    assert records=={p.name:p.read_bytes() for p in (music/'ampdj/tracks').glob('*.json')}
     assert json.loads((folder/'device0/device.json').read_text())['id']!=json.loads((folder/'device1/device.json').read_text())['id']
     def start(env):
         p=subprocess.Popen([cast,str(music)],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -63,7 +63,7 @@ with tempfile.TemporaryDirectory(prefix='amp-coordination-',dir=os.environ.get('
             if state['reused_or_claimed']==6:break
             assert time.monotonic()<until,state
             time.sleep(.1)
-        assert records=={p.name:p.read_bytes() for p in (music/'.ampverse/tracks').glob('*.json')}
+        assert records=={p.name:p.read_bytes() for p in (music/'ampdj/tracks').glob('*.json')}
         print('PASS: two devices coordinate six jobs exactly once; reuse preserves bytes; server IDs persist; station controls stay independent; headless analysis resumes')
     finally:
         for p,base,_ in servers:

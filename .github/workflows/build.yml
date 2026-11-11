@@ -65,7 +65,7 @@ jobs:
           mkdir -p test-output/music
           ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 test-output/music/Tone.wav
           target/release/amp-prepare test-output/music
-          python3 -c "import json,pathlib; p=pathlib.Path('test-output/music/.ampverse/tracks/Tone.wav.json'); d=json.loads(p.read_text()); d['cue_in']=0.2; d['manual_override']=True; p.write_text(json.dumps(d))"
+          python3 -c "import json,pathlib; p=pathlib.Path('test-output/music/ampdj/tracks/Tone.wav.json'); d=json.loads(p.read_text()); d['cue_in']=0.2; d['manual_override']=True; p.write_text(json.dumps(d))"
           target/release/amp-prepare test-output/music --force
           for theme in classic modern-light modern-dark; do
             for view in player compact mini combined library playlists analysis devices preparation rules dj dj-window dj-library sampler lab addons cast; do
@@ -90,6 +90,7 @@ jobs:
           cp target/release/amp-player${{ matrix.suffix }} dist/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
           cp -r docs dist/
+          cp -r licenses dist/
           mkdir -p dist/licenses/mp3-lab
           cp third-party/mp3-lab/LICENSE third-party/mp3-lab/PROVENANCE.md dist/licenses/mp3-lab/
       - uses: actions/upload-artifact@v4
@@ -101,6 +102,7 @@ jobs:
         run: |
           mkdir -p engine-dist
           cp target/release/amp-engine${{ matrix.suffix }} LICENSE THIRD_PARTY_NOTICES.md engine-dist/
+          cp -r licenses engine-dist/
           if [ "${{ runner.os }}" = "Windows" ]; then asset=amp-engine-windows-x86_64.exe; else asset=amp-engine-linux-x86_64; fi
           cp target/release/amp-engine${{ matrix.suffix }} "engine-dist/$asset"
           (cd engine-dist && sha256sum "$asset" > "$asset.sha256")

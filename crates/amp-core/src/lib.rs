@@ -3,6 +3,7 @@
 pub mod analysis;
 pub mod arrangement;
 pub mod batch;
+pub mod catalog_db;
 pub mod coordination;
 pub mod discovery;
 pub mod engine_api;
@@ -11,6 +12,7 @@ pub mod preparation;
 pub mod review;
 pub mod show;
 pub mod smart;
+pub mod stem_archive;
 pub mod stem_mix;
 pub mod storage;
 use serde::{Deserialize, Serialize};
@@ -100,7 +102,13 @@ pub fn scan(root: &Path) -> io::Result<Library> {
     let root = root.canonicalize()?;
     storage::register(&root);
     let mut tracks = Vec::new();
-    fn visit(dir: &Path, root: &Path, tracks: &mut Vec<Track>) -> io::Result<Folder> {
+    let catalog = catalog_db::preparations(&root).map_err(io::Error::other)?;
+    fn visit(
+        dir: &Path,
+        root: &Path,
+        tracks: &mut Vec<Track>,
+        catalog: &std::collections::BTreeMap<String, Preparation>,
+    ) -> io::Result<Folder> {
         let mut folder = Folder {
             name: dir.file_name().unwrap_or_default().to_string_lossy().into(),
             folders: vec![],
@@ -119,9 +127,20 @@ pub fn scan(root: &Path) -> io::Result<Library> {
                 continue;
             }
             if ty.is_dir() {
-                folder.folders.push(visit(&path, root, tracks)?);
+                folder.folders.push(visit(&path, root, tracks, catalog)?);
             } else if ty.is_file() && supported(&path) {
-                let preparation = preparation::load(&path).map_err(io::Error::other)?;
+                let key = format!(
+                    "tracks/{}.json",
+                    path.strip_prefix(root)
+                        .unwrap()
+                        .to_string_lossy()
+                        .replace('\\', "/")
+                );
+                let preparation = if let Some(prep) = catalog.get(&key) {
+                    prep.clone()
+                } else {
+                    preparation::load(&path).map_err(io::Error::other)?
+                };
                 folder.tracks.push(tracks.len());
                 tracks.push(Track {
                     path: path.strip_prefix(root).unwrap().into(),
@@ -143,7 +162,7 @@ pub fn scan(root: &Path) -> io::Result<Library> {
         }
         Ok(folder)
     }
-    let tree = visit(&root, &root, &mut tracks)?;
+    let tree = visit(&root, &root, &mut tracks, &catalog)?;
     Ok(Library { tracks, tree })
 }
 pub fn supported(p: &Path) -> bool {
@@ -182,8 +201,13 @@ pub struct Playlist {
 }
 impl Playlist {
     pub fn load(path: &Path, root: &Path) -> io::Result<Self> {
+        let bytes = if let Some(bytes) = catalog_db::read(path).map_err(io::Error::other)? {
+            bytes
+        } else {
+            fs::read(path)?
+        };
         let mut value: serde_json::Value =
-            serde_json::from_slice(&fs::read(path)?).map_err(io::Error::other)?;
+            serde_json::from_slice(&bytes).map_err(io::Error::other)?;
         coordination::adopt_legacy(&mut value).map_err(io::Error::other)?;
         let mut list: Self = serde_json::from_value(value).map_err(io::Error::other)?;
         for path in &mut list.tracks {

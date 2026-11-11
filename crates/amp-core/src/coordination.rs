@@ -108,6 +108,12 @@ impl Lock {
     }
 }
 pub fn atomic_write(path: &Path, value: &impl Serialize) -> Result<(), String> {
+    let _migration = crate::catalog_db::location(path)
+        .map(|(root, _)| Lock::acquire(&root.join("ampdj/catalog-migration")))
+        .transpose()?;
+    if crate::catalog_db::write(path, &serde_json::to_vec(value).map_err(|e| e.to_string())?)? {
+        return Ok(());
+    }
     regular(path)?;
     let temp = PathBuf::from(format!("{}.{}.tmp", path.display(), token()));
     let result = (|| {
@@ -132,6 +138,11 @@ pub fn atomic_write(path: &Path, value: &impl Serialize) -> Result<(), String> {
     result
 }
 fn read<T: serde::de::DeserializeOwned>(path: &Path) -> Result<Option<T>, String> {
+    if let Some(bytes) = crate::catalog_db::read(path)? {
+        return serde_json::from_slice(&bytes)
+            .map(Some)
+            .map_err(|e| e.to_string());
+    }
     regular(path)?;
     match fs::read(path) {
         Ok(b) => serde_json::from_slice(&b)
@@ -431,6 +442,8 @@ impl Lease {
         device: &str,
         ttl: Duration,
     ) -> Result<Claimed, String> {
+        crate::storage::enroll(root)?;
+        let _migration = Lock::acquire(&root.join("ampdj/catalog-migration"))?;
         let library = library_id(root)?;
         let audio = crate::resolve(root, relative).map_err(|e| e.to_string())?;
         let record = crate::preparation::portable(&audio);

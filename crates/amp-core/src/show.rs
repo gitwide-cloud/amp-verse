@@ -78,35 +78,26 @@ impl Default for Settings {
         Self {
             sync: None,
             version: 1,
-            playlists: [
-                ("recognition", "Recognition", Style::Hype),
-                ("walk-in", "Walk-In Music", Style::Hype),
-                ("meeting-open", "Meeting Open", Style::Steady),
-                ("everyday", "Everyday Music", Style::Steady),
-                ("background", "Background Music", Style::Chill),
-                ("break", "Break Music", Style::Steady),
-                ("closing", "Closing Music", Style::Hype),
-                ("custom", "Custom", Style::Steady),
-            ]
-            .into_iter()
-            .map(|(id, name, style)| SmartPlaylist {
-                id: id.into(),
-                name: name.into(),
-                style,
-                folders: vec![],
-                restrict_folders: false,
-                allowed: vec![],
-                restrict_allowed: false,
-                excluded: vec![],
-                preferred: vec![],
-                recognition_song: None,
-                target_energy: None,
-                recent_repeat: 5,
-                fallback: Fallback::RelaxRecent,
-                energy_progression: None,
-                use_manual_cues: true,
-            })
-            .collect(),
+            playlists: [("demo", "Demo", Style::Steady)]
+                .into_iter()
+                .map(|(id, name, style)| SmartPlaylist {
+                    id: id.into(),
+                    name: name.into(),
+                    style,
+                    folders: vec![],
+                    restrict_folders: false,
+                    allowed: vec![],
+                    restrict_allowed: false,
+                    excluded: vec![],
+                    preferred: vec![],
+                    recognition_song: None,
+                    target_energy: None,
+                    recent_repeat: 5,
+                    fallback: Fallback::RelaxRecent,
+                    energy_progression: None,
+                    use_manual_cues: true,
+                })
+                .collect(),
         }
     }
 }
@@ -154,6 +145,12 @@ impl Settings {
         Ok(())
     }
     pub fn load(root: &Path) -> Result<Self, String> {
+        if let Some(bytes) = crate::catalog_db::read(&root.join("ampdj/smart-playlists.json"))? {
+            let mut s: Self = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+            s.normalize();
+            s.validate()?;
+            return Ok(s);
+        }
         match std::fs::read(root.join("ampdj/smart-playlists.json")).or_else(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 std::fs::read(root.join(".ampverse/show.json"))
@@ -365,7 +362,7 @@ mod tests {
         s.validate().unwrap();
         let b = serde_json::to_vec(&s).unwrap();
         let v: Settings = serde_json::from_slice(&b).unwrap();
-        assert_eq!(v.playlists[0].id, "recognition");
+        assert_eq!(v.playlists[0].id, "demo");
     }
     #[test]
     fn performance_selection_uses_loaded_snapshot_after_shared_update() {

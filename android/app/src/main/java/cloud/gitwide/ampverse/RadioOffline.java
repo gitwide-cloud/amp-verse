@@ -24,20 +24,19 @@ final class RadioOffline {
                     String name="track-"+id+"."+extension;File audio=new File(stage,name);
                     client.download(id,audio,meta.getLong("bytes"),meta.getString("sha256"));
                     JSONObject preparation=meta.getJSONObject("preparation");preparation.put("source_sha256",meta.getString("sha256"));
-                    File metadata=new File(stage,"ampdj/tracks/"+name+".json");if(!metadata.getParentFile().isDirectory()&&!metadata.getParentFile().mkdirs())throw new IOException("Cannot save cues");
-                    Files.write(metadata.toPath(),preparation.toString().getBytes(StandardCharsets.UTF_8));
+                    CatalogStore.put(new File(stage,"ampdj/catalog.ampdb"),"tracks/"+name+".json",preparation.toString());
                     item=new JSONObject().put("file",name).put("title",entry.optString("title","Song")).put("preparation",preparation);copied.put(id,item);
                 }
                 items.put(item);
             }
             JSONObject album=new JSONObject().put("version",1).put("name",playlist.optString("name","Station playlist")).put("source",manifest).put("playlist",playlist).put("items",items).put("offline_changes","local_only");
-            Files.write(new File(stage,"playlist.json").toPath(),album.toString().getBytes(StandardCharsets.UTF_8));
+            CatalogStore.put(new File(stage,"ampdj/catalog.ampdb"),"offline-playlist",album.toString());
             File target=new File(base,token);Files.move(stage.toPath(),target.toPath(),StandardCopyOption.ATOMIC_MOVE);published=true;return target;
         } finally {if(!published)removeStage(stage);}
     }
     private static void removeStage(File file){File[] children=file.listFiles();if(children!=null)for(File child:children)removeStage(child);file.delete();}
-    static List<File> albums(Context context){List<File> result=new ArrayList<>();File[] files=new File(context.getFilesDir(),"radio-offline").listFiles();if(files!=null)for(File file:files)if(!file.getName().startsWith(".")&&new File(file,"playlist.json").isFile())result.add(file);return result;}
-    static JSONObject album(File folder)throws Exception{return new JSONObject(new String(Files.readAllBytes(new File(folder,"playlist.json").toPath()),StandardCharsets.UTF_8));}
+    static List<File> albums(Context context){List<File> result=new ArrayList<>();File[] files=new File(context.getFilesDir(),"radio-offline").listFiles();if(files!=null)for(File file:files)if(!file.getName().startsWith(".")&&(new File(file,"playlist.json").isFile()||new File(file,"ampdj/catalog.ampdb").isFile()))result.add(file);return result;}
+    static JSONObject album(File folder)throws Exception{String packed=CatalogStore.get(new File(folder,"ampdj/catalog.ampdb"),"offline-playlist");return new JSONObject(packed!=null?packed:new String(Files.readAllBytes(new File(folder,"playlist.json").toPath()),StandardCharsets.UTF_8));}
     static List<MediaItem> items(File folder)throws Exception {
         List<MediaItem> result=new ArrayList<>();JSONArray entries=album(folder).getJSONArray("items");
         for(int i=0;i<entries.length();i++){JSONObject entry=entries.getJSONObject(i);File audio=new File(folder,entry.getString("file"));if(!audio.getCanonicalPath().startsWith(folder.getCanonicalPath()+File.separator)||!audio.isFile())throw new IOException("Offline song unavailable");android.os.Bundle extras=new android.os.Bundle();extras.putString("amp-preparation",entry.getJSONObject("preparation").toString());result.add(new MediaItem.Builder().setMediaId("station-"+folder.getName()+"-"+audio.getName()).setUri(android.net.Uri.fromFile(audio)).setMediaMetadata(new MediaMetadata.Builder().setTitle(entry.optString("title")).setArtist("Offline station").setExtras(extras).build()).build());}return result;

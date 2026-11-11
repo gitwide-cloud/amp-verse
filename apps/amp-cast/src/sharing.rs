@@ -52,12 +52,7 @@ pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
         if !directory.starts_with(&cast.root) {
             return Err("Playlist folder leaves the library".into());
         }
-        let mut files = std::fs::read_dir(directory)
-            .map_err(|e| e.to_string())?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.extension().is_some_and(|e| e == "json"))
-            .collect::<Vec<_>>();
+        let mut files = amp_core::catalog_db::playlist_paths(&cast.root)?;
         files.sort();
         for path in files.into_iter().take(1000) {
             let path = path.canonicalize().map_err(|e| e.to_string())?;
