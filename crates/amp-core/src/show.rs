@@ -682,3 +682,9 @@ mod portable_playlist_tests {
         assert!(!a.source_unavailable);
     }
 }
+
+/// Equal-power bus gains shared by AMP DJ and Smart Radio.
+pub fn crossfade_weights(position: f32) -> [f32; 2] {
+    let phase = position.clamp(0., 1.) * std::f32::consts::FRAC_PI_2;
+    [phase.cos(), phase.sin()]
+}

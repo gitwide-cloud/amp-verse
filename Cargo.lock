@@ -75,6 +75,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "tower",
+ "ureq",
 ]
 
 [[package]]

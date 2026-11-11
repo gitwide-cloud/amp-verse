@@ -226,7 +226,7 @@ impl Default for Player {
             control_restart: None,
             control_status: "Show control starting…".into(),
             control_bind: std::env::var("AMP_CONTROL_BIND")
-                .unwrap_or_else(|_| "127.0.0.1:8790".into()),
+                .unwrap_or_else(|_| "0.0.0.0:8790".into()),
             control_password: std::env::var("AMP_CONTROL_PASSWORD").unwrap_or_default(),
             catalog_updated: std::time::Instant::now() - std::time::Duration::from_secs(3),
             last_master: 75,

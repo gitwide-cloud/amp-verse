@@ -22,47 +22,6 @@ jobs:
       - run: python3 tools/smoke_coordination.py target/release/amp-prepare target/release/amp-cast
       - run: python3 tools/smoke_cast.py target/release/amp-cast
       - run: python3 tools/smoke_discovery.py target/release/amp-cast
-  arm32-native-candidate:
-    needs: linux-foundation
-    runs-on: ubuntu-24.04
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.89.0
-        with:
-          targets: armv7-unknown-linux-musleabihf
-      - uses: Swatinem/rust-cache@v2
-      - name: Build static ARM32 candidates without GUI dependencies
-        run: |
-          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_LINKER="$(rustc --print sysroot)/lib/rustlib/x86_64-unknown-linux-gnu/bin/rust-lld"
-          export CARGO_TARGET_ARMV7_UNKNOWN_LINUX_MUSLEABIHF_RUSTFLAGS='-C link-self-contained=yes -C target-feature=+crt-static'
-          cargo build --release --locked -p amp-cast --target armv7-unknown-linux-musleabihf
-          file target/armv7-unknown-linux-musleabihf/release/amp-cast
-      - name: Run ARM32 server health check under emulation
-        run: |
-          sudo apt-get update && sudo apt-get install -y qemu-user
-          mkdir -p test-output/arm-music test-output/arm-data
-          export AMP_DEVICE_CONFIG_DIR="$PWD/test-output/arm-data/device"
-          export AMP_CAST_CONFIG_DIR="$PWD/test-output/arm-data/server"
-          qemu-arm target/armv7-unknown-linux-musleabihf/release/amp-cast test-output/arm-music >test-output/arm.log 2>&1 &
-          server_pid=$!
-          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
-          ready=false
-          for attempt in $(seq 1 30); do
-            if curl --fail --silent http://127.0.0.1:8787/health; then ready=true; break; fi
-            sleep 1
-          done
-          cat test-output/arm.log
-          test "$ready" = true
-      - uses: actions/upload-artifact@v4
-        with:
-          name: amp-cast-arm32-native-candidate
-          path: |
-            target/armv7-unknown-linux-musleabihf/release/amp-cast
-            target/armv7-unknown-linux-musleabihf/release/amp-prepare
-            LICENSE
-            THIRD_PARTY_NOTICES.md
-            deploy/amp-cast.service
-            docs/SERVER_DEPLOYMENT.md
   images:
     needs: linux-foundation
     runs-on: ubuntu-24.04
@@ -74,8 +33,6 @@ jobs:
             suffix: amd64
           - platform: linux/arm64
             suffix: arm64
-          - platform: linux/arm/v7
-            suffix: armv7
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-qemu-action@v3

@@ -23,6 +23,8 @@ final class CastPanel extends LinearLayout {
     private CastClient client;
     private boolean closed,busy,running;
     private String stationName="AMP Cast";
+    private final android.os.Handler handler=new android.os.Handler(android.os.Looper.getMainLooper());
+    private final Runnable poll=new Runnable(){public void run(){if(closed)return;if(client!=null&&!busy)refresh();handler.postDelayed(this,3000);}};
     CastPanel(Activity activity,Appearance colors,Listener listener) {
         super(activity);this.activity=activity;this.colors=colors;this.listener=listener;
         setOrientation(VERTICAL);setPadding(dp(10),dp(10),dp(10),dp(10));setBackground(Chrome.panel(colors,false));
@@ -39,11 +41,15 @@ final class CastPanel extends LinearLayout {
         connect=action("Connect",()->connect());connectionFields.addView(connect);
         status=label("Not connected",14);addView(status);
         now=label("No station selected",18);addView(now);
-        LinearLayout controls=new LinearLayout(activity);start=action("Start station",()->command(true));stop=action("Stop station",()->command(false));controls.addView(start,new LinearLayout.LayoutParams(0,dp(50),1));controls.addView(stop,new LinearLayout.LayoutParams(0,dp(50),1));connectionFields.addView(controls);
+        LinearLayout controls=new LinearLayout(activity);start=action("Start station",()->command(true));stop=action("Stop station",()->command(false));controls.addView(start,new LinearLayout.LayoutParams(0,dp(50),1));controls.addView(stop,new LinearLayout.LayoutParams(0,dp(50),1));addView(controls);
         listen=action("Listen on this phone",()->{if(client!=null)listener.listen(client.stream(),stationName);});addView(listen);
         addView(action("Stop phone playback",listener::stopListening));
         addView(action("Google Home / Chromecast",()->{if(client==null||!running){status.setText("Connect and start a station or live DJ broadcast first.");return;}activity.startActivity(new android.content.Intent(activity,GoogleCastActivity.class).putExtra("stream",client.stream()).putExtra("title",stationName));}));
-        refresh=action("Refresh station",()->refresh());connectionFields.addView(refresh);
+        refresh=action("Refresh station",()->refresh());addView(refresh);
+        addView(action("Launch Smart Radio playlist…",this::chooseStationPlaylist));
+        addView(action("Live Broadcast from host Player/DJ…",()->{if(client==null){status.setText("Connect to a station first");return;}EditText password=new EditText(activity);password.setHint("Host Player/DJ control password, if configured");password.setInputType(129);new android.app.AlertDialog.Builder(activity).setTitle("Broadcast the host's existing master mix").setView(password).setPositiveButton("Start Live Broadcast",(d,n)->work(()->{client.post("/api/live/launch",new JSONObject().put("source_password",password.getText().toString()));return "Live sender requested; waiting for master audio";})).setNegativeButton("Cancel",null).show();}));
+        addView(action("Play on Server",()->{if(client!=null)work(()->{client.post("/api/output/start",null);return "Server speaker requested; station timeline retained";});}));
+        addView(action("Stop server speaker",()->{if(client!=null)work(()->{client.post("/api/output/stop",null);return "Server speaker stopped; station continues";});}));
         sharedLists=new LinearLayout(activity);sharedLists.setOrientation(VERTICAL);addView(sharedLists);
         addView(action("Offline playlists",this::offline));
         addView(label("Music",17));
@@ -51,6 +57,7 @@ final class CastPanel extends LinearLayout {
         queue=label("Find a server to see its music.",14);addView(queue);
         search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int a,int c,int d){}public void onTextChanged(CharSequence t,int a,int b,int c){renderQueue();}public void afterTextChanged(android.text.Editable t){}});
         addView(action("Help",()->new android.app.AlertDialog.Builder(activity).setTitle("Radio help").setMessage("Search LAN stations to find a nearby AMP host, or search broadcast stations by name. For your own music, choose Host Smart Station on the desktop, connect here, and Save offline with my cues. Offline playlists remain separate from phone-folder music.").setPositiveButton("Done",null).show()));enabled(false);
+        handler.postDelayed(poll,3000);
     }
     private int dp(int n){return (int)(n*getResources().getDisplayMetrics().density);}
     private TextView label(String text,int size){TextView v=new TextView(activity);v.setText(text);v.setTextColor(colors.text);v.setTextSize(size);v.setPadding(0,dp(6),0,dp(6));return v;}
@@ -65,7 +72,7 @@ final class CastPanel extends LinearLayout {
     }
     private void connect(){
         final String url=address.getText().toString(),secret=password.getText().toString();client=null;enabled(false);
-        work(()->{CastClient candidate=new CastClient(url,secret);JSONObject snapshot=candidate.connect();JSONObject list=candidate.playlist();JSONObject manifest=snapshot.optJSONObject("capabilities")!=null&&snapshot.getJSONObject("capabilities").optBoolean("smart_sharing")?candidate.get("/api/smart/manifest"):null;
+        work(()->{CastClient candidate=new CastClient(url,secret);JSONObject snapshot=candidate.connect();candidate.get("/api/station/playlists");JSONObject list=candidate.playlist();JSONObject manifest=snapshot.optJSONObject("capabilities")!=null&&snapshot.getJSONObject("capabilities").optBoolean("smart_sharing")?candidate.get("/api/smart/manifest"):null;
             activity.runOnUiThread(()->{if(closed)return;client=candidate;connectionFields.setVisibility(GONE);activity.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putString("cast-server",candidate.base).apply();render(snapshot,list);renderShared(manifest);});return "Station connected";});
     }
     private void refresh(){final CastClient selected=client;if(selected==null)return;work(()->{JSONObject snapshot=selected.status(),list=selected.playlist();JSONObject manifest=snapshot.optJSONObject("capabilities")!=null&&snapshot.getJSONObject("capabilities").optBoolean("smart_sharing")?selected.get("/api/smart/manifest"):null;activity.runOnUiThread(()->{if(!closed&&client==selected){render(snapshot,list);renderShared(manifest);}});return "Station refreshed";});}
@@ -73,13 +80,14 @@ final class CastPanel extends LinearLayout {
     private void render(JSONObject snapshot,JSONObject list){
         running=snapshot.optBoolean("running");
         stationName=snapshot.optString("station_name","AMP Cast");
-        now.setText(stationName+" · "+(snapshot.optBoolean("running")?"ON AIR":"Stopped")+"\n"+(snapshot.isNull("now_playing")?"No track playing":snapshot.optString("now_playing",""))+"\nListeners: "+snapshot.optInt("listeners")+(snapshot.isNull("error")?"":"\n"+snapshot.optString("error","")));
+        now.setText(stationName+" · "+(snapshot.optBoolean("on_air",snapshot.optBoolean("running"))?"ON AIR":snapshot.optBoolean("preparing")?"Preparing audio":"Stopped")+"\n"+(snapshot.isNull("now_playing")?"No track playing":snapshot.optString("now_playing",""))+"\nListeners: "+snapshot.optInt("listeners")+(snapshot.isNull("error")?"":"\n"+snapshot.optString("error","")));
         tracks=list.optJSONArray("tracks");if(tracks==null)tracks=new JSONArray();renderQueue();
     }
     private void renderShared(JSONObject manifest){
         sharedLists.removeAllViews();if(manifest==null)return;queue.setVisibility(GONE);sharedLists.addView(label("Station playlists",18));JSONArray lists=manifest.optJSONArray("playlists");if(lists==null)return;
-        for(int i=0;i<lists.length();i++){JSONObject playlist=lists.optJSONObject(i);if(playlist==null)continue;sharedLists.addView(label(playlist.optString("name")+" · "+playlist.optJSONArray("tracks").length()+" songs",16));final CastClient selected=client;sharedLists.addView(action("Play on this phone",()->work(()->{selected.playPlaylist(playlist.getString("id"));activity.runOnUiThread(()->{if(!closed&&client==selected)listener.listen(selected.stream(),playlist.optString("name"));});return "Playing station playlist";})));sharedLists.addView(action("Save offline with my cues",()->work(()->{java.io.File folder=RadioOffline.save(activity,selected,manifest,playlist);return "Saved "+RadioOffline.album(folder).optString("name")+" with cues. Open Offline playlists to listen.";})));}
+        for(int i=0;i<lists.length();i++){JSONObject playlist=lists.optJSONObject(i);if(playlist==null)continue;sharedLists.addView(label(playlist.optString("name")+" · "+playlist.optJSONArray("tracks").length()+" songs",16));final CastClient selected=client;sharedLists.addView(action("Play on this phone",()->work(()->{activity.runOnUiThread(()->{if(!closed&&client==selected)listener.listen(selected.stream(),playlist.optString("name"));});return "Playing station playlist";})));sharedLists.addView(action("Save offline with my cues",()->work(()->{java.io.File folder=RadioOffline.save(activity,selected,manifest,playlist);return "Saved "+RadioOffline.album(folder).optString("name")+" with cues. Open Offline playlists to listen.";})));}
     }
+    private void chooseStationPlaylist(){final CastClient selected=client;if(selected==null){status.setText("Connect to a station first");return;}work(()->{JSONArray lists=selected.get("/api/station/playlists").getJSONArray("playlists");activity.runOnUiThread(()->{if(closed||client!=selected)return;String[] names=new String[lists.length()];for(int i=0;i<names.length;i++)names[i]=lists.optJSONObject(i).optString("name");new android.app.AlertDialog.Builder(activity).setTitle("Launch independent Smart Radio").setItems(names,(d,i)->work(()->{selected.post("/api/station/play/"+android.net.Uri.encode(lists.optJSONObject(i).optString("id")),null);return "Smart Radio launched";})).setNegativeButton("Cancel",null).show();});return "Choose a saved playlist";});}
     private void offline(){java.util.List<java.io.File> albums=RadioOffline.albums(activity);String[] names=new String[albums.size()];for(int i=0;i<names.length;i++)try{names[i]=RadioOffline.album(albums.get(i)).optString("name");}catch(Exception error){names[i]="Unavailable playlist";}if(names.length==0){status.setText("No offline station playlists yet. Connect to a Smart Station and choose Save offline.");return;}new android.app.AlertDialog.Builder(activity).setTitle("Offline station playlists").setItems(names,(d,index)->{try{listener.playlist(RadioOffline.items(albums.get(index)));}catch(Exception error){status.setText(error.getMessage());}}).setNegativeButton("Close",null).show();}
     private void renderQueue(){
         String query=search.getText().toString().trim().toLowerCase(java.util.Locale.ROOT);StringBuilder text=new StringBuilder();int total=0,shown=0;
@@ -90,5 +98,5 @@ final class CastPanel extends LinearLayout {
     private void findServers(){
         work(()->{java.util.List<CastDiscovery.Server> servers=CastDiscovery.find();activity.runOnUiThread(()->{if(closed)return;serverList.removeAllViews();for(CastDiscovery.Server server:servers){serverList.addView(action(server.name+" · "+server.url.replace("http://",""),()->{address.setText(server.url);password.setText("");connect();}));}});return servers.isEmpty()?"No servers found. Check Wi-Fi or enter the server address.":"Choose a server below.";});
     }
-    void close(){closed=true;worker.shutdownNow();}
+    void close(){closed=true;handler.removeCallbacksAndMessages(null);worker.shutdownNow();}
 }

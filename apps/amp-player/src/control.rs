@@ -59,6 +59,31 @@ pub enum Action {
         #[serde(default)]
         execution: Execution,
     },
+    StartLiveBroadcast {
+        address: String,
+        #[serde(default)]
+        password: String,
+    },
+    StopLiveBroadcast,
+    AdjustVolume {
+        delta: f32,
+    },
+    SeekRelative {
+        #[serde(default)]
+        deck: Deck,
+        seconds: f64,
+    },
+    Previous,
+    PlayerNext,
+    PlayerOptions {
+        #[serde(default)]
+        shuffle: Option<bool>,
+        #[serde(default)]
+        repeat: Option<bool>,
+    },
+    LoadPlaylist {
+        playlist: String,
+    },
     PreloadNext,
     NextSong {
         #[serde(default)]
@@ -210,6 +235,8 @@ struct Shared {
     password: Option<String>,
     ctx: eframe::egui::Context,
     shutdown: Arc<AtomicBool>,
+    session: String,
+    discovery_ready: AtomicBool,
 }
 pub struct Control {
     pub commands: mpsc::Receiver<Envelope>,
@@ -249,7 +276,56 @@ impl Control {
             password,
             ctx: ctx.clone(),
             shutdown: shutdown.clone(),
+            session: amp_core::coordination::token(),
+            discovery_ready: AtomicBool::new(false),
         });
+        let discovery = shared.clone();
+        let local = listener.local_addr().map_err(|e| e.to_string())?;
+        if !local.ip().is_loopback() && local.is_ipv4() {
+            std::thread::spawn(move || {
+                let mut bound = None;
+                for _ in 0..20 {
+                    match std::net::UdpSocket::bind("0.0.0.0:18790") {
+                        Ok(socket) => {
+                            bound = Some(socket);
+                            break;
+                        }
+                        Err(_) if !discovery.shutdown.load(Ordering::Relaxed) => {
+                            std::thread::sleep(Duration::from_millis(50))
+                        }
+                        Err(_) => return,
+                    }
+                }
+                let Some(socket) = bound else { return };
+                discovery.discovery_ready.store(true, Ordering::Relaxed);
+                let _ = socket.set_read_timeout(Some(Duration::from_millis(50)));
+                let mut packet = [0u8; 128];
+                let mut window = Instant::now();
+                let mut replies = 0;
+                while !discovery.shutdown.load(Ordering::Relaxed) {
+                    if window.elapsed() > Duration::from_secs(1) {
+                        window = Instant::now();
+                        replies = 0;
+                    }
+                    if let Ok((n, peer)) = socket.recv_from(&mut packet) {
+                        let local_peer = match peer.ip() {
+                            std::net::IpAddr::V4(ip) => {
+                                ip.is_private() || ip.is_loopback() || ip.is_link_local()
+                            }
+                            _ => false,
+                        };
+                        if local_peer
+                            && &packet[..n] == b"AMPVERSE_CONTROL_DISCOVER_V1"
+                            && replies < 20
+                        {
+                            let reply = json!({"protocol":1,"service":"amp-control","name":std::env::var("COMPUTERNAME").or_else(|_|std::env::var("HOSTNAME")).unwrap_or_else(|_|"AMP Verse".into()),"port":local.port(),"session":discovery.session,"password_required":discovery.password.is_some()});
+                            let _ = socket.send_to(reply.to_string().as_bytes(), peer);
+                            replies += 1;
+                        }
+                    }
+                }
+            });
+        }
         let stop = shutdown.clone();
         let server = shared.clone();
         std::thread::spawn(move || {
@@ -259,6 +335,7 @@ impl Control {
                 .expect("Show control runtime");
             runtime.block_on(async move {
                 let router = Router::new()
+                    .route("/api/v1/info", get(info))
                     .route("/api/v1/state", get(state))
                     .route("/api/v1/catalog", get(catalog))
                     .route("/api/v1/command", post(command))
@@ -291,7 +368,27 @@ impl Control {
         }
     }
 }
+fn protocol(s: &Shared) -> Value {
+    json!({"protocol":1,"service":"amp-control","session":s.session,"password_required":s.password.is_some(),"discovery_available":s.discovery_ready.load(Ordering::Relaxed),"capabilities":["player","dj","catalog","websocket","energy","progression","song_requests","samplers"]})
+}
+fn snapshot(s: &Shared) -> Value {
+    let mut value = s.snapshot.borrow().clone();
+    value["control"] = protocol(s);
+    value
+}
+async fn info(State(s): State<Arc<Shared>>, h: HeaderMap) -> axum::response::Response {
+    if !authorized(&s, &h) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    Json(protocol(&s)).into_response()
+}
 fn authorized(s: &Shared, h: &HeaderMap) -> bool {
+    if h.get("x-amp-session")
+        .is_some_and(|value| value.to_str().ok() != Some(s.session.as_str()))
+    {
+        return false;
+    }
+
     if h.get("sec-fetch-site")
         .is_some_and(|v| v != "same-origin" && v != "none")
     {
@@ -311,7 +408,7 @@ async fn state(State(s): State<Arc<Shared>>, h: HeaderMap) -> axum::response::Re
     if !authorized(&s, &h) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(s.snapshot.borrow().clone()).into_response()
+    Json(snapshot(&s)).into_response()
 }
 async fn catalog(State(s): State<Arc<Shared>>, h: HeaderMap) -> axum::response::Response {
     if !authorized(&s, &h) {
@@ -330,7 +427,7 @@ async fn events(
     ws.on_upgrade(move|mut socket|async move{
         let mut states=s.snapshot.subscribe();
         loop {
-            let value=states.borrow_and_update().to_string();
+            let mut value=states.borrow_and_update().clone();value["control"]=protocol(&s);let value=value.to_string();
             if socket.send(Message::Text(value.into())).await.is_err(){break;}
             tokio::select! {
                 _=tokio::time::sleep(Duration::from_millis(100))=>{if s.shutdown.load(Ordering::Relaxed){break;}},
@@ -517,5 +614,42 @@ mod tests {
                 .is_err()
         );
         worker.join().unwrap();
+    }
+    #[test]
+    fn authenticated_protocol_identifies_session_and_rejects_stale_target() {
+        let control = Control::start(
+            &eframe::egui::Context::default(),
+            "127.0.0.1:0",
+            Some("secret".into()),
+        )
+        .unwrap();
+        let base = format!("http://{}", control.address);
+        assert!(ureq::get(format!("{base}/api/v1/info")).call().is_err());
+        let value: Value = ureq::get(format!("{base}/api/v1/info"))
+            .header("x-amp-password", "secret")
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_json()
+            .unwrap();
+        assert_eq!(value["protocol"], 1);
+        assert_eq!(value["service"], "amp-control");
+        assert!(!value["session"].as_str().unwrap().is_empty());
+        assert!(
+            ureq::get(format!("{base}/api/v1/state"))
+                .header("x-amp-password", "secret")
+                .header("x-amp-session", "stale-session")
+                .call()
+                .is_err()
+        );
+        let state: Value = ureq::get(format!("{base}/api/v1/state"))
+            .header("x-amp-password", "secret")
+            .header("x-amp-session", value["session"].as_str().unwrap())
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_json()
+            .unwrap();
+        assert_eq!(state["control"]["session"], value["session"]);
     }
 }

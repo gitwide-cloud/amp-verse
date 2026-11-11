@@ -8,6 +8,7 @@ pub mod coordination;
 pub mod discovery;
 pub mod energy_profile;
 pub mod engine_api;
+pub mod mix_schedule;
 pub mod offline;
 pub mod preparation;
 pub mod review;

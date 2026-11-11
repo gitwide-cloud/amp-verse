@@ -46,6 +46,8 @@ impl Broadcast {
                 "libmp3lame",
                 "-b:a",
                 "192k",
+                "-reservoir",
+                "0",
                 "-f",
                 "mp3",
                 "-flush_packets",

@@ -1,7 +1,9 @@
 pub mod analysis_worker;
 pub mod config;
 mod live;
+mod radio;
 pub mod sharing;
+mod station_control;
 use amp_core::{Library, Track};
 use axum::{
     Json, Router,
@@ -22,6 +24,10 @@ use tokio::{
 
 #[derive(Default, Serialize)]
 struct Station {
+    name: Option<String>,
+    audio_ready: bool,
+    #[serde(skip)]
+    generation: u64,
     source: String,
     #[serde(skip)]
     live_token: Option<String>,
@@ -36,6 +42,8 @@ struct Station {
 }
 pub struct Cast {
     operation: Mutex<()>,
+    pub listen_address: std::sync::Mutex<Option<std::net::SocketAddr>>,
+    server_output: std::sync::Mutex<Option<std::process::Child>>,
     server_id: String,
     library_id: Option<String>,
     pub config_dir: std::sync::Mutex<Option<PathBuf>>,
@@ -73,6 +81,8 @@ impl Cast {
         let (audio, _) = broadcast::channel(256);
         Arc::new(Self {
             operation: Mutex::new(()),
+            listen_address: std::sync::Mutex::new(None),
+            server_output: std::sync::Mutex::new(None),
             library_id: amp_core::coordination::library_id(&root).ok(),
             config_dir: std::sync::Mutex::new(None),
             server_id,
@@ -89,9 +99,11 @@ impl Cast {
         })
     }
     pub async fn shutdown(&self) {
+        station_control::stop_output(self);
         let worker = {
             let mut station = self.station.lock().await;
             station.running = false;
+            station.generation = station.generation.wrapping_add(1);
             station.live_token = None;
             station.now_playing = None;
             station.current_index = None;
@@ -141,6 +153,7 @@ pub fn router(cast: Arc<Cast>) -> Router {
         )
         .merge(sharing::routes())
         .merge(live::routes())
+        .merge(station_control::routes())
         .route("/api/status", get(status))
         .route(
             "/app-icon.png",
@@ -173,7 +186,7 @@ async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
             .pause_for_radio
             .load(std::sync::atomic::Ordering::Relaxed);
     Json(
-        serde_json::json!({"library_id":cast.library_id,"source":station.source,"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"playlist_playback":true,"google_cast":false,"hls":false,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":cast.station_name,"analysis":analysis,"running":station.running,"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
+        serde_json::json!({"library_id":cast.library_id,"source":station.source,"current_source":if station.source=="live_dj" {serde_json::json!("Player/DJ master")} else {cast.selection.lock().unwrap().as_ref().map_or(serde_json::Value::Null,|v|v["name"].clone())},"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"playlist_playback":true,"google_cast":false,"hls":false,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":station.name.as_ref().unwrap_or(&cast.station_name),"analysis":analysis,"running":station.running && (station.source!="live_dj" || station.audio_ready),"on_air":station.running && station.audio_ready,"preparing":station.running && !station.audio_ready,"server_output":station_control::output_running(&cast),"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
     )
 }
 async fn pause_analysis(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
@@ -205,8 +218,11 @@ async fn resume_analysis(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> R
     StatusCode::NO_CONTENT.into_response()
 }
 async fn playlist(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
+    let live = cast.station.lock().await.source == "live_dj";
+    let selection = cast.selection.lock().unwrap().clone();
+    let selected = selection.as_ref().and_then(|v| v["tracks"].as_array());
     Json(
-        serde_json::json!({"tracks":cast.tracks.iter().enumerate().map(|(index,track)|serde_json::json!({"index":index,"title":track.title,"cue_in":track.preparation.cue_in,"cue_out":track.preparation.cue_out,"bpm":track.preparation.bpm})).collect::<Vec<_>>()}),
+        serde_json::json!({"tracks":cast.tracks.iter().enumerate().filter(|(i,_)|!live&&selected.is_none_or(|list|list.iter().any(|v|v.as_u64()==Some(*i as u64)))).map(|(index,track)|serde_json::json!({"index":index,"title":track.title,"cue_in":track.preparation.cue_in,"cue_out":track.preparation.cue_out,"bpm":track.preparation.bpm})).collect::<Vec<_>>()}),
     )
 }
 async fn start(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
@@ -229,12 +245,18 @@ async fn start_unlocked(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Re
         return (StatusCode::CONFLICT, "Music folder is empty").into_response();
     }
     station.running = true;
-    station.source = "playlist".into();
+    station.audio_ready = false;
+    station.generation = station.generation.wrapping_add(1);
+    let owner = station.generation;
+    station.source = "smart_radio".into();
     station.error = None;
     let worker_cast = cast.clone();
     let task = tokio::spawn(async move {
-        let outcome = broadcast_tracks(worker_cast.clone()).await;
+        let outcome = broadcast_tracks(worker_cast.clone(), owner).await;
         let mut station = worker_cast.station.lock().await;
+        if station.generation != owner {
+            return;
+        }
         station.running = false;
         station.now_playing = None;
         station.current_index = None;
@@ -252,117 +274,8 @@ async fn stop(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     cast.shutdown().await;
     StatusCode::NO_CONTENT.into_response()
 }
-async fn broadcast_tracks(cast: Arc<Cast>) -> Result<(), String> {
-    let selection = cast.selection.lock().unwrap().clone();
-    let indices: Vec<usize> = selection
-        .as_ref()
-        .and_then(|p| p["tracks"].as_array())
-        .map(|a| {
-            a.iter()
-                .filter_map(|i| i.as_u64().map(|i| i as usize))
-                .collect()
-        })
-        .unwrap_or_else(|| (0..cast.tracks.len()).collect());
-    let profile: Option<amp_core::show::SmartPlaylist> = selection
-        .as_ref()
-        .and_then(|p| serde_json::from_value(p["rules"].clone()).ok());
-    let mut recent = Vec::new();
-    let mut current = None;
-    let mut cursor = 0;
-    loop {
-        let index = if let Some(profile) = &profile {
-            amp_core::show::choose(
-                profile,
-                &cast.tracks,
-                current,
-                &recent,
-                profile.target_energy,
-                0,
-            )
-            .or_else(|| {
-                current.filter(|i| {
-                    profile.fallback != amp_core::show::Fallback::Stop
-                        && amp_core::show::eligible(profile, &cast.tracks[*i])
-                })
-            })
-            .ok_or("No eligible songs remain in Smart Playlist")?
-        } else {
-            let i = *indices
-                .get(cursor % indices.len().max(1))
-                .ok_or("Playlist is empty")?;
-            cursor += 1;
-            i
-        };
-        let track = cast.tracks.get(index).ok_or("Invalid playlist track")?;
-        let path = amp_core::resolve(&cast.root, &track.path).map_err(|e| e.to_string())?;
-        // Read once before loading; never change the running track's cues.
-        let preparation = amp_core::preparation::load(&path)?;
-        {
-            let mut station = cast.station.lock().await;
-            station.now_playing = Some(track.title.clone());
-            station.current_index = Some(index);
-        }
-        let mut command = tokio::process::Command::new("ffmpeg");
-        #[cfg(windows)]
-        command.creation_flags(0x08000000);
-        let mut child = command
-            .args(["-hide_banner", "-nostdin", "-loglevel", "error", "-re"])
-            .arg("-ss")
-            .arg(preparation.cue_in.to_string())
-            .arg("-i")
-            .arg(path)
-            .args(
-                preparation
-                    .cue_out
-                    .map(|out| vec!["-t".to_string(), (out - preparation.cue_in).to_string()])
-                    .unwrap_or_default(),
-            )
-            .args([
-                "-vn",
-                "-ac",
-                "2",
-                "-ar",
-                "44100",
-                "-c:a",
-                "libmp3lame",
-                "-b:a",
-                "128k",
-                "-write_xing",
-                "0",
-                "-id3v2_version",
-                "0",
-                "-f",
-                "mp3",
-                "pipe:1",
-            ])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::null())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| format!("FFmpeg unavailable: {e}"))?;
-        let mut stdout = child.stdout.take().ok_or("Missing encoder pipe")?;
-        let mut buffer = [0u8; 4096];
-        let mut total = 0;
-        loop {
-            let size = stdout.read(&mut buffer).await.map_err(|e| e.to_string())?;
-            if size == 0 {
-                break;
-            }
-            total += size;
-            // One encoder feeds all listeners. A listener never starts its own station.
-            let _ = cast.audio.send(Bytes::copy_from_slice(&buffer[..size]));
-        }
-        let result = child.wait().await.map_err(|e| e.to_string())?;
-        if !result.success() || total == 0 {
-            return Err(format!("Audio encoding failed: {}", track.title));
-        }
-        current = Some(index);
-        recent.push(amp_core::show::song_id(track));
-        if recent.len() > 100 {
-            recent.remove(0);
-        }
-    }
+async fn broadcast_tracks(cast: Arc<Cast>, owner: u64) -> Result<(), String> {
+    radio::broadcast(cast, owner).await
 }
 async fn listen(State(cast): State<Arc<Cast>>) -> Response {
     let mut rx = cast.audio.subscribe();

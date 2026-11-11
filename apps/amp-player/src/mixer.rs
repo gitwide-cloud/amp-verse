@@ -694,10 +694,7 @@ impl Mixer {
                 }
             }
             let x = get(&c.crossfader);
-            let mut weights = [
-                (x * std::f32::consts::FRAC_PI_2).cos(),
-                (x * std::f32::consts::FRAC_PI_2).sin(),
-            ];
+            let mut weights = amp_core::show::crossfade_weights(x);
             let mut stem_masks = [[1.; 3]; 2];
             if let Some((buses, masks)) = mashup_mix {
                 weights = buses;

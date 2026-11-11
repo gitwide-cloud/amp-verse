@@ -10,6 +10,13 @@ use std::{
     sync::atomic::Ordering::Relaxed,
     time::{Duration, Instant},
 };
+fn regular_playlist_id(path: &std::path::Path) -> String {
+    use sha2::Digest;
+    format!(
+        "regular_{:x}",
+        sha2::Sha256::digest(path.to_string_lossy().as_bytes())
+    )
+}
 fn scratch_phrase(seconds: f32, flourish: bool) -> f32 {
     if !flourish {
         return if seconds < 0.09 { -0.65 } else { 0.8 };
@@ -674,6 +681,9 @@ impl Player {
             && !matches!(
                 action,
                 Action::ManualLock { .. }
+                    | Action::StartLiveBroadcast { .. }
+                    | Action::StopLiveBroadcast
+                    | Action::AdjustVolume { .. }
                     | Action::Stop { .. }
                     | Action::Pause { .. }
                     | Action::Play { .. }
@@ -687,6 +697,93 @@ impl Player {
             return Err("Manual DJ Lock prevents automated takeover".into());
         }
         match action {
+            Action::StartLiveBroadcast { address, password } => {
+                let destination: std::net::SocketAddr = address
+                    .parse()
+                    .map_err(|_| "Use a LAN IP and port for the broadcast server")?;
+                let lan = match destination.ip() {
+                    std::net::IpAddr::V4(ip) => {
+                        ip.is_private() || ip.is_loopback() || ip.is_link_local()
+                    }
+                    std::net::IpAddr::V6(ip) => ip.is_loopback() || ip.is_unique_local(),
+                };
+                if !lan {
+                    return Err("Live broadcast target must be on the local network".into());
+                }
+                self.ensure_audio()?;
+                self.ensure_right_samples()?;
+                self.live_mix = Some(crate::live_mix::Broadcast::start(
+                    self.audio.as_ref().unwrap(),
+                    self.right_sample_audio.as_ref().unwrap(),
+                    address,
+                    password,
+                )?);
+            }
+            Action::StopLiveBroadcast => {
+                self.live_mix = None;
+                if let Some(a) = &self.audio {
+                    a.stop_broadcast_tap();
+                }
+                if let Some(a) = &self.right_sample_audio {
+                    a.stop_broadcast_tap();
+                }
+            }
+            Action::AdjustVolume { delta } => {
+                if !delta.is_finite() || delta.abs() > 1. {
+                    return Err("Volume adjustment must be between -1 and 1".into());
+                }
+                self.volume = (self.volume as f32 + delta * 100.).round().clamp(0., 100.) as u8;
+                if let Some(audio) = &self.audio {
+                    audio.set_master(self.volume as f32 / 100.);
+                }
+            }
+            Action::SeekRelative { deck, seconds } => {
+                if !seconds.is_finite() || seconds.abs() > 86400. {
+                    return Err("Invalid seek".into());
+                }
+                let d = self.requested_deck(deck, false);
+                if self.loaded[d].is_none() {
+                    return Err("Load a song first".into());
+                }
+                self.seek_deck_relative(d, seconds);
+            }
+            Action::Previous => {
+                let index = self.loaded[0].ok_or("No current song")?;
+                self.play(0, index.saturating_sub(1));
+            }
+            Action::PlayerNext => self.next(),
+            Action::PlayerOptions { shuffle, repeat } => {
+                if let Some(value) = shuffle {
+                    self.shuffle = value;
+                }
+                if let Some(value) = repeat {
+                    self.repeat_one = value;
+                }
+            }
+            Action::LoadPlaylist { playlist } => {
+                let (path, list) = self
+                    .dj_browser
+                    .playlists
+                    .iter()
+                    .find(|(path, _)| regular_playlist_id(path) == playlist)
+                    .cloned()
+                    .ok_or("Playlist unavailable; refresh the catalog")?;
+                let library = self.library.as_ref().ok_or("Library unavailable")?;
+                let indices: Vec<_> = list
+                    .tracks
+                    .iter()
+                    .filter_map(|path| library.tracks.iter().position(|t| &t.path == path))
+                    .collect();
+                let first = *indices.first().ok_or("Playlist has no available songs")?;
+                self.run.auto = false;
+                self.run.profile = None;
+                self.run.playlist = Some(list.name.clone());
+                self.run.cancel_automation();
+                self.queue = indices;
+                self.queue_selected = None;
+                self.playlist_snapshot = Some((path, list));
+                self.load_deck(0, first, false);
+            }
             Action::TransitionSettings {
                 enabled,
                 techniques,
@@ -1564,7 +1661,7 @@ impl Player {
         }
     }
     pub(super) fn control_catalog(&self) -> Value {
-        json!({"songs":self.library.as_ref().map(|l|l.tracks.iter().map(|t|json!({"id":show::song_id(t),"title":t.title,"artist":t.preparation.extensions.get("artist"),"cues":t.preparation.manual_cues.iter().chain(&t.preparation.cues).map(|c|json!({"number":c.number,"id":c.id,"name":c.label,"seconds":c.seconds})).collect::<Vec<_>>()})).collect::<Vec<_>>()).unwrap_or_default(),"playlists":self.run.settings.playlists,"version":1})
+        json!({"songs":self.library.as_ref().map(|l|l.tracks.iter().map(|t|json!({"id":show::song_id(t),"title":t.title,"artist":t.preparation.extensions.get("artist"),"cues":t.preparation.manual_cues.iter().chain(&t.preparation.cues).map(|c|json!({"number":c.number,"id":c.id,"name":c.label,"seconds":c.seconds})).collect::<Vec<_>>()})).collect::<Vec<_>>()).unwrap_or_default(),"playlists":self.run.settings.playlists,"regular_playlists":self.dj_browser.playlists.iter().map(|(path,p)|json!({"id":regular_playlist_id(path),"name":p.name})).collect::<Vec<_>>(),"version":1})
     }
     pub(super) fn control_snapshot(&self) -> Value {
         let active = self.active_deck();
@@ -1575,7 +1672,7 @@ impl Player {
             json!({"deck":if d==0{"A"}else{"B"},"loaded":engine_loaded,"ready":engine_loaded&&a.is_some_and(|a|a.controls.ready[d].load(Relaxed)),"playing":playing,"state":if playing{"playing"}else if engine_loaded{"paused"}else{"stopped"},"song_id":if engine_loaded{t.map(show::song_id)}else{None},"title":if engine_loaded{t.map(|t|t.title.as_str())}else{None},"artist":if engine_loaded{t.and_then(|t|t.preparation.extensions.get("artist")).cloned()}else{None},"position":if engine_loaded{a.map(|a|a.source_position(d))}else{None},"remaining":if engine_loaded{a.and_then(|a|a.remaining(d))}else{None}})
         }).collect();
         let fading = a.is_some_and(|a| a.fading() || a.controls.level_fading.load(Relaxed));
-        json!({"version":1,"amp":{"connected":true,"status":self.status,"playback_state":tracks[active]["state"],"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active==0{"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"manual_dj_locked":self.run.locked},"decks":tracks,"cue_decks":self.sides.iter().map(|side|side.snapshot()).collect::<Vec<_>>()})
+        json!({"version":1,"amp":{"connected":true,"status":self.status,"playback_state":tracks[active]["state"],"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active==0{"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"shuffle":self.shuffle,"repeat":self.repeat_one,"manual_dj_locked":self.run.locked},"decks":tracks,"cue_decks":self.sides.iter().map(|side|side.snapshot()).collect::<Vec<_>>()})
     }
 }
 

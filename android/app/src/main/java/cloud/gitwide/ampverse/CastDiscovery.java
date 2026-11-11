@@ -26,7 +26,7 @@ final class CastDiscovery {
             for(InterfaceAddress address:network.getInterfaceAddresses())if(address.getBroadcast()!=null)destinations.add(address.getBroadcast());
         }
         try(DatagramSocket socket=new DatagramSocket()) {
-            socket.setBroadcast(true);socket.setSoTimeout(200);long until=System.currentTimeMillis()+3000,next=0;
+            socket.setBroadcast(true);socket.setSoTimeout(200);long until=System.currentTimeMillis()+5000,next=0;
             while(System.currentTimeMillis()<until&&!Thread.currentThread().isInterrupted()) {
                 if(System.currentTimeMillis()>=next){for(InetAddress target:destinations){try{socket.send(new DatagramPacket(QUERY,QUERY.length,target,PORT));}catch(java.io.IOException ignored){}}next=System.currentTimeMillis()+1000;}
                 byte[] data=new byte[2048];DatagramPacket packet=new DatagramPacket(data,data.length);

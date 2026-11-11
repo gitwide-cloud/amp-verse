@@ -17,6 +17,7 @@ async fn start_live(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respon
     let token = amp_core::coordination::token();
     let mut station = cast.station.lock().await;
     station.running = true;
+    station.audio_ready = false;
     station.source = "live_dj".into();
     station.now_playing = Some("Live DJ mix".into());
     station.error = None;
@@ -65,6 +66,7 @@ async fn audio(State(cast): State<Arc<Cast>>, headers: HeaderMap, body: Bytes) -
         return StatusCode::BAD_REQUEST.into_response();
     }
     station.live_seen = Some(std::time::Instant::now());
+    station.audio_ready = true;
     let _ = cast.audio.send(body);
     StatusCode::NO_CONTENT.into_response()
 }

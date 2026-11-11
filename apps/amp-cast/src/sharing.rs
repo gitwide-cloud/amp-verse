@@ -27,15 +27,7 @@ async fn enable(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
 }
 pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
     let mut result = Vec::new();
-    let settings = if cast.root.join("ampdj/smart-playlists.json").is_file() {
-        amp_core::show::Settings::load(&cast.root)?
-    } else {
-        amp_core::show::Settings {
-            version: 1,
-            sync: None,
-            playlists: Vec::new(),
-        }
-    };
+    let settings = amp_core::show::Settings::load(&cast.root)?;
     for p in settings.playlists {
         let ordered: Vec<_> = cast
             .tracks
@@ -46,29 +38,26 @@ pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
             .collect();
         result.push(json!({"id":format!("smart_{}",p.id),"name":p.name,"kind":"smart","rules":p,"tracks":ordered}));
     }
-    let directory = cast.root.join("ampdj/playlists");
-    if directory.exists() {
-        let directory = directory.canonicalize().map_err(|e| e.to_string())?;
-        if !directory.starts_with(&cast.root) {
-            return Err("Playlist folder leaves the library".into());
+    let mut files = amp_core::catalog_db::playlist_paths(&cast.root)?;
+    files.sort();
+    for path in files.into_iter().take(1000) {
+        if !path.starts_with(cast.root.join("ampdj/playlists")) {
+            continue;
         }
-        let mut files = amp_core::catalog_db::playlist_paths(&cast.root)?;
-        files.sort();
-        for path in files.into_iter().take(1000) {
-            let path = path.canonicalize().map_err(|e| e.to_string())?;
-            if !path.starts_with(&cast.root)
-                || std::fs::metadata(&path).map_err(|e| e.to_string())?.len() > 4 * 1024 * 1024
-            {
-                continue;
-            }
-            if let Ok(p) = amp_core::Playlist::load(&path, &cast.root) {
-                let tracks: Vec<_> = p
-                    .tracks
-                    .iter()
-                    .filter_map(|path| cast.tracks.iter().position(|t| &t.path == path))
-                    .collect();
-                result.push(json!({"id":format!("normal_{}",path.file_stem().unwrap_or_default().to_string_lossy()),"name":p.name,"kind":"playlist","tracks":tracks}));
-            }
+        if path.exists()
+            && path
+                .canonicalize()
+                .is_ok_and(|p| !p.starts_with(&cast.root))
+        {
+            continue;
+        }
+        if let Ok(p) = amp_core::Playlist::load(&path, &cast.root) {
+            let tracks: Vec<_> = p
+                .tracks
+                .iter()
+                .filter_map(|path| cast.tracks.iter().position(|t| &t.path == path))
+                .collect();
+            result.push(json!({"id":format!("normal_{}",path.file_stem().unwrap_or_default().to_string_lossy()),"name":p.name,"kind":"playlist","tracks":tracks}));
         }
     }
     Ok(result)
@@ -374,5 +363,40 @@ mod tests {
                 .seconds,
             12.
         );
+    }
+}
+
+#[cfg(test)]
+mod catalog_station_tests {
+    use super::*;
+    #[test]
+    fn station_sources_read_database_documents_without_loose_json() {
+        let root = tempfile::tempdir().unwrap();
+        amp_core::show::Settings::default()
+            .save(root.path())
+            .unwrap();
+        let normal = root.path().join("ampdj/playlists/test.json");
+        amp_core::Playlist {
+            sync: None,
+            version: 1,
+            name: "Saved normal".into(),
+            tracks: vec![],
+        }
+        .save_in_library(&normal, root.path())
+        .unwrap();
+        amp_core::catalog_db::compact(root.path()).unwrap();
+        assert!(
+            amp_core::catalog_db::read(&root.path().join("ampdj/smart-playlists.json"))
+                .unwrap()
+                .is_some()
+        );
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        let sources = lists(&cast).unwrap();
+        assert!(sources.iter().any(|p| p["name"] == "Demo"));
+        assert!(sources.iter().any(|p| p["name"] == "Saved normal"));
     }
 }

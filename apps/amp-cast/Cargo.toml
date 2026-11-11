@@ -14,6 +14,8 @@ axum = "0.8"
 async-stream = "0.3"
 bytes = "1"
 sha2 = "0.10"
+ureq = { version = "3", default-features = false, features = ["json"] }
+tempfile = "3"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }

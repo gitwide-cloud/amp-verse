@@ -54,15 +54,17 @@ final class CastClient {
         } finally {connection.disconnect();}
     }
     JSONObject get(String path)throws Exception {return new JSONObject(request(path,false));}
-    private String request(String path,boolean command)throws Exception {
+    void post(String path,JSONObject body)throws Exception {request(path,true,body);}
+    private String request(String path,boolean command)throws Exception {return request(path,command,null);}
+    private String request(String path,boolean command,JSONObject body)throws Exception {
         HttpURLConnection connection=(HttpURLConnection)new URL(base+path).openConnection();
         connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(4000);connection.setReadTimeout(6000);
         try {
             if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);
-            if(command){connection.setRequestMethod("POST");connection.setRequestProperty("x-amp-server",serverId);connection.setRequestProperty("x-amp-station",stationId);if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);connection.setDoOutput(true);connection.getOutputStream().close();}
+            if(command){connection.setRequestMethod("POST");connection.setRequestProperty("x-amp-server",serverId);connection.setRequestProperty("x-amp-station",stationId);if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);connection.setDoOutput(true);if(body!=null)connection.setRequestProperty("Content-Type","application/json");try(OutputStream output=connection.getOutputStream()){if(body!=null)output.write(body.toString().getBytes(StandardCharsets.UTF_8));}}
             int code=connection.getResponseCode();
             if(code==401||code==403)throw new IOException("Station control rejected. Check the admin password and selected station.");
-            if(code<200||code>=300)throw new IOException("AMP Cast returned HTTP "+code);
+            if(code<200||code>=300){String message="AMP Cast returned HTTP "+code;InputStream failure=connection.getErrorStream();if(failure!=null)try(InputStream input=failure){byte[] data=new byte[2048];int n=input.read(data);if(n>0)message+=" · "+new String(data,0,n,StandardCharsets.UTF_8);}throw new IOException(message);}
             if(code==204)return "";
             try(InputStream input=connection.getInputStream();ByteArrayOutputStream output=new ByteArrayOutputStream()) {
                 byte[] chunk=new byte[4096];int count;

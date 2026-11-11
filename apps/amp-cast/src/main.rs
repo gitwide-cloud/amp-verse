@@ -54,6 +54,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .enabled
         .store(enabled, std::sync::atomic::Ordering::Relaxed);
     let listener = tokio::net::TcpListener::bind(address).await?;
+    *cast.listen_address.lock().unwrap() = Some(listener.local_addr()?);
     cast.analysis.start(
         &cast,
         workers,
