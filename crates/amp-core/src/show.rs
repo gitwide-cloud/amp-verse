@@ -196,10 +196,14 @@ pub fn energy(p: &Preparation) -> Option<f64> {
 }
 pub fn eligible(p: &SmartPlaylist, t: &Track) -> bool {
     let id = song_id(t);
+    // Folder sources include all descendants. Older drafts used restrict_allowed as
+    // an empty-source guard; do not require per-song Allow ticks after a folder is chosen.
+    let allowed = p.allowed.contains(&id)
+        || (p.allowed.is_empty() && (!p.restrict_allowed || !p.folders.is_empty()));
     !p.excluded.contains(&id)
-        && ((!p.restrict_allowed && p.allowed.is_empty()) || p.allowed.contains(&id))
+        && allowed
         && ((!p.restrict_folders && p.folders.is_empty())
-            || p.folders.iter().any(|f| t.path.starts_with(f)))
+            || p.folders.iter().any(|f| crate::folder_contains(&t.path, f)))
 }
 pub fn choose(
     p: &SmartPlaylist,

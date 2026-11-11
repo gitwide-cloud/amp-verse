@@ -159,6 +159,10 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 },
             );
         });
+        if self.show_editor.refresh_sources && self.scan.is_none() {
+            self.show_editor.refresh_sources = false;
+            self.scan();
+        }
         if self.show_editor.stop_preview {
             self.smart_preview.stop();
             self.show_editor.stop_preview = false;

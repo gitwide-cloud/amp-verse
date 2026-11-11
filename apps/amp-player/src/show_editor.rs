@@ -45,6 +45,7 @@ pub struct Editor {
     pub audition_blocked: bool,
     pub preview_active: bool,
     pub stop_preview: bool,
+    pub refresh_sources: bool,
     pub mix_request: Option<(amp_core::show::SmartPlaylist, Vec<usize>)>,
     pub preview_status: String,
     pub preview: Option<(std::path::PathBuf, f64)>,
@@ -230,14 +231,24 @@ impl Editor {
                 ui.horizontal_wrapped(|ui|{let button=ui.button("Save Playlist");save|=button.clicked();#[cfg(test)]ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique("smart-top-save"),button.rect));if !self.status.is_empty(){ui.add(egui::Label::new(&self.status).wrap());}});
                 ui.add_space(16.);
                 ui.strong("Music source");
+                if let Some(lib)=library {normalize_folder_spelling(p,&lib.tree);}
                 let count = library.map(|lib| lib.tracks.iter().filter(|track|amp_core::show::eligible(p,track)).count());
                 let source = self.source_labels.get(&p.id).cloned().unwrap_or_else(|| source_summary(p));
                 ui.add(egui::Label::new(format!("{} — {}", source, count.map_or("waiting for library scan".into(), |count|format!("{count} songs")))).wrap());
+                if let Some(lib)=library {
+                    ui.label(format!("Indexed library: {} · {} songs",root.display(),lib.tracks.len()));
+                    if let Some(relative)=library_folder_picker(ui,&lib.tree,p.folders.first()) && confirm_source_change(p){
+                        select_indexed_folder(p,relative.clone());
+                        self.refresh_sources=true;
+                        self.source_labels.insert(p.id.clone(),format!("Folder: {}",root.join(&relative).display()));
+                        self.status="Folder and all subfolders selected. Save Playlist to apply.".into();
+                    }
+                }
                 ui.menu_button(if count == Some(0) {"Choose Music Source"} else {"Change Music Source"}, |ui| {
                     if ui.button("Select Folder...").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().set_directory(root).pick_folder() && confirm_source_change(p) {
                             match select_folder(root, &folder, p) {
-                                Ok(()) => { self.source_labels.insert(p.id.clone(),format!("Folder: {}",folder.display())); self.status = "Folder and all subfolders selected. Save Playlist to apply.".into(); }
+                                Ok(()) => { self.refresh_sources=true; self.source_labels.insert(p.id.clone(),format!("Folder: {}",folder.display())); self.status = "Folder and all subfolders selected. Save Playlist to apply.".into(); }
                                 Err(error) => self.status = error,
                             }
                         }
@@ -332,7 +343,9 @@ impl Editor {
                         &mut p.use_manual_cues,
                         "Prefer approved manual build/drop cues for Hype",
                     );
+                    let old_folders=p.folders.clone();
                     source_ui(ui, root, library, p, &mut self.status);
+                    if p.folders!=old_folders{self.refresh_sources=true;}
                     if ui.button("Song exceptions / recognition...").clicked() {self.assignments_open=true;}
                     if self.assignments_open {
                         egui::Modal::new(egui::Id::unique("smart-song-assignments")).show(ui.ctx(), |ui| {
@@ -556,6 +569,87 @@ fn source_summary(p: &amp_core::show::SmartPlaylist) -> String {
 fn confirm_source_change(p: &amp_core::show::SmartPlaylist) -> bool {
     p.allowed.is_empty() || rfd::MessageDialog::new().set_title("Change music source?").set_description("Replace the previous source song selection? Exclusions, preferred songs, recognition assignments and mixing settings will be kept.").set_buttons(rfd::MessageButtons::YesNo).show()==rfd::MessageDialogResult::Yes
 }
+fn select_indexed_folder(p: &mut amp_core::show::SmartPlaylist, relative: std::path::PathBuf) {
+    set_source_mode(p, SourceMode::Folders);
+    p.folders = vec![relative];
+    p.restrict_allowed = false;
+}
+fn normalize_folder_spelling(p: &mut amp_core::show::SmartPlaylist, tree: &amp_core::Folder) {
+    fn find(
+        tree: &amp_core::Folder,
+        path: &std::path::Path,
+        wanted: &std::path::Path,
+    ) -> Option<std::path::PathBuf> {
+        if amp_core::folder_contains(path, wanted) && amp_core::folder_contains(wanted, path) {
+            return Some(path.to_path_buf());
+        }
+        tree.folders.iter().find_map(|child| {
+            let next = path.join(&child.name);
+            amp_core::folder_contains(wanted, &next)
+                .then(|| find(child, &next, wanted))
+                .flatten()
+        })
+    }
+    for folder in &mut p.folders {
+        if let Some(actual) = find(tree, std::path::Path::new(""), folder) {
+            *folder = actual;
+        }
+    }
+    if !p.folders.is_empty() && p.allowed.is_empty() {
+        p.restrict_allowed = false;
+    }
+}
+fn folder_total(folder: &amp_core::Folder) -> usize {
+    folder.tracks.len() + folder.folders.iter().map(folder_total).sum::<usize>()
+}
+fn source_folder_tree(
+    ui: &mut egui::Ui,
+    folder: &amp_core::Folder,
+    path: &std::path::Path,
+    selected: Option<&std::path::PathBuf>,
+    choice: &mut Option<std::path::PathBuf>,
+) {
+    let label = format!("{} · {} songs", folder.name, folder_total(folder));
+    let same = selected
+        .is_some_and(|p| amp_core::folder_contains(p, path) && amp_core::folder_contains(path, p));
+    let header = egui::collapsing_header::CollapsingState::load_with_default_open(
+        ui.ctx(),
+        ui.make_persistent_id(("smart-folder-node", path)),
+        path.as_os_str().is_empty(),
+    );
+    header
+        .show_header(ui, |ui| {
+            if ui.selectable_label(same, label).clicked() {
+                *choice = Some(path.to_path_buf());
+            }
+        })
+        .body(|ui| {
+            for child in &folder.folders {
+                source_folder_tree(ui, child, &path.join(&child.name), selected, choice);
+            }
+        });
+}
+fn library_folder_picker(
+    ui: &mut egui::Ui,
+    tree: &amp_core::Folder,
+    selected: Option<&std::path::PathBuf>,
+) -> Option<std::path::PathBuf> {
+    let mut choice = None;
+    ui.menu_button("Browse Library Folders…", |ui| {
+        ui.set_min_width(340.);
+        ui.weak("Select a folder to include every song in its subfolders.");
+        egui::ScrollArea::both()
+            .id_salt("smart-library-tree")
+            .max_height(300.)
+            .show(ui, |ui| {
+                source_folder_tree(ui, tree, std::path::Path::new(""), selected, &mut choice)
+            });
+        if choice.is_some() {
+            ui.close();
+        }
+    });
+    choice
+}
 fn select_folder(
     root: &std::path::Path,
     folder: &std::path::Path,
@@ -566,10 +660,8 @@ fn select_folder(
     if !selected.is_dir() {
         return Err("Choose a music folder".into());
     }
-    let relative=selected.strip_prefix(&base).map_err(|_|"That folder is outside this indexed music library. Add it as the music root in Library > Sources before using it here. Existing Smart Playlist rules were kept.".to_owned())?.to_path_buf();
-    set_source_mode(p, SourceMode::Folders);
-    p.folders = vec![relative];
-    p.restrict_allowed = false;
+    let relative=amp_core::relative_folder(&selected,&base).ok_or_else(||format!("That folder is outside the indexed library at {}. Your indexed songs are still available. Use Browse Library Folders to select them, or add this different folder through Library > Sources. Existing rules were kept.",root.display()))?;
+    select_indexed_folder(p, relative);
     Ok(())
 }
 fn import_m3u(
@@ -609,13 +701,13 @@ fn import_m3u(
         let found = candidate
             .canonicalize()
             .ok()
-            .and_then(|absolute| {
-                absolute
-                    .strip_prefix(&base)
-                    .ok()
-                    .map(std::path::Path::to_path_buf)
-            })
-            .and_then(|relative| library.tracks.iter().find(|track| track.path == relative));
+            .and_then(|absolute| amp_core::relative_folder(&absolute, &base))
+            .and_then(|relative| {
+                library.tracks.iter().find(|track| {
+                    amp_core::folder_contains(&track.path, &relative)
+                        && amp_core::folder_contains(&relative, &track.path)
+                })
+            });
         if let Some(track) = found {
             ids.push(amp_core::show::song_id(track));
         } else {
@@ -869,7 +961,7 @@ fn source_ui(
                 let relative=(|| {
                     let base=root.canonicalize().map_err(|e|e.to_string())?;
                     let selected=folder.canonicalize().map_err(|e|e.to_string())?;
-                    selected.strip_prefix(base).map(std::path::Path::to_path_buf).map_err(|_|"That folder is outside the current music root. Choose its parent as your music root in AMP Library first.".to_owned())
+                    amp_core::relative_folder(&selected,&base).ok_or_else(||"That folder is outside the current music root. Use Browse Library Folders to choose an indexed folder, or change the music root in Library > Sources.".to_owned())
                 })();
                 match relative {Ok(path)=>{if !p.folders.contains(&path){p.folders.push(path);}*status="Source folder selected, including its subfolders. Save to apply.".into();},Err(e)=>*status=e}
             }
@@ -954,6 +1046,102 @@ mod tests {
         settings
     }
 
+    #[test]
+    fn choosing_music_root_includes_all_nested_songs_and_keeps_exclusions() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Dance/Set/Deep")).unwrap();
+        for f in ["one.mp3", "Dance/two.mp3", "Dance/Set/Deep/three.mp3"] {
+            std::fs::write(dir.path().join(f), b"music").unwrap();
+        }
+        let lib = amp_core::scan(dir.path()).unwrap();
+        assert_eq!(folder_total(&lib.tree), 3);
+        let mut p = test_settings().playlists.remove(0);
+        p.allowed = vec!["stale-id".into()];
+        p.restrict_allowed = true;
+        select_folder(dir.path(), dir.path(), &mut p).unwrap();
+        assert!(p.allowed.is_empty());
+        assert_eq!(
+            lib.tracks
+                .iter()
+                .filter(|t| amp_core::show::eligible(&p, t))
+                .count(),
+            3
+        );
+        p.restrict_allowed = true; // legacy folder draft safety flag
+        assert_eq!(
+            lib.tracks
+                .iter()
+                .filter(|t| amp_core::show::eligible(&p, t))
+                .count(),
+            3
+        );
+        p.excluded.push(amp_core::show::song_id(
+            lib.tracks
+                .iter()
+                .find(|t| t.path == std::path::Path::new("one.mp3"))
+                .unwrap(),
+        ));
+        assert_eq!(
+            lib.tracks
+                .iter()
+                .filter(|t| amp_core::show::eligible(&p, t))
+                .count(),
+            2
+        );
+        select_folder(dir.path(), &dir.path().join("Dance"), &mut p).unwrap();
+        assert_eq!(
+            lib.tracks
+                .iter()
+                .filter(|t| amp_core::show::eligible(&p, t))
+                .count(),
+            2
+        );
+        let before = serde_json::to_value(&p).unwrap();
+        let other = tempfile::tempdir().unwrap();
+        assert!(select_folder(dir.path(), other.path(), &mut p).is_err());
+        assert_eq!(serde_json::to_value(&p).unwrap(), before);
+    }
+    #[test]
+    #[cfg(windows)]
+    fn windows_folder_case_does_not_turn_a_valid_source_into_zero_songs() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("Music/Deep")).unwrap();
+        std::fs::write(dir.path().join("Music/Deep/song.mp3"), b"music").unwrap();
+        let lib = amp_core::scan(dir.path()).unwrap();
+        let mut p = test_settings().playlists.remove(0);
+        select_folder(dir.path(), &dir.path().join("MUSIC"), &mut p).unwrap();
+        normalize_folder_spelling(&mut p, &lib.tree);
+        assert_eq!(p.folders, vec![std::path::PathBuf::from("Music")]);
+        assert_eq!(
+            lib.tracks
+                .iter()
+                .filter(|t| amp_core::show::eligible(&p, t))
+                .count(),
+            1
+        );
+        assert!(!amp_core::folder_contains(
+            std::path::Path::new("MusicOld/a.mp3"),
+            std::path::Path::new("Music")
+        ));
+    }
+    #[test]
+    #[ignore = "reads user's real NAS library; requires AMP_SMART_SOURCE_ROOT"]
+    fn actual_music_root_retains_thousands_of_eligible_songs() {
+        let root = std::path::PathBuf::from(std::env::var_os("AMP_SMART_SOURCE_ROOT").unwrap());
+        let lib = amp_core::scan(&root).unwrap();
+        assert!(lib.tracks.len() > 4000, "{} indexed", lib.tracks.len());
+        let mut p = test_settings().playlists.remove(0);
+        p.excluded.clear();
+        select_folder(&root, &root, &mut p).unwrap();
+        let count = lib
+            .tracks
+            .iter()
+            .filter(|t| amp_core::show::eligible(&p, t))
+            .count();
+        assert_eq!(count, lib.tracks.len());
+        assert_eq!(folder_total(&lib.tree), count);
+        println!("Music root selection includes {count} songs recursively");
+    }
     #[test]
     fn top_save_button_publishes_the_draft_even_with_a_lower_save_button() {
         let root = tempfile::tempdir().unwrap();

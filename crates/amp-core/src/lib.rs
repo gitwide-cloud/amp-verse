@@ -176,6 +176,30 @@ pub fn supported(p: &Path) -> bool {
     })
 }
 
+/// Component-aware folder selection. Windows folder casing is not significant;
+/// Unix libraries retain their native case-sensitive behavior.
+pub fn folder_contains(path: &Path, folder: &Path) -> bool {
+    if cfg!(windows) {
+        let mut parts = path.components();
+        folder.components().all(|wanted| {
+            parts.next().is_some_and(|part| {
+                part.as_os_str()
+                    .to_string_lossy()
+                    .eq_ignore_ascii_case(&wanted.as_os_str().to_string_lossy())
+            })
+        })
+    } else {
+        path.starts_with(folder)
+    }
+}
+/// Return the original spelling of the relative portion, without substring-prefix matches.
+pub fn relative_folder(path: &Path, root: &Path) -> Option<PathBuf> {
+    if !folder_contains(path, root) {
+        return None;
+    }
+    Some(path.components().skip(root.components().count()).collect())
+}
+
 /// Resolve an untrusted playlist entry without escaping the library root.
 pub fn resolve(root: &Path, relative: &Path) -> io::Result<PathBuf> {
     if relative.is_absolute()
