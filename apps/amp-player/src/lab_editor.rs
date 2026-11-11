@@ -330,7 +330,7 @@ impl Editor {
 fn command(name: &str) -> Command {
     amp_core::command(name)
 }
-fn duration(p: &Path) -> Result<f64, String> {
+pub(super) fn duration(p: &Path) -> Result<f64, String> {
     let o = command("ffprobe")
         .args([
             "-v",
@@ -355,7 +355,7 @@ fn clock(sec: f64) -> String {
     let m = (sec / 60.0).floor() as u64;
     format!("{}:{:05.2}", m, sec - (m * 60) as f64)
 }
-fn read_waveform(path: &Path, duration: f64) -> Result<Vec<[f32; 2]>, String> {
+pub(super) fn read_waveform(path: &Path, duration: f64) -> Result<Vec<[f32; 2]>, String> {
     use std::io::Read;
     let info = command("ffprobe")
         .args([

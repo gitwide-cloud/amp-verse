@@ -1,3 +1,5 @@
+#[path = "lab_timeline.rs"]
+mod timeline;
 use amp_core::{
     Library,
     arrangement::{Clip, render},
@@ -10,6 +12,7 @@ use std::{
 #[derive(Default)]
 pub struct Arrangement {
     clips: Vec<Clip>,
+    timeline: timeline::Timeline,
     editor: crate::lab_editor::Editor,
     tab: usize,
     demo_loaded: bool,
@@ -22,6 +25,7 @@ impl Arrangement {
     }
     pub(super) fn stop_preview(&mut self) {
         self.editor.stop();
+        self.timeline.stop();
     }
 
     pub fn show(
@@ -39,6 +43,9 @@ impl Arrangement {
                 ui.selectable_value(&mut self.tab, 0, "Waveform editor");
                 ui.selectable_value(&mut self.tab, 1, "Mix timeline");
             });
+            if previous == 1 && self.tab != 1 {
+                self.timeline.stop();
+            }
             if previous == 0 && self.tab != 0 {
                 self.editor.stop();
             }
@@ -74,12 +81,9 @@ impl Arrangement {
         ui.heading("AMP Lab / Mix arrangement");
         ui.label("Arrange songs using cue IN/OUT and timeline starts. Overlaps mix together; source files stay unchanged.");
         ui.horizontal_wrapped(|ui| {
-            if ui.button("Waveform editor").clicked() {
-                self.tab = 0;
-            }
             if ui.button("Save arrangement...").clicked()
                 && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("AMP arrangement", &["json"])
+                    .add_filter("AMP mix project", &["ampmix", "json"])
                     .save_file()
             {
                 self.status = serde_json::to_vec_pretty(&self.clips)
@@ -90,7 +94,7 @@ impl Arrangement {
             }
             if ui.button("Load arrangement...").clicked()
                 && let Some(path) = rfd::FileDialog::new()
-                    .add_filter("AMP arrangement", &["json"])
+                    .add_filter("AMP mix project", &["ampmix", "json"])
                     .pick_file()
             {
                 match std::fs::read(path)
@@ -98,7 +102,13 @@ impl Arrangement {
                     .and_then(|bytes| {
                         serde_json::from_slice::<Vec<Clip>>(&bytes).map_err(|e| e.to_string())
                     }) {
-                    Ok(clips) => self.clips = clips,
+                    Ok(clips) if clips.iter().all(|c| c.duration().is_ok() && c.lane < 64) => {
+                        self.clips = clips;
+                        self.timeline.reset();
+                    }
+                    Ok(_) => {
+                        self.status = "Invalid mix project; existing arrangement retained".into()
+                    }
                     Err(e) => self.status = e,
                 }
             }
@@ -121,117 +131,16 @@ impl Arrangement {
             });
         if let Some(i) = add
             && let Some(track) = library.and_then(|l| l.tracks.get(i))
+            && let Ok(path) = amp_core::resolve(root, &track.path)
         {
-            let mut preparation = track.preparation.clone();
-            if preparation.cue_out.is_none() {
-                preparation.cue_out = amp_core::resolve(root, &track.path)
-                    .ok()
-                    .and_then(|path| {
-                        amp_core::command("ffprobe")
-                            .args([
-                                "-v",
-                                "error",
-                                "-show_entries",
-                                "format=duration",
-                                "-of",
-                                "default=nw=1:nk=1",
-                            ])
-                            .arg(path)
-                            .output()
-                            .ok()
-                    })
-                    .filter(|o| o.status.success())
-                    .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse().ok());
-            }
             let start = self
                 .clips
                 .iter()
                 .filter_map(|c| c.duration().ok().map(|d| c.start + d))
                 .fold(0., f64::max);
-            self.clips.push(Clip {
-                path: track.path.clone(),
-                start,
-                preparation,
-                gain_db: 0.,
-            });
+            self.timeline.import(path, self.clips.len() % 2, start);
         }
-        let extent = self
-            .clips
-            .iter()
-            .filter_map(|c| c.duration().ok().map(|d| c.start + d))
-            .fold(1., f64::max);
-        let mut remove = None;
-        egui::ScrollArea::vertical()
-            .max_height(460.)
-            .show(ui, |ui| {
-                for (i, clip) in self.clips.iter_mut().enumerate() {
-                    ui.push_id(i, |ui| {
-                        egui::Frame::group(ui.style()).show(ui, |ui| {
-                            ui.horizontal_wrapped(|ui| {
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(clip.path.display().to_string())
-                                            .strong(),
-                                    )
-                                    .truncate(),
-                                );
-                                if ui.button("Remove").clicked() {
-                                    remove = Some(i);
-                                }
-                            });
-                            ui.horizontal_wrapped(|ui| {
-                                ui.label("Start (s)");
-                                ui.add(
-                                    egui::DragValue::new(&mut clip.start)
-                                        .range(0. ..=864000.)
-                                        .speed(0.1),
-                                );
-                                ui.label("Cue IN");
-                                ui.add(
-                                    egui::DragValue::new(&mut clip.preparation.cue_in)
-                                        .range(0. ..=864000.)
-                                        .speed(0.1),
-                                );
-                                ui.label("Cue OUT");
-                                let end = clip.preparation.cue_out.get_or_insert(0.);
-                                ui.add(egui::DragValue::new(end).range(0. ..=864000.).speed(0.1));
-                                ui.add(
-                                    egui::DragValue::new(&mut clip.gain_db)
-                                        .range(-60. ..=12.)
-                                        .suffix(" dB"),
-                                );
-                            });
-                            let (r, _) = ui.allocate_exact_size(
-                                egui::vec2(ui.available_width(), 30.),
-                                egui::Sense::hover(),
-                            );
-                            ui.painter()
-                                .rect_filled(r, 2., ui.visuals().extreme_bg_color);
-                            if let Ok(duration) = clip.duration() {
-                                let mut bar = r;
-                                bar.min.x += r.width() * (clip.start / extent) as f32;
-                                bar.max.x = r.left()
-                                    + r.width() * ((clip.start + duration) / extent) as f32;
-                                ui.painter()
-                                    .rect_filled(bar, 2., ui.visuals().selection.bg_fill);
-                                ui.painter().text(
-                                    bar.center(),
-                                    egui::Align2::CENTER_CENTER,
-                                    format!("{:.2}s to {:.2}s", clip.start, clip.start + duration),
-                                    egui::FontId::monospace(12.),
-                                    ui.visuals().text_color(),
-                                );
-                            }
-                        });
-                    });
-                }
-            });
-        if let Some(i) = remove {
-            self.clips.remove(i);
-        }
-        ui.label(format!(
-            "Timeline length: {extent:.2} seconds / bars show clip placement, not waveforms"
-        ));
+        self.timeline_ui(ui, root);
         ui.add_enabled_ui(self.job.is_none() && !self.clips.is_empty(), |ui| {
             ui.horizontal_wrapped(|ui| {
                 if ui.button("Export one combined MP3...").clicked()
@@ -253,7 +162,7 @@ impl Arrangement {
         } else {
             &self.status
         });
-        ui.weak("320 kbps MP3 / limiter / existing files never overwritten. Individual exports remove leading timeline silence. Beat sync, fades and waveform editing of this arrangement are not yet available.");
+        ui.weak("320 kbps MP3 / limiter / existing files never overwritten. Individual exports remove leading timeline silence. Drag clips to move; drag edges to trim. Overlaps sum together; use fades to shape transitions. Automatic beat sync is not applied.");
     }
     fn export(&mut self, root: PathBuf, output: PathBuf, individual: bool) {
         let clips = self.clips.clone();

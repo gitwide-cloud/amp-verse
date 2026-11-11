@@ -1,13 +1,19 @@
 //! Cue-aligned mix arrangement shared with the Lab shell. No source files are modified.
-use crate::{Preparation, resolve};
+use crate::Preparation;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
-#[derive(Clone, Debug, Serialize, Deserialize)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Clip {
     pub path: PathBuf,
     pub start: f64,
     pub preparation: Preparation,
     pub gain_db: f64,
+    #[serde(default)]
+    pub lane: usize,
+    #[serde(default)]
+    pub fade_in: f64,
+    #[serde(default)]
+    pub fade_out: f64,
 }
 impl Clip {
     pub fn duration(&self) -> Result<f64, String> {
@@ -18,6 +24,13 @@ impl Clip {
             || !(-60. ..=12.).contains(&self.gain_db)
         {
             return Err("Invalid timeline start or gain".into());
+        }
+        if !self.fade_in.is_finite()
+            || !self.fade_out.is_finite()
+            || self.fade_in < 0.
+            || self.fade_out < 0.
+        {
+            return Err("Invalid clip fades".into());
         }
         self.preparation
             .cue_out
@@ -33,7 +46,13 @@ pub fn filter(clips: &[Clip], combined: bool) -> Result<String, String> {
     for (i, clip) in clips.iter().enumerate() {
         let duration = clip.duration()?;
         let delay = if combined { clip.start } else { 0. };
-        graph.push(format!("[{i}:a]atrim=start={}:duration={duration},asetpts=PTS-STARTPTS,aresample=44100,aformat=channel_layouts=stereo,volume={}dB,adelay={}:all=1[c{i}]", clip.preparation.cue_in, clip.gain_db, (delay*1000.).round()));
+        let fades = format!(
+            ",afade=t=in:d={},afade=t=out:st={}:d={}",
+            clip.fade_in.min(duration),
+            (duration - clip.fade_out).max(0.),
+            clip.fade_out.min(duration)
+        );
+        graph.push(format!("[{i}:a]atrim=start={}:duration={duration},asetpts=PTS-STARTPTS,aresample=44100,aformat=channel_layouts=stereo,volume={}dB{fades},adelay={}:all=1[c{i}]", clip.preparation.cue_in, clip.gain_db, (delay*1000.).round()));
     }
     let inputs = (0..clips.len())
         .map(|i| format!("[c{i}]"))
@@ -41,17 +60,41 @@ pub fn filter(clips: &[Clip], combined: bool) -> Result<String, String> {
     graph.push(format!("{inputs}amix=inputs={}:normalize=0:duration=longest,alimiter=limit=0.95:level=0:latency=1[out]", clips.len()));
     Ok(graph.join(";"))
 }
+/// Lab projects explicitly reference locally selected files, including files outside the library.
+pub fn source(root: &Path, path: &Path) -> Result<PathBuf, String> {
+    if path.is_absolute() {
+        if path.is_file() {
+            Ok(path.to_path_buf())
+        } else {
+            Err("Mix source file is missing".into())
+        }
+    } else {
+        crate::resolve(root, path).map_err(|e| e.to_string())
+    }
+}
 pub fn render(root: &Path, clips: &[Clip], output: &Path) -> Result<(), String> {
     if output.exists() {
         return Err("Output already exists; choose a new filename".into());
     }
-    let graph = filter(clips, true)?;
+    // Seek each source before decoding, so editing near the end of a long recording
+    // does not decode all preceding hours just to render a short excerpt.
+    let mut selected = clips.to_vec();
+    for c in &mut selected {
+        let d = c.duration()?;
+        c.preparation.cue_in = 0.;
+        c.preparation.cue_out = Some(d);
+    }
+    let graph = filter(&selected, true)?;
     let mut command = crate::command("ffmpeg");
     command.args(["-n", "-v", "error"]);
     for clip in clips {
         command
+            .arg("-ss")
+            .arg(clip.preparation.cue_in.to_string())
+            .arg("-t")
+            .arg(clip.duration()?.to_string())
             .arg("-i")
-            .arg(resolve(root, &clip.path).map_err(|e| e.to_string())?);
+            .arg(source(root, &clip.path)?);
     }
     let result = command
         .args([
@@ -85,6 +128,7 @@ mod tests {
                 ..Default::default()
             },
             gain_db: -3.,
+            ..Clip::default()
         }
     }
     #[test]
@@ -116,6 +160,7 @@ mod tests {
                 ..Default::default()
             },
             gain_db: -3.,
+            ..Clip::default()
         };
         let out = dir.path().join("mix.mp3");
         render(dir.path(), &[clip.clone(), clip.clone()], &out).unwrap();
@@ -161,6 +206,27 @@ mod tests {
         assert!(graph.contains("adelay=5000:all=1"));
         assert!(graph.contains("amix=inputs=2"));
         assert!(filter(&[clip()], false).unwrap().contains("adelay=0"));
+    }
+    #[test]
+    fn layered_projects_keep_trims_fades_and_legacy_compatibility() {
+        let mut a = clip();
+        a.lane = 1;
+        a.fade_in = 1.;
+        a.fade_out = 2.;
+        let graph = filter(&[a.clone()], true).unwrap();
+        assert!(graph.contains("afade=t=in:d=1,afade=t=out:st=3:d=2"));
+        let loaded: Clip = serde_json::from_slice(&serde_json::to_vec(&a).unwrap()).unwrap();
+        assert_eq!(loaded.lane, 1);
+        assert_eq!(loaded.fade_out, 2.);
+        let mut legacy = serde_json::to_value(&a).unwrap();
+        for key in ["lane", "fade_in", "fade_out"] {
+            legacy.as_object_mut().unwrap().remove(key);
+        }
+        let loaded: Clip = serde_json::from_value(legacy).unwrap();
+        assert_eq!(loaded.lane, 0);
+        assert_eq!(loaded.fade_in, 0.);
+        a.fade_in = f64::NAN;
+        assert!(filter(&[a], true).is_err());
     }
     #[test]
     fn invalid_arrangements_fail_before_encoding() {
