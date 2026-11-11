@@ -34,6 +34,7 @@ mod preparer;
 mod sample_editor;
 mod sampler;
 mod section_controls;
+mod session;
 mod show_editor;
 mod side_deck;
 mod skin;
@@ -111,6 +112,7 @@ fn capture(ctx: &egui::Context, path: PathBuf) {
 }
 
 struct Player {
+    recovery: session::Recovery,
     root: PathBuf,
     library: Option<Library>,
     scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
@@ -128,6 +130,7 @@ struct Player {
     loaded_origin: [Option<PathBuf>; 2],
     dj_browser: dj_browser::Browser,
     dj_tab: usize,
+    dj_library_hidden: bool,
     dj_cues: [bool; 2],
     player_mode: u8,
     player_on_top: bool,
@@ -191,6 +194,7 @@ struct Player {
 impl Default for Player {
     fn default() -> Self {
         Self {
+            recovery: Default::default(),
             root: std::env::args_os()
                 .nth(1)
                 .map(PathBuf::from)
@@ -216,6 +220,7 @@ impl Default for Player {
             loaded_origin: Default::default(),
             dj_browser: Default::default(),
             dj_tab: 0,
+            dj_library_hidden: false,
             dj_cues: [false; 2],
             player_mode: 0,
             player_on_top: load_player_on_top(),
@@ -880,6 +885,8 @@ impl Player {
         }
     }
     fn connect_music_root(&mut self, root: PathBuf) {
+        self.checkpoint(true);
+        let recover = self.recovery.enabled();
         if let Some(audio) = &mut self.audio {
             audio.stop(0);
             audio.stop(1);
@@ -898,6 +905,9 @@ impl Player {
         self.show_editor.open = false;
         self.scan = None; // Discard any previous root's in-flight result.
         self.root = root;
+        if recover {
+            self.recovery = session::Recovery::open(&self.root);
+        }
         let pref = library_preference();
         if let Some(parent) = pref.parent() {
             let _ = std::fs::create_dir_all(parent);
@@ -1984,7 +1994,13 @@ impl Player {
                 .data_mut(|d| d.get_persisted::<f32>(library_id))
                 .unwrap_or((ui.available_height() * 0.32).max(250.))
                 .clamp(180., library_max);
-            let height = (ui.available_height() - browser_height - 70.).max(300.);
+            let height = (ui.available_height()
+                - if self.dj_library_hidden {
+                    35.
+                } else {
+                    browser_height + 70.
+                })
+            .max(300.);
             let side_widths = std::array::from_fn::<_, 2, _>(|side| {
                 if pads_below {
                     0.
@@ -2018,7 +2034,7 @@ impl Player {
                             egui::vec2(280., height),
                             egui::Layout::top_down(egui::Align::Center),
                             |ui| {
-                                let scale = (height / 520.).min(1.);
+                                let scale = (height / 780.).min(1.);
                                 let logical = egui::vec2(280. / scale, height / scale);
                                 window_layout::fitted_content(
                                     ui,
@@ -2030,10 +2046,10 @@ impl Player {
                                             ui.set_width(logical.x - 18.);
                                             ui.set_min_height(logical.y - 18.);
                                             ui.spacing_mut().interact_size.y =
-                                                ((logical.y - 220.) / 14.).clamp(24., 44.);
+                                                ((logical.y - 700.) / 14. + 24.).clamp(24., 32.);
                                             egui::ScrollArea::vertical()
                                                 .id_salt("dj-channel-controls")
-                                                .max_height((logical.y - 480.).max(100.))
+                                                .max_height((logical.y - 320.).max(400.))
                                                 .auto_shrink([false, true])
                                                 .show(ui, |ui| self.inline_mixer(ui, logical.y));
                                             let fading =
@@ -2191,6 +2207,16 @@ impl Player {
                     });
                 });
             ui.horizontal(|ui| {
+                if ui
+                    .button(if self.dj_library_hidden {
+                        "Show Library"
+                    } else {
+                        "Hide Library"
+                    })
+                    .clicked()
+                {
+                    self.dj_library_hidden = !self.dj_library_hidden;
+                }
                 ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Master"))
                     .on_hover_text(
                         self.audio
@@ -2200,6 +2226,9 @@ impl Player {
                     );
                 ui.add(egui::Label::new(&self.status).truncate());
             });
+            if self.dj_library_hidden {
+                return;
+            }
             window_layout::splitter(
                 ui,
                 "dj-library-divider",
@@ -3005,6 +3034,9 @@ impl Player {
     }
 }
 impl eframe::App for Player {
+    fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        self.checkpoint(true);
+    }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         if !self.control_attempted && self.screenshot_view.is_empty() {
             self.control_attempted = true;
@@ -3019,6 +3051,7 @@ impl eframe::App for Player {
             self.start_control(ui.ctx());
         }
         self.poll();
+        self.try_automatic_recovery(ui.ctx());
         self.release_jog_wheels(ui.ctx());
         self.poll_control();
         self.poll_controllers();
@@ -3111,7 +3144,7 @@ impl eframe::App for Player {
             if !is_open || self.layout.parent[pane].is_some() {
                 continue;
             }
-            let size = window_layout::initial_size(pane, ctx.input(|i| i.viewport().monitor_size));
+            let size = self.recovered_window_size(pane, ctx.input(|i| i.viewport().monitor_size));
             ctx.show_viewport_immediate(
                 window_layout::viewport(pane),
                 egui::ViewportBuilder::default()
@@ -3148,6 +3181,16 @@ impl eframe::App for Player {
                 capture(&ctx, path.into());
             }
         }
+        if self.recovery.pending.is_some() || self.recovery.error.is_some() {
+            egui::Window::new("Session recovery")
+                .order(egui::Order::Foreground)
+                .collapsible(false)
+                .resizable(false)
+                .anchor(egui::Align2::CENTER_TOP, [0., 48.])
+                .show(&ctx, |ui| self.recovery_ui(ui));
+        }
+        self.capture_session_layout(&ctx);
+        self.checkpoint(false);
         ctx.request_repaint_after(Duration::from_millis(if self.playing.iter().any(|p| *p) {
             33
         } else {
@@ -3157,6 +3200,9 @@ impl eframe::App for Player {
 }
 fn main() -> eframe::Result {
     let mut player = Player::default();
+    if player.screenshot_view.is_empty() {
+        player.recovery = session::Recovery::open(&player.root);
+    }
     if !player.root.as_os_str().is_empty() {
         player.scan();
     }
