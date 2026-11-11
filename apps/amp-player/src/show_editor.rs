@@ -635,19 +635,22 @@ fn library_folder_picker(
     selected: Option<&std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
     let mut choice = None;
-    ui.menu_button("Browse Library Folders…", |ui| {
-        ui.set_min_width(340.);
-        ui.weak("Select a folder to include every song in its subfolders.");
-        egui::ScrollArea::both()
-            .id_salt("smart-library-tree")
-            .max_height(300.)
-            .show(ui, |ui| {
-                source_folder_tree(ui, tree, std::path::Path::new(""), selected, &mut choice)
-            });
-        if choice.is_some() {
-            ui.close();
-        }
-    });
+    let button = ui.button("Browse Library Folders…");
+    egui::Popup::menu(&button)
+        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+        .show(|ui| {
+            ui.set_min_width(340.);
+            ui.weak("Select a folder to include every song in its subfolders.");
+            egui::ScrollArea::both()
+                .id_salt("smart-library-tree")
+                .max_height(300.)
+                .show(ui, |ui| {
+                    source_folder_tree(ui, tree, std::path::Path::new(""), selected, &mut choice)
+                });
+            if choice.is_some() {
+                ui.close();
+            }
+        });
     choice
 }
 fn select_folder(
