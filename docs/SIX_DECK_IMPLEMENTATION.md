@@ -21,8 +21,8 @@ Development branch: `feature/six-deck-controls`. This is a preview implementatio
 
 ## Verification completed locally
 
-- Workspace Rust tests and warning-free Clippy; player: 127 passed, 30 hardware/codec-specific tests left ignored by the default run.
-- Explicit synthetic six-stream Key Lock benchmark: five seconds of audio rendered in about 1.9 seconds, zero buffer underruns in that test.
+- Workspace Rust tests and warning-free Clippy; player: 129 passed, 31 hardware/codec-specific tests left ignored by the default run.
+- Explicit synthetic six-stream Key Lock benchmark: five seconds of audio rendered in about 1.87 seconds, zero buffer underruns in that test.
 - Measured sine test: 116% playback corrected from approximately 510 Hz back to 440 Hz.
 - Real native desktop process with six generated WAV decoders: all voices play, LIVE changes preserve routing, unsafe pair changes reject, independent background fade leaves other voices playing, scoped resources return only the requested page, and emergency stop works.
 - Pixel 7: development APK and test APK installed; Remote command/cue-deck/retry protocol test passed against an isolated desktop through USB forwarding. This is not a claim of a new end-to-end Wi-Fi/Google speaker acceptance pass.
@@ -33,8 +33,9 @@ Screenshots and local logs are under `test-output/six-deck` and are excluded fro
 
 ## Limits and acceptance work
 
+- Android and Companion GitHub jobs passed for the first branch checkpoint. Linux compiled and passed unit tests/lint; follow-up CI fixes correct stale JSON-path smoke tests. Windows codec tests now run explicitly where FFmpeg is available rather than assuming every runner includes it.
 - No actual Companion host is installed/running on this machine. SDK packaging, contract tests and protocol tests do not replace a real host button/feedback acceptance pass.
-- The pitch backend adds approximately 6848 frames (143 ms at 48 kHz) of latency. Mixed locked/unlocked layers and scratch-to-Key-Lock handoff need acoustic alignment/latency acceptance before performance-release approval. `AMP_DISABLE_KEYLOCK=1` disables the backend on slower systems; missing Windows DLL disables Key Lock rather than silently claiming pitch preservation.
+- The pitch backend adds 2176 frames (45.3 ms at 48 kHz) of latency before device buffering. Dry, pitch-locked and scratch paths share this delay; an impulse test confirms matching sample positions. Section handoffs retain processor history and EOF drains its delayed tail. Acoustic quality/latency acceptance remains required before a performance release. `AMP_DISABLE_KEYLOCK=1` disables the backend on slower systems; missing Windows DLL disables Key Lock rather than silently claiming pitch preservation.
 - `amp-keylock.dll` and the bundled MIT notices must ship beside the Windows player. Packaging/install scripts now include them. Linux and MSVC CI acceptance must pass before distributing those builds.
 - Fingerprint-based identity is rename-independent only while the corresponding preparation fingerprint remains associated with the audio. Unanalyzed tracks retain legacy path IDs; automatic recovery of preparation after arbitrary external file moves remains an edge case to verify.
 - Synthetic throughput is not a complete real-world CPU/RAM/latency benchmark. Prepared-stem/multi-loop/FX/Auto-DJ-with-background load and sustained network activity still require the full performance matrix.

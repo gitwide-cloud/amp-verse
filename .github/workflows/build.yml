@@ -42,6 +42,9 @@ jobs:
       - name: Verify MP3 Lab editor foundation with real codecs
         if: runner.os == 'Linux'
         run: cargo test -p amp-player --bin amp-player lab_editor::tests::ffmpeg_export_smoke -- --ignored
+      - name: Verify sampler clip export with real codecs
+        if: runner.os == 'Linux'
+        run: cargo test -p amp-player --bin amp-player sample_editor::tests::clip_export_preserves_source_and_respects_selection -- --ignored
       - run: cargo build --workspace --release --locked
       - name: Build base player without analysis implementation
         run: cargo build -p amp-player --release --locked

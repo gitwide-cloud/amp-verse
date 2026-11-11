@@ -190,6 +190,7 @@ pub struct Dashboard {
     listen_after_play: bool,
     pub live_action: Option<bool>,
     pub live_active: bool,
+    pub live_player_only: bool,
     pub live_status: String,
     address: String,
     password: String,
@@ -281,6 +282,7 @@ impl Default for Dashboard {
             listen_after_play: false,
             live_action: None,
             live_active: false,
+            live_player_only: false,
             live_status: String::new(),
             address: std::env::var("AMP_CAST_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8787".into()),
             password: String::new(),
@@ -615,7 +617,13 @@ impl Dashboard {
                 });
             });
         } else if self.section == 1 {
-            ui.heading("Broadcast my live DJ mix");
+            ui.heading("Broadcast live audio");
+            ui.add_enabled_ui(!self.live_active, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.live_player_only, false, "DJ master mix");
+                    ui.selectable_value(&mut self.live_player_only, true, "Music Player");
+                });
+            });
             ui.label("Send the actual master mix: both decks, crossfader, EQ, stems and sampler. Headphone cue stays private.");
             let supported = self
                 .snapshot
@@ -624,7 +632,7 @@ impl Dashboard {
             if ui
                 .add_enabled(
                     supported && !self.live_active,
-                    egui::Button::new("Start live DJ broadcast"),
+                    egui::Button::new("Start live broadcast"),
                 )
                 .clicked()
             {

@@ -3025,6 +3025,7 @@ impl Player {
         self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
         if let Some(broadcast) = &self.live_mix {
             self.cast.live_status = broadcast.status.lock().unwrap().clone();
+            self.cast.live_player_only = broadcast.player_only;
         }
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
@@ -3046,11 +3047,12 @@ impl Player {
                     self.ensure_audio()?;
                     self.ensure_right_samples()?;
                     let (address, password) = self.cast.endpoint();
-                    live_mix::Broadcast::start(
+                    live_mix::Broadcast::start_source(
                         self.audio.as_ref().unwrap(),
                         self.right_sample_audio.as_ref().unwrap(),
                         address,
                         password,
+                        self.cast.live_player_only,
                     )
                 })();
                 match result {

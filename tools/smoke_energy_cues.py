@@ -1,6 +1,7 @@
 """Real decoded-audio energy cue regression; generated fixtures only."""
 import json, math, os, struct, subprocess, sys, tempfile, wave
 from pathlib import Path
+from fixture_catalog import read,write
 binary=str(Path(sys.argv[1]).resolve())
 with tempfile.TemporaryDirectory() as tmp:
     root=Path(tmp)/'music';root.mkdir()
@@ -18,9 +19,8 @@ with tempfile.TemporaryDirectory() as tmp:
                 pcm.extend(struct.pack('<h',int(value*32767)))
             audio.writeframes(pcm)
     subprocess.run([binary,str(root),'--jobs','2'],env=env,check=True)
-    records=root/'.ampverse'/'tracks'
-    drop=json.loads((records/'drop.wav.json').read_text())
-    opening=json.loads((records/'opening.wav.json').read_text())
+    drop=read(root,'tracks/drop.wav.json')
+    opening=read(root,'tracks/opening.wav.json')
     assert abs(drop['cue_in']-6)<0.3,drop
     assert opening['cue_in']<0.2,opening
     assert any(c['kind']=='drop' for c in drop['cues'])
@@ -30,9 +30,9 @@ with tempfile.TemporaryDirectory() as tmp:
     assert any(c['kind']=='mix-in' and c['seconds']==drop['cue_in'] for c in drop['cues'])
     drop['manual_override']=True;drop['cue_in']=2
     drop['manual_cues']=[{'id':'mine','label':'My cue','seconds':3,'kind':'hotcue','number':1}]
-    path=records/'drop.wav.json';path.write_text(json.dumps(drop))
+    write(root,'tracks/drop.wav.json',drop)
     subprocess.run([binary,str(root),'--force'],env=env,check=True)
-    kept=json.loads(path.read_text())
+    kept=read(root,'tracks/drop.wav.json')
     assert kept['cue_in']==2 and kept['manual_cues']==drop['manual_cues'],kept
     assert abs(kept['analysis_recommendation']['cue_in']-6)<0.3
 print('PASS: decoded high-energy drop/opening, spike rejection, boundaries and protected manual proposal')

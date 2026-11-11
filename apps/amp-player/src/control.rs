@@ -111,6 +111,7 @@ pub enum Action {
         deck: Deck,
     },
     StopAllDecks,
+    StopPlayer,
     EmergencyMute,
     StopSamplers {
         #[serde(default)]
@@ -140,6 +141,8 @@ pub enum Action {
         execution: Execution,
     },
     StartLiveBroadcast {
+        #[serde(default)]
+        player_only: bool,
         address: String,
         #[serde(default)]
         password: String,

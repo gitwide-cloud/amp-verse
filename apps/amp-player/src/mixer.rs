@@ -27,6 +27,7 @@ fn set(v: &AtomicU32, x: f32) {
 pub const DECKS: usize = 6;
 pub const MASTER: usize = DECKS;
 pub struct Controls {
+    pub broadcast_player_only: AtomicBool,
     pub pair: [AtomicU32; 2],
     pub master_bpm: AtomicU32,
     clock_origin_frame: AtomicU64,
@@ -109,6 +110,7 @@ impl Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            broadcast_player_only: AtomicBool::new(false),
             pair: [AtomicU32::new(0), AtomicU32::new(1)],
             key_lock: std::array::from_fn(|_| AtomicBool::new(false)),
             key_lock_available: std::array::from_fn(|_| AtomicBool::new(false)),
@@ -231,6 +233,7 @@ struct Voice {
     gain: f32,
     looped: Option<Loop>,
     pending_loop: Option<(u64, Vec<DeckFrame>)>,
+    tail_frames: usize,
 }
 struct LevelFade {
     from: f32,
@@ -839,6 +842,13 @@ impl Mixer {
                         pending.previous_origin = f64::from_bits(c.source_origin[d].load(Relaxed));
                         pending.old =
                             std::mem::replace(&mut self.voices[d].source, pending.source.take());
+                        // Keep one output-delay/pitch history across section jumps.
+                        if let (Some(incoming), Some(previous)) =
+                            (&mut self.voices[d].source, &mut pending.old)
+                        {
+                            incoming.key_lock = previous.key_lock.take();
+                        }
+                        self.voices[d].tail_frames = 0;
                         c.source_origin[d].store(pending.origin.to_bits(), Relaxed);
                         c.section_epoch[d].fetch_add(1, Relaxed);
                         c.section_state[d].store(2, Relaxed);
@@ -857,6 +867,7 @@ impl Mixer {
                 Relaxed,
             );
             let mut mix = [0.; 2];
+            let mut player_mix = [0.; 2];
             let mut cue_mix = [0.; 2];
             for d in 0..6 {
                 let v = &mut self.voices[d];
@@ -908,12 +919,25 @@ impl Mixer {
                     && let Some(pending) = &mut self.sections[d]
                     && let Some(old) = pending.old.take()
                 {
+                    let processor = source.key_lock.take();
                     *source = old;
+                    source.key_lock = processor;
                     frame = source.next(rates[d]);
                     c.source_origin[d].store(pending.previous_origin.to_bits(), Relaxed);
                     c.section_epoch[d].fetch_sub(1, Relaxed);
                     c.section_state[d].store(3, Relaxed);
                     self.sections[d] = None;
+                }
+                if frame.is_some() {
+                    v.tail_frames = 0;
+                } else if source.done.load(std::sync::atomic::Ordering::Acquire)
+                    && source
+                        .key_lock
+                        .as_ref()
+                        .is_some_and(|processor| v.tail_frames < processor.latency)
+                {
+                    v.tail_frames += 1;
+                    frame = Some([0.; 6]);
                 }
                 let Some(mut frame) = frame else {
                     if source.done.load(std::sync::atomic::Ordering::Acquire) {
@@ -1000,6 +1024,9 @@ impl Mixer {
                         cue_mix[ch] += frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
                     }
                     frame[ch] *= v.gain;
+                    if d == 0 {
+                        player_mix[ch] = frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
+                    }
                     peaks[d] = peaks[d].max(frame[ch].abs());
                     let pair = c.pair_indices();
                     let weight = if d == pair[0] {
@@ -1054,7 +1081,12 @@ impl Mixer {
                 (mix[1] * get(&c.master)).clamp(-0.98, 0.98),
             ];
             if let Some(tap) = &mut self.broadcast {
-                let _ = tap.push(master);
+                let output = if c.broadcast_player_only.load(Relaxed) {
+                    player_mix.map(|value| (value * get(&c.master)).clamp(-0.98, 0.98))
+                } else {
+                    master
+                };
+                let _ = tap.push(output);
             }
             output(i, master);
         }
@@ -1064,7 +1096,12 @@ impl Mixer {
                 set(&c.scope[d][i], *value);
             }
             if let Some(s) = &self.voices[d].source {
-                c.position[d].store(s.position as u64, Relaxed);
+                let remaining_delay = s.key_lock.as_ref().map_or(0, |processor| {
+                    processor.latency.saturating_sub(self.voices[d].tail_frames)
+                });
+                let audible =
+                    (s.position - remaining_delay as f64 * c.effective_rate(d) as f64).max(0.);
+                c.position[d].store(audible as u64, Relaxed);
             }
         }
         c.rendered.fetch_add(frames as u64, Relaxed);
@@ -1244,6 +1281,12 @@ impl Engine {
         Ok(())
     }
     pub fn broadcast_tap(&self) -> Result<rtrb::Consumer<Frame>, String> {
+        self.broadcast_source_tap(false)
+    }
+    pub fn broadcast_source_tap(&self, player_only: bool) -> Result<rtrb::Consumer<Frame>, String> {
+        self.controls
+            .broadcast_player_only
+            .store(player_only, Relaxed);
         let (producer, consumer) = RingBuffer::new(self.sample_rate as usize);
         self.send(Command::Broadcast(Some(producer)))?;
         Ok(consumer)
@@ -1612,7 +1655,7 @@ impl Engine {
         Some(
             (frames.saturating_sub(self.controls.position[deck].load(Relaxed)) as f32
                 / self.sample_rate as f32
-                / get(&self.controls.rate[deck]))
+                / self.controls.effective_rate(deck))
             .max(0.),
         )
     }
@@ -1902,7 +1945,7 @@ mod tests {
             p.push([value, value, 0., 0., 0., 0.]).unwrap();
         }
         Source {
-            key_lock: crate::key_lock::Processor::new(48000).map(Box::new),
+            key_lock: None,
             ring: c,
             duration: Arc::new(AtomicU64::new(frames as u64)),
             done: Arc::new(AtomicBool::new(true)),
@@ -1926,7 +1969,7 @@ mod tests {
                 .unwrap();
         }
         Source {
-            key_lock: crate::key_lock::Processor::new(48000).map(Box::new),
+            key_lock: None,
             ring: consumer,
             duration: Arc::new(AtomicU64::new(frames as u64)),
             done: Arc::new(AtomicBool::new(true)),
@@ -3133,14 +3176,163 @@ mod tests {
         assert!(!c.looping[2].load(Relaxed));
     }
     #[test]
+    fn player_broadcast_tap_excludes_other_decks_and_preserves_local_mix() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut mixer = Mixer::new(48000, rx, c.clone());
+        let (producer, mut consumer) = RingBuffer::new(2048);
+        tx.send(Command::Broadcast(Some(producer))).unwrap();
+        tx.send(Command::Load(0, source(0.01, 4000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(1, source(0.03, 4000), true, 1))
+            .unwrap();
+        c.broadcast_player_only.store(true, Relaxed);
+        set(&c.crossfader, 1.);
+        let mut local = 0.;
+        mixer.render(1000, |_, f| local = f[0]);
+        let mut broadcast = 0.;
+        while let Ok(f) = consumer.pop() {
+            broadcast = f[0];
+        }
+        assert!((local / broadcast - 3.).abs() < 0.01);
+        assert!(broadcast > 0.004);
+        assert!(c.play[0].load(Relaxed) && c.play[1].load(Relaxed));
+    }
+    #[test]
+    fn section_handoff_preserves_pitch_history_without_a_silent_gap() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut mixer = Mixer::new(48000, rx, controls.clone());
+        let mut prepared = source(0.03, 48000);
+        prepared.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+        tx.send(Command::Load(0, prepared, true, 1)).unwrap();
+        mixer.render(6000, |_, _| {});
+        let mut jump = section(source(0.03, 48000), 1);
+        jump.grid = None;
+        tx.send(Command::Section(0, jump)).unwrap();
+        mixer.render(6000, |_, frame| {
+            assert!(frame[0] > 0.01, "A section handoff inserted silence")
+        });
+        assert!(mixer.voices[0].source.as_ref().unwrap().key_lock.is_some());
+    }
+    #[test]
+    fn pitch_backend_drains_the_delayed_tail_before_finishing() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(4);
+        let mut mixer = Mixer::new(48000, rx, controls.clone());
+        let mut prepared = source(0.03, 10000);
+        prepared.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+        let latency = prepared.key_lock.as_ref().unwrap().latency;
+        tx.send(Command::Load(0, prepared, true, 1)).unwrap();
+        let mut first = None;
+        let mut last = 0;
+        mixer.render(15000, |i, frame| {
+            if frame[0] > 0.0001 {
+                first.get_or_insert(i);
+                last = i;
+            }
+        });
+        assert_eq!(first, Some(latency));
+        assert!(last > 10000 + latency - 5);
+        assert!(controls.finished[0].load(Relaxed));
+    }
+    #[test]
+    #[ignore = "Synthetic DSP performance matrix; no hardware output"]
+    fn benchmark_dsp_matrix() {
+        for mode in [
+            "two-dry",
+            "six-dry",
+            "six-sync-keylock",
+            "six-stems",
+            "six-loops",
+            "six-effects",
+            "pair-auto-fade-with-four-layers",
+        ] {
+            let c = Arc::new(Controls::default());
+            let (tx, rx) = mpsc::sync_channel(64);
+            let mut mixer = Mixer::new(48000, rx, c.clone());
+            let decks = if mode == "two-dry" { 2 } else { 6 };
+            for d in 0..decks {
+                let mut voice = if mode == "six-stems" {
+                    layered_source([0.005, 0.003, 0.002], 48000 * 3)
+                } else {
+                    source(0.01, 48000 * 3)
+                };
+                let (mut pcm, ring) = RingBuffer::new(48000 * 3 + 1);
+                for frame in 0..48000 * 3 {
+                    let tone = (frame as f32 * std::f32::consts::TAU * 440. / 48000.).sin();
+                    pcm.push(if mode == "six-stems" {
+                        [
+                            tone * 0.005,
+                            tone * 0.005,
+                            tone * 0.003,
+                            tone * 0.003,
+                            tone * 0.002,
+                            tone * 0.002,
+                        ]
+                    } else {
+                        [tone * 0.01, tone * 0.01, 0., 0., 0., 0.]
+                    })
+                    .unwrap();
+                }
+                voice.ring = ring;
+                if mode == "six-sync-keylock" {
+                    voice.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+                    set(&c.bpm[d], 120.);
+                    c.synced[d].store(true, Relaxed);
+                    c.key_lock[d].store(true, Relaxed);
+                }
+                tx.send(Command::Load(d, voice, true, 1)).unwrap();
+                if mode == "six-loops" {
+                    tx.send(Command::Loop(d, Some(Vec::with_capacity(12000))))
+                        .unwrap();
+                }
+                if mode == "six-effects" {
+                    set(&c.eq[d][0], -6.);
+                    set(&c.sweep[d], -0.35);
+                }
+            }
+            if mode == "six-sync-keylock" {
+                tx.send(Command::Clock(126., 4)).unwrap();
+            }
+            if mode == "pair-auto-fade-with-four-layers" {
+                tx.send(Command::Fade {
+                    to: 1.,
+                    seconds: 0.5,
+                })
+                .unwrap();
+            }
+            let started = std::time::Instant::now();
+            let mut energy = 0.;
+            for _ in 0..200 {
+                mixer.render(480, |_, f| {
+                    assert!(f.iter().all(|v| v.is_finite()));
+                    energy += f[0].abs();
+                });
+            }
+            let elapsed = started.elapsed();
+            let underruns: Vec<_> = c.underruns.iter().map(|u| u.load(Relaxed)).collect();
+            eprintln!(
+                "{mode}: 2 s rendered in {elapsed:?}; underruns {underruns:?}; signal {energy:.1}"
+            );
+            assert!(elapsed.as_secs_f32() < 2. && energy > 1.);
+            assert!(underruns.iter().all(|n| *n == 0));
+            if mode == "pair-auto-fade-with-four-layers" {
+                assert!(!c.play[0].load(Relaxed));
+                assert!((2..6).all(|d| c.play[d].load(Relaxed)));
+            }
+        }
+    }
+    #[test]
     #[ignore = "CPU benchmark: generated six-stream PCM, no hardware output"]
     fn benchmark_six_keylocked_layers() {
         let c = Arc::new(Controls::default());
         let (tx, rx) = mpsc::sync_channel(16);
         let mut m = Mixer::new(48000, rx, c.clone());
         for d in 0..6 {
-            tx.send(Command::Load(d, source(0.03, 48000 * 6), true, 1))
-                .unwrap();
+            let mut prepared = source(0.03, 48000 * 6);
+            prepared.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+            tx.send(Command::Load(d, prepared, true, 1)).unwrap();
             c.key_lock[d].store(true, Relaxed);
             set(&c.rate[d], 1.08);
         }

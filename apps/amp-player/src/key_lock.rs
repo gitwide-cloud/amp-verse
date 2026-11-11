@@ -1,10 +1,10 @@
-//! MIT Signalsmith backend. Constructed and warmed on the load thread; fixed-size
+//! MIT Signalsmith backend. Constructed and warmed before entering the callback; fixed-size
 //! processing buffers are reused by the audio callback. One processor follows
 //! the summed stem signal, so stems cannot drift relative to one another.
 use std::ffi::c_void;
 #[cfg(not(target_os = "windows"))]
 unsafe extern "C" {
-    fn signalsmith_stretch_create_preset_cheaper(channels: i32, rate: f32) -> *mut c_void;
+    fn signalsmith_stretch_create(channels: i32, block: usize, interval: usize) -> *mut c_void;
     fn signalsmith_stretch_destroy(handle: *mut c_void);
     fn signalsmith_stretch_set_transpose_factor(handle: *mut c_void, factor: f32, tonality: f32);
     fn signalsmith_stretch_process(
@@ -23,7 +23,7 @@ mod native {
     use super::*;
     struct Backend {
         _library: libloading::Library,
-        create: unsafe extern "C" fn(i32, f32) -> *mut c_void,
+        create: unsafe extern "C" fn(i32, usize, usize) -> *mut c_void,
         destroy: unsafe extern "C" fn(*mut c_void),
         transpose: unsafe extern "C" fn(*mut c_void, f32, f32),
         process: unsafe extern "C" fn(*mut c_void, *const f32, usize, *mut f32, usize),
@@ -41,9 +41,7 @@ mod native {
                     .join("amp-keylock.dll");
                 let library = libloading::Library::new(path).ok()?;
                 Some(Backend {
-                    create: *library
-                        .get(b"signalsmith_stretch_create_preset_cheaper\0")
-                        .ok()?,
+                    create: *library.get(b"signalsmith_stretch_create\0").ok()?,
                     destroy: *library.get(b"signalsmith_stretch_destroy\0").ok()?,
                     transpose: *library
                         .get(b"signalsmith_stretch_set_transpose_factor\0")
@@ -57,8 +55,14 @@ mod native {
             })
             .as_ref()
     }
-    pub unsafe fn signalsmith_stretch_create_preset_cheaper(ch: i32, rate: f32) -> *mut c_void {
-        backend().map_or(std::ptr::null_mut(), |b| unsafe { (b.create)(ch, rate) })
+    pub unsafe fn signalsmith_stretch_create(
+        ch: i32,
+        block: usize,
+        interval: usize,
+    ) -> *mut c_void {
+        backend().map_or(std::ptr::null_mut(), |b| unsafe {
+            (b.create)(ch, block, interval)
+        })
     }
     pub unsafe fn signalsmith_stretch_destroy(h: *mut c_void) {
         if let Some(b) = backend() {
@@ -104,6 +108,9 @@ pub struct Processor {
     primed: usize,
     pub latency: usize,
     wet: f32,
+    dry: Vec<[f32; 2]>,
+    dry_at: usize,
+    processing: bool,
 }
 // The opaque instance has exactly one owner and moves with its Source to the
 // audio callback. No method provides shared mutation or calls it concurrently.
@@ -115,7 +122,9 @@ impl Processor {
         }
         // SAFETY: two channels, valid sample rate; the returned C++ instance is
         // uniquely owned until Drop. The fixed buffer lengths match the ABI.
-        let handle = unsafe { signalsmith_stretch_create_preset_cheaper(2, rate as f32) };
+        // A short analysis window keeps on-screen vinyl response practical.
+        let block = ((rate as usize * 2048 / 48000).max(512)).next_power_of_two();
+        let handle = unsafe { signalsmith_stretch_create(2, block, block / 4) };
         if handle.is_null() {
             return None;
         }
@@ -136,6 +145,9 @@ impl Processor {
             primed: 0,
             latency,
             wet: 0.,
+            dry: vec![[0.; 2]; latency],
+            dry_at: 0,
+            processing: false,
         })
     }
     pub fn frame(
@@ -145,10 +157,25 @@ impl Processor {
         enabled: bool,
         scratching: bool,
     ) -> [f32; 2] {
+        // Every prepared voice has the same delay, even with Key Lock off.
+        // Switching pitch processing therefore cannot move a layer off the beat.
+        let dry = self.dry[self.dry_at];
+        self.dry[self.dry_at] = frame;
+        self.dry_at = (self.dry_at + 1) % self.dry.len();
         if !enabled || scratching || rate <= 0. {
             self.primed = 0;
             self.wet = 0.;
-            return frame;
+            self.processing = false;
+            return dry;
+        }
+        if !self.processing {
+            unsafe {
+                signalsmith_stretch_reset(self.handle);
+            }
+            self.at = 0;
+            self.input.fill(0.);
+            self.output.fill(0.);
+            self.processing = true;
         }
         let offset = self.at * 2;
         self.input[offset..offset + 2].copy_from_slice(&frame);
@@ -173,7 +200,7 @@ impl Processor {
         if self.primed > self.latency {
             self.wet = (self.wet + 0.001).min(1.);
         }
-        std::array::from_fn(|ch| frame[ch] * (1. - self.wet) + processed[ch] * self.wet)
+        std::array::from_fn(|ch| dry[ch] * (1. - self.wet) + processed[ch] * self.wet)
     }
 }
 impl Drop for Processor {
@@ -184,6 +211,31 @@ impl Drop for Processor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dry_and_pitch_locked_layers_keep_matching_impulse_timing() {
+        let mut dry = Processor::new(48000).unwrap();
+        let mut locked = Processor::new(48000).unwrap();
+        let mut a = (0, 0.);
+        let mut b = (0, 0.);
+        for i in 0..20000 {
+            let input = if i == 10000 { [0.8; 2] } else { [0.; 2] };
+            let x = dry.frame(input, 1., false, false)[0].abs();
+            let y = locked.frame(input, 1., true, false)[0].abs();
+            if x > a.1 {
+                a = (i, x);
+            }
+            if y > b.1 {
+                b = (i, y);
+            }
+        }
+        eprintln!(
+            "Dry impulse {}, locked impulse {}, reported latency {}",
+            a.0, b.0, dry.latency
+        );
+        assert!(a.1 > 0.5 && b.1 > 0.3);
+        assert!((a.0 as i32 - b.0 as i32).abs() <= 2);
+        assert_eq!(a.0, 10000 + dry.latency);
+    }
     #[test]
     fn locked_tempo_preserves_a_measured_sine_pitch() {
         let rate = 48000;

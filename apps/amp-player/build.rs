@@ -17,7 +17,7 @@ fn main() {
         let mut command = tool.to_command();
         if tool.is_like_msvc() {
             let exports = out.join("keylock.def");
-            std::fs::write(&exports,"LIBRARY amp-keylock\nEXPORTS\nsignalsmith_stretch_create_preset_cheaper\nsignalsmith_stretch_destroy\nsignalsmith_stretch_set_transpose_factor\nsignalsmith_stretch_process\nsignalsmith_stretch_input_latency\nsignalsmith_stretch_output_latency\nsignalsmith_stretch_reset\n").unwrap();
+            std::fs::write(&exports,"LIBRARY amp-keylock\nEXPORTS\nsignalsmith_stretch_create\nsignalsmith_stretch_destroy\nsignalsmith_stretch_set_transpose_factor\nsignalsmith_stretch_process\nsignalsmith_stretch_input_latency\nsignalsmith_stretch_output_latency\nsignalsmith_stretch_reset\n").unwrap();
             command
                 .arg("/LD")
                 .arg("/EHsc")

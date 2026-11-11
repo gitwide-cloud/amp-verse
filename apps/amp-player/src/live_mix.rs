@@ -8,6 +8,7 @@ use std::{
     },
 };
 pub struct Broadcast {
+    pub player_only: bool,
     level: Arc<AtomicU32>,
     muted: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -29,19 +30,24 @@ impl Broadcast {
             self.muted.load(Relaxed),
         )
     }
-    pub fn start(
+    pub fn start_source(
         audio: &crate::mixer::Engine,
         aux: &crate::mixer::Engine,
         address: String,
         password: String,
+        player_only: bool,
     ) -> Result<Self, String> {
         if audio.sample_rate != aux.sample_rate {
             return Err(
                 "Sampler and DJ outputs need the same sample rate for live broadcast".into(),
             );
         }
-        let mut main = audio.broadcast_tap()?;
-        let mut samples = aux.broadcast_tap()?;
+        let mut main = audio.broadcast_source_tap(player_only)?;
+        let mut samples = if player_only {
+            None
+        } else {
+            Some(aux.broadcast_tap()?)
+        };
         let mut child = amp_core::command("ffmpeg")
             .args(["-nostdin", "-v", "error", "-f", "f32le", "-ar"])
             .arg(audio.sample_rate.to_string())
@@ -106,7 +112,10 @@ impl Broadcast {
                         bytes.clear();
                         for _ in 0..1024 {
                             let Ok(frame) = main.pop() else { break };
-                            let aux = samples.pop().unwrap_or([0.; 2]);
+                            let aux = samples
+                                .as_mut()
+                                .and_then(|s| s.pop().ok())
+                                .unwrap_or([0.; 2]);
                             for ch in 0..2 {
                                 bytes.extend_from_slice(
                                     &((frame[ch] + aux[ch])
@@ -127,8 +136,12 @@ impl Broadcast {
                         }
                     }
                 });
-                *message.lock().unwrap() =
-                    "Broadcasting live DJ mix · decks, mixer, stems and sampler".into();
+                *message.lock().unwrap() = if player_only {
+                    "Broadcasting AMP Player output"
+                } else {
+                    "Broadcasting live DJ mix · decks, mixer, stems and sampler"
+                }
+                .into();
                 let outcome = (|| -> Result<(), String> {
                     let mut bytes = [0; 8192];
                     while !stopped.load(Relaxed) {
@@ -164,6 +177,7 @@ impl Broadcast {
             }
         });
         Ok(Self {
+            player_only,
             level,
             muted,
             stop,
@@ -212,7 +226,8 @@ mod tests {
         main.set_master(0.);
         let aux = crate::mixer::Engine::new().unwrap();
         aux.set_master(0.);
-        let broadcast = Broadcast::start(&main, &aux, address.clone(), String::new()).unwrap();
+        let broadcast =
+            Broadcast::start_source(&main, &aux, address.clone(), String::new(), false).unwrap();
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_secs(5)))
             .proxy(None)
