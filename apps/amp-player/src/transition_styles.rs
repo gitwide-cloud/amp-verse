@@ -34,6 +34,7 @@ impl Style {
 #[serde(default)]
 pub struct Settings {
     pub enabled: bool,
+    pub timing: crate::mix_schedule::Timing,
     pub style: Style,
     pub every: u32,
     pub techniques: [bool; 6],
@@ -44,6 +45,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: true,
+            timing: Default::default(),
             style: Style::Variety,
             every: 4,
             techniques: [true; 6],

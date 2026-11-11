@@ -24,6 +24,7 @@ mod lab;
 mod lab_editor;
 mod library_cache;
 mod live_mix;
+mod mix_schedule;
 mod mixer;
 mod monitor;
 mod organized_library;
@@ -31,6 +32,7 @@ mod performance;
 mod preparer;
 mod sample_editor;
 mod sampler;
+mod section_controls;
 mod show_editor;
 mod side_deck;
 mod skin;
@@ -146,6 +148,8 @@ struct Player {
     fade_seconds: f32,
     jog_resume: [Option<(bool, egui::ViewportId)>; 2],
     jog_angle: [f32; 2],
+    jog_target: [f64; 2],
+    jog_auto: [bool; 2],
     mixer_panel: dj_mixer::Panel,
     controllers: controllers::Panel,
     stem_panel: stems::Panel,
@@ -233,6 +237,8 @@ impl Default for Player {
             fade_seconds: crossfade_settings::load(),
             jog_resume: [None; 2],
             jog_angle: [0.; 2],
+            jog_target: [0.; 2],
+            jog_auto: [false; 2],
             mixer_panel: Default::default(),
             controllers: Default::default(),
             stem_panel: Default::default(),
@@ -1915,6 +1921,7 @@ impl Player {
                     self.wave_span,
                     d,
                 );
+                self.deck_sections(ui, d);
             }
             window_layout::splitter(
                 ui,
@@ -2711,16 +2718,18 @@ impl Player {
             if !audio.loaded(deck) {
                 return;
             }
+            self.jog_auto[deck] = self.run.auto;
             self.jog_resume[deck] = Some((audio.playing(deck), ui.ctx().viewport_id()));
             self.run.cancel_effects(audio);
             self.jog_angle[deck] = angle;
+            self.jog_target[deck] = audio.position(deck);
             self.run.cancel_automation();
             self.auto = false;
             if audio.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed) {
                 let _ = audio.loop_toggle(deck, 2.);
             }
             audio.set_fader(audio.fader());
-            audio.scratch(deck, true, 0.);
+            audio.vinyl_target(deck, self.jog_target[deck]);
             audio.controls.play[deck].store(true, std::sync::atomic::Ordering::Relaxed);
             ui.ctx().request_repaint_after(Duration::from_millis(8));
             return;
@@ -2730,17 +2739,15 @@ impl Player {
                 .rem_euclid(std::f32::consts::TAU)
                 - std::f32::consts::PI;
             self.jog_angle[deck] = angle;
-            let dt = ui.input(|i| i.stable_dt).max(0.001);
-            let rate = if relative.length() < wheel.rect.width() * 0.2 {
-                // Near the spindle angle is unstable. A straight finger movement
-                // still moves the record, instead of jumping through half a turn.
+            let seconds = if relative.length() < wheel.rect.width() * 0.2 {
                 let motion = ui.input(|i| i.pointer.delta());
-                (motion.x - motion.y) / wheel.rect.width().max(1.) / dt
+                (motion.x - motion.y) / wheel.rect.width().max(1.) * 1.8
             } else {
-                delta / std::f32::consts::TAU * 1.8 / dt
+                delta / std::f32::consts::TAU * 1.8
             };
+            self.jog_target[deck] = (self.jog_target[deck] + seconds as f64).max(0.);
             if let Some(audio) = &self.audio {
-                audio.scratch(deck, true, rate);
+                audio.vinyl_target(deck, self.jog_target[deck]);
             }
             ui.ctx().request_repaint_after(Duration::from_millis(8));
         }
@@ -2760,6 +2767,10 @@ impl Player {
             {
                 audio.scratch(deck, false, 0.);
                 audio.controls.play[deck].store(resume, std::sync::atomic::Ordering::Relaxed);
+                if self.jog_auto[deck] && resume && self.run.profile.is_some() {
+                    self.run.auto = true;
+                }
+                self.jog_auto[deck] = false;
             }
         }
     }

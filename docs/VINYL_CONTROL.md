@@ -1,6 +1,8 @@
-# Digital vinyl control — accepted requirement, not implemented
+# Physical digital vinyl control — future hardware scope
 
-The requested vinyl behavior means physical timecode vinyl/CD input controlling digital deck transport, plus ordinary-record passthrough. It is not satisfied by the current mouse jog wheel, scratch effect or MIDI XML importer. This distinction supersedes earlier assumptions that jog gestures alone met the request.
+The user subsequently clarified that the current request means AMP DJ’s on-screen jog wheels, with no physical controller or timecode records. Position-following on-screen scratching is implemented and tested: hand movement controls forward/reverse audio, a stationary touch holds position, release restores the previous play/pause state, and active Auto DJ resumes. The platter uses the same 1.8-second revolution scale as transport.
+
+The hardware DVS design below remains a future scope only. On-screen gestures do not provide physical timecode decoding or normal-record passthrough.
 
 ## Current gaps
 

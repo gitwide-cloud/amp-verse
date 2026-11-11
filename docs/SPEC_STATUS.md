@@ -24,8 +24,8 @@ Source of truth: REVISED_BUILD_SPEC.md. This milestone delivers desktop show con
 
 ## Remaining work
 
-- Physical timecode vinyl/DVS and ordinary-record passthrough. Mouse scratch and partial MIDI XML import do not implement these; see VINYL_CONTROL.md for the accepted requirement and hardware verification gates.
-- Section preparation is now inline in Library: portable energy curves, editable neutral sections and explicit section-to-DJ handoffs. Two-deck Auto DJ selects entry sections by local energy. Reviewed downbeats, semantic section recognition and audio-clock phrase scheduling remain unfinished; see ENERGY_PREPARATION.md and FLOW_REFERENCE.md.
+- Physical timecode vinyl/DVS and ordinary-record passthrough remain future hardware scope. The user clarified on-screen jog wheels for the current request; position-following vinyl-style gestures are now implemented. See VINYL_CONTROL.md.
+- Library energy preparation, explicit bar anchors, deck section strips and audio-clock beat/bar launch scheduling are implemented. Auto DJ selects entries by local energy. Semantic section recognition, variable-tempo tracking and end-of-fade bar quantization remain unfinished; see ENERGY_PREPARATION.md and FLOW_REFERENCE.md.
 - Packaged AMP Verse Companion module, importable pages/presets and SDK-specific feedback mappings; current integration uses Generic HTTP Requests and the documented API.
 - Full hardware mappings, OSC, HID, scripted Mixxx adapters and LED feedback. Partial direct Mixxx MIDI XML import and native MIDI input are available; see CONTROLLERS.md. Physical hardware verification remains pending.
 - Music Scene editing/recall and prepared FX preset actions.

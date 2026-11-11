@@ -159,6 +159,17 @@ impl Preparer {
             if ui.button("Full track").clicked() {
                 self.zoom = None;
             }
+            if ui
+                .button("Mark bar 1 at cursor")
+                .on_hover_text("Use this reviewed musical downbeat for next-bar scheduling")
+                .clicked()
+            {
+                self.draft
+                    .extensions
+                    .insert("mix_bar_anchor".into(), serde_json::json!(self.position));
+                self.draft.beat_offset = self.draft.bpm.map(|b| self.position.rem_euclid(60. / b));
+                self.draft.manual_override = true;
+            }
             if ui.button("Zoom to cursor").clicked() {
                 self.zoom = Some(16.);
             }

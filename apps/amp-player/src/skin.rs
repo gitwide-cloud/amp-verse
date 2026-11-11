@@ -571,7 +571,7 @@ pub fn platter(
             ),
         );
     }
-    let angle = phase * 1.8;
+    let angle = phase * std::f32::consts::TAU / 1.8;
     ui.painter().line_segment(
         [
             center,

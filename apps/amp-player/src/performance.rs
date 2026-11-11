@@ -120,7 +120,7 @@ impl Default for Run {
 impl Run {
     fn tick_effect(&mut self, audio: &crate::mixer::Engine) -> Option<String> {
         let mut effect = self.effect_bridge.take()?;
-        if !audio.fading() {
+        if !audio.fading() || !audio.playing(1 - effect.deck) {
             self.effect_bridge = Some(effect);
             return None;
         }
@@ -644,6 +644,7 @@ impl Player {
                 }
                 let settings = crate::transition_styles::Settings {
                     enabled,
+                    timing: self.run.transitions.timing,
                     techniques,
                     every,
                     style: crate::transition_styles::Style::Variety,
@@ -1287,7 +1288,31 @@ impl Player {
                     self.run.cancel_automation();
                 } else {
                     let seconds = self.fade_seconds;
-                    match a.crossfade(seconds) {
+                    let grid = self
+                        .loaded_track(outgoing)
+                        .zip(self.loaded_track(incoming))
+                        .and_then(|(out, next)| {
+                            crate::mix_schedule::grid(
+                                &out.preparation,
+                                &next.preparation,
+                                a.source_position(incoming),
+                                a.source_position(outgoing) - a.position(outgoing),
+                                self.run.transitions.timing,
+                            )
+                        });
+                    let result = if let Some(grid) = grid.filter(|g| {
+                        a.remaining(outgoing).is_some_and(|r| {
+                            r > seconds
+                                + (g.next(a.position(outgoing) + 0.1) - a.position(outgoing)) as f32
+                                    / (1. + self.pitch[outgoing] / 100.)
+                                + 0.1
+                        })
+                    }) {
+                        a.scheduled_crossfade(seconds, grid)
+                    } else {
+                        a.crossfade(seconds)
+                    };
+                    match result {
                         Ok(()) => {
                             self.run.transition = Some(incoming);
                             if let Some((style, grain)) = effect_plan {
@@ -1328,6 +1353,12 @@ impl Player {
         }
 
         if self.run.auto
+            && !self.audio.as_ref().is_some_and(|a| {
+                a.controls
+                    .section_state
+                    .iter()
+                    .any(|s| matches!(s.load(Relaxed), 1 | 2))
+            })
             && !self.run.locked
             && self.run.pending.is_none()
             && self.run.transition.is_none()
@@ -1335,6 +1366,27 @@ impl Player {
             let active = self.active_deck();
             let remaining = self.audio.as_ref().and_then(|a| a.remaining(active));
             let mix_seconds = self.fade_seconds;
+            let grid_lead = if self.run.transitions.timing != crate::mix_schedule::Timing::Immediate
+            {
+                self.loaded_track(active)
+                    .and_then(|t| {
+                        t.preparation.bpm.map(|b| {
+                            let beats = if self.run.transitions.timing
+                                == crate::mix_schedule::Timing::Bar
+                                && t.preparation.extensions.contains_key("mix_bar_anchor")
+                            {
+                                4.
+                            } else {
+                                1.
+                            };
+                            (beats * 60. / (b * (1. + self.pitch[active] as f64 / 100.))) as f32
+                                + 0.2
+                        })
+                    })
+                    .unwrap_or(0.)
+            } else {
+                0.
+            };
             if self
                 .audio
                 .as_ref()
@@ -1352,7 +1404,9 @@ impl Player {
             if (finished
                 || (self.run.crossfade
                     && remaining.is_some_and(|r| {
-                        r <= mix_seconds + if self.run.scratch_assist { 0.8 } else { 0. }
+                        r <= mix_seconds
+                            + grid_lead
+                            + if self.run.scratch_assist { 0.8 } else { 0. }
                     })))
                 && let Some((incoming, _)) = self.run.preloaded
             {
