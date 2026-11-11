@@ -288,7 +288,7 @@ impl Editor {
                 if dirty { ui.colored_label(crate::ORANGE,"Unsaved changes · DJ still uses the saved version"); }
                 ui.horizontal_wrapped(|ui|{let button=ui.button("Save Playlist");save|=button.clicked();#[cfg(test)]ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique("smart-top-save"),button.rect));if !self.status.is_empty(){ui.add(egui::Label::new(&self.status).wrap());}});
                 ui.add_space(16.);
-                ui.strong("Music source");
+                ui.strong("Music sources");
                 if p.source_unavailable {
                     ui.colored_label(crate::ORANGE,"Source library not connected · settings retained, playback paused for this playlist");
                     if let Some(hint)=&p.source_root_hint {
@@ -307,34 +307,37 @@ impl Editor {
                 }
                 if !p.source_unavailable && let Some(lib)=library {normalize_folder_spelling(p,&lib.tree);}
                 let count = library.map(|lib| lib.tracks.iter().filter(|track|amp_core::show::eligible(p,track)).count());
-                let source = self.source_labels.get(&p.id).cloned().unwrap_or_else(|| source_summary(p));
+                let source = source_summary(p);
                 ui.add(egui::Label::new(format!("{} — {}", source, count.map_or("waiting for library scan".into(), |count|format!("{count} songs")))).wrap());
+                ui.add_enabled_ui(!p.source_unavailable, |ui| {
                 if let Some(lib)=library {
                     ui.label(format!("Indexed library: {} · {} songs",root.display(),lib.tracks.len()));
-                    if let Some(relative)=library_folder_picker(ui,&lib.tree,p.folders.first()) && confirm_source_change(p){
-                        select_indexed_folder(p,relative.clone());
+                    if let Some(relative)=library_folder_picker(ui,&lib.tree,p.folders.first()){
+                        add_indexed_folder(p,relative.clone());
                         self.refresh_sources=true;
                         self.source_labels.insert(p.id.clone(),format!("Folder: {}",root.join(&relative).display()));
-                        self.status="Folder and all subfolders selected. Save Playlist to apply.".into();
+                        self.status="Folder added with all subfolders. Existing sources kept. Save Playlist to apply.".into();
                     }
                 }
-                ui.menu_button(if count == Some(0) {"Choose Music Source"} else {"Change Music Source"}, |ui| {
+                ui.menu_button("Add Music Source", |ui| {
                     if ui.button("Select Folder...").clicked() {
-                        if let Some(folder) = rfd::FileDialog::new().set_directory(root).pick_folder() && confirm_source_change(p) {
-                            match select_folder(root, &folder, p) {
-                                Ok(()) => { self.refresh_sources=true; self.source_labels.insert(p.id.clone(),format!("Folder: {}",folder.display())); self.status = "Folder and all subfolders selected. Save Playlist to apply.".into(); }
+                        if let Some(folder) = rfd::FileDialog::new().set_directory(root).pick_folder() {
+                            let mut selected=p.clone();
+                            match select_folder(root, &folder, &mut selected) {
+                                Ok(()) => { add_indexed_folder(p,selected.folders.remove(0)); self.refresh_sources=true; self.source_labels.insert(p.id.clone(),format!("Folder: {}",folder.display())); self.status = "Folder added with subfolders; existing sources kept. Save Playlist to apply.".into(); }
                                 Err(error) => self.status = error,
                             }
                         }
                         ui.close();
                     }
                     if ui.add_enabled(library.is_some(),egui::Button::new("Import Playlist (M3U / M3U8 / AMP)...")).clicked() {
-                        if let Some(file) = rfd::FileDialog::new().add_filter("Playlists", &["m3u","m3u8","json"]).pick_file() && let Some(lib) = library && confirm_source_change(p) {
+                        if let Some(file) = rfd::FileDialog::new().add_filter("Playlists", &["m3u","m3u8","json"]).pick_file() && let Some(lib) = library {
+                            let mut selected=p.clone();
                             let result = if file.extension().is_some_and(|ext|ext.eq_ignore_ascii_case("json")) {
-                                amp_core::Playlist::load(&file,root).map_err(|e|e.to_string()).and_then(|list|import_source_playlist(p,&list,lib).map(|count|(count,0)))
-                            } else { import_m3u(&file,root,lib,p) };
+                                amp_core::Playlist::load(&file,root).map_err(|e|e.to_string()).and_then(|list|import_source_playlist(&mut selected,&list,lib).map(|count|(count,0)))
+                            } else { import_m3u(&file,root,lib,&mut selected) };
                             match result {
-                                Ok((count,missing)) => {self.source_labels.insert(p.id.clone(),format!("Imported: {}",file.file_name().unwrap_or_default().to_string_lossy()));self.status=format!("Imported {count} songs; {missing} missing or outside the indexed library. Save Playlist to apply.");}
+                                Ok((count,missing)) => {add_playlist_source(p,file.file_stem().unwrap_or_default().to_string_lossy().into_owned(),selected.allowed);self.source_labels.insert(p.id.clone(),format!("Imported: {}",file.file_name().unwrap_or_default().to_string_lossy()));self.status=format!("Imported {count} songs; {missing} missing or outside the indexed library. Save Playlist to apply.");}
                                 Err(error) => self.status = error,
                             }
                         }
@@ -343,9 +346,10 @@ impl Editor {
                     ui.menu_button("Choose Existing Playlist", |ui| {
                         if self.existing_sources.is_empty() { ui.weak("Create or import a playlist in Library > Playlists first."); }
                         for list in &self.existing_sources {
-                            if ui.button(format!("{} · {} songs",list.name,list.tracks.len())).clicked() && let Some(lib)=library && confirm_source_change(p) {
-                                match import_source_playlist(p,list,lib) {
-                                    Ok(count)=>{self.source_labels.insert(p.id.clone(),format!("Playlist: {}",list.name));self.status=format!("Selected {count} songs. Save Playlist to apply.");}
+                            if ui.button(format!("{} · {} songs",list.name,list.tracks.len())).clicked() && let Some(lib)=library {
+                                let mut selected=p.clone();
+                                match import_source_playlist(&mut selected,list,lib) {
+                                    Ok(count)=>{add_playlist_source(p,list.name.clone(),selected.allowed);self.source_labels.insert(p.id.clone(),format!("Playlist: {}",list.name));self.status=format!("Selected {count} songs. Save Playlist to apply.");}
                                     Err(error)=>self.status=error,
                                 }
                                 ui.close();
@@ -355,6 +359,14 @@ impl Editor {
                     ui.separator();
                     if ui.button("Use entire library").clicked() && confirm_source_change(p) { set_source_mode(p,SourceMode::All); self.source_labels.remove(&p.id); ui.close(); }
                 });
+                });
+                let mut remove_folder=None;
+                for (i,folder) in p.folders.iter().enumerate(){ui.horizontal_wrapped(|ui|{ui.label(format!("Folder: {} (includes subfolders)",if folder.as_os_str().is_empty(){root.display().to_string()}else{folder.display().to_string()}));if ui.small_button("Remove").clicked(){remove_folder=Some(i);}});}
+                if let Some(i)=remove_folder {p.folders.remove(i);p.restrict_folders=true;}
+                let mut remove_playlist=None;
+                for (i,source) in p.playlist_sources.iter().enumerate(){ui.horizontal_wrapped(|ui|{ui.label(format!("Playlist: {} · {} songs (saved selection)",source.name,source.songs.len()));if ui.small_button("Remove").clicked(){remove_playlist=Some(i);}});}
+                if let Some(i)=remove_playlist {p.playlist_sources.remove(i);}
+                ui.weak("Sources are combined; overlapping songs appear once. Save Playlist to apply.");
                 ui.add_space(18.);
                 ui.strong("Mixing style");
                 ui.horizontal(|ui| {
@@ -612,6 +624,13 @@ fn save_draft_bytes(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     Ok(())
 }
 fn source_summary(p: &amp_core::show::SmartPlaylist) -> String {
+    if !p.playlist_sources.is_empty() || p.folders.len() > 1 {
+        return format!(
+            "{} folders + {} playlist sources",
+            p.folders.len(),
+            p.playlist_sources.len()
+        );
+    }
     if p.restrict_folders || !p.folders.is_empty() {
         if p.folders.is_empty() {
             "No music source selected".into()
@@ -641,6 +660,46 @@ fn source_summary(p: &amp_core::show::SmartPlaylist) -> String {
 }
 fn confirm_source_change(p: &amp_core::show::SmartPlaylist) -> bool {
     p.allowed.is_empty() || rfd::MessageDialog::new().set_title("Change music source?").set_description("Replace the previous source song selection? Exclusions, preferred songs, recognition assignments and mixing settings will be kept.").set_buttons(rfd::MessageButtons::YesNo).show()==rfd::MessageDialogResult::Yes
+}
+fn prepare_additive_sources(p: &mut amp_core::show::SmartPlaylist) {
+    if !p.allowed.is_empty() {
+        p.playlist_sources.push(amp_core::show::PlaylistSource {
+            name: "Selected songs".into(),
+            songs: std::mem::take(&mut p.allowed),
+        });
+    }
+    p.source_library = None;
+    p.source_root_hint = None;
+    p.source_unavailable = false;
+    p.restrict_folders = true;
+    p.restrict_allowed = false;
+}
+fn add_indexed_folder(p: &mut amp_core::show::SmartPlaylist, relative: std::path::PathBuf) {
+    prepare_additive_sources(p);
+    if !p
+        .folders
+        .iter()
+        .any(|f| amp_core::folder_contains(f, &relative) && amp_core::folder_contains(&relative, f))
+    {
+        p.folders.push(relative);
+    }
+}
+fn add_playlist_source(
+    p: &mut amp_core::show::SmartPlaylist,
+    name: String,
+    mut songs: Vec<String>,
+) {
+    prepare_additive_sources(p);
+    songs.sort();
+    songs.dedup();
+    if !p
+        .playlist_sources
+        .iter()
+        .any(|source| source.name == name && source.songs == songs)
+    {
+        p.playlist_sources
+            .push(amp_core::show::PlaylistSource { name, songs });
+    }
 }
 fn select_indexed_folder(p: &mut amp_core::show::SmartPlaylist, relative: std::path::PathBuf) {
     set_source_mode(p, SourceMode::Folders);
@@ -845,6 +904,7 @@ fn merge_rules(
         "restrict_allowed",
         "source_library",
         "source_root_hint",
+        "playlist_sources",
     ];
     let mut conflicts = Vec::new();
     for old in &base.playlists {
@@ -981,6 +1041,7 @@ fn set_source_mode(p: &mut amp_core::show::SmartPlaylist, mode: SourceMode) {
     p.source_root_hint = None;
     p.source_unavailable = false;
     p.folders.clear();
+    p.playlist_sources.clear();
     p.allowed.clear();
     p.restrict_folders = mode == SourceMode::Folders;
     p.restrict_allowed = mode != SourceMode::All;
@@ -1542,5 +1603,70 @@ mod tests {
             "Inline editor must fit parent viewport: {viewport:?}"
         );
         assert_eq!(saved.playlists[0].name, "Demo");
+    }
+}
+
+#[cfg(test)]
+mod additive_source_tests {
+    use super::*;
+    fn track(path: &str) -> amp_core::Track {
+        amp_core::Track {
+            path: path.into(),
+            title: path.into(),
+            preparation: Default::default(),
+        }
+    }
+    #[test]
+    fn folders_append_deduplicate_and_remain_recursive() {
+        let mut p = Settings::default().playlists.remove(0);
+        add_indexed_folder(&mut p, "House".into());
+        add_indexed_folder(&mut p, "Disco".into());
+        add_indexed_folder(&mut p, "House".into());
+        assert_eq!(p.folders.len(), 2);
+        assert!(amp_core::show::eligible(&p, &track("House/Deep/a.mp3")));
+        assert!(amp_core::show::eligible(&p, &track("Disco/b.mp3")));
+        assert!(!amp_core::show::eligible(&p, &track("Other/c.mp3")));
+        p.folders.clear();
+        assert!(!amp_core::show::eligible(&p, &track("Other/c.mp3")));
+    }
+    #[test]
+    fn folders_and_playlist_selections_are_a_union_with_global_exclusions() {
+        let mut p = Settings::default().playlists.remove(0);
+        let original = track("Other/original.mp3");
+        let extra = track("Extra/a.mp3");
+        p.allowed = vec![amp_core::show::song_id(&original)];
+        p.restrict_allowed = true;
+        add_indexed_folder(&mut p, "House".into());
+        add_playlist_source(
+            &mut p,
+            "Extras".into(),
+            vec![amp_core::show::song_id(&extra)],
+        );
+        assert!(amp_core::show::eligible(&p, &original));
+        assert!(amp_core::show::eligible(&p, &extra));
+        assert!(amp_core::show::eligible(&p, &track("House/a.mp3")));
+        p.excluded.push(amp_core::show::song_id(&extra));
+        assert!(!amp_core::show::eligible(&p, &extra));
+        p.playlist_sources.clear();
+        assert!(!amp_core::show::eligible(&p, &original));
+    }
+    #[test]
+    fn mixed_sources_roundtrip_in_portable_export() {
+        let root = tempfile::tempdir().unwrap();
+        let mut p = Settings::default().playlists.remove(0);
+        add_indexed_folder(&mut p, "House".into());
+        add_indexed_folder(&mut p, "Disco".into());
+        add_playlist_source(
+            &mut p,
+            "Extras".into(),
+            vec![amp_core::show::song_id(&track("Extra/a.mp3"))],
+        );
+        let bytes = amp_core::show::SmartPlaylistExport::encode(&p, root.path()).unwrap();
+        let value: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["version"], 2);
+        let imported = amp_core::show::SmartPlaylistExport::decode(&bytes, root.path()).unwrap();
+        assert_eq!(imported.folders, p.folders);
+        assert_eq!(imported.playlist_sources.len(), 1);
+        assert!(amp_core::show::eligible(&imported, &track("Extra/a.mp3")));
     }
 }

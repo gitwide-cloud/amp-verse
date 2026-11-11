@@ -13,3 +13,11 @@ If a different library is loaded, the complete settings are retained but the imp
 The file is versioned and limited to 4 MiB. Invalid settings, unsupported versions and folders escaping the library root are rejected. Song selections use existing portable relative-path song IDs; moving or renaming individual songs requires remapping those selections. This is a settings exchange, not an offline music download. Android's file-import interface is not part of this desktop update.
 
 Validation covers full-rule round trips, distinct IDs for repeated imports, unavailable sources surviving save/reload, identity matching after relocation, malformed/future packages, path traversal and size limits.
+
+## Multiple sources
+
+Use **Add Music Source** repeatedly to combine folders and existing/imported playlists in a Smart Playlist. The indexed folder browser also adds folders rather than replacing the earlier choice. Each folder includes its subfolders. Each selected source has its own Remove button. Removing the final source leaves an empty selection; it never enables the entire library.
+
+Folder rules remain live as the library refreshes. Added playlist sources keep a saved snapshot of their selected songs. Songs appearing in multiple sources occur once, and exclusions apply to the combined selection. Save Playlist publishes the changes for future DJ loads. Multiple source folders must be within the currently indexed music library; this does not add simultaneous independent library roots.
+
+Exports containing playlist-source snapshots use `.ampsmart` version 2 and require this update on the importing desktop. Version 1 files remain supported.

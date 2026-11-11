@@ -31,6 +31,11 @@ pub struct EnergyPlan {
     pub hold: bool,
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PlaylistSource {
+    pub name: String,
+    pub songs: Vec<String>,
+}
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartPlaylist {
     pub id: String,
     pub name: String,
@@ -45,6 +50,8 @@ pub struct SmartPlaylist {
     pub style: Style,
     #[serde(default)]
     pub folders: Vec<PathBuf>,
+    #[serde(default)]
+    pub playlist_sources: Vec<PlaylistSource>,
     #[serde(default)]
     pub restrict_folders: bool,
     #[serde(default)]
@@ -96,6 +103,7 @@ impl Default for Settings {
                     source_unavailable: false,
                     style,
                     folders: vec![],
+                    playlist_sources: vec![],
                     restrict_folders: false,
                     allowed: vec![],
                     restrict_allowed: false,
@@ -236,7 +244,11 @@ impl SmartPlaylistExport {
         }
         let package = Self {
             format: "ampverse-smart-playlist".into(),
-            version: 1,
+            version: if playlist.playlist_sources.is_empty() {
+                1
+            } else {
+                2
+            },
             playlist,
         };
         package.validate()?;
@@ -247,7 +259,7 @@ impl SmartPlaylistExport {
         Ok(bytes)
     }
     fn validate(&self) -> Result<(), String> {
-        if self.format != "ampverse-smart-playlist" || self.version != 1 {
+        if self.format != "ampverse-smart-playlist" || !(1..=2).contains(&self.version) {
             return Err("Unsupported AMP Smart Playlist file".into());
         }
         let p = &self.playlist;
@@ -300,9 +312,12 @@ pub fn eligible(p: &SmartPlaylist, t: &Track) -> bool {
     let allowed = p.allowed.contains(&id)
         || (p.allowed.is_empty() && (!p.restrict_allowed || !p.folders.is_empty()));
     !p.excluded.contains(&id)
-        && allowed
-        && ((!p.restrict_folders && p.folders.is_empty())
-            || p.folders.iter().any(|f| crate::folder_contains(&t.path, f)))
+        && ((allowed
+            && ((!p.restrict_folders && p.folders.is_empty())
+                || p.folders.iter().any(|f| crate::folder_contains(&t.path, f))))
+            || p.playlist_sources
+                .iter()
+                .any(|source| source.songs.contains(&id)))
 }
 pub fn choose(
     p: &SmartPlaylist,
@@ -635,7 +650,7 @@ mod portable_playlist_tests {
             );
         }
         let mut future = value;
-        future["version"] = 2.into();
+        future["version"] = 99.into();
         assert!(
             SmartPlaylistExport::decode(&serde_json::to_vec(&future).unwrap(), root.path())
                 .is_err()
