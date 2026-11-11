@@ -36,6 +36,22 @@ fn blend_eq(progress: f32, original: [[f32; 3]; 2]) -> [[f32; 3]; 2] {
     ];
     std::array::from_fn(|d| std::array::from_fn(|b| (original[d][b] - cuts[d][b]).max(-24.)))
 }
+fn blend_stems(progress: f32, original: [[f32; 3]; 2]) -> [[f32; 3]; 2] {
+    let p = progress.clamp(0., 1.);
+    let ramp = |a: f32, b: f32| ((p - a) / (b - a)).clamp(0., 1.);
+    let drums = ramp(0.4, 0.6);
+    let weights = [
+        [1. - ramp(0., 0.25), 1. - ramp(0.5, 1.), 1. - drums],
+        [ramp(0.1, 0.35), ramp(0.45, 0.85), drums],
+    ];
+    std::array::from_fn(|d| std::array::from_fn(|s| original[d][s] * weights[d][s]))
+}
+fn buildup_halves(elapsed: f32, capture: f32, duration: f32) -> u8 {
+    if elapsed < capture || duration <= capture {
+        return 0;
+    }
+    (1 + ((elapsed - capture) / (duration - capture) * 4.) as u8).min(4)
+}
 pub struct Run {
     pub requests: VecDeque<String>,
     pub transitions: crate::transition_styles::Settings,
@@ -109,6 +125,62 @@ impl Run {
             return None;
         }
         let progress = f32::from_bits(audio.controls.fade_progress.load(Relaxed)).clamp(0., 1.);
+        if effect.style == crate::transition_styles::Style::LoopBuild {
+            if !effect.engaged {
+                if audio.controls.looping[effect.deck].load(Relaxed)
+                    || audio.buildup_start(effect.deck, effect.grain).is_err()
+                {
+                    return None;
+                }
+                effect.start_progress = progress;
+                effect.engaged = true;
+            }
+            let elapsed = (progress - effect.start_progress) * effect.seconds;
+            let target = buildup_halves(elapsed, effect.grain + 0.05, effect.seconds);
+            while effect.halves < target {
+                if audio.loop_halve(effect.deck).is_err() {
+                    break;
+                }
+                effect.halves += 1;
+            }
+            self.effect_bridge = Some(effect);
+            return Some("Loop buildup transition".into());
+        }
+        if effect.style == crate::transition_styles::Style::StemSwap {
+            if !effect.engaged {
+                if !audio.controls.stems_loaded.iter().all(|v| v.load(Relaxed)) {
+                    return None;
+                }
+                effect.original_stems = std::array::from_fn(|side| {
+                    std::array::from_fn(|s| {
+                        f32::from_bits(
+                            audio.controls.stem_level[if side == 0 {
+                                effect.deck
+                            } else {
+                                1 - effect.deck
+                            }][s]
+                                .load(Relaxed),
+                        )
+                    })
+                });
+                effect.engaged = true;
+            }
+            for (side, levels) in blend_stems(progress, effect.original_stems)
+                .iter()
+                .enumerate()
+            {
+                let deck = if side == 0 {
+                    effect.deck
+                } else {
+                    1 - effect.deck
+                };
+                for (stem, value) in levels.iter().enumerate() {
+                    audio.controls.stem_level[deck][stem].store(value.to_bits(), Relaxed);
+                }
+            }
+            self.effect_bridge = Some(effect);
+            return Some("Stem handoff transition".into());
+        }
         if effect.style == crate::transition_styles::Style::BassSwap {
             if !effect.engaged {
                 effect.original_eq = std::array::from_fn(|d| {
@@ -177,8 +249,23 @@ impl Run {
         if let Some(effect) = self.effect_bridge.take()
             && effect.engaged
         {
-            if effect.style == crate::transition_styles::Style::Stutter {
+            if matches!(
+                effect.style,
+                crate::transition_styles::Style::Stutter
+                    | crate::transition_styles::Style::LoopBuild
+            ) {
                 audio.loop_stop(effect.deck);
+            } else if effect.style == crate::transition_styles::Style::StemSwap {
+                for (side, levels) in effect.original_stems.iter().enumerate() {
+                    let deck = if side == 0 {
+                        effect.deck
+                    } else {
+                        1 - effect.deck
+                    };
+                    for (stem, value) in levels.iter().enumerate() {
+                        audio.controls.stem_level[deck][stem].store(value.to_bits(), Relaxed);
+                    }
+                }
             } else if effect.style == crate::transition_styles::Style::Filter {
                 audio.controls.cutoff[effect.deck].store(effect.original.to_bits(), Relaxed);
             } else if effect.style == crate::transition_styles::Style::BassSwap {
@@ -217,6 +304,9 @@ struct EffectBridge {
     engaged: bool,
     original: f32,
     original_eq: [[f32; 3]; 2],
+    original_stems: [[f32; 3]; 2],
+    start_progress: f32,
+    halves: u8,
 }
 impl Player {
     fn active_deck(&self) -> usize {
@@ -514,6 +604,8 @@ impl Player {
                 enabled,
                 techniques,
                 every,
+                loop_build,
+                stem_swap,
             } => {
                 if !(2..=12).contains(&every) {
                     return Err("Effect frequency must be 2–12 mixes".into());
@@ -523,6 +615,8 @@ impl Player {
                     techniques,
                     every,
                     style: crate::transition_styles::Style::Variety,
+                    loop_build: loop_build.unwrap_or(self.run.transitions.loop_build),
+                    stem_swap: stem_swap.unwrap_or(self.run.transitions.stem_swap),
                 };
                 crate::transition_styles::save(settings)?;
                 self.run.transitions = settings;
@@ -1042,25 +1136,45 @@ impl Player {
                         && !a.controls.looping[outgoing].load(Relaxed)
                         && a.remaining(outgoing).is_none_or(|r| r > 0.9)
                 });
-                let effect_plan = if safe
-                    && matches!(
-                        chosen,
-                        Some(
-                            crate::transition_styles::Style::Stutter
-                                | crate::transition_styles::Style::Brake
-                                | crate::transition_styles::Style::Filter
-                                | crate::transition_styles::Style::BassSwap
+                let beat = self
+                    .loaded_track(outgoing)
+                    .and_then(|t| t.preparation.bpm)
+                    .filter(|bpm| bpm.is_finite() && (40. ..=240.).contains(bpm))
+                    .map(|bpm| (60. / (bpm * (1. + self.pitch[outgoing] as f64 / 100.))) as f32);
+                let effect_plan =
+                    if safe && chosen == Some(crate::transition_styles::Style::LoopBuild) {
+                        beat.filter(|beat| {
+                            self.fade_seconds >= beat * 6.
+                                && self.audio.as_ref().is_some_and(|a| {
+                                    a.remaining(outgoing).is_some_and(|r| r > beat * 4. + 0.3)
+                                })
+                        })
+                        .map(|beat| (crate::transition_styles::Style::LoopBuild, beat * 4.))
+                    } else if safe && chosen == Some(crate::transition_styles::Style::StemSwap) {
+                        self.audio
+                            .as_ref()
+                            .filter(|a| a.controls.stems_loaded.iter().all(|v| v.load(Relaxed)))
+                            .map(|_| (crate::transition_styles::Style::StemSwap, 0.))
+                    } else if safe
+                        && matches!(
+                            chosen,
+                            Some(
+                                crate::transition_styles::Style::Stutter
+                                    | crate::transition_styles::Style::Brake
+                                    | crate::transition_styles::Style::Filter
+                                    | crate::transition_styles::Style::BassSwap
+                            )
                         )
-                    ) {
-                    let bpm = self
-                        .loaded_track(outgoing)
-                        .and_then(|t| t.preparation.bpm)
-                        .unwrap_or(120.)
-                        * (1. + self.pitch[outgoing] as f64 / 100.);
-                    Some((chosen.unwrap(), (60. / bpm / 4.).clamp(0.03, 0.25) as f32))
-                } else {
-                    None
-                };
+                    {
+                        let bpm = self
+                            .loaded_track(outgoing)
+                            .and_then(|t| t.preparation.bpm)
+                            .unwrap_or(120.)
+                            * (1. + self.pitch[outgoing] as f64 / 100.);
+                        Some((chosen.unwrap(), (60. / bpm / 4.).clamp(0.03, 0.25) as f32))
+                    } else {
+                        None
+                    };
                 let bridge_needed = self.run.scratch_assist
                     && !self.run.locked
                     && self.run.effect_done != Some(started)
@@ -1135,6 +1249,9 @@ impl Player {
                                     engaged: false,
                                     original: 0.,
                                     original_eq: [[0.; 3]; 2],
+                                    original_stems: [[1.; 3]; 2],
+                                    start_progress: 0.,
+                                    halves: 0,
                                 });
                             }
                         }
@@ -1234,6 +1351,19 @@ impl Player {
 #[cfg(test)]
 mod tests {
     #[test]
+    fn stem_handoff_preserves_muted_parts_and_brings_in_vocals_before_backing() {
+        let original = [[0., 0.7, 1.], [0.8, 0., 0.6]];
+        assert_eq!(super::blend_stems(0., original)[0], original[0]);
+        assert_eq!(super::blend_stems(0., original)[1], [0.; 3]);
+        let middle = super::blend_stems(0.35, original);
+        assert_eq!(middle[1], [0.8, 0., 0.]);
+        assert_eq!(super::blend_stems(1., original), [[0.; 3], original[1]]);
+        assert_eq!(super::buildup_halves(1.9, 2., 3.), 0);
+        assert_eq!(super::buildup_halves(2., 2., 3.), 1);
+        assert_eq!(super::buildup_halves(2.5, 2., 3.), 3);
+        assert_eq!(super::buildup_halves(3., 2., 3.), 4);
+    }
+    #[test]
     fn eq_blend_swaps_bass_and_stages_the_other_bands_relative_to_user_eq() {
         let original = [[-2., 1., 3.], [2., -1., -3.]];
         let begin = super::blend_eq(0., original);
@@ -1314,19 +1444,26 @@ mod tests {
                 &path,
                 &amp_core::Preparation {
                     cue_in: 0.25,
-                    cue_out: Some(4.),
+                    cue_out: Some(8.),
                     bpm: Some(120.),
                     ..Default::default()
                 },
             )
             .unwrap();
         }
-        for style in [Fx::Stutter, Fx::Brake, Fx::Filter, Fx::BassSwap] {
+        for style in [
+            Fx::Stutter,
+            Fx::Brake,
+            Fx::Filter,
+            Fx::BassSwap,
+            Fx::LoopBuild,
+        ] {
+            let fade_seconds = if style == Fx::LoopBuild { 3.5 } else { 0.8 };
             let mut player = Player {
                 root: dir.path().into(),
                 library: Some(amp_core::scan(dir.path()).unwrap()),
                 channel_gain: [0.; 2],
-                fade_seconds: 0.8,
+                fade_seconds,
                 ..Default::default()
             };
             player
@@ -1343,6 +1480,7 @@ mod tests {
                     .is_some_and(|a| a.position(p.active_deck()) > 0.3)
             });
             player.run.transitions.style = style;
+            player.run.transitions.loop_build = true;
             player.run.transitions.every = 2;
             player.run.completed_handoffs = 1;
             let original_eq = [[-2., 1., 3.], [2., -1., -3.]];
@@ -1359,7 +1497,7 @@ mod tests {
             });
             wait(&mut player, |p| p.run.completed_handoffs == 2);
             assert!(player.run.auto);
-            assert_eq!(player.fade_seconds, 0.8);
+            assert_eq!(player.fade_seconds, fade_seconds);
             assert!(player.run.effect_bridge.is_none());
             let audio = player.audio.as_ref().unwrap();
             for (deck, bands) in original_eq.iter().enumerate() {

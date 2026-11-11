@@ -208,6 +208,7 @@ enum Command {
     Fade { to: f32, seconds: f32 },
     Cancel,
     Loop(usize, Option<Vec<DeckFrame>>),
+    LoopHalve(usize),
 }
 struct Mixer {
     voices: [Voice; 2],
@@ -343,6 +344,18 @@ impl Mixer {
                 Command::Cancel => {
                     self.fade = None;
                     self.controls.fading.store(false, Relaxed);
+                }
+                Command::LoopHalve(d) => {
+                    if let Some(l) = &mut self.voices[d].looped
+                        && l.length >= 4
+                    {
+                        l.length /= 2;
+                        if l.frames.len() >= l.length {
+                            l.frames.truncate(l.length);
+                            l.phase %= l.length as f64;
+                            l.capturing = false;
+                        }
+                    }
                 }
                 Command::Loop(d, frames) => {
                     if frames.is_none()
@@ -1087,6 +1100,17 @@ impl Engine {
     pub fn loop_stop(&self, deck: usize) {
         let _ = self.send(Command::Loop(deck, None));
     }
+    pub fn buildup_start(&self, deck: usize, seconds: f32) -> Result<(), String> {
+        self.send(Command::Loop(
+            deck,
+            Some(Vec::with_capacity(
+                (seconds.clamp(0.1, 8.) * self.sample_rate as f32) as usize,
+            )),
+        ))
+    }
+    pub fn loop_halve(&self, deck: usize) -> Result<(), String> {
+        self.send(Command::LoopHalve(deck))
+    }
     pub fn stutter_start(&self, deck: usize, seconds: f32) -> Result<(), String> {
         self.send(Command::Loop(
             deck,
@@ -1608,6 +1632,16 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(10));
         }
+        // Drawing the knobs must not undo an automated stem level.
+        let mut panel = crate::stems::Panel::default();
+        set(&engine.controls.stem_level[0][0], 0.25);
+        let ctx = eframe::egui::Context::default();
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            panel.show(ui, 0, None, Some(&engine), false);
+        });
+        output.textures_delta.clear();
+        assert_eq!(get(&engine.controls.stem_level[0][0]), 0.25);
+        assert!(panel.manual_change.is_none());
         assert!(engine.controls.stems_loaded[0].load(Relaxed));
         assert!((engine.source_position(0) - 0.5).abs() < 0.001);
         engine.controls.play[0].store(true, Relaxed);
@@ -1789,6 +1823,30 @@ mod tests {
         m.render(10, |_, _| {});
         assert_eq!(get(&c.crossfader), 0.4);
         assert!(!c.fading.load(Relaxed));
+    }
+    #[test]
+    fn buildup_halves_captured_audio_without_new_allocations_or_empty_loops() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.2, 5000), true, 0))
+            .unwrap();
+        tx.send(Command::Loop(0, Some(Vec::with_capacity(400))))
+            .unwrap();
+        m.render(600, |_, _| {});
+        let capacity = m.voices[0].looped.as_ref().unwrap().frames.capacity();
+        for expected in [200, 100, 50, 25] {
+            tx.send(Command::LoopHalve(0)).unwrap();
+            m.render(80, |_, _| {});
+            let l = m.voices[0].looped.as_ref().unwrap();
+            assert_eq!(l.frames.len(), expected);
+            assert_eq!(l.frames.capacity(), capacity);
+            assert!(l.phase < expected as f64);
+        }
+        tx.send(Command::Loop(0, None)).unwrap();
+        m.render(20, |_, _| {});
+        assert!(!c.looping[0].load(Relaxed));
+        assert!(c.play[0].load(Relaxed));
     }
     #[test]
     fn fade_waits_for_incoming_pcm() {

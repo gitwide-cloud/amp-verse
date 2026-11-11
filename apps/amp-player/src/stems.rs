@@ -306,6 +306,7 @@ impl Drop for Job {
     }
 }
 pub struct Panel {
+    pub manual_change: Option<(usize, [f32; 3])>,
     job: Option<Job>,
     batch: Option<Job>,
     batch_rx: Option<mpsc::Receiver<(usize, usize, String)>>,
@@ -319,6 +320,7 @@ impl Default for Panel {
     fn default() -> Self {
         Self {
             job: None,
+            manual_change: None,
             batch: None,
             batch_rx: None,
             batch_progress: (0, 0),
@@ -515,6 +517,7 @@ impl Panel {
                 self.generation[deck] = generation;
             }
         }
+        let previous_levels = self.level[deck];
         let mut reload = false;
         let response = ui.push_id(("deck-stems", deck), |ui| {
             ui.colored_label(
@@ -610,17 +613,14 @@ impl Panel {
                 (response.response.rect, ui.layer_id()),
             )
         });
-        if let Some(audio) = audio {
-            let gains = remix_gains(self.level[deck]);
-            for (stem, gain) in gains.into_iter().enumerate() {
-                audio.controls.stem_level[deck][stem].store(gain.to_bits(), Relaxed);
-            }
+        if self.level[deck] != previous_levels {
+            self.manual_change = Some((deck, self.level[deck]));
         }
         reload
     }
 }
 /// Center is original mix; left removes this part, right attenuates other parts.
-fn remix_gains(knobs: [f32; 3]) -> [f32; 3] {
+pub fn remix_gains(knobs: [f32; 3]) -> [f32; 3] {
     amp_core::stem_mix::gains(knobs)
 }
 #[cfg(test)]

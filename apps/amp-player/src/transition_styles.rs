@@ -11,6 +11,8 @@ pub enum Style {
     Filter,
     BassSwap,
     Beatmatch,
+    LoopBuild,
+    StemSwap,
 }
 impl Style {
     pub fn label(self) -> &'static str {
@@ -23,6 +25,8 @@ impl Style {
             Self::Filter => "Filter sweep",
             Self::BassSwap => "Bass swap",
             Self::Beatmatch => "Beatmatch",
+            Self::LoopBuild => "Loop buildup",
+            Self::StemSwap => "Stem handoff",
         }
     }
 }
@@ -33,6 +37,8 @@ pub struct Settings {
     pub style: Style,
     pub every: u32,
     pub techniques: [bool; 6],
+    pub loop_build: bool,
+    pub stem_swap: bool,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -41,6 +47,8 @@ impl Default for Settings {
             style: Style::Variety,
             every: 4,
             techniques: [true; 6],
+            loop_build: false,
+            stem_swap: false,
         }
     }
 }
@@ -60,11 +68,17 @@ impl Settings {
             Style::BassSwap,
             Style::Beatmatch,
         ];
-        let enabled: Vec<_> = all
+        let mut enabled: Vec<_> = all
             .into_iter()
             .zip(self.techniques)
             .filter_map(|(s, yes)| yes.then_some(s))
             .collect();
+        if self.loop_build {
+            enabled.push(Style::LoopBuild);
+        }
+        if self.stem_swap {
+            enabled.push(Style::StemSwap);
+        }
         match self.style {
             Style::Fade => None,
             Style::Variety if !enabled.is_empty() => {
@@ -98,6 +112,23 @@ pub fn save(settings: Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn new_techniques_are_opt_in_and_old_settings_remain_readable() {
+        let old: Settings = serde_json::from_str(r#"{"enabled":true,"every":2,"style":"Variety","techniques":[false,false,false,false,false,false]}"#).unwrap();
+        assert!(!old.loop_build && !old.stem_swap);
+        assert_eq!(old.pick(1), None);
+        let updated = Settings {
+            loop_build: true,
+            stem_swap: true,
+            ..old
+        };
+        assert_eq!(updated.pick(1), Some(Style::LoopBuild));
+        assert_eq!(updated.pick(3), Some(Style::StemSwap));
+        assert_eq!(
+            serde_json::from_str::<Settings>(&serde_json::to_string(&updated).unwrap()).unwrap(),
+            updated
+        );
+    }
     #[test]
     fn variety_is_occasional_and_rotates_without_changing_fade_duration() {
         let s = Settings::default();

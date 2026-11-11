@@ -41,6 +41,10 @@ pub enum Action {
         enabled: bool,
         techniques: [bool; 6],
         every: u32,
+        #[serde(default)]
+        loop_build: Option<bool>,
+        #[serde(default)]
+        stem_swap: Option<bool>,
     },
     RequestSong {
         song: String,

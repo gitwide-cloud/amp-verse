@@ -1930,10 +1930,12 @@ impl Player {
                     let previous=self.run.transitions;
                     ui.toggle_value(&mut self.run.transitions.enabled,"Auto DJ transition effects");
                     egui::ComboBox::from_id_salt("auto-dj-transition-style").selected_text(self.run.transitions.style.label()).show_ui(ui,|ui|{
-                        for style in [transition_styles::Style::Variety,transition_styles::Style::Fade,transition_styles::Style::Scratch,transition_styles::Style::Stutter,transition_styles::Style::Brake,transition_styles::Style::Filter,transition_styles::Style::BassSwap,transition_styles::Style::Beatmatch]{ui.selectable_value(&mut self.run.transitions.style,style,style.label());}
+                        for style in [transition_styles::Style::Variety,transition_styles::Style::Fade,transition_styles::Style::Scratch,transition_styles::Style::Stutter,transition_styles::Style::Brake,transition_styles::Style::Filter,transition_styles::Style::BassSwap,transition_styles::Style::Beatmatch,transition_styles::Style::LoopBuild,transition_styles::Style::StemSwap]{ui.selectable_value(&mut self.run.transitions.style,style,style.label());}
                     });
                     ui.horizontal_wrapped(|ui|{ui.label("Use an effect every");ui.add(egui::DragValue::new(&mut self.run.transitions.every).range(2..=12));ui.label("mixes");});
                     ui.horizontal_wrapped(|ui| {for (i, name) in ["Scratch", "Stutter", "Tape brake", "Filter sweep", "Bass swap", "Beatmatch"].iter().enumerate() { ui.toggle_value(&mut self.run.transitions.techniques[i], *name); }});
+                    ui.horizontal_wrapped(|ui| { ui.toggle_value(&mut self.run.transitions.loop_build, "Loop buildup"); ui.toggle_value(&mut self.run.transitions.stem_swap, "Stem handoff"); });
+                    ui.weak("Loop buildup needs BPM and at least 6 beats of mix time. Stem handoff needs prepared stems on both decks. Otherwise a clean fade is used.");
                     ui.weak("Variety rotates enabled techniques occasionally. Mix time stays unchanged. Beatmatch adjusts tempo within +/-16%; beat phase stays manual.");
                     self.run.scratch_assist=self.run.transitions.enabled;
                     if previous!=self.run.transitions && let Err(error)=transition_styles::save(self.run.transitions){self.status=error;}
@@ -2129,6 +2131,25 @@ impl Player {
                                                     }
                                                 }
                                             });
+                                            if let Some((deck, knobs)) =
+                                                self.stem_panel.manual_change.take()
+                                                && let Some(audio) = &self.audio
+                                            {
+                                                self.run.cancel_effects(audio);
+                                                for (stem, gain) in stems::remix_gains(knobs)
+                                                    .iter()
+                                                    .enumerate()
+                                                {
+                                                    audio.controls.stem_level[deck][stem].store(
+                                                        gain.to_bits(),
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                    audio.controls.stem_knobs[deck][stem].store(
+                                                        knobs[stem].to_bits(),
+                                                        std::sync::atomic::Ordering::Relaxed,
+                                                    );
+                                                }
+                                            }
                                         });
                                     },
                                 );
