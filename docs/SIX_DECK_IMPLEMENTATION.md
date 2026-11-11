@@ -1,6 +1,6 @@
 # Six-deck implementation and acceptance record
 
-Branch: `feature/six-deck-controls`. This is a development preview, not a production release announcement. Production binaries are preserved. The separate MP3 Lab repository is unchanged.
+Branch: `feature/six-deck-controls`. This is a development preview, not a production release announcement. Production binaries are preserved. The local preview is installed beside them at `%LOCALAPPDATA%/Programs/AMP Verse Six Deck Preview`, with desktop shortcut **AMP DJ Six Deck Preview**, separate settings and the standard Remote/Cast ports 8790/8787. Its Library and Cast loaded all 4,405 NAS songs; both were left idle with analysis off. The separate MP3 Lab repository is unchanged.
 
 ## Implemented
 
@@ -24,6 +24,7 @@ Branch: `feature/six-deck-controls`. This is a development preview, not a produc
 - Synthetic DSP matrix: two/six dry decks, six synchronized Key Lock streams, prepared stems, loops, effects and pair Auto DJ with four layers. Two seconds rendered in 232-786 ms in the debug build, finite signal and zero test underruns. Six Key Lock streams rendered five seconds in about 1.87 seconds.
 - Real release process: six generated WAV decoders play; LIVE preserves routing; unsafe pair changes reject; independent fade and Auto DJ handoff/pause/resume preserve background decks; scoped pages and emergency stops pass.
 - Short native profile with HTTP at 5 Hz and actual Companion WebSocket client: two active/six prepared 9.3% of one CPU core, 249.5 MiB peak; six active 15.7% of one core, 268.4 MiB peak including decoders. All six underrun counters zero. Companion received 372 actual state updates.
+- Sustained short-cue regression: three automatic end-of-cue handoffs, Auto DJ remained on, three independent background loops continued, all six underrun counters zero. Run with `AMP_CONTINUITY=1` separately from profiling.
 - Pixel 7: installed app/test APKs; command, auxiliary cue and retry protocol test passes over USB forwarding. Direct Wi-Fi attempt timed out; Windows has blocking rules for the development executable. Direct Wi-Fi is not counted as passing.
 - Physical Bigo speaker: isolated quiet generated audio, receiver-confirmed PLAYING, reported existing volume/mute acknowledged, targeted stop confirmed. No claim of human acoustic-quality acceptance.
 - Companion: five client/action/preset/feedback contract tests pass; official SDK package generation passes. A real Companion host is not installed here, so host button/feedback acceptance remains outstanding.

@@ -7,7 +7,9 @@ with tempfile.TemporaryDirectory(prefix="amp-six-") as folder:
  for number in range(6):
   with wave.open(str(music/f"Track {number+1}.wav"),"wb") as audio:
    audio.setnchannels(2);audio.setsampwidth(2);audio.setframerate(8000);audio.writeframes(bytes(8000*4*30))
-  (music/f"Track {number+1}.wav.amp.json").write_text(json.dumps({"cue_in":0,"bpm":120,"beat_offset":0,"harmonic_key":"8A","manual_override":True}))
+  preparation={"cue_in":0,"bpm":120,"beat_offset":0,"harmonic_key":"8A","manual_override":True}
+  if os.environ.get("AMP_CONTINUITY")=="1":preparation["cue_out"]=8
+  (music/f"Track {number+1}.wav.amp.json").write_text(json.dumps(preparation))
  (music/".ampverse/show.json").write_text(json.dumps({"version":1,"playlists":[{"id":"demo","name":"Demo","style":"steady","companion_available":True}]}))
  port_socket=socket.socket();port_socket.bind(("127.0.0.1",0));port=port_socket.getsockname()[1];port_socket.close();base=f"http://127.0.0.1:{port}"
  env=os.environ.copy();env.update(AMP_CONTROL_BIND=f"{os.environ.get('AMP_SMOKE_BIND','127.0.0.1')}:{port}",AMP_VERSE_CONFIG_DIR=str(root/"settings"))
@@ -60,6 +62,9 @@ with tempfile.TemporaryDirectory(prefix="amp-six-") as folder:
    for name in names[:2]:command("play",deck=name)
    profile("two active / six prepared")
   for name in names:command("play",deck=name)
+  if os.environ.get("AMP_CONTINUITY")=="1":
+   assert os.environ.get("AMP_PROFILE")!="1","Run short-cue continuity separately from the throughput profile"
+   for name in names[3:]:command("deck_loop",deck=name,enabled=True,beats=4)
   if os.environ.get("AMP_PROFILE")=="1":profile("six active")
   before=wait(lambda s:all(d["playing"] for d in s["deck_layers"]))
   command("select_live",deck="a3");command("select_live",deck="b2")
@@ -95,6 +100,16 @@ with tempfile.TemporaryDirectory(prefix="amp-six-") as folder:
   resumed=wait(lambda s:s["amp"]["auto_dj_enabled"] and s["deck_layers"][0]["playing"])
   assert resumed["deck_layers"][0]["position"]>=paused_position
   assert all(resumed["deck_layers"][d]["playing"] for d in [3,4,5])
+  if os.environ.get("AMP_CONTINUITY")=="1":
+   changes=0;last=resumed["amp"]["current_song"];until=time.monotonic()+40
+   while changes<3:
+    current=state();assert current["amp"]["auto_dj_enabled"],current["amp"]
+    title=current["amp"]["current_song"]
+    if title and title!=last:changes+=1;last=title
+    assert all(current["deck_layers"][d]["playing"] and current["deck_layers"][d]["looping"] for d in [3,4,5]),current["deck_layers"]
+    assert time.monotonic()<until,(changes,current["amp"])
+    time.sleep(.1)
+   print("PASS: three automatic end-of-cue handoffs; Auto DJ stayed on and three background loops stayed playing")
   print("Actual decoder underrun counters:", [d["underruns"] for d in resumed["deck_layers"]])
   command("auto_dj",enabled=False)
   if feedback is not None:
