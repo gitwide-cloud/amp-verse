@@ -17,3 +17,5 @@ For Cast, refresh station playlists before selecting one. Runtime station energy
 Network reconnect never starts/stops playback. Commands have unique request IDs and retries reuse the same ID. Old configuration sockets cannot update new connection state. Do not expose the control API directly to the Internet.
 
 Development: `npm ci`, `npm test`, `npm run package`. Official SDK packaging and automated action/preset contract checks are included. A real Companion host button test is still required before claiming host-level acceptance.
+
+Separate Cast passwords are supported. Recognition accepts recipient/team/milestone and a prepared song/cue. Music scenes retain local mix settings. Auto DJ Pause/Resume keeps its current song position and background layers; finish an active handoff first. Broadcast selects processed DJ master or Player/A1. Live variables cover all six decks, both pad banks, clock, energy/progression, receiver, broadcast and polled station state. Disconnection clears green playback feedback.

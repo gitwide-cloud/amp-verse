@@ -1,45 +1,60 @@
 # Six-deck implementation and acceptance record
 
-Development branch: `feature/six-deck-controls`. This is a preview implementation, not a production release announcement. The installed desktop production build is preserved while acceptance checks continue. The separate MP3 Lab repository is unchanged.
+Branch: `feature/six-deck-controls`. This is a development preview, not a production release announcement. Production binaries are preserved. The separate MP3 Lab repository is unchanged.
 
 ## Implemented
 
-- Six simultaneous independent decoder/timeline voices, A1/A2/A3 and B1/B2/B3, in one native output stream. Two LIVE jog interfaces select focus independently of the assigned crossfade pair.
-- Auto DJ, crossfades, section changes and transition effects operate on the assigned pair. Independent background gain, fades, loops, transport and private headphone cue remain separate. Reassignment is rejected unless both old/new pairs are paused and Auto DJ is stopped.
-- A sample-clock master tempo, continuous phase when tempo changes, quantized launch, synchronized playback, and quantized loop capture for synchronized decks. Unprepared BPM is rejected for sync/beat loops.
-- Signalsmith Stretch pitch preservation behind per-deck Key Lock. Prepared stems share one timeline and one pitch processor per deck. Vinyl scratching bypasses Key Lock. Original two-deck layout remains available in Setup.
-- Compact desktop layout: two scrolling waveforms, two vector vinyl jogs, two three-deck strip groups, four hot cues and four favorite sampler pads per side. Expanded mode exposes eight hot cues and nine sampler pads. Favorite assignments survive switching layouts. Auxiliary Cue Decks remain separate.
-- Visible master BPM, quantization and Sync All; per-deck controls, stems/EQ, mix-duration stepper with saved timing, resizable library, amber A / cyan B, and purple sampler outlines.
-- Waveform peak buffers are shared across views/decks of the same file, including in-flight decode coalescing. No analysis or separation is performed on the audio callback. The header displays actual audio envelopes, not simulated spectrum activity.
-- Six-deck paused session recovery including focus, pair, paths, positions, gain, pitch, EQ, filter, sync, Key Lock and stem levels. Legacy two-deck checkpoints load without losing their original data.
-- Regular and Smart Playlist opt-in for Companion. Authenticated scoped playlist/folder/search/paged discovery. Analyzed audio uses preparation fingerprints as resource IDs; legacy command IDs continue to work.
-- Official Companion SDK module, scoped song/cue Learn pickers, 24 transport/LIVE presets, actual feedback, deck/sampler/FX/energy/scene/output controls, request IDs, session fences and reconnect without replaying transport commands.
-- Device-local music scenes store playlist/style/energy/fade/master-clock settings in one local database file. Recall does not change the pair or stop background layers.
-- Google Cast discovery, stable receiver selection, receiver-confirmed state and volume. Live broadcast has an independent level/mute; stopping broadcast leaves local playback alone.
-- Independent Cast station playlist launch and revision-checked runtime energy/style/progression, applied at the next song selection without restarting the current station audio.
-- Android retains two-deck Remote and offline playback. Added desktop sync/Key Lock/loop/stem tools and desktop Google speaker controls. No analysis engine was added to Android. Pixel installed development version: 0.2.0-dev, code 20.
+- Six simultaneous independent voices: A1/A2/A3 and B1/B2/B3 in one native output stream. Each has its own decoder/timeline, transport, gain, EQ/filter, loop, sync, stems, cue state and fade. Two LIVE jogs select focus without changing routing.
+- Auto DJ, section changes, crossfades, scratch/stutter/brake/filter/bass/stem effects and phrase mashups operate on the assigned pair. Four background layers remain independent. Pair reassignment requires old/new pairs paused and automation stopped.
+- Sample-clock master BPM, continuous phase during tempo changes, quantized launch and loop capture, synchronized rates, per-deck Signalsmith Stretch Key Lock. Prepared stems share one aligned timeline. Vinyl scratch bypasses pitch preservation.
+- Compact UI: two scrolling waveforms, two vector vinyl jogs, two three-strip groups, four cues and four sampler favorites per side. Expanded: eight cues and all nine pads. Favorite mappings survive layout changes. Cue Decks retain separate auxiliary playback.
+- Master BPM/Q/Sync All, visible Transitions menu, saved crossfade duration stepper, resizable DJ Library, amber A/cyan B, purple sampler controls. The original two-deck layout remains available in Setup.
+- Shared waveform peak buffers, including coalesced concurrent decodes. No analysis/separation on the audio callback. Header meters use actual envelopes, not a simulated spectrum.
+- Paused six-deck session recovery: tracks, positions, focus, pair, gain, pitch, EQ/filter, stems, sync, Key Lock and clock. Legacy two-deck snapshots load. Stable initial window sizes preserve the resize/maximize fix.
+- Companion opt-in on regular and Smart Playlists, scoped/paged playlist song/cue discovery, request/session identity fences, duplicate suppression, reconnect without replaying transport. Analyzed tracks use preparation fingerprints as resource IDs; legacy IDs remain accepted.
+- Official Companion SDK module with deck controls plus Player, Auto DJ/safety, energy/FX, sampler and Cast preset pages. Includes scenes, Recognition context, stem presets, loops, clock, pair-only pause/resume and separate Cast credentials. Live variables cover six decks, both pad banks, clock, energy/progression, receiver, broadcast and polled station state.
+- Device-local music scenes store playlist/style/energy/fade/clock in one database. Recall does not change the pair or stop background layers.
+- Independent Cast station playlist launch and revision-checked runtime energy/style/progression, applied at next selection. Processed live broadcast selects DJ master or Player/A1, independent level/mute/stop, excluding private headphone cue. Google receiver discovery, confirmed status/volume and targeted stop.
+- Android stays two-deck, with local/offline playback preserved and no analysis engine. Added desktop sync, Key Lock, loops, prepared-stem tools and Google speaker controls. Pixel development APK: 0.2.0-dev, code 20.
 
-## Verification completed locally
+## Verification
 
-- Workspace Rust tests and warning-free Clippy; player: 129 passed, 31 hardware/codec-specific tests left ignored by the default run.
-- Explicit synthetic six-stream Key Lock benchmark: five seconds of audio rendered in about 1.87 seconds, zero buffer underruns in that test.
-- Measured sine test: 116% playback corrected from approximately 510 Hz back to 440 Hz.
-- Real native desktop process with six generated WAV decoders: all voices play, LIVE changes preserve routing, unsafe pair changes reject, independent background fade leaves other voices playing, scoped resources return only the requested page, and emergency stop works.
-- Pixel 7: development APK and test APK installed; Remote command/cue-deck/retry protocol test passed against an isolated desktop through USB forwarding. This is not a claim of a new end-to-end Wi-Fi/Google speaker acceptance pass.
-- Companion: four automated client/preset/action contract tests and official SDK package generation pass. The packaged module is `integrations/companion/ampverse-0.2.0.tgz`.
-- Actual application screenshots captured at 1570×1000, 1000×700 and 1920×1080, compact/expanded, Classic/Modern Dark, including 125% application scaling. Native maximize held at 2560×1552; restore and native resize held at 1429×1000 without rubberbanding.
+- Player default tests: 131 passed; 33 hardware/codec/benchmark tests explicitly excluded from the default run. Workspace tests and strict Clippy passed. Relevant codec/native tests also run explicitly.
+- Pitch test: 116% varispeed corrected from about 510 Hz back to 440 Hz. Dry/wet impulse peaks match at 2176 frames. Section handoffs retain processor history; EOF drains the delayed tail.
+- Synthetic DSP matrix: two/six dry decks, six synchronized Key Lock streams, prepared stems, loops, effects and pair Auto DJ with four layers. Two seconds rendered in 232-786 ms in the debug build, finite signal and zero test underruns. Six Key Lock streams rendered five seconds in about 1.87 seconds.
+- Real release process: six generated WAV decoders play; LIVE preserves routing; unsafe pair changes reject; independent fade and Auto DJ handoff/pause/resume preserve background decks; scoped pages and emergency stops pass.
+- Short native profile with HTTP at 5 Hz and actual Companion WebSocket client: two active/six prepared 9.3% of one CPU core, 249.5 MiB peak; six active 15.7% of one core, 268.4 MiB peak including decoders. All six underrun counters zero. Companion received 372 actual state updates.
+- Pixel 7: installed app/test APKs; command, auxiliary cue and retry protocol test passes over USB forwarding. Direct Wi-Fi attempt timed out; Windows has blocking rules for the development executable. Direct Wi-Fi is not counted as passing.
+- Physical Bigo speaker: isolated quiet generated audio, receiver-confirmed PLAYING, reported existing volume/mute acknowledged, targeted stop confirmed. No claim of human acoustic-quality acceptance.
+- Companion: five client/action/preset/feedback contract tests pass; official SDK package generation passes. A real Companion host is not installed here, so host button/feedback acceptance remains outstanding.
+- Windows, Linux, Android and Companion GitHub checks passed at checkpoint `effc6da`. Final-head checks are tracked on the PR. Linux checks include real codec tests, native X11 docking, screenshots and packaging.
+- Actual screenshots at 1570x1000, 1000x700 and 1920x1080, compact/expanded, Classic/Modern Dark and 125% scaling. Native maximize held at 2560x1552; restore/native resize held at 1429x1000 without rubberbanding. Local screenshots/logs: `test-output/six-deck` (excluded from Git).
 
-Screenshots and local logs are under `test-output/six-deck` and are excluded from Git. CI artifacts will provide shareable captures and platform binaries after the branch checks run.
+## Use
 
-## Limits and acceptance work
+Select LIVE on a mini strip to move the jog focus. Use Setup / Assign crossfader to LIVE pair after pausing both pairs and stopping Auto DJ. Background layers keep playing. Expanded shows eight cues/all pads; compact shows four cues/favorites. Transitions is directly on the toolbar; duration is the center stepper. Drag the divider above DJ Library. Setup also restores the original two-deck layout.
 
-- Android and Companion GitHub jobs passed for the first branch checkpoint. Linux compiled and passed unit tests/lint; follow-up CI fixes correct stale JSON-path smoke tests. Windows codec tests now run explicitly where FFmpeg is available rather than assuming every runner includes it.
-- No actual Companion host is installed/running on this machine. SDK packaging, contract tests and protocol tests do not replace a real host button/feedback acceptance pass.
-- The pitch backend adds 2176 frames (45.3 ms at 48 kHz) of latency before device buffering. Dry, pitch-locked and scratch paths share this delay; an impulse test confirms matching sample positions. Section handoffs retain processor history and EOF drains its delayed tail. Acoustic quality/latency acceptance remains required before a performance release. `AMP_DISABLE_KEYLOCK=1` disables the backend on slower systems; missing Windows DLL disables Key Lock rather than silently claiming pitch preservation.
-- `amp-keylock.dll` and the bundled MIT notices must ship beside the Windows player. Packaging/install scripts now include them. Linux and MSVC CI acceptance must pass before distributing those builds.
-- Fingerprint-based identity is rename-independent only while the corresponding preparation fingerprint remains associated with the audio. Unanalyzed tracks retain legacy path IDs; automatic recovery of preparation after arbitrary external file moves remains an edge case to verify.
-- Synthetic throughput is not a complete real-world CPU/RAM/latency benchmark. Prepared-stem/multi-loop/FX/Auto-DJ-with-background load and sustained network activity still require the full performance matrix.
-- New Google receiver control is not yet retested audibly on the selected physical speaker. Earlier production Cast tests are documented separately in `CAST_REMOTE_ACCEPTANCE.md` and are not counted as new-branch verification.
-- Current Player transport still shares its original main-deck playback architecture. A fully independent additional Player voice and dedicated Stop Player behavior are not implemented by this six-deck change.
+In Library, enable Available in Companion on desired playlists and save. In Companion, refresh playlists, select a playlist/search/page, Learn songs, then Learn the chosen song's cues. Normal discovery returns 50-song pages, not the full library. Refer to `integrations/companion/README.md` for host setup.
 
-Production installation/release remains gated on these acceptance items. No claim that the entire supplied specification is finished should be inferred from the passing unit tests.
+## Limits
+
+- Pitch processing adds 2176 frames (45.3 ms at 48 kHz) before hardware buffering; dry, locked and scratch paths share it. Acoustic scratch/Key Lock acceptance and long-duration performance testing remain required. `AMP_DISABLE_KEYLOCK=1` disables this backend for slower systems. Missing Windows DLL disables Key Lock truthfully.
+- `amp-keylock.dll` and bundled Signalsmith MIT notices must ship beside the Windows player. Packaging and installation include them.
+- Fingerprint identity stays rename-independent while preparation remains associated with its audio. Unanalyzed files retain path IDs. Recovering preparation after arbitrary external moves is still an edge case.
+- Player transport retains the existing A1 voice. Distinct Stop Player stops A1 only, leaving the other five decks, pads and radio alone; it is not a seventh independent voice.
+- Short synthetic/native benchmarks do not certify older hardware or a long live show. Real Companion-host acceptance and direct Android Wi-Fi acceptance remain outstanding as above.
+
+## Reproduce and delivery
+
+`python tools/smoke_six_deck.py <player.exe> <adb.exe>` uses isolated temporary fixtures/settings. Optional `AMP_PROFILE=1` enables psutil/Node measurement. `AMP_ANDROID_HOST=<PC LAN IP>` selects direct Wi-Fi rather than USB forwarding. `python tools/smoke_google_output.py <player.exe> <cast.exe> "Bigo speaker"` requires that explicitly named receiver and never chooses a substitute.
+
+PR: https://github.com/gitwide-cloud/amp-verse/pull/1
+
+Initial implementation: `922afc779f710d58eceaaacf86a3afc73adc9059`. Pitch timing and CI migration checkpoint: `effc6da8c0e3b48e1a28e8c1585ac44fb9359069`. Final commits and Actions artifacts are linked on the PR. Artifacts include Windows/Linux desktop packages, analysis add-ons, Android preview APK, Companion SDK package and UI screenshots. No production release tag is created by this branch.
+## Real application captures
+
+Generated rhythmic WAV fixtures, paused transports, muted master, no simulated waveform or activity. Disabled stems truthfully indicate unprepared fixtures.
+
+![Compact desktop](screenshots/six-deck/compact.png)
+
+![Expanded desktop](screenshots/six-deck/expanded.png)

@@ -11,7 +11,7 @@ pub fn show(
     can_mashup: bool,
 ) -> bool {
     let mut mashup = false;
-    let button = ui.add_sized([118., 28.], egui::Button::new("Transitions ▾"));
+    let button = ui.add_sized([118., 28.], egui::Button::new("Transitions"));
     #[cfg(test)]
     ui.ctx()
         .data_mut(|d| d.insert_temp(egui::Id::unique("transitions-button"), button.rect));

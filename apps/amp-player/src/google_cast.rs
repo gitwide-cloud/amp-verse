@@ -117,6 +117,9 @@ fn cast(device: Device, url: String) -> Session {
                 .connect("receiver-0")
                 .map_err(|e| e.to_string())?;
             cast.heartbeat.ping().map_err(|e| e.to_string())?;
+            if let Ok(status) = cast.receiver.get_status() {
+                *actual_volume.lock().unwrap() = Some((status.volume.level, status.volume.muted));
+            }
             *message.lock().unwrap() = "Launching Google Cast audio receiver…".into();
             let app = cast
                 .receiver
@@ -152,6 +155,12 @@ fn cast(device: Device, url: String) -> Session {
                     *actual_volume.lock().unwrap() = Some((confirmed.level, confirmed.muted));
                 }
                 match cast.receive().map_err(|e| e.to_string())? {
+                    rust_cast::ChannelMessage::Receiver(
+                        rust_cast::channels::receiver::ReceiverResponse::Status(status),
+                    ) => {
+                        *actual_volume.lock().unwrap() =
+                            Some((status.volume.level, status.volume.muted));
+                    }
                     rust_cast::ChannelMessage::Connection(
                         rust_cast::channels::connection::ConnectionResponse::Close,
                     ) => return Err("Speaker closed the Cast session".into()),

@@ -17,6 +17,13 @@ impl Default for Rack {
 }
 pub const NAMES: [&str; 6] = ["A1", "B1", "A2", "B2", "A3", "B3"];
 impl Player {
+    pub(super) fn deck_rate(&self, d: usize) -> f64 {
+        self.audio
+            .as_ref()
+            .map_or(1. + self.pitch[d] as f64 / 100., |a| {
+                a.controls.effective_rate(d) as f64
+            })
+    }
     pub(super) fn pair(&self) -> [usize; 2] {
         self.audio
             .as_ref()
@@ -40,11 +47,8 @@ fn transport_button(
     let response = ui.add(
         egui::Button::new("")
             .min_size(size)
-            .fill(if playing {
-                color
-            } else {
-                ui.visuals().widgets.inactive.bg_fill
-            })
+            .corner_radius(7)
+            .fill(color)
             .stroke(egui::Stroke::new(1., color)),
     );
     icons::draw(
@@ -55,13 +59,12 @@ fn transport_button(
         } else {
             icons::Icon::Play
         },
-        if playing { egui::Color32::BLACK } else { color },
+        egui::Color32::BLACK,
     );
     response
 }
 impl Player {
     pub(super) fn six_deck_ui(&mut self, ui: &mut egui::Ui) {
-        self.release_jog_wheels(ui.ctx());
         let scope = self
             .audio
             .as_ref()
@@ -82,12 +85,13 @@ impl Player {
         ui.horizontal_wrapped(|ui|{
             self.performance_controls(ui);
             self.clock_controls(ui);
+            let previous=self.run.transitions;
+            if transition_controls::show(ui,&mut self.run.transitions,&mut self.wave_span,self.run.pending.is_none() && !self.audio.as_ref().is_some_and(|a|a.fading())) { self.run.force_mashup=true;if let Err(error)=self.execute_control(control::Action::AutoFade){self.run.force_mashup=false;self.status=error;} }
+            if previous!=self.run.transitions {let _=transition_styles::save(self.run.transitions);}
+            self.run.scratch_assist=self.run.transitions.enabled;
             if ui.selectable_label(self.rack.expanded,"Expanded").clicked(){self.rack.expanded = !self.rack.expanded;}
             ui.menu_button("Setup",|ui|{
                 if ui.button("Use original two-deck layout").clicked(){self.rack.six=false;ui.close();}
-                let previous=self.run.transitions;
-                transition_controls::show(ui,&mut self.run.transitions,&mut self.wave_span,false);
-                if previous!=self.run.transitions {let _=transition_styles::save(self.run.transitions);}
                 if ui.button("Assign crossfader to LIVE pair").on_hover_text("Pause both the current and requested pair first. Background layers keep playing. Auto DJ must be off.").clicked(){self.status=if self.run.auto{"Stop Auto DJ before assigning a different pair".into()}else if let Err(e)=self.ensure_audio().and_then(|_|self.audio.as_ref().unwrap().assign_pair(self.rack.live)){e}else{"Crossfade assignment queued; applies only if both pairs remain paused".into()};}
             });
         });
@@ -96,10 +100,21 @@ impl Player {
             for (side, column) in columns.iter_mut().enumerate() {
                 let d = self.rack.live[side];
                 column.horizontal(|ui| {
-                    ui.colored_label(accent(d), NAMES[d]);
+                    ui.label(
+                        egui::RichText::new(NAMES[d])
+                            .size(17.)
+                            .strong()
+                            .color(accent(d)),
+                    );
                     ui.add_sized(
                         [(ui.available_width() - 190.).max(80.), 20.],
-                        egui::Label::new(egui::RichText::new(self.title(d)).strong()).truncate(),
+                        egui::Label::new(
+                            egui::RichText::new(self.title(d))
+                                .size(15.)
+                                .strong()
+                                .color(accent(d)),
+                        )
+                        .truncate(),
                     );
                     if let Some(track) = self.loaded_track(d) {
                         ui.colored_label(
@@ -108,7 +123,7 @@ impl Player {
                                 "{}  {}",
                                 track.preparation.bpm.map_or("--".into(), |b| format!(
                                     "{:.1}",
-                                    b * (1. + self.pitch[d] as f64 / 100.)
+                                    b * self.deck_rate(d)
                                 )),
                                 track.preparation.harmonic_key.as_deref().unwrap_or("--")
                             ),
@@ -157,9 +172,13 @@ impl Player {
         let jog_width = ((ui.available_width() - strips * 2. - mixer - 40.) / 2.).max(220.);
         ui.horizontal_top(|ui| {
             self.deck_strips(ui, 0, strips, height);
-            self.jog_section(ui, self.rack.live[0], jog_width, height);
+            ui.push_id(("live-jog", self.rack.live[0]), |ui| {
+                self.jog_section(ui, self.rack.live[0], jog_width, height)
+            });
             self.rack_mixer(ui, mixer, height);
-            self.jog_section(ui, self.rack.live[1], jog_width, height);
+            ui.push_id(("live-jog", self.rack.live[1]), |ui| {
+                self.jog_section(ui, self.rack.live[1], jog_width, height)
+            });
             self.deck_strips(ui, 1, strips, height);
         });
         ui.horizontal_wrapped(|ui| {
@@ -258,7 +277,7 @@ impl Player {
         ui.allocate_ui_with_layout(egui::vec2(width,height),egui::Layout::top_down(egui::Align::Min),|ui|{
             for d in (side..6).step_by(2){ui.push_id(("strip",d),|ui|{
                 let selected=self.rack.live[side]==d;
-                let frame=egui::Frame::group(ui.style()).fill(theme::current(ui.ctx()).palette().surface).stroke(egui::Stroke::new(if selected{2.}else{1.},if selected{accent(d)}else{ui.visuals().widgets.noninteractive.bg_stroke.color})).show(ui,|ui|{
+                let frame=egui::Frame::group(ui.style()).corner_radius(7).fill(theme::current(ui.ctx()).palette().surface).stroke(egui::Stroke::new(if selected{2.}else{1.},if selected{accent(d)}else{ui.visuals().widgets.noninteractive.bg_stroke.color})).show(ui,|ui|{
                     ui.set_width(width-18.);
                     ui.horizontal(|ui|{
                         ui.colored_label(accent(d),NAMES[d]);
@@ -304,6 +323,9 @@ impl Player {
                 && let Some(a) = &self.audio
             {
                 if a.controls.stems_loaded[d].load(Relaxed) {
+                    if a.controls.pair_indices().contains(&d) {
+                        self.run.cancel_effects(a);
+                    }
                     for (i, gain) in gains.into_iter().enumerate() {
                         a.controls.stem_level[d][i].store(f32::to_bits(gain), Relaxed);
                         a.controls.stem_knobs[d][i].store(f32::to_bits(gain - 1.), Relaxed);
@@ -344,6 +366,11 @@ impl Player {
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 egui::Frame::group(ui.style())
+                    .corner_radius(8)
+                    .stroke(egui::Stroke::new(
+                        1.5,
+                        theme::current(ui.ctx()).palette().border,
+                    ))
                     .fill(theme::current(ui.ctx()).palette().surface)
                     .show(ui, |ui| {
                         ui.set_width(width - 18.);
@@ -420,6 +447,14 @@ impl Player {
                             }
                         });
                         ui.menu_button("Advanced", |ui| {
+                            if self.mixer_panel.deck_tools(ui, d, accent(d))
+                                && let Some(audio) = &self.audio
+                            {
+                                if self.pair().contains(&d) {
+                                    self.run.cancel_effects(audio);
+                                }
+                                self.mixer_panel.apply(audio);
+                            }
                             if width <= 335. {
                                 self.rack_stem_knobs(ui, d);
                             }
@@ -430,7 +465,8 @@ impl Player {
                                 let mut enabled = a.controls.key_lock[d].load(Relaxed);
                                 if ui
                                     .add_enabled(
-                                        a.controls.key_lock_available[d].load(Relaxed),
+                                        a.loaded(d)
+                                            && a.controls.key_lock_available[d].load(Relaxed),
                                         egui::Checkbox::new(
                                             &mut enabled,
                                             "Key Lock · preserve pitch",

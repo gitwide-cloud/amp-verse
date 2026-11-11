@@ -30,6 +30,29 @@ impl Default for Panel {
     }
 }
 impl Panel {
+    pub fn deck_tools(&mut self, ui: &mut egui::Ui, deck: usize, accent: egui::Color32) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            changed |= dial(ui, "Gain dB", &mut self.gain[deck], -12. ..=12., accent).changed();
+            ui.label("Gain");
+            changed |= dial(
+                ui,
+                "Filter (left low-pass; right high-pass)",
+                &mut self.sweep[deck],
+                -1. ..=1.,
+                accent,
+            )
+            .changed();
+            ui.label("Filter");
+        });
+        changed |= ui
+            .toggle_value(&mut self.cue[deck], "Headphone cue")
+            .on_hover_text(
+                "Private pre-fader monitoring; select a headphone output in the center mixer.",
+            )
+            .changed();
+        changed
+    }
     pub fn set_filter(&mut self, deck: usize, value: f32) {
         self.sweep[deck] = value;
     }

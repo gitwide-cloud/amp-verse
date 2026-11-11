@@ -261,6 +261,7 @@ struct SampleVoice {
 }
 enum Command {
     StemLevels(usize, [f32; 3]),
+    RestoreSync(usize, bool),
     Clock(f32, u32),
     Launch(usize),
     Pair([usize; 2]),
@@ -338,6 +339,17 @@ impl Mixer {
     fn process_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
             match command {
+                Command::RestoreSync(d, enabled) => {
+                    let bpm = get(&self.controls.bpm[d]);
+                    let ratio = get(&self.controls.master_bpm) / bpm;
+                    self.controls.synced[d].store(
+                        enabled
+                            && self.controls.loaded[d].load(Relaxed)
+                            && bpm > 0.
+                            && (0.5..=2.).contains(&ratio),
+                        Relaxed,
+                    );
+                }
                 Command::StemLevels(d, levels) => {
                     for (i, value) in levels.into_iter().enumerate() {
                         set(&self.controls.stem_level[d][i], value);
@@ -1234,6 +1246,13 @@ impl Engine {
         self.controls.synced[deck].store(enabled, Relaxed);
         Ok(())
     }
+    pub fn restore_sync(&self, deck: usize, enabled: bool) -> Result<(), String> {
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        // Ordered after queued Load and Clock, unlike interactive sync validation.
+        self.send(Command::RestoreSync(deck, enabled))
+    }
     pub fn assign_pair(&self, pair: [usize; 2]) -> Result<(), String> {
         if pair[0] >= DECKS || pair[1] >= DECKS || !pair[0].is_multiple_of(2) || pair[1] % 2 != 1 {
             return Err("Choose one A-side and one B-side deck".into());
@@ -1659,6 +1678,19 @@ impl Engine {
             .max(0.),
         )
     }
+    pub fn settle_pair(&self, active: usize, seconds: f32) -> Result<(), String> {
+        if !self.controls.pair_indices().contains(&active)
+            || !self.playing(active)
+            || !seconds.is_finite()
+            || !(0.05..=30.).contains(&seconds)
+        {
+            return Err("Cannot settle the current pair".into());
+        }
+        self.send(Command::Fade {
+            to: (active % 2) as f32,
+            seconds,
+        })
+    }
     pub fn crossfade(&self, seconds: f32) -> Result<(), String> {
         if self.fading() {
             return self.send(Command::Cancel);
@@ -1795,7 +1827,11 @@ impl Engine {
         {
             return Err("Invalid mashup timing".into());
         }
-        if !self.controls.stems_loaded.iter().all(|v| v.load(Relaxed))
+        if !self
+            .controls
+            .pair_indices()
+            .iter()
+            .all(|d| self.controls.stems_loaded[*d].load(Relaxed))
             || !self.playing(self.controls.other(incoming))
             || self.playing(incoming)
             || self.fading()
@@ -1804,8 +1840,16 @@ impl Engine {
                 "Mashup needs two prepared stem decks, with the incoming deck paused".into(),
             );
         }
-        if self.controls.looping.iter().any(|v| v.load(Relaxed))
-            || self.controls.scratching.iter().any(|v| v.load(Relaxed))
+        if self
+            .controls
+            .pair_indices()
+            .iter()
+            .any(|d| self.controls.looping[*d].load(Relaxed))
+            || self
+                .controls
+                .pair_indices()
+                .iter()
+                .any(|d| self.controls.scratching[*d].load(Relaxed))
         {
             return Err("Release loops and scratching before a mashup".into());
         }
@@ -2040,7 +2084,10 @@ mod tests {
             }
         };
         wait(&engine, &|e| {
-            e.controls.ready.iter().all(|v| v.load(Relaxed))
+            e.controls
+                .pair_indices()
+                .iter()
+                .all(|d| e.controls.ready[*d].load(Relaxed))
         });
         set(&engine.controls.stem_level[0][1], 0.4);
         let saved: [[u32; 3]; 2] = std::array::from_fn(|d| {
@@ -3214,6 +3261,22 @@ mod tests {
             assert!(frame[0] > 0.01, "A section handoff inserted silence")
         });
         assert!(mixer.voices[0].source.as_ref().unwrap().key_lock.is_some());
+    }
+    #[test]
+    fn restored_sync_uses_the_queued_clock_and_loaded_paused_deck() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut mixer = Mixer::new(48000, rx, c.clone());
+        set(&c.bpm[4], 40.);
+        // The previous 120 BPM clock would reject this ratio before restoration.
+        tx.send(Command::Load(4, source(0.03, 48000), false, 1))
+            .unwrap();
+        tx.send(Command::Clock(40., 4)).unwrap();
+        tx.send(Command::RestoreSync(4, true)).unwrap();
+        mixer.render(1, |_, _| {});
+        assert!(c.synced[4].load(Relaxed));
+        assert!(!c.play[4].load(Relaxed));
+        assert_eq!(c.effective_rate(4), 1.);
     }
     #[test]
     fn pitch_backend_drains_the_delayed_tail_before_finishing() {

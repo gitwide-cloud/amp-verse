@@ -420,6 +420,25 @@ mod tests {
         assert!(decode(Path::new(&path), &AtomicBool::new(true)).is_err());
     }
     #[test]
+    #[ignore = "requires ffmpeg and AMP_WAVEFORM_FIXTURE"]
+    fn concurrent_views_share_the_same_decoded_peak_buffer() {
+        let path = PathBuf::from(std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(6));
+        let workers: Vec<_> = (0..6)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    shared_decode(&path, &AtomicBool::new(false)).unwrap()
+                })
+            })
+            .collect();
+        let buffers: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert!(!buffers[0].is_empty());
+        assert!(buffers.iter().all(|peaks| Arc::ptr_eq(&buffers[0], peaks)));
+    }
+    #[test]
     fn compact_waveforms_have_positive_visible_signal_area() {
         for height in [26., 56., 72., 140.] {
             let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800., height));

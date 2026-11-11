@@ -32,6 +32,9 @@ pub enum Deck {
     B2,
     B3,
 }
+impl Deck {
+    pub const PHYSICAL: [Self; 6] = [Self::A1, Self::B1, Self::A2, Self::B2, Self::A3, Self::B3];
+}
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, Default, PartialEq)]
 #[serde(rename_all = "snake_case")]
 pub enum Execution {
@@ -230,6 +233,14 @@ pub enum Action {
     },
     Recognition {
         #[serde(default)]
+        playlist: Option<String>,
+        #[serde(default)]
+        recipient: Option<String>,
+        #[serde(default)]
+        team: Option<String>,
+        #[serde(default)]
+        milestone: Option<String>,
+        #[serde(default)]
         song: Option<String>,
         #[serde(default)]
         cue: Option<String>,
@@ -256,6 +267,9 @@ pub enum Action {
     HoldEnergy,
     AutoDj {
         enabled: bool,
+    },
+    AutoDjPause {
+        paused: bool,
     },
     ManualLock {
         enabled: bool,

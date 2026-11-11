@@ -485,7 +485,7 @@ impl Player {
                     a.controls.key_lock[d].store(saved.key_lock, Relaxed);
                     let _ = a.restore_stems(d, saved.stems);
                     // Sync is restored while paused; loading never starts playback.
-                    let _ = a.sync(d, saved.synced);
+                    let _ = a.restore_sync(d, saved.synced);
                 }
             }
         }

@@ -910,8 +910,9 @@ impl Player {
         self.checkpoint(true);
         let recover = self.recovery.enabled();
         if let Some(audio) = &mut self.audio {
-            audio.stop(0);
-            audio.stop(1);
+            for deck in 0..6 {
+                audio.stop(deck);
+            }
         }
         self.auto = false;
         self.loaded = [None; 6];
@@ -1928,10 +1929,6 @@ impl Player {
         }
     }
     fn dj_ui(&mut self, ui: &mut egui::Ui) {
-        if self.rack.six {
-            self.six_deck_ui(ui);
-            return;
-        }
         self.release_jog_wheels(ui.ctx());
         if !ui.ctx().egui_wants_keyboard_input() && ui.input(|input| input.focused) {
             for event in ui.input(|input| input.events.clone()) {
@@ -1953,6 +1950,13 @@ impl Player {
                     );
                 }
             }
+        }
+        if self.rack.six {
+            self.six_deck_ui(ui);
+            return;
+        }
+        for lane in &mut self.waveforms {
+            lane.hide_caption = false;
         }
         skin::panel(ui, true, |ui| {
             ui.set_min_width(ui.available_width());

@@ -156,6 +156,13 @@ impl Default for Sampler {
     }
 }
 impl Sampler {
+    pub fn snapshot(&self, engine: Option<&Engine>) -> serde_json::Value {
+        serde_json::json!((0..9).map(|pad| serde_json::json!({
+            "name": self.bank.names[pad], "loaded": self.ready[pad],
+            "playing": engine.is_some_and(|a| a.controls.sample_playing[pad].load(std::sync::atomic::Ordering::Relaxed)),
+            "loop": self.bank.loops[pad], "gain": self.bank.gains[pad],
+        })).collect::<Vec<_>>())
+    }
     pub fn trigger(&self, engine: &Engine, pad: usize) -> Result<(), String> {
         if pad >= 9 {
             return Err("Unknown sampler pad".into());
