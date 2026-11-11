@@ -24,6 +24,7 @@ mod lab;
 mod lab_editor;
 mod library_cache;
 mod live_mix;
+mod mashup;
 mod mix_schedule;
 mod mixer;
 mod monitor;
@@ -1938,15 +1939,23 @@ impl Player {
                 .id_salt("dj-advanced")
                 .show(ui, |ui| {
                     let previous=self.run.transitions;
+                    egui::ComboBox::from_id_salt("phrase-mix-timing").selected_text(self.run.transitions.timing.label()).show_ui(ui,|ui|{for timing in [mix_schedule::Timing::Immediate,mix_schedule::Timing::Beat,mix_schedule::Timing::Bar,mix_schedule::Timing::Phrase8,mix_schedule::Timing::Phrase16,mix_schedule::Timing::Phrase32]{ui.selectable_value(&mut self.run.transitions.timing,timing,timing.label());}});
+
                     ui.toggle_value(&mut self.run.transitions.enabled,"Auto DJ transition effects");
                     egui::ComboBox::from_id_salt("auto-dj-transition-style").selected_text(self.run.transitions.style.label()).show_ui(ui,|ui|{
-                        for style in [transition_styles::Style::Variety,transition_styles::Style::Fade,transition_styles::Style::Scratch,transition_styles::Style::Stutter,transition_styles::Style::Brake,transition_styles::Style::Filter,transition_styles::Style::BassSwap,transition_styles::Style::Beatmatch,transition_styles::Style::LoopBuild,transition_styles::Style::StemSwap]{ui.selectable_value(&mut self.run.transitions.style,style,style.label());}
+                        for style in [transition_styles::Style::Variety,transition_styles::Style::Fade,transition_styles::Style::Scratch,transition_styles::Style::Stutter,transition_styles::Style::Brake,transition_styles::Style::Filter,transition_styles::Style::BassSwap,transition_styles::Style::Beatmatch,transition_styles::Style::LoopBuild,transition_styles::Style::StemSwap,transition_styles::Style::Mashup]{ui.selectable_value(&mut self.run.transitions.style,style,style.label());}
                     });
                     ui.horizontal_wrapped(|ui|{ui.label("Use an effect every");ui.add(egui::DragValue::new(&mut self.run.transitions.every).range(2..=12));ui.label("mixes");});
                     ui.horizontal_wrapped(|ui| {for (i, name) in ["Scratch", "Stutter", "Tape brake", "Filter sweep", "Bass swap", "Beatmatch"].iter().enumerate() { ui.toggle_value(&mut self.run.transitions.techniques[i], *name); }});
                     ui.horizontal_wrapped(|ui| { ui.toggle_value(&mut self.run.transitions.loop_build, "Loop buildup"); ui.toggle_value(&mut self.run.transitions.stem_swap, "Stem handoff"); });
+                    ui.horizontal_wrapped(|ui|{
+                        ui.toggle_value(&mut self.run.transitions.mashup,"Automatic vocal / instrumental mashups");
+                        ui.label("Hold");egui::ComboBox::from_id_salt("mashup-hold").selected_text(format!("{} beats",self.run.transitions.mashup_beats)).show_ui(ui,|ui|{for beats in [8,16,32]{ui.selectable_value(&mut self.run.transitions.mashup_beats,beats,format!("{beats} beats"));}});
+                        if ui.add_enabled(self.run.pending.is_none() && !self.audio.as_ref().is_some_and(|a|a.fading()),egui::Button::new("Mashup next pair")).clicked(){self.run.force_mashup=true;if let Err(error)=self.execute_control(control::Action::AutoFade){self.run.force_mashup=false;self.status=error;}}
+                    });
+                    ui.weak("Mashups use two prepared stem sets, matched tempo/tuning and a phrase grid. Hold time is separate from your saved mix time; unsuitable pairs use a clean blend.");
                     ui.weak("Loop buildup needs BPM and at least 6 beats of mix time. Stem handoff needs prepared stems on both decks. Otherwise a clean fade is used.");
-                    ui.weak("Variety rotates enabled techniques occasionally. Mix time stays unchanged. Beatmatch adjusts tempo within +/-16%; beat phase stays manual.");
+                    ui.weak("Variety rotates enabled techniques occasionally. Mix time stays unchanged. Beatmatch adjusts tempo within +/-16%; grid scheduling requires prepared beat phase.");
                     self.run.scratch_assist=self.run.transitions.enabled;
                     if previous!=self.run.transitions && let Err(error)=transition_styles::save(self.run.transitions){self.status=error;}
 

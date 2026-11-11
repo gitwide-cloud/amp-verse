@@ -65,6 +65,7 @@ pub struct Controls {
     pub crossfader: AtomicU32,
     pub master: AtomicU32,
     pub fading: AtomicBool,
+    pub mashup_active: AtomicBool,
     pub underruns: [AtomicU64; 2],
     pub rendered: AtomicU64,
     pub error: Mutex<Option<String>>,
@@ -114,6 +115,7 @@ impl Default for Controls {
             crossfader: atom(0.),
             master: atom(0.75),
             fading: AtomicBool::new(false),
+            mashup_active: AtomicBool::new(false),
             underruns: std::array::from_fn(|_| AtomicU64::new(0)),
             rendered: AtomicU64::new(0),
             error: Mutex::new(None),
@@ -200,6 +202,7 @@ struct Fade {
     started: bool,
     grid: Option<crate::mix_schedule::Grid>,
     boundary: Option<f64>,
+    mashup: Option<(u64, u64)>,
 }
 #[derive(Default)]
 struct SampleVoice {
@@ -225,6 +228,12 @@ enum Command {
     ScheduledFade {
         to: f32,
         seconds: f32,
+        grid: crate::mix_schedule::Grid,
+    },
+    Mashup {
+        to: f32,
+        fade: f32,
+        hold: f32,
         grid: crate::mix_schedule::Grid,
     },
     Section(usize, SectionChange),
@@ -332,6 +341,29 @@ impl Mixer {
                     self.sections[d] = Some(s);
                     self.controls.section_state[d].store(1, Relaxed);
                 }
+                Command::Mashup {
+                    to,
+                    fade,
+                    hold,
+                    grid,
+                } => {
+                    let fade = (fade * self.rate as f32).max(1.) as u64;
+                    let hold = (hold * self.rate as f32).max(1.) as u64;
+                    self.fade = Some(Fade {
+                        from: get(&self.controls.crossfader),
+                        to,
+                        total: fade * 2 + hold,
+                        elapsed: 0,
+                        incoming: usize::from(to > 0.5),
+                        started: false,
+                        grid: Some(grid),
+                        boundary: None,
+                        mashup: Some((fade, hold)),
+                    });
+                    set(&self.controls.fade_progress, 0.);
+                    self.controls.fading.store(true, Relaxed);
+                    self.controls.mashup_active.store(true, Relaxed);
+                }
                 Command::ScheduledFade { to, seconds, grid } => {
                     set(&self.controls.fade_progress, 0.);
                     self.fade = Some(Fade {
@@ -343,6 +375,7 @@ impl Mixer {
                         started: false,
                         grid: Some(grid),
                         boundary: None,
+                        mashup: None,
                     });
                     self.controls.fading.store(true, Relaxed);
                 }
@@ -372,6 +405,7 @@ impl Mixer {
                     self.controls.deck_generation[d]
                         .store(generation, std::sync::atomic::Ordering::Release);
                     self.fade = None;
+                    self.controls.mashup_active.store(false, Relaxed);
                     self.controls.fading.store(false, Relaxed);
                 }
                 Command::Stop(d) => {
@@ -385,11 +419,13 @@ impl Mixer {
                     self.controls.ready[d].store(false, Relaxed);
                     self.controls.looping[d].store(false, Relaxed);
                     self.fade = None;
+                    self.controls.mashup_active.store(false, Relaxed);
                     self.controls.fading.store(false, Relaxed);
                 }
                 Command::Fader(x) => {
                     set(&self.controls.crossfader, x.clamp(0., 1.));
                     self.fade = None;
+                    self.controls.mashup_active.store(false, Relaxed);
                     self.controls.fading.store(false, Relaxed);
                 }
                 Command::Fade { to, seconds } => {
@@ -403,6 +439,7 @@ impl Mixer {
                         started: false,
                         grid: None,
                         boundary: None,
+                        mashup: None,
                     });
                     self.controls.fading.store(true, Relaxed);
                 }
@@ -412,6 +449,7 @@ impl Mixer {
                         self.controls.section_state[d].store(0, Relaxed);
                     }
                     self.fade = None;
+                    self.controls.mashup_active.store(false, Relaxed);
                     self.controls.fading.store(false, Relaxed);
                 }
                 Command::LoopHalve(d) => {
@@ -548,9 +586,13 @@ impl Mixer {
                 .as_ref()
                 .is_some_and(|fade| c.finished[fade.incoming].load(Relaxed))
             {
+                if let Some(fade) = &self.fade {
+                    set(&c.crossfader, (1 - fade.incoming) as f32);
+                }
                 self.fade = None;
                 c.fading.store(false, Relaxed);
             }
+            let mut mashup_mix = None;
             if let Some(fade) = &mut self.fade {
                 let outgoing = 1 - fade.incoming;
                 let position = self.voices[outgoing]
@@ -570,6 +612,19 @@ impl Mixer {
                     fade.started = true;
                 }
                 if fade.started {
+                    if let Some((ramp, _)) = fade.mashup
+                        && c.finished[outgoing].load(Relaxed)
+                    {
+                        fade.elapsed = fade.elapsed.max(fade.total.saturating_sub(ramp));
+                    }
+                    if let Some((ramp, hold)) = fade.mashup {
+                        mashup_mix = Some(crate::mashup::envelope(
+                            fade.elapsed,
+                            ramp,
+                            hold,
+                            fade.incoming,
+                        ));
+                    }
                     let t = (fade.elapsed as f32 / fade.total as f32).clamp(0., 1.);
                     set(&c.fade_progress, t);
                     set(&c.crossfader, fade.from + (fade.to - fade.from) * t);
@@ -579,6 +634,7 @@ impl Mixer {
                         c.play[1 - fade.incoming].store(false, Relaxed);
                         c.fading.store(false, Relaxed);
                         self.fade = None;
+                        self.controls.mashup_active.store(false, Relaxed);
                     }
                 }
             }
@@ -638,10 +694,19 @@ impl Mixer {
                 }
             }
             let x = get(&c.crossfader);
-            let weights = [
+            let mut weights = [
                 (x * std::f32::consts::FRAC_PI_2).cos(),
                 (x * std::f32::consts::FRAC_PI_2).sin(),
             ];
+            let mut stem_masks = [[1.; 3]; 2];
+            if let Some((buses, masks)) = mashup_mix {
+                weights = buses;
+                stem_masks = masks;
+            }
+            c.mashup_active.store(
+                self.fade.as_ref().is_some_and(|f| f.mashup.is_some()),
+                Relaxed,
+            );
             let mut mix = [0.; 2];
             let mut cue_mix = [0.; 2];
             for d in 0..2 {
@@ -721,9 +786,10 @@ impl Mixer {
                         l.capturing = false;
                     }
                 }
-                for stem in 0..3 {
-                    v.stem_mix[stem] +=
-                        (get(&c.stem_level[d][stem]).clamp(0., 1.) - v.stem_mix[stem]) * 0.004;
+                for (stem, mask) in stem_masks[d].iter().enumerate() {
+                    v.stem_mix[stem] += (get(&c.stem_level[d][stem]).clamp(0., 1.) * mask
+                        - v.stem_mix[stem])
+                        * 0.004;
                 }
                 let mut frame: Frame = if source.separated {
                     std::array::from_fn(|ch| {
@@ -1395,6 +1461,60 @@ impl Engine {
         }
         let _ = self.send(Command::CancelSection(deck));
     }
+    pub fn mashup(
+        &self,
+        seconds: f32,
+        hold: f32,
+        grid: crate::mix_schedule::Grid,
+    ) -> Result<(), String> {
+        let incoming = usize::from(self.fader() < 0.5);
+        if !seconds.is_finite()
+            || !hold.is_finite()
+            || !(0.05..=30.).contains(&seconds)
+            || !(0.1..=120.).contains(&hold)
+        {
+            return Err("Invalid mashup timing".into());
+        }
+        if !self.controls.stems_loaded.iter().all(|v| v.load(Relaxed))
+            || !self.playing(1 - incoming)
+            || self.playing(incoming)
+            || self.fading()
+        {
+            return Err(
+                "Mashup needs two prepared stem decks, with the incoming deck paused".into(),
+            );
+        }
+        if self.controls.looping.iter().any(|v| v.load(Relaxed))
+            || self.controls.scratching.iter().any(|v| v.load(Relaxed))
+        {
+            return Err("Release loops and scratching before a mashup".into());
+        }
+        let delay = (grid.next(self.position(1 - incoming) + 0.1) - self.position(1 - incoming))
+            as f32
+            / get(&self.controls.rate[1 - incoming]);
+        if self
+            .remaining(1 - incoming)
+            .is_none_or(|r| r < seconds * 2. + hold + delay + 0.2)
+            || self
+                .remaining(incoming)
+                .is_none_or(|r| r < seconds * 2. + hold + 0.2)
+        {
+            return Err("Not enough prepared audio remains for this mashup".into());
+        }
+        if get(&self.controls.stem_level[1 - incoming][0]) < 0.05
+            || get(&self.controls.stem_level[incoming][1])
+                + get(&self.controls.stem_level[incoming][2])
+                < 0.05
+        {
+            return Err("The selected vocal or backing is muted by your stem settings".into());
+        }
+        self.send(Command::Mashup {
+            to: incoming as f32,
+            fade: seconds,
+            hold,
+            grid,
+        })
+    }
     pub fn scheduled_crossfade(
         &self,
         seconds: f32,
@@ -1516,6 +1636,244 @@ mod tests {
         }
     }
 
+    fn layered_source(values: [f32; 3], frames: usize) -> Source {
+        let (mut producer, consumer) = RingBuffer::new(frames + 1);
+        for _ in 0..frames {
+            producer
+                .push([
+                    values[0], values[0], values[1], values[1], values[2], values[2],
+                ])
+                .unwrap();
+        }
+        Source {
+            ring: consumer,
+            duration: Arc::new(AtomicU64::new(frames as u64)),
+            done: Arc::new(AtomicBool::new(true)),
+            failed: Arc::new(AtomicBool::new(false)),
+            history: VecDeque::with_capacity(frames + 1),
+            history_start: 0,
+            position: 0.,
+            primed: false,
+            separated: true,
+            stem_knobs: [0.; 3],
+        }
+    }
+
+    #[test]
+    #[ignore = "requires FFmpeg and native output; generated stem fixtures, master muted"]
+    fn native_phrase_mashup_launches_two_stem_decoders_and_completes() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut sets = Vec::new();
+        for deck in 0..2 {
+            let paths = std::array::from_fn::<_, 3, _>(|stem| {
+                dir.path().join(format!("d{deck}-s{stem}.wav"))
+            });
+            for (stem, path) in paths.iter().enumerate() {
+                assert!(
+                    amp_core::command("ffmpeg")
+                        .args(["-v", "error", "-f", "lavfi", "-i"])
+                        .arg(format!(
+                            "sine=frequency={}:duration=12",
+                            220 + deck * 110 + stem * 55
+                        ))
+                        .args(["-ac", "2", "-ar", "48000"])
+                        .arg(path)
+                        .status()
+                        .unwrap()
+                        .success()
+                );
+            }
+            sets.push(paths);
+        }
+        let mut engine = Engine::new().unwrap();
+        engine.set_master(0.);
+        let p = amp_core::Preparation {
+            bpm: Some(240.),
+            beat_offset: Some(0.),
+            cue_out: Some(12.),
+            harmonic_key: Some("8A".into()),
+            ..Default::default()
+        };
+        for (deck, paths) in sets.iter().enumerate() {
+            let t = amp_core::Track {
+                path: paths[0].file_name().unwrap().into(),
+                title: format!("Fixture {deck}"),
+                preparation: p.clone(),
+            };
+            engine
+                .load_with_stems(deck, dir.path(), &t, false, Some(paths.clone()))
+                .unwrap();
+        }
+        let wait = |e: &Engine, f: &dyn Fn(&Engine) -> bool| {
+            let end = std::time::Instant::now() + Duration::from_secs(10);
+            while !f(e) {
+                assert!(
+                    std::time::Instant::now() < end,
+                    "{:?}",
+                    e.take_decode_errors()
+                );
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        };
+        wait(&engine, &|e| {
+            e.controls.ready.iter().all(|v| v.load(Relaxed))
+        });
+        set(&engine.controls.stem_level[0][1], 0.4);
+        let saved: [[u32; 3]; 2] = std::array::from_fn(|d| {
+            std::array::from_fn(|s| engine.controls.stem_level[d][s].load(Relaxed))
+        });
+        engine.controls.play[0].store(true, Relaxed);
+        let grid = crate::mix_schedule::grid(&p, &p, 0., 0., crate::mix_schedule::Timing::Phrase8)
+            .unwrap();
+        engine.mashup(0.1, 2., grid).unwrap();
+        wait(&engine, &|e| {
+            e.controls.mashup_active.load(Relaxed) && e.playing(1)
+        });
+        wait(&engine, &|e| !e.fading() && !e.playing(0) && e.playing(1));
+        assert_eq!(engine.fader(), 1.);
+        assert!(engine.take_decode_errors().is_empty());
+        assert_eq!(
+            saved,
+            std::array::from_fn(|d| std::array::from_fn(
+                |s| engine.controls.stem_level[d][s].load(Relaxed)
+            ))
+        );
+        engine.stop(0);
+        engine.stop(1);
+    }
+    #[test]
+    fn failed_mashup_incoming_returns_to_outgoing_bus() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(32);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(
+            0,
+            layered_source([0.1, 0.1, 0.1], 12000),
+            true,
+            1,
+        ))
+        .unwrap();
+        tx.send(Command::Load(
+            1,
+            layered_source([0.1, 0.1, 0.1], 600),
+            false,
+            1,
+        ))
+        .unwrap();
+        tx.send(Command::Mashup {
+            to: 1.,
+            fade: 0.1,
+            hold: 2.,
+            grid: crate::mix_schedule::Grid {
+                period: 0.5,
+                anchor: 0.,
+            },
+        })
+        .unwrap();
+        m.render(2500, |_, _| {});
+        assert!(c.play[0].load(Relaxed));
+        assert!(!c.play[1].load(Relaxed));
+        assert_eq!(get(&c.crossfader), 0.);
+        assert!(!c.fading.load(Relaxed));
+        assert!(!c.mashup_active.load(Relaxed));
+    }
+    #[test]
+    fn mashup_hold_is_one_vocal_with_other_backing_and_does_not_write_live_stem_defaults() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(32);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        // A: 0.10 vocal, 0.20 music, 0.30 drums; B: 0.40 vocal, 0.05 music, 0.02 drums.
+        tx.send(Command::Load(
+            0,
+            layered_source([0.10, 0.20, 0.30], 12000),
+            true,
+            1,
+        ))
+        .unwrap();
+        tx.send(Command::Load(
+            1,
+            layered_source([0.40, 0.05, 0.02], 12000),
+            false,
+            1,
+        ))
+        .unwrap();
+        m.render(1000, |_, _| {});
+        let saved: [[u32; 3]; 2] =
+            std::array::from_fn(|d| std::array::from_fn(|s| c.stem_level[d][s].load(Relaxed)));
+        tx.send(Command::Mashup {
+            to: 1.,
+            fade: 0.1,
+            hold: 2.,
+            grid: crate::mix_schedule::Grid {
+                period: 0.5,
+                anchor: 0.,
+            },
+        })
+        .unwrap();
+        m.render(2050, |_, _| {});
+        let mut sum = 0.;
+        m.render(100, |_, f| sum += f[0]);
+        let expected = (0.10 + 0.05 + 0.02) * std::f32::consts::FRAC_1_SQRT_2 * 0.75;
+        assert!(
+            (sum / 100. - expected).abs() < 0.002,
+            "hold {} expected {}",
+            sum / 100.,
+            expected
+        );
+        assert!(c.mashup_active.load(Relaxed));
+        assert_eq!(
+            saved,
+            std::array::from_fn(|d| std::array::from_fn(|s| c.stem_level[d][s].load(Relaxed)))
+        );
+        m.render(2200, |_, _| {});
+        assert!(!c.mashup_active.load(Relaxed));
+        assert!(!c.play[0].load(Relaxed));
+        assert!(c.play[1].load(Relaxed));
+        assert_eq!(get(&c.crossfader), 1.);
+        assert_eq!(
+            saved,
+            std::array::from_fn(|d| std::array::from_fn(|s| c.stem_level[d][s].load(Relaxed)))
+        );
+    }
+    #[test]
+    fn canceling_mashup_restores_masks_and_preserves_manual_stem_cuts() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(32);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(
+            0,
+            layered_source([0.1, 0.1, 0.1], 8000),
+            true,
+            1,
+        ))
+        .unwrap();
+        tx.send(Command::Load(
+            1,
+            layered_source([0.1, 0.1, 0.1], 8000),
+            false,
+            1,
+        ))
+        .unwrap();
+        m.render(500, |_, _| {});
+        set(&c.stem_level[1][0], 0.);
+        tx.send(Command::Mashup {
+            to: 1.,
+            fade: 0.1,
+            hold: 2.,
+            grid: crate::mix_schedule::Grid {
+                period: 0.5,
+                anchor: 0.,
+            },
+        })
+        .unwrap();
+        m.render(1000, |_, _| {});
+        tx.send(Command::Fader(1.)).unwrap();
+        m.render(2000, |_, _| {});
+        assert!(!c.mashup_active.load(Relaxed));
+        assert_eq!(get(&c.stem_level[1][0]), 0.);
+        assert!(m.voices[1].stem_mix[0] < 0.001);
+        assert!((m.voices[1].stem_mix[1] - 1.).abs() < 0.001);
+    }
     #[test]
     #[ignore = "requires real supplied songs, FFmpeg and an audio output device; muted"]
     fn real_sections_and_vinyl_follow_keep_other_deck_and_metadata_intact() {

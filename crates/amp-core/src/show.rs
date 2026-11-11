@@ -220,6 +220,19 @@ pub fn choose_with_snapshot(
     alternate: usize,
     snapshot: Option<&Preparation>,
 ) -> Option<usize> {
+    let ranked = ranked_with_snapshot(p, tracks, current, recent, target, snapshot);
+    ranked
+        .get(alternate.min(ranked.len().saturating_sub(1)))
+        .copied()
+}
+pub fn ranked_with_snapshot(
+    p: &SmartPlaylist,
+    tracks: &[Track],
+    current: Option<usize>,
+    recent: &[String],
+    target: Option<f64>,
+    snapshot: Option<&Preparation>,
+) -> Vec<usize> {
     let playing = snapshot.or_else(|| current.and_then(|i| tracks.get(i)).map(|t| &t.preparation));
     let mut candidates: Vec<_> = tracks
         .iter()
@@ -240,7 +253,7 @@ pub fn choose_with_snapshot(
     if !fresh.is_empty() {
         candidates = fresh;
     } else if p.fallback == Fallback::Stop {
-        return None;
+        return Vec::new();
     }
     let wanted = target.or(p.target_energy).or(playing.and_then(energy));
     let score = |t: &Track| {
@@ -284,9 +297,7 @@ pub fn choose_with_snapshot(
     };
     let mut scored: Vec<_> = candidates.iter().map(|(i, t)| (score(t), *i)).collect();
     scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
-    scored
-        .get(alternate.min(scored.len().saturating_sub(1)))
-        .map(|(_, i)| *i)
+    scored.into_iter().map(|(_, i)| i).collect()
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Progression {

@@ -13,6 +13,7 @@ pub enum Style {
     Beatmatch,
     LoopBuild,
     StemSwap,
+    Mashup,
 }
 impl Style {
     pub fn label(self) -> &'static str {
@@ -27,6 +28,7 @@ impl Style {
             Self::Beatmatch => "Beatmatch",
             Self::LoopBuild => "Loop buildup",
             Self::StemSwap => "Stem handoff",
+            Self::Mashup => "Vocal / instrumental mashup",
         }
     }
 }
@@ -40,6 +42,8 @@ pub struct Settings {
     pub techniques: [bool; 6],
     pub loop_build: bool,
     pub stem_swap: bool,
+    pub mashup: bool,
+    pub mashup_beats: u32,
 }
 impl Default for Settings {
     fn default() -> Self {
@@ -51,6 +55,8 @@ impl Default for Settings {
             techniques: [true; 6],
             loop_build: false,
             stem_swap: false,
+            mashup: false,
+            mashup_beats: 16,
         }
     }
 }
@@ -81,6 +87,9 @@ impl Settings {
         if self.stem_swap {
             enabled.push(Style::StemSwap);
         }
+        if self.mashup {
+            enabled.push(Style::Mashup);
+        }
         match self.style {
             Style::Fade => None,
             Style::Variety if !enabled.is_empty() => {
@@ -98,10 +107,13 @@ pub fn load() -> Settings {
     crate::theme::settings_path()
         .and_then(|p| std::fs::read(p.with_file_name("auto-transitions.json")).ok())
         .and_then(|b| serde_json::from_slice::<Settings>(&b).ok())
-        .filter(|s| (2..=12).contains(&s.every))
+        .filter(|s| (2..=12).contains(&s.every) && [8, 16, 32].contains(&s.mashup_beats))
         .unwrap_or_default()
 }
 pub fn save(settings: Settings) -> Result<(), String> {
+    if ![8, 16, 32].contains(&settings.mashup_beats) {
+        return Err("Mashup length must be 8, 16 or 32 beats".into());
+    }
     if !(2..=12).contains(&settings.every) {
         return Err("Effect frequency must be 2–12 mixes".into());
     }
@@ -114,6 +126,22 @@ pub fn save(settings: Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn mashups_are_opt_in_and_use_saved_frequency_and_hold() {
+        let s = Settings {
+            style: Style::Mashup,
+            mashup: true,
+            every: 2,
+            mashup_beats: 8,
+            ..Default::default()
+        };
+        assert_eq!(s.pick(0), None);
+        assert_eq!(s.pick(1), Some(Style::Mashup));
+        let restored: Settings = serde_json::from_slice(&serde_json::to_vec(&s).unwrap()).unwrap();
+        assert_eq!(restored.mashup_beats, 8);
+        assert_eq!(restored.pick(1), Some(Style::Mashup));
+        assert_eq!(Settings { mashup: false, ..s }.pick(1), None);
+    }
     #[test]
     fn new_techniques_are_opt_in_and_old_settings_remain_readable() {
         let old: Settings = serde_json::from_str(r#"{"enabled":true,"every":2,"style":"Variety","techniques":[false,false,false,false,false,false]}"#).unwrap();

@@ -16,7 +16,14 @@ impl Player {
             egui::ComboBox::from_id_salt(("section-timing", deck))
                 .selected_text(self.run.transitions.timing.label())
                 .show_ui(ui, |ui| {
-                    for timing in [Timing::Immediate, Timing::Beat, Timing::Bar] {
+                    for timing in [
+                        Timing::Immediate,
+                        Timing::Beat,
+                        Timing::Bar,
+                        Timing::Phrase8,
+                        Timing::Phrase16,
+                        Timing::Phrase32,
+                    ] {
                         ui.selectable_value(
                             &mut self.run.transitions.timing,
                             timing,
@@ -28,6 +35,14 @@ impl Player {
                 && let Err(e) = crate::transition_styles::save(self.run.transitions)
             {
                 self.status = e;
+            }
+            if self.run.transitions.timing.phrase_beats().is_some()
+                && !track
+                    .preparation
+                    .extensions
+                    .contains_key("mix_phrase_anchor")
+            {
+                ui.weak("Estimated phrase grid — review in Library");
             }
             if self.run.transitions.timing != Timing::Immediate
                 && (track.preparation.bpm.is_none()

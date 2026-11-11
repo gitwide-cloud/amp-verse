@@ -1,0 +1,15 @@
+# Phrase blends and vocal/backing mashups
+
+In DJ → Transition options, choose an 8-, 16-, or 32-beat phrase launch grid. The deck section controls expose the same saved choice. Incoming entry phase is matched to the outgoing phrase phase on the audio clock, with tempo matched before launch. A manually selected entry is retained. Your seconds-based mix time is unchanged; this aligns song phase, not necessarily the end of the fade to a phrase boundary.
+
+Library → Prepare → Mark phrase start at cursor saves a reviewed phrase anchor. Save preparation and reload the deck to use it. Reviewed phrase anchors take priority, then reviewed bar anchors, then the existing beat phase as an estimated counted grid. DJ labels unreviewed phrasing as estimated. Variable-tempo songs, automatic verse/chorus detection and vocal-line recognition are not implemented. Phrase alignment of different tracks requires their effective tempos to match; unavailable grids or insufficient remaining time use a normal blend.
+
+Enable Automatic vocal / instrumental mashups to include the technique in Auto DJ. Select its style to use it at the saved effect frequency, or use Mashup next pair for one handoff. Choose an 8-, 16-, or 32-beat hold. The hold is separate from the saved entry/exit fade seconds, so the total transition is two fades plus the hold.
+
+The entry fade brings in the incoming track's instrumental/drum stems while removing outgoing backing. During the hold, outgoing vocals play over incoming backing; incoming vocals remain masked. The exit fade hands over vocals and stops the outgoing deck. There are still two main decks. Temporary masks multiply existing live stem gains; muted/isolation defaults are never automatically unmuted or written to metadata. Knobs and their saved values remain unchanged, and cancellation removes temporary masks.
+
+Mashups require both prepared stem sets, phase-capable constant-tempo grids, a paused incoming deck, sufficient remaining audio, audible selected stems, and compatible effective tempo/tuning. Automatic pairing conservatively accepts the same Camelot number (including relative major/minor) and rejects significant varispeed detuning; there is no new key-lock or pitch-shift engine. The next-song choice prefers compatible prepared songs among the top twelve energy-ranked eligible candidates. Playlist membership, repeats, requested songs and existing source restrictions retain priority. An unsuitable pair falls back to a normal blend with a status explanation.
+
+Separation quality and vocal phrasing still need listening judgment. The engine does not determine whether a specific lyric line suits the other backing or guarantee audible vocals throughout an instrumental passage.
+
+Validation: workspace tests and strict Clippy; phrase-origin/phase tests; numeric stem-routing checks against known component amplitudes; cancellation and incoming-failure recovery; persistence/opt-in checks; and a muted native FFmpeg test launching both prepared stem decoders on a phrase grid through the complete handoff.

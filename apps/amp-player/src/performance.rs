@@ -54,6 +54,7 @@ fn buildup_halves(elapsed: f32, capture: f32, duration: f32) -> u8 {
 }
 pub struct Run {
     pub requests: VecDeque<String>,
+    pub force_mashup: bool,
     pub transitions: crate::transition_styles::Settings,
     effect_bridge: Option<EffectBridge>,
     effect_done: Option<Instant>,
@@ -87,6 +88,7 @@ impl Default for Run {
         let transitions = crate::transition_styles::load();
         Self {
             requests: VecDeque::new(),
+            force_mashup: false,
             transitions,
             effect_bridge: None,
             effect_done: None,
@@ -288,6 +290,7 @@ impl Run {
         }
     }
     pub fn cancel_automation(&mut self) {
+        self.force_mashup = false;
         self.future_candidates.clear();
         self.auto = false;
         self.pending = None;
@@ -387,6 +390,39 @@ impl Player {
             [] => Err("Cue ID or name was not found".into()),
             _ => Err("Cue name is ambiguous; use its ID".into()),
         }
+    }
+    fn mashup_pair_plan(
+        &self,
+        outgoing: usize,
+        incoming: usize,
+    ) -> Option<(crate::mix_schedule::Grid, f32)> {
+        let audio = self.audio.as_ref()?;
+        if !audio.controls.stems_loaded.iter().all(|v| v.load(Relaxed)) {
+            return None;
+        }
+        let out = &self.loaded_track(outgoing)?.preparation;
+        let next = &self.loaded_track(incoming)?.preparation;
+        let out_rate = 1. + self.pitch[outgoing] as f64 / 100.;
+        let in_rate = 1. + self.pitch[incoming] as f64 / 100.;
+        if !crate::mashup::compatible(out, next, out_rate, in_rate) {
+            return None;
+        }
+        let timing = if self.run.transitions.timing.phrase_beats().is_some() {
+            self.run.transitions.timing
+        } else {
+            crate::mix_schedule::Timing::Phrase16
+        };
+        let grid = crate::mix_schedule::grid(
+            out,
+            next,
+            audio.source_position(incoming),
+            audio.source_position(outgoing) - audio.position(outgoing),
+            timing,
+        )?;
+        Some((
+            grid,
+            (self.run.transitions.mashup_beats as f64 * 60. / (out.bpm? * out_rate)) as f32,
+        ))
     }
     fn call_track(
         &mut self,
@@ -574,10 +610,29 @@ impl Player {
                 p.extensions
                     .insert("energy".into(), serde_json::json!(energy));
             }
-            let index = show::choose_with_snapshot(
-                &p, tracks, current, &recent, target, alternate,
-                snapshot.as_ref(),
-            ).ok_or("Auto Mix stopped: no playable next song matches this playlist's source and repeat rules")?;
+            let ranked =
+                show::ranked_with_snapshot(&p, tracks, current, &recent, target, snapshot.as_ref());
+            let mut index=*ranked.get(alternate.min(ranked.len().saturating_sub(1))).ok_or("Auto Mix stopped: no playable next song matches this playlist's source and repeat rules")?;
+            let wants_mashup = self.run.force_mashup
+                || self.run.transitions.pick(self.run.completed_handoffs)
+                    == Some(crate::transition_styles::Style::Mashup);
+            if wants_mashup && let Some(out) = self.loaded_track(self.active_deck()) {
+                let rate = 1. + self.pitch[self.active_deck()] as f64 / 100.;
+                // Prefer a prepared compatible pair among the top energy-ranked candidates;
+                // do not change eligibility, requests, or force a distant-energy song.
+                if let Some(best) = ranked.iter().take(12).copied().find(|i| {
+                    let next = &tracks[*i];
+                    let in_rate = out
+                        .preparation
+                        .bpm
+                        .zip(next.preparation.bpm)
+                        .map_or(1., |(a, b)| a * rate / b);
+                    crate::mashup::compatible(&out.preparation, &next.preparation, rate, in_rate)
+                        && crate::stems::ready(&self.root.join(&next.path)).is_some()
+                }) {
+                    index = best;
+                }
+            }
             match self.call_track(index, None, Deck::Auto, Execution::LoadOnly) {
                 Ok(()) => return Ok(()),
                 Err(error) => {
@@ -650,6 +705,8 @@ impl Player {
                     style: crate::transition_styles::Style::Variety,
                     loop_build: loop_build.unwrap_or(self.run.transitions.loop_build),
                     stem_swap: stem_swap.unwrap_or(self.run.transitions.stem_swap),
+                    mashup: self.run.transitions.mashup,
+                    mashup_beats: self.run.transitions.mashup_beats,
                 };
                 crate::transition_styles::save(settings)?;
                 self.run.transitions = settings;
@@ -1171,12 +1228,14 @@ impl Player {
                 );
             } else if ready && due {
                 let outgoing = 1 - incoming;
-                let chosen =
-                    if self.run.auto && !self.run.locked && self.run.effect_done != Some(started) {
-                        self.run.transitions.pick(self.run.completed_handoffs)
-                    } else {
-                        None
-                    };
+                let chosen = if self.run.force_mashup {
+                    Some(crate::transition_styles::Style::Mashup)
+                } else if self.run.auto && !self.run.locked && self.run.effect_done != Some(started)
+                {
+                    self.run.transitions.pick(self.run.completed_handoffs)
+                } else {
+                    None
+                };
                 if chosen == Some(crate::transition_styles::Style::Beatmatch) {
                     self.sync_deck(incoming);
                 }
@@ -1291,6 +1350,18 @@ impl Player {
                     let grid = self
                         .loaded_track(outgoing)
                         .zip(self.loaded_track(incoming))
+                        .filter(|(out, next)| {
+                            self.run.transitions.timing.phrase_beats().is_none()
+                                || out.preparation.bpm.zip(next.preparation.bpm).is_some_and(
+                                    |(a, b)| {
+                                        (a * (1. + self.pitch[outgoing] as f64 / 100.)
+                                            / (b * (1. + self.pitch[incoming] as f64 / 100.))
+                                            - 1.)
+                                            .abs()
+                                            < 0.005
+                                    },
+                                )
+                        })
                         .and_then(|(out, next)| {
                             crate::mix_schedule::grid(
                                 &out.preparation,
@@ -1300,7 +1371,26 @@ impl Player {
                                 self.run.transitions.timing,
                             )
                         });
-                    let result = if let Some(grid) = grid.filter(|g| {
+                    let mashup_plan = if chosen == Some(crate::transition_styles::Style::Mashup) {
+                        self.mashup_pair_plan(outgoing, incoming)
+                    } else {
+                        None
+                    };
+                    let result = if let Some((mashup_grid, hold)) = mashup_plan {
+                        match a.mashup(seconds, hold, mashup_grid) {
+                            Ok(()) => {
+                                self.status = format!(
+                                    "Vocal / instrumental mashup · {}-beat hold",
+                                    self.run.transitions.mashup_beats
+                                );
+                                Ok(())
+                            }
+                            Err(e) => {
+                                self.status = format!("Mashup skipped: {e}; using normal blend");
+                                a.crossfade(seconds)
+                            }
+                        }
+                    } else if let Some(grid) = grid.filter(|g| {
                         a.remaining(outgoing).is_some_and(|r| {
                             r > seconds
                                 + (g.next(a.position(outgoing) + 0.1) - a.position(outgoing)) as f32
@@ -1314,6 +1404,12 @@ impl Player {
                     };
                     match result {
                         Ok(()) => {
+                            self.run.force_mashup = false;
+                            if chosen == Some(crate::transition_styles::Style::Mashup)
+                                && mashup_plan.is_none()
+                            {
+                                self.status="Mashup skipped: prepare both stem sets and use compatible tempo, tuning and grids; using normal blend".into();
+                            }
                             self.run.transition = Some(incoming);
                             if let Some((style, grain)) = effect_plan {
                                 self.run.effect_bridge = Some(EffectBridge {
@@ -1343,6 +1439,19 @@ impl Player {
             }
         }
         if let Some(incoming) = self.run.transition
+            && self.audio.as_ref().is_some_and(|a| {
+                !a.fading()
+                    && !a.playing(incoming)
+                    && a.controls.finished[incoming].load(Relaxed)
+                    && a.playing(1 - incoming)
+            })
+        {
+            self.recover_failed_song(
+                incoming,
+                "Incoming audio ended before the mix completed; current deck retained",
+            );
+        }
+        if let Some(incoming) = self.run.transition
             && let Some(a) = &self.audio
             && !a.fading()
             && !a.playing(1 - incoming)
@@ -1365,13 +1474,31 @@ impl Player {
         {
             let active = self.active_deck();
             let remaining = self.audio.as_ref().and_then(|a| a.remaining(active));
-            let mix_seconds = self.fade_seconds;
-            let grid_lead = if self.run.transitions.timing != crate::mix_schedule::Timing::Immediate
+            let next_mashup = self.run.transitions.pick(self.run.completed_handoffs)
+                == Some(crate::transition_styles::Style::Mashup);
+            let auto_mashup_plan = if next_mashup {
+                self.run
+                    .preloaded
+                    .and_then(|(incoming, _)| self.mashup_pair_plan(active, incoming))
+            } else {
+                None
+            };
+            let mix_seconds = self.fade_seconds
+                + auto_mashup_plan.map_or(0., |(_, hold)| self.fade_seconds + hold);
+            let lead_timing = if auto_mashup_plan.is_some()
+                && self.run.transitions.timing.phrase_beats().is_none()
             {
+                crate::mix_schedule::Timing::Phrase16
+            } else {
+                self.run.transitions.timing
+            };
+            let grid_lead = if lead_timing != crate::mix_schedule::Timing::Immediate {
                 self.loaded_track(active)
                     .and_then(|t| {
                         t.preparation.bpm.map(|b| {
-                            let beats = if self.run.transitions.timing
+                            let beats = if let Some(beats) = lead_timing.phrase_beats() {
+                                beats
+                            } else if self.run.transitions.timing
                                 == crate::mix_schedule::Timing::Bar
                                 && t.preparation.extensions.contains_key("mix_bar_anchor")
                             {
