@@ -8,6 +8,7 @@ import com.google.android.gms.cast.framework.*;
 /** Native Google Cast picker; the speaker reads the station stream directly. */
 public final class GoogleCastActivity extends AppCompatActivity {
     private TextView status;
+    private Appearance colors;
     private final SessionManagerListener<CastSession> sessions=new SessionManagerListener<CastSession>() {
         public void onSessionStarting(CastSession s){status.setText("Connecting to speaker...");}
         public void onSessionStarted(CastSession s,String id){play();}
@@ -24,21 +25,24 @@ public final class GoogleCastActivity extends AppCompatActivity {
 
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
-        LinearLayout content=new LinearLayout(this);content.setOrientation(LinearLayout.VERTICAL);int pad=(int)(20*getResources().getDisplayMetrics().density);content.setPadding(pad,pad,pad,pad);setContentView(content);
-        TextView heading=new TextView(this);heading.setText("Google Home / Chromecast");heading.setTextSize(24);content.addView(heading);
-        status=new TextView(this);status.setText("Choose a speaker with the Cast button to play this station or live DJ broadcast.");status.setTextSize(17);content.addView(status);
+        colors=new Appearance(this);getWindow().setStatusBarColor(colors.background);getWindow().setNavigationBarColor(colors.background);
+        ScrollView scroll=new ScrollView(this);scroll.setBackgroundColor(colors.background);scroll.setOnApplyWindowInsetsListener((view,insets)->{view.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;});
+        LinearLayout content=new LinearLayout(this);content.setOrientation(LinearLayout.VERTICAL);int pad=(int)(20*getResources().getDisplayMetrics().density);content.setPadding(pad,pad,pad,pad);scroll.addView(content);setContentView(scroll);
+        TextView heading=new TextView(this);heading.setText("Google Home / Chromecast");heading.setTextSize(24);heading.setTextColor(colors.text);content.addView(heading);
+        status=new TextView(this);status.setText("Choose a speaker with the Cast button to play this station or live DJ broadcast.");status.setTextSize(17);status.setTextColor(colors.muted);content.addView(status);
         try {
             CastContext.getSharedInstance(this);
             MediaRouteButton route=new MediaRouteButton(this);route.setContentDescription("Choose Google Cast speaker");content.addView(route,new LinearLayout.LayoutParams(pad*3,pad*3));CastButtonFactory.setUpMediaRouteButton(this,route);
-            Button play=new Button(this);play.setText("Play station on speaker");content.addView(play);play.setOnClickListener(v->play());
-            Button stop=new Button(this);stop.setText("Stop casting");content.addView(stop);stop.setOnClickListener(v->{CastContext.getSharedInstance(this).getSessionManager().endCurrentSession(true);status.setText("Casting stopped");});
+            Button play=button();play.setText("Play station on speaker");content.addView(play);play.setOnClickListener(v->play());
+            Button stop=button();stop.setText("Stop casting");content.addView(stop);stop.setOnClickListener(v->{CastContext.getSharedInstance(this).getSessionManager().endCurrentSession(true);status.setText("Casting stopped");});
         } catch(Exception error){status.setText("Google Cast is unavailable: "+error.getMessage());}
-        Button back=new Button(this);back.setText("Back to AMP Cast");content.addView(back);back.setOnClickListener(v->finish());
+        Button back=button();back.setText("Back to AMP Cast");content.addView(back);back.setOnClickListener(v->finish());
     }
+    private Button button(){Button button=new Button(this);button.setAllCaps(false);button.setMinHeight((int)(48*getResources().getDisplayMetrics().density));button.setTextColor(colors.text);button.setBackground(Chrome.button(colors,false));return button;}
     private void play(){
         try {
             String url=getIntent().getStringExtra("stream");android.net.Uri uri=android.net.Uri.parse(url==null?"":url);String host=uri.getHost();
-            if(host==null||host.equals("localhost")||host.equals("127.0.0.1")||!"http".equals(uri.getScheme())){status.setText("Connect to your Cast server using its LAN address first. A speaker cannot use the phone's localhost address.");return;}
+            if(host==null||host.equals("localhost")||host.equals("127.0.0.1")||host.equals("::1")||!("http".equals(uri.getScheme())||"https".equals(uri.getScheme()))){status.setText("Connect to your Cast server using its LAN address first. A speaker cannot use the phone's localhost address.");return;}
             CastSession session=CastContext.getSharedInstance(this).getSessionManager().getCurrentCastSession();
             if(session==null||!session.isConnected()||session.getRemoteMediaClient()==null){status.setText("Choose a Google speaker first, then tap Play station on speaker.");return;}
             MediaMetadata metadata=new MediaMetadata(MediaMetadata.MEDIA_TYPE_MUSIC_TRACK);metadata.putString(MediaMetadata.KEY_TITLE,getIntent().getStringExtra("title"));

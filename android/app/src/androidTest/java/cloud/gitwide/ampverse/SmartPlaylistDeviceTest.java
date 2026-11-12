@@ -38,8 +38,8 @@ public class SmartPlaylistDeviceTest {
             device.waitForIdle();device.takeScreenshot(new File(real.getExternalFilesDir(null),"smart-editor-main.png"));device.dumpWindowHierarchy(new File(real.getExternalFilesDir(null),"smart-editor-main.xml"));
             assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Choose music sources")),3000));
             androidx.test.uiautomator.UiScrollable scroll=new androidx.test.uiautomator.UiScrollable(new androidx.test.uiautomator.UiSelector().scrollable(true));
-            if(device.findObject(androidx.test.uiautomator.By.text("Genres, analysis filters & advanced options"))==null)assertTrue(scroll.scrollTextIntoView("Genres, analysis filters & advanced options"));
-            device.findObject(androidx.test.uiautomator.By.text("Genres, analysis filters & advanced options")).click();
+            if(device.findObject(androidx.test.uiautomator.By.text("Genres & filters"))==null)assertTrue(scroll.scrollTextIntoView("Genres & filters"));
+            device.findObject(androidx.test.uiautomator.By.text("Genres & filters")).click();
             assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Smart Playlist options")),3000));
             device.takeScreenshot(new File(real.getExternalFilesDir(null),"smart-playlist-options.png"));
             device.findObject(androidx.test.uiautomator.By.text("Choose genres")).click();

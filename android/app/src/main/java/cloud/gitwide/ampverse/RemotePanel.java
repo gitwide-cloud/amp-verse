@@ -19,6 +19,7 @@ final class RemotePanel extends LinearLayout {
     private int discoveryGeneration,discoveryPending,discoveryFound,discoveryErrors;
     private final EditText address,password,search;private final TextView status,now;
     private final LinearLayout songs,controls;
+    private LinearLayout connectionOptions;
     private Switch autoMix; private boolean updatingAutoMix;
     private JSONObject latestState=new JSONObject();
     private JSONArray catalog=new JSONArray(),playlists=new JSONArray();
@@ -33,19 +34,22 @@ final class RemotePanel extends LinearLayout {
         discoverButton=button("Discover devices",this::discover);discoverButton.setContentDescription("Discover AMP Verse devices");addView(discoverButton);
         discoveryStatus=label("Find Player, DJ and Cast hosts on your Wi-Fi.",14);addView(discoveryStatus);
         nearbyDevices=new LinearLayout(a);nearbyDevices.setOrientation(VERTICAL);addView(nearbyDevices);
+        int connectionStart=getChildCount();
         address=field("http://192.168.1.50:8790",false);address.setText(a.getSharedPreferences("settings",0).getString("remote-server",""));address.setContentDescription("Desktop server address");password=field("Optional control password",true);password.setContentDescription("Desktop control password");
         if(address.getText().toString().equals(rememberedBase))password.setText(rememberedSecret);
         addView(button("Connect / Refresh",this::connect));
-        addView(button("Disconnect remote",this::disconnect));status=label("Choose the desktop control server. Cast radio has its own screen.",14);addView(status);now=label("Not connected",18);addView(now);
+        addView(button("Disconnect remote",this::disconnect));connectionOptions=UiSections.fold(this,colors,"Connection settings",connectionStart);status=label("Choose the desktop control server. Cast radio has its own screen.",14);addView(status);now=label("Not connected",18);addView(now);
         controls=new LinearLayout(a);controls.setOrientation(VERTICAL);addView(controls);controls.setVisibility(GONE);
         row(controls,button("A",()->{deck="a";status.setText("Selected deck A");}),button("B",()->{deck="b";status.setText("Selected deck B");}));
         row(controls,button("Play",()->command("play","deck",deck)),button("Pause",()->command("pause","deck",deck)),button("Stop",()->command("stop","deck",deck)));
         row(controls,button("Restart cue",()->command("restart_cue","deck",deck)),button("Preload next",()->command("preload_next")),button("Mix next",()->command("mix_next","immediate",true)));
-        autoMix=new Switch(a);autoMix.setText("Auto Mix");autoMix.setTextColor(colors.text);autoMix.setThumbTintList(android.content.res.ColorStateList.valueOf(colors.accent));autoMix.setContentDescription("Auto Mix on uses the engine; off is manual");autoMix.setOnCheckedChangeListener((view,enabled)->{if(!updatingAutoMix)command("auto_dj","enabled",enabled);});controls.addView(autoMix);
-        controls.addView(label("Crossfader · A ↔ B",15));SeekBar fader=new SeekBar(a);fader.setMax(100);fader.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){command("set_crossfader","value",b.getProgress()/100.);}public void onProgressChanged(SeekBar b,int value,boolean user){}});controls.addView(fader);
-        row(controls,button("Hype",()->command("set_style","style","hype")),button("Steady",()->command("set_style","style","steady")),button("Chill",()->command("set_style","style","chill")));
-        controls.addView(label("Target energy",15));SeekBar energy=new SeekBar(a);energy.setMax(100);energy.setProgress(50);energy.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){command("set_energy","target",1.+9.*b.getProgress()/100.);}public void onProgressChanged(SeekBar b,int value,boolean user){}});controls.addView(energy);
+        autoMix=new Switch(a);autoMix.setText("Auto Mix");autoMix.setTextColor(colors.text);Chrome.toggle(autoMix,colors);autoMix.setContentDescription("Auto Mix on uses the engine; off is manual");autoMix.setOnCheckedChangeListener((view,enabled)->{if(!updatingAutoMix)command("auto_dj","enabled",enabled);});controls.addView(autoMix);
         controls.addView(button("Desktop Smart Playlists",this::choosePlaylist));
+        controls.addView(label("Crossfader · A ↔ B",15));SeekBar fader=new SeekBar(a);Chrome.slider(fader,colors.accent);fader.setMax(100);fader.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){command("set_crossfader","value",b.getProgress()/100.);}public void onProgressChanged(SeekBar b,int value,boolean user){}});controls.addView(fader);
+        int advancedStart=controls.getChildCount();
+        row(controls,button("Hype",()->command("set_style","style","hype")),button("Steady",()->command("set_style","style","steady")),button("Chill",()->command("set_style","style","chill")));
+        controls.addView(label("Target energy",15));SeekBar energy=new SeekBar(a);Chrome.slider(energy,colors.accent);energy.setMax(100);energy.setProgress(50);energy.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){command("set_energy","target",1.+9.*b.getProgress()/100.);}public void onProgressChanged(SeekBar b,int value,boolean user){}});controls.addView(energy);
+
         controls.addView(button("Deck tools · sync, stems and loops",this::deckTools));
         controls.addView(button("Google speakers on desktop",this::googleSpeakers));
         row(controls,button("Master −",()->command("adjust_volume","delta",-0.05)),button("Master +",()->command("adjust_volume","delta",0.05)));
@@ -56,20 +60,21 @@ final class RemotePanel extends LinearLayout {
         controls.addView(button("Progressive energy…",()->{final EditText value=new EditText(activity);value.setHint("Target energy 1–10");value.setInputType(8194);new AlertDialog.Builder(activity).setTitle("Reach target over 4 transitions").setView(value).setPositiveButton("Apply",(d,n)->{try{command("progression","target",Double.parseDouble(value.getText().toString()),"transitions",4,"hold",true);}catch(Exception e){status.setText("Enter energy from 1 to 10");}}).setNegativeButton("Cancel",null).show();}));
         controls.addView(button("Desktop transition techniques",()->{boolean[] enabled={true,true,true,true,true,true};new AlertDialog.Builder(activity).setTitle("Occasional Auto DJ techniques").setMultiChoiceItems(new String[]{"Scratch","Stutter","Tape brake","Filter sweep","Bass swap","Beatmatch"},enabled,(dialog,n,value)->enabled[n]=value).setPositiveButton("Apply",(dialog,n)->{JSONArray flags=new JSONArray();for(boolean value:enabled)flags.put(value);command("transition_settings","enabled",true,"techniques",flags,"every",4);}).setNeutralButton("All effects off",(dialog,n)->command("transition_settings","enabled",false,"techniques",new JSONArray().put(false).put(false).put(false).put(false).put(false).put(false),"every",4)).setNegativeButton("Cancel",null).show();}));
         for(int side=0;side<2;side++){final int s=side;controls.addView(label((s==0?"Left":"Right")+" desktop Cue Deck",17));row(controls,button("Play cue",()->cue(s,"play")),button("Pause cue",()->cue(s,"pause")),button("Stop cue",()->cue(s,"stop")));row(controls,button("Send → A",()->cue(s,"send","deck","a")),button("Send → B",()->cue(s,"send","deck","b")));controls.addView(label((s==0?"Left":"Right")+" desktop sampler",15));for(int r=0;r<3;r++){Button[] pads=new Button[3];for(int col=0;col<3;col++){final int pad=r*3+col+1;pads[col]=button("Pad "+pad,()->command("side_sampler","side",s,"pad",pad));}row(controls,pads);}}
-        search=field("Search desktop songs",false);search.setContentDescription("Search desktop music");songs=new LinearLayout(a);songs.setOrientation(VERTICAL);addView(songs);
+        UiSections.fold(controls,colors,"More DJ controls",advancedStart);
+        search=field("Search desktop songs",false);search.setContentDescription("Search desktop music");songs=new LinearLayout(a);songs.setOrientation(VERTICAL);addView(songs);search.setVisibility(GONE);songs.setVisibility(GONE);
         search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int s,int count,int after){}public void onTextChanged(CharSequence t,int s,int before,int count){renderSongs();}public void afterTextChanged(android.text.Editable e){}});
         if(address.getText().toString().equals(rememberedBase)&&!rememberedBase.isEmpty())handler.post(this::connect);
         handler.post(this::discover);
-        addView(label("Desktop audio stays on desktop. Use AMP Cast to listen on this phone. This control API does not transfer music, edit NAS metadata or run analysis on Android.",13));
+        addView(label("Control desktop playback here. Open Cast to listen on this phone.",13));
     }
     private TextView label(String text,int size){TextView v=new TextView(activity);v.setText(text);v.setTextSize(size);v.setTextColor(colors.text);v.setPadding(6,10,6,10);return v;}
     private EditText field(String hint,boolean secret){EditText v=new EditText(activity);v.setSingleLine(true);v.setHint(hint);v.setTextColor(colors.text);v.setHintTextColor(colors.muted);v.setInputType(android.text.InputType.TYPE_CLASS_TEXT|(secret?android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD:android.text.InputType.TYPE_TEXT_VARIATION_URI));addView(v);return v;}
-    private Button button(String text,Runnable action){Button b=new Button(activity);b.setText(text);b.setAllCaps(false);b.setMinWidth(0);b.setMinimumWidth(0);b.setTextSize(13);b.setPadding(4,8,4,8);b.setTextColor(text.equals("A")||text.endsWith("→ A")?DjEngine.AMBER:text.equals("B")||text.endsWith("→ B")?DjEngine.CYAN:colors.classic?android.graphics.Color.BLACK:colors.text);b.setBackground(Chrome.button(colors,false));b.setOnClickListener(v->action.run());return b;}
+    private Button button(String text,Runnable action){Button b=new Button(activity);b.setText(text);b.setAllCaps(false);b.setMinWidth(0);b.setMinimumWidth(0);b.setTextSize(13);b.setMinHeight((int)(48*getResources().getDisplayMetrics().density));b.setPadding(4,8,4,8);b.setTextColor(text.equals("A")||text.endsWith("→ A")?DjEngine.AMBER:text.equals("B")||text.endsWith("→ B")?DjEngine.CYAN:Chrome.ink(colors,false));b.setBackground(Chrome.button(colors,false));b.setOnClickListener(v->action.run());return b;}
     private void row(LinearLayout target,Button...buttons){LinearLayout row=new LinearLayout(activity);for(Button b:buttons)row.addView(b,new LayoutParams(0,(int)(50*getResources().getDisplayMetrics().density),1));target.addView(row);}
     private interface Work {JSONObject run()throws Exception;}
     private void submit(Work work,java.util.function.Consumer<JSONObject> done){submit(work,done,error->status.setText("Desktop: "+describe(error)));}
     private void submit(Work work,java.util.function.Consumer<JSONObject> done,java.util.function.Consumer<Exception> failed){if(closed)return;final int expected=generation;worker.execute(()->{if(closed||expected!=generation)return;try{JSONObject value=work.run();activity.runOnUiThread(()->{if(!closed&&expected==generation)done.accept(value);});}catch(Exception error){activity.runOnUiThread(()->{if(!closed&&expected==generation)failed.accept(error);});}});}
-    private void disconnect(){generation++;connected=false;session="";rememberedBase="";rememberedSecret="";if(socket!=null)socket.cancel();controls.setVisibility(GONE);now.setText("Disconnected · host playback continues");}
+    private void disconnect(){generation++;connected=false;session="";rememberedBase="";rememberedSecret="";if(socket!=null)socket.cancel();controls.setVisibility(GONE);search.setVisibility(GONE);songs.setVisibility(GONE);now.setText("Disconnected · host playback continues");}
     private void discover(){
         if(closed||discoveryPending>0)return;
         final int scan=++discoveryGeneration;
@@ -84,7 +89,7 @@ final class RemotePanel extends LinearLayout {
                         if(closed)return;
                         if(!address.getText().toString().equals(host.url))password.setText("");
                         address.setText(host.url);
-                        if(host.passwordRequired){status.setText("Device selected. Enter its control password, then Connect.");password.requestFocus();}
+                        if(host.passwordRequired){connectionOptions.setVisibility(VISIBLE);status.setText("Device selected. Enter its control password, then Connect.");password.requestFocus();}
                         else connect();
                     }));discoveryFound++;
                 }
@@ -126,7 +131,7 @@ final class RemotePanel extends LinearLayout {
         submit(()->{JSONObject info=request(endpoint,credential,"/api/v1/info",null);if(info.optInt("protocol")!=1||!info.optString("service").equals("amp-control")||info.optString("session").isEmpty())throw new IOException("Incompatible version. Update the desktop AMP Verse host.");JSONObject state=request(endpoint,credential,"/api/v1/state",null);if(!info.optString("session").equals(state.optJSONObject("control").optString("session")))throw new IOException("Host restarted. Connect again.");JSONObject result=request(endpoint,credential,"/api/v1/catalog",null);result.put("state",state).put("control",info);return result;},value->{
             session=value.optJSONObject("control").optString("session");connected=true;reconnectAttempts=0;rememberedBase=endpoint;rememberedSecret=credential;
             catalog=value.optJSONArray("songs");if(catalog==null)catalog=new JSONArray();playlists=value.optJSONArray("playlists");if(playlists==null)playlists=new JSONArray();JSONArray regular=value.optJSONArray("regular_playlists");if(regular!=null)for(int i=0;i<regular.length();i++){JSONObject p=regular.optJSONObject(i);if(p!=null)playlists.put(p);}
-            activity.getSharedPreferences("settings",0).edit().putString("remote-server",endpoint).apply();controls.setVisibility(VISIBLE);status.setText("Connected · authenticated AMP host · "+catalog.length()+" songs");showState(value.optJSONObject("state"));renderSongs();openEvents(generation,endpoint,credential,session);
+            activity.getSharedPreferences("settings",0).edit().putString("remote-server",endpoint).apply();controls.setVisibility(VISIBLE);search.setVisibility(VISIBLE);songs.setVisibility(VISIBLE);status.setText("Connected · authenticated AMP host · "+catalog.length()+" songs");showState(value.optJSONObject("state"));renderSongs();openEvents(generation,endpoint,credential,session);
         },error->{if(automatic&&retryable(error))lost(generation,error);else status.setText("Desktop: "+describe(error));});
     }catch(Exception error){status.setText(describe(error));}}
     private void openEvents(final int expected,String endpoint,String credential,String identity){
@@ -138,7 +143,7 @@ final class RemotePanel extends LinearLayout {
         });
     }
     private static boolean retryable(Throwable error){return error instanceof java.net.ConnectException||error instanceof java.net.UnknownHostException||error instanceof java.net.SocketTimeoutException||error instanceof java.net.SocketException||error.getMessage()!=null&&(error.getMessage().startsWith("HTTP 503")||error.getMessage().startsWith("HTTP 502")||error.getMessage().startsWith("HTTP 504")||error.getMessage().startsWith("Host restarted"));}
-    private void lost(int expected,Throwable error){if(closed||expected!=generation)return;final int retryGeneration=++generation;connected=false;session="";controls.setVisibility(GONE);long delay=Math.min(30000L,3000L<<Math.min(4,reconnectAttempts++));status.setText("Connection lost · "+describe(error)+" · reconnecting in "+delay/1000+"s (commands are not replayed)");handler.postDelayed(()->{if(!closed&&retryGeneration==generation)connect(true);},delay);}
+    private void lost(int expected,Throwable error){if(closed||expected!=generation)return;final int retryGeneration=++generation;connected=false;session="";controls.setVisibility(GONE);search.setVisibility(GONE);songs.setVisibility(GONE);long delay=Math.min(30000L,3000L<<Math.min(4,reconnectAttempts++));status.setText("Connection lost · "+describe(error)+" · reconnecting in "+delay/1000+"s (commands are not replayed)");handler.postDelayed(()->{if(!closed&&retryGeneration==generation)connect(true);},delay);}
     private void showState(JSONObject state){
         if(state!=null)latestState=state;
         JSONObject amp=state==null?null:state.optJSONObject("amp");if(amp==null){now.setText("Status unavailable");return;}

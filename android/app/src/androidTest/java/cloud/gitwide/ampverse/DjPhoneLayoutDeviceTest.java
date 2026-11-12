@@ -19,12 +19,12 @@ public class DjPhoneLayoutDeviceTest {
                 scenario.onActivity(a->{a.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);a.setShowWhenLocked(true);a.setTurnScreenOn(true);});
                 assertTrue(device.wait(Until.hasObject(By.desc("DECK B")),5000));device.findObject(By.desc("DECK B")).click();assertTrue(device.wait(Until.hasObject(By.text("DECK B")),2000));
                 android.graphics.Bitmap screenshot=InstrumentationRegistry.getInstrumentation().getUiAutomation().takeScreenshot();if(screenshot!=null)try(FileOutputStream output=new FileOutputStream(new File(context.getExternalFilesDir(null),"dj-"+theme+".png"))){screenshot.compress(android.graphics.Bitmap.CompressFormat.PNG,100,output);}
-                UiScrollable scroll=new UiScrollable(new UiSelector().scrollable(true));scroll.scrollTextIntoView("Left side deck");
+                UiScrollable scroll=new UiScrollable(new UiSelector().scrollable(true));scroll.scrollIntoView(new UiSelector().description("Sampler & Cue Decks"));device.findObject(By.desc("Sampler & Cue Decks")).click();scroll.scrollTextIntoView("Left side deck");
                 // Choose Sampler mode through the view tree, without touching transport state.
                 scenario.onActivity(a->{DjEngine engine=PlaybackService.dj();assertNotNull(engine);engine.mode(0,false);if(engine.collapsed[0])engine.collapse(0);});
                 // Rebuild this module so persisted panel mode is reflected in its views.
                 scenario.onActivity(a->a.onNewIntent(new Intent(a,MainActivity.class).putExtra("module","AMP DJ")));
-                scroll=new UiScrollable(new UiSelector().scrollable(true));scroll.scrollIntoView(new UiSelector().description("Left pad 1"));UiObject pad=new UiObject(new UiSelector().description("Left pad 1"));assertTrue(pad.exists());scenario.onActivity(a->{android.view.View view=find(a.getWindow().getDecorView(),"Left pad 1");assertNotNull(view);assertEquals("Sampler pad must be square",view.getWidth(),view.getHeight());});
+                scroll=new UiScrollable(new UiSelector().scrollable(true));scroll.scrollIntoView(new UiSelector().description("Sampler & Cue Decks"));device.findObject(By.desc("Sampler & Cue Decks")).click();scroll.scrollIntoView(new UiSelector().description("Left pad 1"));UiObject pad=new UiObject(new UiSelector().description("Left pad 1"));assertTrue(pad.exists());scenario.onActivity(a->{android.view.View view=find(a.getWindow().getDecorView(),"Left pad 1");assertNotNull(view);assertEquals("Sampler pad must be square",view.getWidth(),view.getHeight());});
                 assertTrue(scroll.scrollIntoView(new UiSelector().description("Search DJ music")));
             }
         }}finally{prefs.edit().putString("theme",original).commit();}
