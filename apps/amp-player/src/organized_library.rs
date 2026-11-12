@@ -569,26 +569,36 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
             .and_then(|i| self.library.as_ref()?.tracks.get(i))
             .cloned();
         let prepare_height = (height * 0.4).clamp(150., 300.);
-        skin::panel(ui, false, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("inline-prepare-panel")
-                .max_height(prepare_height)
-                .show(ui, |ui| {
-                    if let Some(track) = track.as_ref() {
-                        self.lookup.cover(ui, &self.root, track);
-                        if ui.button("Find tags / album artwork...").clicked() {
-                            self.library_page = 9;
-                            self.lookup.query.clear();
-                        }
-                    }
-                    self.preparer.prepare_panel(
-                        ui,
-                        &self.root,
-                        track.as_ref(),
-                        self.library.as_mut(),
-                    );
+        let preparation = egui::CollapsingHeader::new("Prepare selected song")
+            .id_salt("library-selected-preparation")
+            .default_open(height >= 400.)
+            .show(ui, |ui| {
+                skin::panel(ui, false, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("inline-prepare-panel")
+                        .max_height(prepare_height)
+                        .show(ui, |ui| {
+                            if let Some(track) = track.as_ref() {
+                                self.lookup.cover(ui, &self.root, track);
+                                if ui.button("Find tags / album artwork...").clicked() {
+                                    self.library_page = 9;
+                                    self.lookup.query.clear();
+                                }
+                            }
+                            self.preparer.prepare_panel(
+                                ui,
+                                &self.root,
+                                track.as_ref(),
+                                self.library.as_mut(),
+                            );
+                        });
                 });
-        });
+            });
+        let preparation_used = preparation.header_response.rect.height()
+            + preparation
+                .body_response
+                .as_ref()
+                .map_or(0., |response| response.rect.height());
         if let Some((path, section)) = self.preparer.mix_section.take()
             && let Some(t) = self
                 .library
@@ -607,7 +617,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 self.dj_open = true;
             }
         }
-        let height = (height - prepare_height - 24.).max(180.);
+        let height = (height - preparation_used - 12.).max(180.);
         ui.horizontal(|ui| {
             let (search_icon, _) =
                 ui.allocate_exact_size(egui::vec2(24., 24.), egui::Sense::hover());
@@ -672,6 +682,7 @@ if ui.checkbox(&mut included, "").changed() {
 }
 let row = ui.add_sized([title_width,24.],egui::Button::selectable(self.selected==Some(index), &track.title).truncate());
 let row = row.interact(egui::Sense::click_and_drag());
+#[cfg(test)]if position==0 {ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique("library-first-track"),row.rect));}
 dragdrop::source(&row, amp_core::music_sources::audio_path(&self.root, &track.path));
 if row.clicked() {
     self.selected = Some(index);
@@ -960,6 +971,40 @@ mod tests {
         assert!(enabled);
         assert!(button.min.y >= 0. && button.max.y < 460.);
         assert!(status.max.y <= 460., "status clipped at {status:?}");
+    }
+    #[test]
+    fn short_library_starts_with_a_visible_song_list_and_optional_preparation() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Song.mp3"), b"fixture").unwrap();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800., 460.),
+                )),
+                ..Default::default()
+            },
+            |ui| player.library_ui(ui),
+        );
+        output.textures_delta.clear();
+        let row = ctx.data(|data| {
+            data.get_temp::<egui::Rect>(egui::Id::unique("library-first-track"))
+                .unwrap()
+        });
+        let footer = ctx.data(|data| {
+            data.get_temp::<egui::Rect>(egui::Id::unique("library-workflow-status"))
+                .unwrap()
+        });
+        assert!(
+            row.min.y >= 0. && row.max.y < footer.min.y,
+            "song row hidden: {row:?}, footer {footer:?}"
+        );
     }
     #[test]
     fn named_playlist_creation_preserves_queue_and_avoids_file_naming_and_overwrite_traps() {
