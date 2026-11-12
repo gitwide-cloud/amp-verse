@@ -29,7 +29,9 @@ pub fn analyze(
     relative: &Path,
     draft: Option<&Preparation>,
 ) -> Result<Option<Preparation>, String> {
-    analyze_with(path(), root, relative, draft)
+    let (owner, path_in_source) =
+        amp_core::music_sources::owner(root, relative).map_err(|e| e.to_string())?;
+    analyze_with(path(), &owner, &path_in_source, draft)
 }
 fn analyze_with(
     executable: Option<PathBuf>,

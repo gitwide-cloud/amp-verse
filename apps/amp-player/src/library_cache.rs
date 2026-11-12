@@ -11,6 +11,8 @@ pub struct Snapshot {
     version: u32,
     root: PathBuf,
     pub library: Library,
+    #[serde(default)]
+    pub sources: Vec<amp_core::music_sources::Source>,
     pub settings: Option<amp_core::show::Settings>,
     pub playlists: Vec<(PathBuf, Playlist)>,
 }
@@ -37,6 +39,7 @@ pub fn scan(root: &Path) -> Result<Snapshot, String> {
         version: 1,
         root: root.into(),
         library,
+        sources: amp_core::music_sources::list(root)?,
         settings,
         playlists,
     })

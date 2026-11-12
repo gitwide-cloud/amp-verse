@@ -177,8 +177,7 @@ pub fn edit(
     current.schema_version = Some(1);
     preparation::save_if_unchanged(
         root,
-        path.strip_prefix(root)
-            .map_err(|_| "Track is outside the library")?,
+        &amp_core::relative_folder(path, root).ok_or("Track is outside the library")?,
         &current,
         revision.as_deref(),
     )?;

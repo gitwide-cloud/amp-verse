@@ -316,7 +316,7 @@ impl Editor {
                     if let Some(relative)=library_folder_picker(ui,&lib.tree,p.folders.first()){
                         add_indexed_folder(p,relative.clone());
                         self.refresh_sources=true;
-                        self.source_labels.insert(p.id.clone(),format!("Folder: {}",root.join(&relative).display()));
+                        self.source_labels.insert(p.id.clone(),format!("Folder: {}",amp_core::music_sources::audio_path(root,&relative).display()));
                         self.status="Folder added with all subfolders. Existing sources kept. Save Playlist to apply.".into();
                     }
                 }
@@ -583,7 +583,7 @@ impl Editor {
                 });
                 if !self.preview_order.is_empty() {
                     ui.separator(); ui.strong("Mix preview · suggested order");
-                    for (index,title) in self.preview_order.iter().enumerate() { let row=ui.add(egui::Label::new(format!("{}. {title}",index+1)).truncate().sense(egui::Sense::click_and_drag()));if let Some(path)=self.preview_paths.get(index){crate::dragdrop::source(&row,root.join(path));} }
+                    for (index,title) in self.preview_order.iter().enumerate() { let row=ui.add(egui::Label::new(format!("{}. {title}",index+1)).truncate().sense(egui::Sense::click_and_drag()));if let Some(path)=self.preview_paths.get(index){crate::dragdrop::source(&row,amp_core::music_sources::audio_path(root,path));} }
                     if ui.add_enabled(!self.audition_blocked,egui::Button::new("Audition first track")).on_hover_text("Available when player, DJ, sampler and Auto Mix are stopped").clicked() && let Some(lib)=library && let Some(index)=preview_mix(p,lib).first().copied() {
                         self.preview=Some((lib.tracks[index].path.clone(),lib.tracks[index].preparation.cue_in));
                     }
@@ -768,7 +768,11 @@ fn source_folder_tree(
     selected: Option<&std::path::PathBuf>,
     choice: &mut Option<std::path::PathBuf>,
 ) {
-    let label = format!("{} · {} songs", folder.name, folder_total(folder));
+    let label = format!(
+        "{} · {} songs",
+        amp_core::music_sources::display_name(&folder.name),
+        folder_total(folder)
+    );
     let same = selected
         .is_some_and(|p| amp_core::folder_contains(p, path) && amp_core::folder_contains(path, p));
     let header = egui::collapsing_header::CollapsingState::load_with_default_open(

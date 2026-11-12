@@ -205,6 +205,10 @@ fn save_record(
     expected: Option<Option<&[u8]>>,
     lease: Option<&crate::coordination::Lease>,
 ) -> Result<(), String> {
+    let (owner, path) = crate::music_sources::owner(root, relative).map_err(|e| e.to_string())?;
+    if owner != root.canonicalize().map_err(|e| e.to_string())? {
+        return save_record(&owner, &path, p, expected, lease);
+    }
     crate::storage::enroll(root)?;
     let _migration = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-migration"))?;
     p.validate()?;

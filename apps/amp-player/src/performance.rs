@@ -686,7 +686,10 @@ impl Player {
                         .zip(next.preparation.bpm)
                         .map_or(1., |(a, b)| a * rate / b);
                     crate::mashup::compatible(&out.preparation, &next.preparation, rate, in_rate)
-                        && crate::stems::ready(&self.root.join(&next.path)).is_some()
+                        && crate::stems::ready(&amp_core::music_sources::audio_path(
+                            &self.root, &next.path,
+                        ))
+                        .is_some()
                 }) {
                     index = best;
                 }

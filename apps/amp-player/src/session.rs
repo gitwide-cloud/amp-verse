@@ -349,7 +349,7 @@ impl Player {
                         .as_ref()?
                         .tracks
                         .get(*i)
-                        .map(|t| self.root.join(&t.path))
+                        .map(|t| amp_core::music_sources::audio_path(&self.root, &t.path))
                 })
                 .collect(),
             playlist: self.playlist_snapshot.clone(),
@@ -489,17 +489,16 @@ impl Player {
                 }
             }
         }
-        self.queue = snapshot
-            .queue
-            .iter()
-            .filter_map(|path| {
-                self.library
-                    .as_ref()?
-                    .tracks
-                    .iter()
-                    .position(|t| self.root.join(&t.path) == *path)
-            })
-            .collect();
+        self.queue =
+            snapshot
+                .queue
+                .iter()
+                .filter_map(|path| {
+                    self.library.as_ref()?.tracks.iter().position(|t| {
+                        amp_core::music_sources::audio_path(&self.root, &t.path) == *path
+                    })
+                })
+                .collect();
         let missing = snapshot.queue.len() - self.queue.len();
         self.playlist_snapshot = snapshot.playlist.clone();
         self.run.playlist = snapshot.playlist_id.clone();

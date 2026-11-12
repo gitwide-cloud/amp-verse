@@ -50,8 +50,7 @@ impl Player {
                     2 => self.organized_playlists(ui,height),
                     3 => {egui::ScrollArea::vertical().max_height(height-50.).show(ui,|ui| {self.controllers.show(ui);ui.separator();ui.heading("AMP Cast devices");self.cast.show(ui, &self.root, self.library.is_some() && self.scan.is_none());});},
                     4 => {ui.heading("Playback history");ui.weak("Tracks started by this desktop session. A start does not mean the full track was played.");egui::ScrollArea::vertical().max_height(height-80.).show(ui,|ui|{for (deck,title) in self.playback_history.iter().rev(){ui.label(format!("Deck {}    {title}",deck+1));}if self.playback_history.is_empty(){ui.weak("Play a song to begin your session history.");}});},
-                    5 => {ui.heading("Music sources");ui.label("Local folders and mounted network libraries");ui.label(self.root.display().to_string());ui.horizontal(|ui|{if ui.button("Browse music folder").clicked(){self.choose_folder();}
-if ui.add_enabled(self.scan.is_none(),egui::Button::new("Rescan")).clicked(){self.scan();}});ui.separator();ui.heading("Remote control");ui.label(&self.control_status);ui.label("Listen address");ui.text_edit_singleline(&mut self.control_bind);ui.label("Optional password");ui.add(egui::TextEdit::singleline(&mut self.control_password).password(true));ui.horizontal(|ui|{if ui.button("Start / restart control").clicked(){self.start_control(ui.ctx());}
+                    5 => {ui.heading("Music sources");ui.label("Local folders and mounted network libraries");self.music_source_controls(ui);ui.separator();ui.heading("Remote control");ui.label(&self.control_status);ui.label("Listen address");ui.text_edit_singleline(&mut self.control_bind);ui.label("Optional password");ui.add(egui::TextEdit::singleline(&mut self.control_password).password(true));ui.horizontal(|ui|{if ui.button("Start / restart control").clicked(){self.start_control(ui.ctx());}
 if ui.button("Stop control").clicked(){self.control=None;self.control_restart=None;self.control_status="Control stopped".into();}});theme::selector(ui);},
                     7 => self.library_equalizer(ui),
                     _ => self.organized_analysis(ui),
@@ -72,6 +71,75 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
         });
         ui.add(egui::Label::new(&self.status).truncate())
             .on_hover_text(&self.status);
+    }
+    fn add_music_source(&mut self, folder: PathBuf) {
+        if self.root.as_os_str().is_empty() {
+            self.connect_music_root(folder);
+            return;
+        }
+        match amp_core::music_sources::add(&self.root, &folder) {
+            Ok(sources) => {
+                self.source_roots = sources;
+                self.scan = None;
+                self.scan();
+                self.status="Music source added. Existing songs stay available while new folders scan in the background.".into();
+            }
+            Err(error) => self.status = error,
+        }
+    }
+    fn music_source_controls(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Main library");
+        ui.label(self.root.display().to_string());
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Add music folder…").clicked()
+                && let Some(folder) = rfd::FileDialog::new()
+                    .set_title("Add another music source (includes subfolders)")
+                    .pick_folder()
+            {
+                self.add_music_source(folder);
+            }
+            if ui
+                .add_enabled(self.scan.is_none(), egui::Button::new("Rescan all sources"))
+                .clicked()
+            {
+                self.scan();
+            }
+            if ui.button("Change main library…").clicked() {
+                self.choose_folder();
+            }
+        });
+        ui.weak("Added folders are combined with the main library. Music files stay in their original locations.");
+        let mut remove = None;
+        egui::ScrollArea::vertical()
+            .id_salt("additional-music-sources")
+            .max_height(180.)
+            .show(ui, |ui| {
+                for source in &self.source_roots {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(source.root.display().to_string());
+                        if ui.small_button("Remove source").clicked() {
+                            remove = Some(source.id.clone());
+                        }
+                    });
+                }
+            });
+        if let Some(id) = remove {
+            match amp_core::music_sources::remove(&self.root, &id) {
+                Ok(sources) => {
+                    self.source_roots = sources;
+                    self.scan = None;
+                    self.scan();
+                    self.status =
+                        "Source removed from this library. Audio and preparation files were kept."
+                            .into();
+                }
+                Err(error) => self.status = error,
+            }
+        }
+        if self.scan.is_some() {
+            ui.label("Scanning sources in the background…");
+        }
+        ui.label(&self.status);
     }
     fn organized_smart(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.heading("Smart Playlists");
@@ -568,7 +636,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                                                 &track.title,
                                             );
                                             let row = row.interact(egui::Sense::click_and_drag());
-                                            dragdrop::source(&row, self.root.join(&track.path));
+                                            dragdrop::source(&row, amp_core::music_sources::audio_path(&self.root, &track.path));
                                             if row.clicked() {
                                                 self.selected = Some(index);
                                             }
@@ -776,7 +844,10 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                                     .truncate()
                                     .sense(egui::Sense::click_and_drag()),
                                 );
-                                dragdrop::source(&response, self.root.join(&track.path));
+                                dragdrop::source(
+                                    &response,
+                                    amp_core::music_sources::audio_path(&self.root, &track.path),
+                                );
                                 if response.clicked() {
                                     self.queue_selected = Some(row);
                                 }

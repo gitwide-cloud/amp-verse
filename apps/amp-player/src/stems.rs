@@ -448,7 +448,12 @@ impl Panel {
         {
             let sources: Vec<_> = tracks
                 .iter()
-                .map(|t| (root.join(&t.path), t.title.clone()))
+                .map(|t| {
+                    (
+                        amp_core::music_sources::audio_path(root, &t.path),
+                        t.title.clone(),
+                    )
+                })
                 .collect();
             self.batch_progress = (0, sources.len());
             let cancel = Arc::new(AtomicBool::new(false));

@@ -121,6 +121,7 @@ struct Player {
     recovery: session::Recovery,
     root: PathBuf,
     library: Option<Library>,
+    source_roots: Vec<amp_core::music_sources::Source>,
     scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
     last_scan: std::time::Instant,
     selected: Option<usize>,
@@ -212,6 +213,7 @@ impl Default for Player {
                 })
                 .unwrap_or_default(),
             library: None,
+            source_roots: Vec::new(),
             scan: None,
             last_scan: std::time::Instant::now(),
             selected: None,
@@ -418,6 +420,7 @@ impl Player {
         });
     }
     fn accept_scan(&mut self, snapshot: library_cache::Snapshot) {
+        self.source_roots = snapshot.sources;
         self.accept_library_scan(snapshot.library);
         if let Some(settings) = snapshot.settings {
             self.run.settings = settings;
@@ -926,6 +929,7 @@ impl Player {
         self.queue.clear();
         self.queue_selected = None;
         self.library = None;
+        self.source_roots.clear();
         self.show_editor.open = false;
         self.scan = None; // Discard any previous root's in-flight result.
         self.root = root;
@@ -1068,7 +1072,7 @@ impl Player {
     }
     fn folder_tree(ui: &mut egui::Ui, folder: &Folder, path: &Path, selected: &mut PathBuf) {
         let mut label = egui::text::LayoutJob::simple_singleline(
-            folder.name.clone(),
+            amp_core::music_sources::display_name(&folder.name).to_owned(),
             egui::TextStyle::Body.resolve(ui.style()),
             skin::accent(ui),
         );
@@ -2385,7 +2389,8 @@ impl Player {
                     .as_ref()
                     .and_then(|library| library.tracks.get(index))
                     .ok_or("Track unavailable")?;
-                self.sides[side].load(self.root.join(&track.path))?;
+                self.sides[side]
+                    .load(amp_core::music_sources::audio_path(&self.root, &track.path))?;
             }
             side_deck::Operation::Play => self.sides[side].play()?,
             side_deck::Operation::Pause => self.sides[side].pause(),
@@ -2479,7 +2484,7 @@ impl Player {
             .load(deck, &root, &track, false)?;
         self.cancel_deck_automation(deck);
         self.auto = false;
-        self.loaded[deck] = path.strip_prefix(&self.root).ok().and_then(|relative| {
+        self.loaded[deck] = amp_core::relative_folder(&path, &self.root).and_then(|relative| {
             self.library
                 .as_ref()?
                 .tracks
@@ -3181,6 +3186,10 @@ impl eframe::App for Player {
             "library" | "preparation" => self.library_ui(ui),
             "playlists" => {
                 self.library_page = 2;
+                self.library_ui(ui);
+            }
+            "sources" => {
+                self.library_page = 5;
                 self.library_ui(ui);
             }
             "analysis" => {

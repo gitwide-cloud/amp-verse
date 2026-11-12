@@ -10,6 +10,7 @@ pub mod energy_profile;
 pub mod engine_api;
 pub mod genres;
 pub mod mix_schedule;
+pub mod music_sources;
 pub mod offline;
 pub mod preparation;
 pub mod review;
@@ -103,6 +104,11 @@ pub fn sidecar(path: &Path) -> PathBuf {
 }
 
 pub fn scan(root: &Path) -> io::Result<Library> {
+    let mut library = scan_single(root)?;
+    music_sources::append(root, &mut library)?;
+    Ok(library)
+}
+fn scan_single(root: &Path) -> io::Result<Library> {
     let root = root.canonicalize()?;
     storage::register(&root);
     let mut tracks = Vec::new();
@@ -198,7 +204,7 @@ pub fn folder_contains(path: &Path, folder: &Path) -> bool {
 /// Return the original spelling of the relative portion, without substring-prefix matches.
 pub fn relative_folder(path: &Path, root: &Path) -> Option<PathBuf> {
     if !folder_contains(path, root) {
-        return None;
+        return music_sources::relative(root, path);
     }
     Some(path.components().skip(root.components().count()).collect())
 }
@@ -212,7 +218,7 @@ pub fn resolve(root: &Path, relative: &Path) -> io::Result<PathBuf> {
     {
         return Err(io::Error::other("Expected a relative library path"));
     }
-    let root = root.canonicalize()?;
+    let (root, relative) = music_sources::owner(root, relative)?;
     let file = root.join(relative).canonicalize()?;
     if !file.starts_with(root) || !file.is_file() {
         return Err(io::Error::other("Track outside library"));

@@ -474,10 +474,20 @@ impl Preparer {
         if self.busy() {
             return;
         }
-        self.root = root.to_path_buf();
-        self.path = track.path.clone();
+        let (owner, relative) = match amp_core::music_sources::owner(root, &track.path) {
+            Ok(value) => value,
+            Err(error) => {
+                self.status = error.to_string();
+                return;
+            }
+        };
+        self.root = owner;
+        self.path = relative;
         self.title = track.title.clone();
-        match preparation::load_with_revision(&root.join(&track.path)) {
+        match preparation::load_with_revision(&amp_core::music_sources::audio_path(
+            root,
+            &track.path,
+        )) {
             Ok((p, revision)) => {
                 self.draft = p;
                 self.editing_revision = revision;
@@ -490,7 +500,7 @@ impl Preparer {
         if let Some(title) = self.draft.extensions.get("title").and_then(|v| v.as_str()) {
             self.title = title.into();
         }
-        self.library_id = amp_core::coordination::library_id(root).unwrap_or_default();
+        self.library_id = amp_core::coordination::library_id(&self.root).unwrap_or_default();
         self.review_selected.clear();
         self.open = true;
     }
@@ -530,7 +540,7 @@ impl Preparer {
                     Ok(Some(p)) => Ok(p),
                     Ok(None) => {
                         skipped = true;
-                        preparation::load(&root.join(&track.path))
+                        preparation::load(&amp_core::music_sources::audio_path(&root, &track.path))
                     }
                     Err(e) => Err(e),
                 };
@@ -629,7 +639,7 @@ impl Preparer {
             if ui.button("Analyze track").clicked(){self.total=1;self.done=0;self.failures=0;let track=Track{path:self.path.clone(),title:self.title.clone(),preparation:self.draft.clone()};self.status="Analyzing decoded audio...".into();self.start(self.root.clone(),vec![track],true);}
             if ui.button("Save approved metadata").clicked(){
 self.draft.schema_version=Some(1);self.draft.manual_override=true;if let Some(a)=&mut self.draft.analysis{a.reviewed=true;}match preparation::save_if_unchanged(&self.root,&self.path,&self.draft,self.editing_revision.as_deref()){Ok(())=>{if let Ok(fresh)=preparation::load(&self.root.join(&self.path)){self.draft=fresh;}
-if self.root==root&&let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|t.path==self.path){t.preparation=self.draft.clone();if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.editing_revision=preparation::revision(&self.root.join(&self.path));self.status="Approved metadata saved in ampdj. Original audio unchanged.".into();},Err(e)=>{
+if let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|amp_core::music_sources::audio_path(root,&t.path)==self.root.join(&self.path)){t.preparation=self.draft.clone();if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.editing_revision=preparation::revision(&self.root.join(&self.path));self.status="Approved metadata saved in ampdj. Original audio unchanged.".into();},Err(e)=>{
 let queued=(||{let base=if let Some(bytes)=&self.editing_revision{serde_json::from_slice(bytes).map_err(|e:serde_json::Error|e.to_string())?}else{Preparation::default()};amp_core::offline::Edit::new(self.library_id.clone(),self.path.clone(),base,self.draft.clone())?.queue()})();
 self.status=match queued{Ok(path)=>format!("{e}. Draft kept locally at {}. Reconnection will not publish it automatically.",path.display()),Err(_)=>format!("{e}. Unsaved draft remains open; local queue unavailable.")};}}}
         });});

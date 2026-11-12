@@ -285,7 +285,7 @@ impl Player {
                                         .truncate().sense(egui::Sense::click_and_drag()),
                                     )
 ;
-                                crate::dragdrop::source(&row,self.root.join(&t.path));
+                                crate::dragdrop::source(&row,amp_core::music_sources::audio_path(&self.root, &t.path));
                                 if row.clicked() {self.selected=Some(i);}
                                 row.context_menu(|ui| { ui.label("Request in this live Smart Playlist"); for within in 1..=5 { if ui.button(format!("Play within {within} songs")).clicked() { request=Some((amp_core::show::song_id(t),within));ui.close(); } } });
                                 if row.double_clicked() {load=Some((self.dj_browser.destination,i));}
@@ -414,7 +414,7 @@ impl Player {
                 .as_ref()
                 .and_then(|library| library.tracks.get(index))
             {
-                let path = self.root.join(&track.path);
+                let path = amp_core::music_sources::audio_path(&self.root, &track.path);
                 if let Err(error) = self.safe_load_path(self.rack.live[deck], path, None) {
                     self.status = error;
                 }
