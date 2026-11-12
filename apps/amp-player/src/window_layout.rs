@@ -1,13 +1,5 @@
 //! Explicit window merges, independent of geometric edge snapping.
 use eframe::egui::{self, ViewportId};
-pub const NAMES: [&str; 6] = [
-    "AMP Verse",
-    "AMP Library",
-    "AMP DJ",
-    "AMP Lab",
-    "AMP Cast",
-    "Plugin Manager",
-];
 pub fn viewport(pane: usize) -> ViewportId {
     if pane == 0 {
         ViewportId::ROOT

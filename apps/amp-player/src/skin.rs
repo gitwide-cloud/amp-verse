@@ -267,11 +267,7 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
         }
     } else if center_right - center_left > 140. {
         let mid = (center_left + center_right) / 2.;
-        let label = if title == "AMP VERSE" {
-            "PLAYER"
-        } else {
-            title
-        };
+        let label = "AMP Verse";
         let text_width = label.len() as f32 * 9.;
         if theme == crate::theme::Theme::Classic {
             for y in [14., 19., 24.] {

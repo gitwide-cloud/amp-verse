@@ -3224,7 +3224,7 @@ impl eframe::App for Player {
             ctx.show_viewport_immediate(
                 window_layout::viewport(pane),
                 egui::ViewportBuilder::default()
-                    .with_title(window_layout::NAMES[pane])
+                    .with_title("AMP Verse")
                     .with_decorations(false)
                     .with_icon(app_icon())
                     .with_inner_size(size)
@@ -3310,7 +3310,7 @@ fn main() -> eframe::Result {
         size = [w, h];
     }
     eframe::run_native(
-        "AMP VERSE",
+        "AMP Verse",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_decorations(false)
