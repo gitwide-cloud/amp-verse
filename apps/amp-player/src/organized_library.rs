@@ -1,6 +1,18 @@
 use super::*;
 impl Player {
     pub(super) fn library_ui(&mut self, ui: &mut egui::Ui) {
+        let blocked = self.run.auto
+            || self.auto
+            || self.run.locked
+            || self.auxiliary_playing()
+            || self
+                .audio
+                .as_ref()
+                .is_some_and(|a| (0..6).any(|d| a.playing(d)))
+            || self.preparer.busy()
+            || self.stem_panel.busy()
+            || self.lab_open;
+
         if theme::current(ui.ctx()) != theme::Theme::Classic {
             let style = ui.style_mut();
             style
@@ -31,10 +43,17 @@ impl Player {
             theme::current(ui.ctx()).palette().background,
         );
         self.header(ui, "AMP Library", false);
+        if ui
+            .button("Find duplicates / Consolidate library…")
+            .clicked()
+        {
+            self.library_page = 8;
+        }
+
         let height = (ui.available_height() - 64.).max(350.);
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(176.,height - 70.),egui::Layout::top_down(egui::Align::Min),|ui| {
-                for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(7,icons::Icon::Analyze,"Equalizer")] {
+                for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(7,icons::Icon::Analyze,"Equalizer"),(8,icons::Icon::Folder,"Organise library")] {
                     if icons::button(ui,icon,title,self.library_page==page,egui::vec2(172.,46.)).clicked(){self.library_page=page;}
                 }
                 ui.add_space(20.);ui.separator();
@@ -53,6 +72,10 @@ impl Player {
                     5 => {ui.heading("Music sources");ui.label("Local folders and mounted network libraries");self.music_source_controls(ui);ui.separator();ui.heading("Remote control");ui.label(&self.control_status);ui.label("Listen address");ui.text_edit_singleline(&mut self.control_bind);ui.label("Optional password");ui.add(egui::TextEdit::singleline(&mut self.control_password).password(true));ui.horizontal(|ui|{if ui.button("Start / restart control").clicked(){self.start_control(ui.ctx());}
 if ui.button("Stop control").clicked(){self.control=None;self.control_restart=None;self.control_status="Control stopped".into();}});theme::selector(ui);},
                     7 => self.library_equalizer(ui),
+                    8 => {
+                        let audio=&mut self.audio;
+                        if let Some(destination)=self.organizer.show(ui,&self.root,blocked,||{if let Some(audio)=audio {for d in 0..6 {audio.stop(d);}}}) {self.connect_music_root(destination);}
+                    },
                     _ => self.organized_analysis(ui),
                 }
             });

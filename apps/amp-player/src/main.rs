@@ -26,6 +26,7 @@ mod lab;
 mod lab_editor;
 mod lab_youtube;
 mod library_cache;
+mod library_organizer;
 mod live_mix;
 mod mashup;
 mod mix_schedule;
@@ -123,6 +124,7 @@ struct Player {
     root: PathBuf,
     library: Option<Library>,
     source_roots: Vec<amp_core::music_sources::Source>,
+    organizer: library_organizer::Organizer,
     scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
     last_scan: std::time::Instant,
     selected: Option<usize>,
@@ -215,6 +217,7 @@ impl Default for Player {
                 .unwrap_or_default(),
             library: None,
             source_roots: Vec::new(),
+            organizer: Default::default(),
             scan: None,
             last_scan: std::time::Instant::now(),
             selected: None,
@@ -3127,6 +3130,13 @@ impl eframe::App for Player {
         self.checkpoint(true);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        if self.organizer.moving() {
+            if let Some(destination) = self.organizer.show(ui, &self.root, false, || {}) {
+                self.connect_music_root(destination);
+            }
+            return;
+        }
+
         if !self.control_attempted && self.screenshot_view.is_empty() {
             self.control_attempted = true;
             if std::env::var_os("AMP_CONTROL_DISABLE").is_none() {
@@ -3193,6 +3203,10 @@ impl eframe::App for Player {
             "library" | "preparation" => self.library_ui(ui),
             "playlists" => {
                 self.library_page = 2;
+                self.library_ui(ui);
+            }
+            "organizer" => {
+                self.library_page = 8;
                 self.library_ui(ui);
             }
             "sources" => {

@@ -4,6 +4,7 @@ pub mod analysis;
 pub mod arrangement;
 pub mod batch;
 pub mod catalog_db;
+pub mod consolidate;
 pub mod coordination;
 pub mod discovery;
 pub mod energy_profile;

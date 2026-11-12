@@ -95,6 +95,28 @@ fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 3]> {
 pub fn ready(source: &Path) -> Option<[PathBuf; 3]> {
     ready_in(&cache_root()?, source)
 }
+pub(super) fn relocate_cached(source: &Path, destination: &Path) -> Result<(), String> {
+    let Some(cache) = cache_root() else {
+        return Ok(());
+    };
+    if ready_in(&cache, source).is_none() {
+        return Ok(());
+    }
+    // This branch only archives existing prepared audio; it never starts separation.
+    prepare(
+        &cache,
+        source,
+        Path::new(""),
+        &AtomicBool::new(false),
+        &Arc::new(Mutex::new(None)),
+    )?;
+    if !restore_cached(&cache, destination)? {
+        return Err(
+            "Prepared stems could not be restored at the new location; original retained.".into(),
+        );
+    }
+    Ok(())
+}
 fn restore_cached(cache: &Path, source: &Path) -> Result<bool, String> {
     let archive = cache.join("stems.ampdb");
     if !archive.is_file() {
