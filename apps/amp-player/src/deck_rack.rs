@@ -504,7 +504,10 @@ impl Player {
                         });
                         ui.add(egui::Label::new(self.title(d)).truncate());
                         let track=self.loaded_snapshot[d].as_ref().or_else(||self.loaded[d].and_then(|i|self.library.as_ref()?.tracks.get(i)));
-                        self.waveforms[d].thumbnail(ui,self.loaded_origin[d].as_deref().unwrap_or(&self.root),track,self.audio.as_ref().map_or(0.,|a|a.source_position(d)),accent(d), ((height - 16.) / 3. - if compact { 68. } else { 130. }).clamp(26., 140.));
+                        if let Some(at) = self.waveforms[d].thumbnail(ui,self.loaded_origin[d].as_deref().unwrap_or(&self.root),track,self.audio.as_ref().map_or(0.,|a|a.source_position(d)),accent(d), ((height - 16.) / 3. - if compact { 68. } else { 130. }).clamp(26., 140.)) {
+                            ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique(("section-target", d)), at));
+                            self.select_deck_section(d,at);
+                        }
                         if !compact {
                         ui.horizontal(|ui| {
                             if ui.small_button("LOOP").on_hover_text("Toggle a four-beat loop on this deck").clicked() { self.rack_loop(d); }
@@ -999,6 +1002,50 @@ mod tests {
             assert!(!audio.playing(deck));
         }
         assert!(player.auto && player.run.auto);
+        assert_eq!(player.pair(), [0, 1]);
+        for deck in 2..6 {
+            player.select_deck_section(deck, 8.);
+            assert!(
+                player.status.contains("Section selected"),
+                "{}",
+                player.status
+            );
+            assert!(player.auto && player.run.auto);
+            assert!(player.run.preloaded.is_none());
+            assert_eq!(
+                player.loaded_snapshot[deck]
+                    .as_ref()
+                    .unwrap()
+                    .preparation
+                    .cue_in,
+                0.
+            );
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        assert!(player.audio.as_ref().unwrap().playing(0));
+        player.fade_seconds = 0.1;
+        player.run.transitions.timing = crate::mix_schedule::Timing::Immediate;
+        player.audio.as_ref().unwrap().toggle(2);
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        player.select_deck_section(2, 12.);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        loop {
+            let audio = player.audio.as_mut().unwrap();
+            audio.sample_maintenance();
+            if audio.source_position(2) >= 12. && audio.controls.section_state[2].load(Relaxed) == 0
+            {
+                break;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Section jump timed out: {}",
+                player.status
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        assert!(player.audio.as_ref().unwrap().source_position(2) >= 12.);
+        assert!(player.audio.as_ref().unwrap().playing(0));
+        assert!(player.run.auto && player.auto);
         assert_eq!(player.pair(), [0, 1]);
         let ctx = egui::Context::default();
         let mut previous = None;

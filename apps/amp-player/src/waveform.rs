@@ -185,15 +185,106 @@ impl Lane {
         position: f64,
         accent: egui::Color32,
         height: f32,
-    ) {
+    ) -> Option<f64> {
         self.prepare(ui, root, track);
-        let (rect, _) = ui.allocate_exact_size(
+        let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width().max(1.), height.max(1.)),
-            egui::Sense::hover(),
+            egui::Sense::click(),
         );
         let painter = ui.painter_at(rect);
+        let profile = track
+            .and_then(|t| amp_core::energy_profile::read(&t.preparation))
+            .filter(|p| p.duration > 0. && !p.sections.is_empty());
+        let mut choice = None;
+        if let (Some(profile), Some(track)) = (&profile, track) {
+            for (index, section) in profile.sections.iter().enumerate() {
+                let section_rect = egui::Rect::from_min_max(
+                    egui::pos2(
+                        rect.left() + (section.start / profile.duration) as f32 * rect.width(),
+                        rect.top(),
+                    ),
+                    egui::pos2(
+                        rect.left() + (section.end / profile.duration) as f32 * rect.width(),
+                        rect.bottom(),
+                    ),
+                )
+                .intersect(rect);
+                let allowed = section.start
+                    >= amp_core::energy_profile::entry_bound(&track.preparation)
+                    && track
+                        .preparation
+                        .cue_out
+                        .is_none_or(|out| section.start < out);
+                let current = position >= section.start && position < section.end;
+                let hovered = response
+                    .hover_pos()
+                    .is_some_and(|p| section_rect.contains(p));
+                let color = if allowed { accent } else { egui::Color32::GRAY };
+                painter.rect_filled(
+                    section_rect,
+                    1.,
+                    color.gamma_multiply(if current {
+                        0.28
+                    } else if hovered {
+                        0.2
+                    } else {
+                        0.08
+                    }),
+                );
+                painter.line_segment(
+                    [section_rect.left_top(), section_rect.left_bottom()],
+                    Stroke::new(1., color),
+                );
+                let band = egui::Rect::from_min_max(
+                    egui::pos2(section_rect.left(), (rect.bottom() - 14.).max(rect.top())),
+                    section_rect.right_bottom(),
+                );
+                painter.rect_filled(band, 0., color.gamma_multiply(0.5));
+                if section_rect.width() >= 16. {
+                    painter.text(
+                        band.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{}", index + 1),
+                        egui::FontId::monospace(10.),
+                        egui::Color32::WHITE,
+                    );
+                }
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(
+                        ui.scope_id().with(("thumbnail-section", index)),
+                        section_rect,
+                    )
+                });
+                if hovered {
+                    response.clone().on_hover_text(format!(
+                        "{} · {:.1}–{:.1}s · energy {:.0}/10\n{}",
+                        section.name,
+                        section.start,
+                        section.end,
+                        1. + section.energy * 9.,
+                        if allowed {
+                            "Click: prepare here when paused; queue a timed jump when playing."
+                        } else {
+                            "Outside protected cue bounds. Edit cues in Library to enable."
+                        }
+                    ));
+                    if allowed && response.clicked() {
+                        choice = Some(section.start);
+                    }
+                }
+            }
+        }
         let n = self.peaks.len();
         if n > 0 {
+            let graph = if profile.is_some() {
+                egui::Rect::from_min_max(
+                    rect.min,
+                    egui::pos2(rect.right(), (rect.bottom() - 14.).max(rect.top() + 1.)),
+                )
+            } else {
+                rect
+            };
             let count = (rect.width().max(1.) as usize).min(n);
             for x in 0..count {
                 let index = x * n / count;
@@ -201,8 +292,8 @@ impl Lane {
                 let px = rect.left() + x as f32 * rect.width() / count as f32;
                 painter.line_segment(
                     [
-                        egui::pos2(px, rect.center().y + -peak[0] * rect.height() * 0.45),
-                        egui::pos2(px, rect.center().y - peak[1] * rect.height() * 0.45),
+                        egui::pos2(px, graph.center().y + -peak[0] * graph.height() * 0.45),
+                        egui::pos2(px, graph.center().y - peak[1] * graph.height() * 0.45),
                     ],
                     egui::Stroke::new(1., accent),
                 );
@@ -214,6 +305,18 @@ impl Lane {
                 egui::Stroke::new(1., egui::Color32::WHITE),
             );
         }
+        if profile.is_none() && track.is_some() {
+            painter.text(
+                rect.left_bottom(),
+                egui::Align2::LEFT_BOTTOM,
+                "Analyze for sections",
+                egui::FontId::proportional(10.),
+                egui::Color32::GRAY,
+            );
+            response
+                .on_hover_text("Analyze this song in Library to enable clickable energy sections.");
+        }
+        choice
     }
     pub fn show(
         &mut self,
@@ -422,6 +525,59 @@ impl Drop for Lane {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn strip_sections_click_their_start_and_protect_manual_cue_bounds() {
+        for (section_index, expected) in [(0usize, None), (1, Some(10.))] {
+            let ctx = egui::Context::default();
+            let mut lane = Lane::default();
+            let mut track = amp_core::Track {
+                path: "missing.wav".into(),
+                title: "Sections".into(),
+                preparation: Default::default(),
+            };
+            track.preparation.cue_in = 5.;
+            track.preparation.manual_override = true;
+            track.preparation.extensions.insert("energy_profile".into(),serde_json::json!({"version":1,"duration":20.,"step":1.,"curve":[],"sections":[{"id":"intro","name":"Beginning","start":0.,"end":10.,"energy":0.3},{"id":"drop","name":"High energy","start":10.,"end":20.,"energy":0.9}]}));
+            let mut point = egui::Pos2::ZERO;
+            let mut chosen = None;
+            for frame in 0..4 {
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300., 100.),
+                    )),
+                    ..Default::default()
+                };
+                raw.events.push(egui::Event::PointerMoved(point));
+                if frame >= 2 {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: frame == 2,
+                        modifiers: Default::default(),
+                    });
+                }
+                let mut output = ctx.run_ui(raw, |ui| {
+                    if let Some(at) =
+                        lane.thumbnail(ui, Path::new(""), Some(&track), 6., Color32::YELLOW, 60.)
+                    {
+                        chosen = Some(at);
+                    }
+                    point = ui
+                        .ctx()
+                        .data(|data| {
+                            data.get_temp::<egui::Rect>(
+                                ui.scope_id().with(("thumbnail-section", section_index)),
+                            )
+                        })
+                        .unwrap()
+                        .center();
+                });
+                output.textures_delta.clear();
+            }
+            assert_eq!(chosen, expected);
+        }
+    }
     #[test]
     #[ignore = "requires ffmpeg and AMP_WAVEFORM_FIXTURE"]
     fn real_audio_has_silence_then_signal() {

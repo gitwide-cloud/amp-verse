@@ -121,7 +121,11 @@ impl Player {
             self.select_deck_section(deck, at);
         }
     }
-    fn select_deck_section(&mut self, deck: usize, at: f64) {
+    pub(super) fn select_deck_section(&mut self, deck: usize, at: f64) {
+        if deck >= 6 || !at.is_finite() {
+            self.status = "Choose a valid deck section".into();
+            return;
+        }
         let Some(mut track) = self.loaded_track(deck).cloned() else {
             return;
         };
@@ -136,8 +140,9 @@ impl Player {
         let root = self.loaded_origin[deck]
             .clone()
             .unwrap_or_else(|| self.root.clone());
+        let in_pair = self.pair().contains(&deck);
         let Some(audio) = &mut self.audio else { return };
-        if audio.fading() {
+        if in_pair && audio.fading() {
             self.status = "Finish or cancel the current crossfade before choosing a section".into();
             return;
         }
@@ -150,10 +155,14 @@ impl Player {
             audio.source_position(deck) - audio.position(deck),
             self.run.transitions.timing,
         );
-        self.run.cancel_effects(audio);
-        audio.set_fader(audio.fader());
-        self.run.cancel_automation();
-        self.auto = false;
+        if in_pair {
+            self.run.cancel_effects(audio);
+            audio.set_fader(audio.fader());
+            self.run.cancel_automation();
+        }
+        if deck == 0 {
+            self.auto = false;
+        }
         let result = if playing {
             audio.schedule_section(deck, &root, &track, grid, self.fade_seconds)
         } else {
@@ -163,6 +172,7 @@ impl Player {
             self.run.auto = was_auto;
         }
         if !playing
+            && in_pair
             && result.is_ok()
             && let Some(index) = self.loaded[deck]
         {

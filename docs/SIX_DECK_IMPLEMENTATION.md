@@ -62,3 +62,11 @@ Generated rhythmic WAV fixtures, paused transports, muted master, no simulated w
 
 
 The responsive/simplification follow-up is documented in [DJ UX audit](DJ_UX_AUDIT.md), including updated real screenshots and the short-window browser/readability regression.
+# Clickable sections in deck strips — November 12
+
+A1–A3 and B1–B3 waveform thumbnails display numbered, proportional energy-section blocks from the song's saved analysis. Hover for the section name, source time and energy. Click a block to prepare its start on a paused deck or queue a timed section handoff on a playing deck, using the existing beat/bar/phrase timing and crossfade duration. Current sections are highlighted; protected cue-bound entries are grey and cannot be selected. Unanalyzed songs show “Analyze for sections” instead of invented song structure. These are energy-derived sections, not guaranteed verse/chorus labels or an imported Flow session.
+
+Preparing or jumping an auxiliary deck does not cancel automation, change the active crossfade pair or set it as Auto DJ's preloaded song. Active-pair crossfades retain their existing section-selection guard. The operation does not write shared cues or analysis. The existing detailed section controls remain available on the main deck.
+
+Validation: 183 Player tests, strict Player Clippy, pointer-click/protected-bound tests, and a muted native check of paused section preparation on all four auxiliary decks plus a playing A2 jump while A1 and automation continued. Existing resizing checks still pass. User playback was left running; update is staged for the next normal restart.
+
