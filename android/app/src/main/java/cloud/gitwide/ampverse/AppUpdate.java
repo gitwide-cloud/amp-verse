@@ -37,6 +37,7 @@ final class AppUpdate {
         new Thread(()->{File partial=null;try{
             JSONObject release=json("https://api.github.com/repos/gitwide-cloud/amp-verse/releases/latest");String tag=release.getString("tag_name");
             if(!tag.matches("v?[0-9]{1,8}\\.[0-9]{1,8}\\.[0-9]{1,8}")||release.optBoolean("draft")||release.optBoolean("prerelease"))throw new IOException("No stable update is published");
+            if(ReleaseCheck.compare(tag,BuildConfig.VERSION_NAME)<=0){status="You have the latest Android update.";return;}
             String base=GITHUB+"/releases/download/"+tag+"/";JSONObject manifest=json(base+"amp-update.json");
             if(manifest.optInt("schema")!=1||ReleaseCheck.compare(manifest.getString("version"),tag)!=0)throw new IOException("Update manifest version mismatch");
             JSONObject p=manifest.getJSONObject("packages").getJSONObject("android-arm64");
@@ -69,6 +70,9 @@ final class AppUpdate {
     static void installPending(Activity activity){
         if(busy)return;SharedPreferences prefs=activity.getSharedPreferences("updates",0);if(!prefs.getBoolean("install",false))return;
         try{File apk=new File(prefs.getString("apk",""));File directory=new File(activity.getFilesDir(),"updates");if(!apk.getCanonicalPath().startsWith(directory.getCanonicalPath()+File.separator)||!apk.isFile())throw new IOException("Downloaded update is missing; tap Update to retry");
+            PackageInfo cached=activity.getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(),PackageManager.GET_SIGNING_CERTIFICATES);
+            if(cached==null)throw new IOException("Downloaded APK is invalid; tap Update to retry");
+            validate(activity,apk,cached.getLongVersionCode());
             if(!activity.getPackageManager().canRequestPackageInstalls()){status="Allow AMP Verse to install updates, then return here.";prefs.edit().putBoolean("install",false).putBoolean("permission_pending",true).apply();activity.startActivity(new Intent(Settings.ACTION_MANAGE_UNKNOWN_APP_SOURCES,Uri.parse("package:"+activity.getPackageName())));return;}
             prefs.edit().putBoolean("install",false).putBoolean("permission_pending",false).apply();
             Uri uri=FileProvider.getUriForFile(activity,activity.getPackageName()+".updates",apk);
