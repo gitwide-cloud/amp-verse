@@ -22,6 +22,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Determine download version
+        id: package_version
+        shell: bash
+        run: echo "version=$(python tools/package_downloads.py desktop-version)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -124,7 +131,7 @@ jobs:
           cp tools/setup_lab_youtube.py dist/setup/
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ matrix.artifact }}-v${{ steps.package_version.outputs.version }}
           path: dist/
       - name: Package optional analysis add-on
         shell: bash
@@ -177,7 +184,8 @@ jobs:
           path: packages
       - run: |
           cd packages
-          for dir in amp-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
+          for dir in amp-verse-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
+          for dir in amp-analysis-engine-*; do (cd "$dir" && zip -r "../$dir-${GITHUB_REF_NAME}.zip" .); done
           cp amp-analysis-engine-Windows/amp-engine-windows-x86_64.exe* .
           cp amp-analysis-engine-Linux/amp-engine-linux-x86_64* .
           sha256sum *.zip > SHA256SUMS.txt
