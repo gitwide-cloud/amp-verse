@@ -665,7 +665,18 @@ fn safe_name(title: &str) -> String {
     if name.is_empty() {
         "YouTube audio".into()
     } else {
-        name.into()
+        let stem = name.split('.').next().unwrap_or("").to_ascii_uppercase();
+        let reserved = matches!(
+            stem.as_str(),
+            "CON" | "PRN" | "AUX" | "NUL" | "CONIN$" | "CONOUT$"
+        ) || (stem.len() == 4
+            && (stem.starts_with("COM") || stem.starts_with("LPT"))
+            && matches!(stem.as_bytes()[3], b'1'..=b'9'));
+        if reserved {
+            format!("_{name}")
+        } else {
+            name.into()
+        }
     }
 }
 
@@ -933,6 +944,8 @@ mod tests {
         assert!(panel.job.is_none());
         assert!(panel.status.contains("playlist"));
         assert!(safe_name(&"🎵".repeat(200)).len() <= 120);
+        assert_eq!(safe_name("CON.track"), "_CON.track");
+        assert_eq!(safe_name("lpt1"), "_lpt1");
     }
     #[test]
     fn progress_names_and_collision_safe_publication() {
