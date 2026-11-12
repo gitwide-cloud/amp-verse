@@ -960,6 +960,101 @@ impl Player {
 mod tests {
     use super::*;
     #[test]
+    fn unavailable_library_load_and_cue_preserve_running_automation() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut library = amp_core::scan(dir.path()).unwrap();
+        library.tracks.push(amp_core::Track {
+            path: "missing.wav".into(),
+            title: "Missing".into(),
+            preparation: Default::default(),
+        });
+        let mut player = Player {
+            root: dir.path().into(),
+            library: Some(library),
+            auto: true,
+            ..Default::default()
+        };
+        player.run.auto = true;
+        player.run.preloaded = Some((1, 0));
+        for deck in 0..6 {
+            player.load_deck(deck, 0, false);
+            assert!(player.run.auto && player.auto);
+            assert_eq!(player.run.preloaded, Some((1, 0)));
+            player.play_cue(deck, 0, 2.);
+            assert!(player.run.auto && player.auto);
+            assert_eq!(player.run.preloaded, Some((1, 0)));
+        }
+    }
+
+    #[test]
+    #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; muted"]
+    fn native_auxiliary_seek_cue_and_scratch_preserve_active_crossfade() {
+        let path = PathBuf::from(std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap())
+            .canonicalize()
+            .unwrap();
+        let mut player = Player {
+            volume: 0,
+            channel_gain: [0.; 6],
+            ..Default::default()
+        };
+        for deck in 0..6 {
+            player.safe_load_path(deck, path.clone(), None).unwrap();
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while !(0..6).all(|d| player.audio.as_ref().unwrap().controls.ready[d].load(Relaxed)) {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        player.audio.as_ref().unwrap().toggle(0);
+        player.audio.as_ref().unwrap().crossfade(10.).unwrap();
+        while !player.audio.as_ref().unwrap().fading() {
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        player.run.auto = true;
+        player.auto = true;
+        player.run.preloaded = Some((1, 0));
+        let ctx = egui::Context::default();
+        for deck in 2..6 {
+            player.seek_deck_relative(deck, 2.);
+            player.recue_deck(deck);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+            while !player.audio.as_ref().unwrap().controls.ready[deck].load(Relaxed) {
+                assert!(std::time::Instant::now() < deadline);
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            player.begin_jog(deck, 0., egui::ViewportId::ROOT);
+            assert!(!player.jog_auto[deck]);
+            player.release_jog_wheels(&ctx);
+            assert!(player.run.auto && player.auto);
+            assert_eq!(player.run.preloaded, Some((1, 0)));
+            assert!(player.audio.as_ref().unwrap().fading());
+        }
+        let audio = player.audio.as_mut().unwrap();
+        let mut invalid = player.loaded_snapshot[2].clone().unwrap();
+        invalid.path = "unavailable-replacement.wav".into();
+        invalid.preparation.cue_in = 9.;
+        invalid.preparation.bpm = Some(90.);
+        let origin = audio.source_position(2) - audio.position(2);
+        let bpm = audio.controls.bpm[2].load(Relaxed);
+        assert!(
+            audio
+                .load(2, path.parent().unwrap(), &invalid, false)
+                .is_err()
+        );
+        assert_eq!(audio.source_position(2) - audio.position(2), origin);
+        assert_eq!(audio.controls.bpm[2].load(Relaxed), bpm);
+        assert!(audio.fading());
+        audio.controls.play[0].store(false, Relaxed);
+        audio.controls.play[1].store(false, Relaxed);
+        audio.controls.play[2].store(true, Relaxed);
+        player.run.auto = false;
+        assert!(
+            player.library_preview_blocked(),
+            "A2 playback must block Library audition"
+        );
+    }
+    #[test]
     fn invalid_deck_load_is_rejected_without_changing_playback() {
         let mut player = Player::default();
         player.run.auto = true;

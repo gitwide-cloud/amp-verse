@@ -1350,6 +1350,7 @@ impl Engine {
                     .into(),
             );
         }
+        let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
         if section.is_none() {
             self.cancel_section(deck);
             self.controls.source_origin[deck].store(track.preparation.cue_in.to_bits(), Relaxed);
@@ -1363,7 +1364,6 @@ impl Engine {
                 Relaxed,
             );
         }
-        let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
         let separated = stems.is_some();
         if section.is_none()
             && let Some(cancel) = self.cancel[deck].take()

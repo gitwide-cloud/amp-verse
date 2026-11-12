@@ -729,11 +729,59 @@ impl Player {
         }
     }
     fn controller_input(&mut self, target: Target, value: f32) -> Result<(), String> {
-        if !matches!(target, Target::Phones(_)) {
+        if !value.is_finite() || !(0. ..=1.).contains(&value) {
+            return Err("Invalid controller value".into());
+        }
+        let deck = match target {
+            Target::Crossfader => None,
+            Target::Play(d)
+            | Target::Stop(d)
+            | Target::Sync(d)
+            | Target::Cue(d)
+            | Target::Loop(d)
+            | Target::Volume(d)
+            | Target::Pitch(d)
+            | Target::Eq(d, _)
+            | Target::Phones(d) => Some(d),
+        };
+        if deck.is_some_and(|d| d >= 6) || matches!(target,Target::Eq(_,b) if b>=3) {
+            return Err("Invalid controller target".into());
+        }
+        if let Target::Play(d) | Target::Cue(d) | Target::Loop(d) | Target::Sync(d) = target {
+            let audio = self.audio.as_ref().ok_or("Load a track first")?;
+            if !audio.load_current(d) || !audio.loaded(d) {
+                return Err("Deck is not ready".into());
+            }
+            if matches!(target, Target::Cue(_) | Target::Loop(_)) && self.loaded_track(d).is_none()
+            {
+                return Err("Load a track first".into());
+            }
+            if matches!(target, Target::Loop(_))
+                && self
+                    .loaded_track(d)
+                    .and_then(|t| t.preparation.bpm)
+                    .is_none()
+            {
+                return Err("Prepare BPM before using beat loops".into());
+            }
+            if matches!(target, Target::Sync(_)) {
+                audio.sync(d, !audio.controls.synced[d].load(Relaxed))?;
+            }
+        }
+        if matches!(target, Target::Crossfader) && self.audio.is_none() {
+            return Err("Load a track first".into());
+        }
+        let manual = !matches!(target, Target::Phones(_));
+        if manual
+            && (matches!(target, Target::Crossfader)
+                || deck.is_some_and(|d| self.pair().contains(&d)))
+        {
             if let Some(a) = &self.audio {
                 self.run.cancel_effects(a);
             }
             self.run.cancel_automation();
+        }
+        if manual && (deck == Some(0) || matches!(target, Target::Crossfader)) {
             self.auto = false;
         }
         match target {
@@ -747,7 +795,7 @@ impl Player {
             Target::Stop(d) => {
                 self.stop(d);
             }
-            Target::Sync(d) => self.sync_deck(d),
+            Target::Sync(_) => {}
             Target::Cue(d) => {
                 let cue = self
                     .loaded_track(d)
@@ -817,6 +865,32 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejected_controller_commands_and_background_faders_preserve_automation() {
+        let mut p = Player {
+            auto: true,
+            ..Default::default()
+        };
+        p.run.auto = true;
+        p.run.preloaded = Some((1, 0));
+        for target in [
+            Target::Play(1),
+            Target::Cue(1),
+            Target::Loop(1),
+            Target::Sync(1),
+            Target::Crossfader,
+        ] {
+            assert!(p.controller_input(target, 1.).is_err());
+            assert!(p.auto && p.run.auto);
+            assert_eq!(p.run.preloaded, Some((1, 0)));
+        }
+        p.controller_input(Target::Volume(2), 0.7).unwrap();
+        assert!(p.run.auto && p.auto);
+        assert_eq!(p.channel_gain[2], 0.7);
+        assert!(p.controller_input(Target::Eq(0, 7), 0.5).is_err());
+        assert!(p.controller_input(Target::Volume(0), f32::NAN).is_err());
+        assert!(p.auto && p.run.auto);
+    }
     #[test]
     fn virtualdj_import_translates_literal_actions_and_reports_scripts() {
         let mapper = r#"<mapper device="TEST"><map value="PLAY" action="play_pause"/><map value="VOL" action="volume"/><map value="PITCH" action="deck 2 pitch_slider"/><map value="JOG" action="jogwheel"/><map value="SHIFT" action="var 'shift' ? play_pause : sync"/></mapper>"#;

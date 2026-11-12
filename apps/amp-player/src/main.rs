@@ -643,16 +643,21 @@ impl Player {
                     .any(|voice| voice.load(std::sync::atomic::Ordering::Relaxed))
             })
     }
+    fn library_preview_blocked(&self) -> bool {
+        self.run.auto
+            || self.auxiliary_playing()
+            || self.audio.as_ref().is_some_and(|audio| {
+                (0..6).any(|deck| audio.playing(deck))
+                    || audio
+                        .controls
+                        .sample_playing
+                        .iter()
+                        .any(|p| p.load(std::sync::atomic::Ordering::Relaxed))
+            })
+    }
     fn poll(&mut self) {
         self.preparer.guard_preview(
-            !self.library_open
-                || self.run.auto
-                || self.smart_preview.active()
-                || self.auxiliary_playing()
-                || self
-                    .audio
-                    .as_ref()
-                    .is_some_and(|a| a.playing(0) || a.playing(1)),
+            !self.library_open || self.smart_preview.active() || self.library_preview_blocked(),
         );
         if let Some(sample) = self.lab.take_sample() {
             let result = self.ensure_audio();
@@ -816,9 +821,9 @@ impl Player {
         Ok(())
     }
     fn load_deck(&mut self, deck: usize, index: usize, play: bool) {
-        self.cancel_deck_automation(deck);
-        if deck == 0 && !play {
-            self.auto = false;
+        if deck >= 6 {
+            self.status = "Choose a valid deck".into();
+            return;
         }
         if let Some(_track) = self
             .library
@@ -844,6 +849,10 @@ impl Player {
             }
             match result {
                 Ok(()) => {
+                    self.cancel_deck_automation(deck);
+                    if deck == 0 && !play {
+                        self.auto = false;
+                    }
                     if let Some(rate) = track
                         .preparation
                         .extensions
@@ -878,7 +887,10 @@ impl Player {
         self.load_deck(deck, index, true);
     }
     fn play_cue(&mut self, deck: usize, index: usize, seconds: f64) {
-        self.cancel_deck_automation(deck);
+        if deck >= 6 || !seconds.is_finite() || seconds < 0. {
+            self.status = "Choose a valid cue and deck".into();
+            return;
+        }
         if let Some(_track) = self
             .library
             .as_ref()
@@ -904,6 +916,7 @@ impl Player {
             });
             match result {
                 Ok(()) => {
+                    self.cancel_deck_automation(deck);
                     self.loaded_snapshot[deck] = Some(track.clone());
                     self.loaded_origin[deck] = Some(self.root.clone());
                     self.loaded[deck] = Some(index);
@@ -2711,11 +2724,15 @@ impl Player {
             && let Some(audio) = &mut self.audio
         {
             let root = self.loaded_origin[deck].as_deref().unwrap_or(&self.root);
-            if let Err(error) = audio.load(deck, root, &track, false) {
-                self.status = error;
+            match audio.load(deck, root, &track, false) {
+                Err(error) => self.status = error,
+                Ok(()) => {
+                    self.cancel_deck_automation(deck);
+                    if deck == 0 {
+                        self.auto = false;
+                    }
+                }
             }
-            self.cancel_deck_automation(deck);
-            self.auto = false;
         }
     }
     fn side_panel(&mut self, ui: &mut egui::Ui, side: usize, width: f32, height: f32, below: bool) {
@@ -2985,6 +3002,10 @@ impl Player {
         }
     }
     fn seek_deck_relative(&mut self, deck: usize, delta: f64) {
+        if deck >= 6 || !delta.is_finite() {
+            self.status = "Choose a valid seek and deck".into();
+            return;
+        }
         let Some(mut track) = self.loaded_track(deck).cloned() else {
             self.status = "Load a track before seeking".into();
             return;
@@ -3000,17 +3021,22 @@ impl Player {
             .map(|a| a.duration));
         let position = (audio.source_position(deck) + delta).max(0.);
         track.preparation.cue_in = end.map_or(position, |end| position.min((end - 0.02).max(0.)));
-        self.cancel_deck_automation(deck);
-        self.auto = false;
-        if let Some(audio) = &mut self.audio
-            && let Err(error) = audio.load(
+        if let Some(audio) = &mut self.audio {
+            let result = audio.load(
                 deck,
                 self.loaded_origin[deck].as_deref().unwrap_or(&self.root),
                 &track,
                 was_playing,
-            )
-        {
-            self.status = error;
+            );
+            match result {
+                Err(error) => self.status = error,
+                Ok(()) => {
+                    self.cancel_deck_automation(deck);
+                    if deck == 0 {
+                        self.auto = false;
+                    }
+                }
+            }
         }
     }
     fn jog_wheel(&mut self, ui: &mut egui::Ui, deck: usize, wheel: &egui::Response) {
@@ -3048,26 +3074,9 @@ impl Player {
         if wheel.is_pointer_button_down_on()
             && ui.input(|i| i.pointer.primary_down())
             && self.jog_resume[deck].is_none()
-            && let Some(audio) = &self.audio
+            && self.audio.is_some()
         {
-            if !audio.loaded(deck) {
-                return;
-            }
-            self.jog_auto[deck] = self.run.auto;
-            self.jog_resume[deck] = Some((audio.playing(deck), ui.ctx().viewport_id()));
-            self.run.cancel_effects(audio);
-            self.jog_angle[deck] = angle;
-            self.jog_target[deck] = audio.position(deck);
-            if audio.controls.pair_indices().contains(&deck) {
-                self.run.cancel_automation();
-            }
-            self.auto = false;
-            if audio.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = audio.loop_toggle(deck, 2.);
-            }
-            audio.set_fader(audio.fader());
-            audio.vinyl_target(deck, self.jog_target[deck]);
-            audio.controls.play[deck].store(true, std::sync::atomic::Ordering::Relaxed);
+            self.begin_jog(deck, angle, ui.ctx().viewport_id());
             ui.ctx().request_repaint_after(Duration::from_millis(8));
             return;
         }
@@ -3088,6 +3097,32 @@ impl Player {
             }
             ui.ctx().request_repaint_after(Duration::from_millis(8));
         }
+    }
+    fn begin_jog(&mut self, deck: usize, angle: f32, viewport: egui::ViewportId) {
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        if deck >= 6 || !audio.loaded(deck) {
+            return;
+        }
+        let paired = audio.controls.pair_indices().contains(&deck);
+        self.jog_auto[deck] = paired && self.run.auto;
+        self.jog_resume[deck] = Some((audio.playing(deck), viewport));
+        self.jog_angle[deck] = angle;
+        self.jog_target[deck] = audio.position(deck);
+        if paired {
+            self.run.cancel_effects(audio);
+            self.run.cancel_automation();
+            audio.set_fader(audio.fader());
+        }
+        if deck == 0 {
+            self.auto = false;
+        }
+        if audio.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = audio.loop_toggle(deck, 2.);
+        }
+        audio.vinyl_target(deck, self.jog_target[deck]);
+        audio.controls.play[deck].store(true, std::sync::atomic::Ordering::Relaxed);
     }
     fn release_jog_wheels(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.pointer.primary_down() && i.viewport().focused.unwrap_or(true)) {
@@ -3370,16 +3405,7 @@ impl eframe::App for Player {
             }
         }
         if let Some((path, seconds)) = self.preparer.preview.take() {
-            if self.run.auto
-                || self.audio.as_ref().is_some_and(|a| {
-                    a.playing(0)
-                        || a.playing(1)
-                        || a.controls
-                            .sample_playing
-                            .iter()
-                            .any(|p| p.load(std::sync::atomic::Ordering::Relaxed))
-                })
-            {
+            if self.library_preview_blocked() {
                 self.status =
                     "Stop deck playback before auditioning a Library recommendation".into();
             } else if let Some(i) = self

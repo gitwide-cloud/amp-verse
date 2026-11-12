@@ -28,12 +28,7 @@ impl Player {
                 .text_styles
                 .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.));
         }
-        self.preparer.preview_blocked = self.run.auto
-            || self.auxiliary_playing()
-            || self
-                .audio
-                .as_ref()
-                .is_some_and(|a| a.playing(0) || a.playing(1));
+        self.preparer.preview_blocked = self.library_preview_blocked();
         self.preparer
             .show(ui.ctx(), &self.root, self.library.as_mut());
         ui.painter().rect_filled(

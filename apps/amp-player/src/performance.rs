@@ -588,10 +588,10 @@ impl Player {
                 serde_json::json!(plan.landing),
             );
         }
-        self.pitch[d] = (rate - 1.) * 100.;
         let engine = self.audio.as_mut().unwrap();
-        engine.set_rate(d, rate);
         engine.load(d, &self.root, &track, execution == Execution::PlayNow)?;
+        engine.set_rate(d, rate);
+        self.pitch[d] = (rate - 1.) * 100.;
         self.loaded_snapshot[d] = Some(track.clone());
         self.loaded_origin[d] = Some(self.root.clone());
         self.loaded[d] = Some(index);

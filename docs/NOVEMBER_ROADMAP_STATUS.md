@@ -68,3 +68,23 @@ The file/drop loading path now accepts A1–A3 and B1–B3, uses the correct dec
 
 Verification: 179 Player tests and strict Player Clippy passed. A muted native test loaded all four auxiliary decks while A1 played, preserved Auto DJ and the mix pair, and checked stable layout bounds for 30 frames. Live user-reported flashing was not reproduced or established as fixed; user playback was left running.
 
+# Playback ownership code audit — November 12
+
+Review prompted by auxiliary-deck actions unexpectedly disabling Auto DJ. Scope: GUI loading/cues/seek/scratch, controller dispatch, engine load validation, remote track loading, Library preview guards, crossfade-pair ownership and related session/routing paths. This is a targeted reliability review, not exhaustive certification of every module/platform.
+
+Subjective overall reliability/maintainability assessment: **6/10**. Shared Rust facilities, validated metadata and existing automated tests are strengths. Playback ownership is still spread across GUI, remote and controller code, and legacy two-deck UI paths coexist with the six-deck rack. The main Player source exceeds 4,500 lines. Test coverage needs more combinations of active crossfades, auxiliary controls and failed operations; hardware/platform and long-session coverage remains incomplete.
+
+Verified findings fixed in this pass:
+
+- Auxiliary jog capture cancelled global transition effects and sent a main-fader command even when the jog deck was outside the assigned pair. It now affects global mixing only for an assigned deck; background release cannot reinstate Auto DJ from a stale captured flag.
+- Auxiliary Seek and Cue-to-start cleared regular Player queue automation. They now change that flag only when targeting Player's A1, and cancel pair automation only after a successful load.
+- Library load/cue attempts cancelled automation before resolving missing files or validating the cue. Cancellation now follows accepted loads; invalid indices/decks/times cannot trigger premature takeover.
+- Engine replacement updated source origin/BPM and cancelled pending sections before discovering an unavailable file. Path resolution now precedes these mutations.
+- Remote track loading applied the replacement playback rate before a load that could fail. Rate and UI pitch now update after successful load acceptance.
+- Controller dispatch cancelled automation before reporting an unavailable deck/unsupported loop or sync state. It now validates these prerequisites before takeover, rejects invalid values/targets, and scopes takeover to the crossfade pair or global crossfader. Background faders do not stop the main mix.
+- Library audition guards still checked A1/B1 in multiple places. One shared guard now checks all six decks plus auxiliary and sampler playback, both while rendering and when consuming an audition request.
+
+Verification: **98 Core + 185 Player + 9 Cast = 292 passing workspace tests**; strict workspace Clippy with all targets/features; five Node browser/request tests; two explicit muted native regressions. New tests cover missing-file loads/cues preserving pending automation, rejected controller commands, background faders, all four auxiliary decks seeking/cueing/scratching during an active crossfade, missing replacement paths retaining timing metadata, and A2-only playback blocking Library audition. Existing native six-deck loading/section handoff and repeated-frame layout test also passed. Standard ignored integration/hardware tests remain ignored unless explicitly listed here.
+
+User playback was not stopped. The Windows Player build is staged for the next normal restart. No new Android, Linux, physical controller/receiver, or overnight radio acceptance is claimed. The next structural improvement is a single playback-ownership policy shared by GUI, controller and remote actions, retaining independent auxiliary deck control.
+
