@@ -39,10 +39,13 @@ fn read(
     cancel: &AtomicBool,
     tx: &mpsc::Sender<Event>,
 ) -> Result<Vec<u8>, String> {
+    if cancel.load(Ordering::Relaxed) {
+        return Err("Update cancelled; installed files were kept".into());
+    }
     let agent: ureq::Agent = ureq::Agent::config_builder()
-        .timeout_global(Some(Duration::from_secs(300)))
+        .timeout_global(Some(Duration::from_secs(1800)))
         .timeout_connect(Some(Duration::from_secs(15)))
-        .timeout_recv_body(Some(Duration::from_secs(10)))
+        .timeout_per_read(Some(Duration::from_secs(10)))
         .build()
         .into();
     let mut response = agent
@@ -72,6 +75,46 @@ fn read(
         }
     }
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cancelled_update_never_connects() {
+        let (tx, _) = mpsc::channel();
+        let error = read("https://invalid.invalid", 100, &AtomicBool::new(true), &tx).unwrap_err();
+        assert!(error.contains("cancelled"));
+    }
+    #[test]
+    fn download_reads_exact_bytes_and_reports_progress() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/package", listener.local_addr().unwrap());
+        let bytes = vec![42u8; 2 * 1024 * 1024];
+        let sent = bytes.clone();
+        let worker = std::thread::spawn(move || {
+            let (mut socket, _) = listener.accept().unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            let mut request = [0; 8192];
+            let _ = socket.read(&mut request).unwrap();
+            write!(
+                socket,
+                "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                sent.len()
+            )
+            .unwrap();
+            socket.write_all(&sent).unwrap();
+        });
+        let (tx, rx) = mpsc::channel();
+        assert_eq!(
+            read(&url, bytes.len() as u64, &AtomicBool::new(false), &tx).unwrap(),
+            bytes
+        );
+        worker.join().unwrap();
+        assert!(rx.try_iter().any(|e| matches!(e, Event::Progress(_))));
+    }
 }
 fn stage(cancel: &AtomicBool, tx: &mpsc::Sender<Event>) -> Result<Option<PathBuf>, String> {
     let info = read(
