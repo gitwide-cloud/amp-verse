@@ -122,6 +122,7 @@ struct Loaded {
     result: Result<Frames, String>,
 }
 pub enum Action {
+    Browse(usize),
     Load(usize),
     Trigger(usize),
     Stop(usize),
@@ -226,6 +227,9 @@ impl Sampler {
     ) -> Vec<Action> {
         let count = if all { 9 } else { 4 };
         let mut actions = Vec::new();
+        if ui.small_button("Sound effects…").clicked() {
+            actions.push(Action::Browse(self.selected_pad));
+        }
         let pad_width = ((ui.available_width() - ui.spacing().item_spacing.x * (count - 1) as f32)
             / count as f32)
             .max(30.);
@@ -321,6 +325,9 @@ impl Sampler {
         columns: usize,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
+        if ui.button("Sound effects…").clicked() {
+            actions.push(Action::Browse(self.selected_pad));
+        }
         if columns == 3 {
             ui.label("Volume");
         }
@@ -566,6 +573,7 @@ impl Sampler {
         egui::CollapsingHeader::new("SAMPLER · 9 SOUND EFFECT PADS").id_salt("sampler-bank").default_open(true).show(ui,|ui|{
             ui.horizontal(|ui|{
                 if ui.add(egui::Slider::new(&mut self.bank.master,0. ..=1.).text("Sampler volume")).changed() {self.save();}
+                if ui.button("Sound effects…").clicked() {actions.push(Action::Browse(self.selected_pad));}
                 if ui.button("Stop all pads").clicked() {actions.push(Action::StopAll);}
                 ui.weak("One-shot · 1–9 · independent of crossfader");
             });

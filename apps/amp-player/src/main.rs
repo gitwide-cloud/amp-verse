@@ -44,6 +44,7 @@ mod podcasts;
 mod preparer;
 mod resources;
 mod sample_editor;
+mod sample_library;
 mod sampler;
 mod section_controls;
 mod session;
@@ -146,6 +147,7 @@ struct Player {
     search: String,
     audio: Option<mixer::Engine>,
     sampler: sampler::Sampler,
+    sample_library: sample_library::Browser,
     live_mix: Option<live_mix::Broadcast>,
     right_sampler: sampler::Sampler,
     right_sample_audio: Option<mixer::Engine>,
@@ -246,6 +248,7 @@ impl Default for Player {
             search: String::new(),
             audio: None,
             sampler: Default::default(),
+            sample_library: Default::default(),
             live_mix: None,
             right_sampler: sampler::Sampler::separate_bank("sampler-right.json"),
             right_sample_audio: None,
@@ -2033,12 +2036,19 @@ impl Player {
         }
         let actions = self.sampler.show(ui, self.audio.as_ref());
         for action in actions {
+            if let sampler::Action::Browse(pad) = action {
+                self.sample_library.open = true;
+                self.sample_library.side = 0;
+                self.sample_library.pad = pad;
+                continue;
+            }
             if let Err(e) = self.ensure_audio() {
                 self.sampler.status = e;
                 continue;
             }
             let engine = self.audio.as_mut().unwrap();
             let result = match action {
+                sampler::Action::Browse(_) => Ok(()),
                 sampler::Action::Load(pad) => {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter(
@@ -2726,6 +2736,12 @@ impl Player {
         Ok(())
     }
     fn side_sample_action(&mut self, side: usize, action: sampler::Action) {
+        if let sampler::Action::Browse(pad) = action {
+            self.sample_library.open = true;
+            self.sample_library.side = side;
+            self.sample_library.pad = pad;
+            return;
+        }
         let (sampler, audio) = if side == 0 {
             (&mut self.sampler, self.audio.as_mut())
         } else {
@@ -2735,6 +2751,7 @@ impl Player {
             return;
         };
         let result = match action {
+            sampler::Action::Browse(_) => Ok(()),
             sampler::Action::Load(pad) => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter(
@@ -3486,6 +3503,33 @@ impl eframe::App for Player {
                 .resizable(false)
                 .anchor(egui::Align2::CENTER_TOP, [0., 48.])
                 .show(&ctx, |ui| self.recovery_ui(ui));
+        }
+        let chosen = self.sample_library.show(
+            &ctx,
+            self.library.as_ref().map_or(&[], |l| l.tracks.as_slice()),
+        );
+        if let Some(index) = chosen {
+            let path = amp_core::music_sources::audio_path(
+                &self.root,
+                &self.library.as_ref().unwrap().tracks[index].path,
+            );
+            let result = if self.sample_library.side == 0 {
+                self.ensure_audio()
+            } else {
+                self.ensure_right_samples()
+            };
+            match result {
+                Ok(()) => {
+                    let sampler = if self.sample_library.side == 0 {
+                        &mut self.sampler
+                    } else {
+                        &mut self.right_sampler
+                    };
+                    sampler.request_load(self.sample_library.pad, path);
+                    self.sample_library.open = false;
+                }
+                Err(error) => self.status = error,
+            }
         }
         self.capture_session_layout(&ctx);
         self.checkpoint(false);
