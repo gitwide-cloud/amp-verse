@@ -599,7 +599,15 @@ impl Player {
             let index = self
                 .library
                 .as_ref()
-                .and_then(|l| l.tracks.iter().position(|t| show::song_id(t) == id));
+                .and_then(|l| l.tracks.iter().position(|t| show::song_id(t) == id))
+                .filter(|index| {
+                    self.run.profile.as_ref().is_none_or(|p| {
+                        let track = &self.library.as_ref().unwrap().tracks[*index];
+                        !p.excluded.contains(&id)
+                            && (p.genres.is_empty()
+                                || amp_core::genres::matches(&p.genres, &track.preparation))
+                    })
+                });
             if let Some(index) = index {
                 match self.call_track(index, None, Deck::Auto, Execution::LoadOnly) {
                     Ok(()) => return Ok(()),
@@ -1068,6 +1076,13 @@ impl Player {
                 let index = self.find_song(&song)?;
                 let track = &self.library.as_ref().unwrap().tracks[index];
                 let id = show::song_id(track);
+                if let Some(p) = &self.run.profile
+                    && ((!p.genres.is_empty()
+                        && !amp_core::genres::matches(&p.genres, &track.preparation))
+                        || p.excluded.contains(&id))
+                {
+                    return Err("That song does not match this Smart Playlist’s genre filter or is excluded".into());
+                }
                 if self.run.requests.contains(&id) {
                     return Err("That song is already requested".into());
                 }
@@ -2107,6 +2122,18 @@ mod tests {
             ..Default::default()
         };
         player.run.profile = Some(player.run.settings.playlists[0].clone());
+        player.run.profile.as_mut().unwrap().genres = vec!["Rock".into()];
+        assert!(
+            player
+                .execute_control(Action::RequestSong {
+                    song: "Song 0".into(),
+                    within: 5
+                })
+                .unwrap_err()
+                .contains("genre")
+        );
+        assert!(player.run.requests.is_empty());
+        player.run.profile.as_mut().unwrap().genres.clear();
         let saved = serde_json::to_value(&player.run.settings).unwrap();
         assert!(
             player

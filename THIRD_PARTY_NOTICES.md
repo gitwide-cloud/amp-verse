@@ -24,3 +24,5 @@ Android Remote uses OkHttp 4.12.0 (Apache-2.0, Square and contributors) for auth
 ## Signalsmith Stretch (Key Lock)
 
 The optional pitch-preserving playback backend uses Signalsmith Stretch and Signalsmith Linear (MIT), through the pinned signalsmith-stretch-rs 0.1.3 wrapper (MIT). Sources, provenance and original licenses are in `apps/amp-player/vendor/signalsmith` and are included in desktop distributions. Windows requires the accompanying `amp-keylock.dll`; if absent, Key Lock is unavailable and ordinary playback remains supported.
+
+Genre-tag reading uses Lofty 0.25.5 (MIT OR Apache-2.0), https://github.com/Serial-ATA/lofty-rs. Its licenses are retained in licenses/lofty. Genre reading disables cover-art and audio-property parsing and does not modify source audio.

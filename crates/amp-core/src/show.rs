@@ -49,6 +49,9 @@ pub struct SmartPlaylist {
     // Keep the conservative state in device-local startup caches; shared loads recompute it.
     #[serde(default)]
     pub source_unavailable: bool,
+    /// Empty means all genres; selected genres are combined with OR.
+    #[serde(default)]
+    pub genres: Vec<String>,
     pub style: Style,
     #[serde(default)]
     pub folders: Vec<PathBuf>,
@@ -104,6 +107,7 @@ impl Default for Settings {
                     source_library: None,
                     source_root_hint: None,
                     source_unavailable: false,
+                    genres: vec![],
                     style,
                     folders: vec![],
                     playlist_sources: vec![],
@@ -141,6 +145,13 @@ impl Settings {
     }
     fn normalize(&mut self) {
         for p in &mut self.playlists {
+            p.genres = p
+                .genres
+                .iter()
+                .map(|g| crate::genres::canonical(g))
+                .collect();
+            let mut seen_genres = std::collections::HashSet::new();
+            p.genres.retain(|g| seen_genres.insert(g.clone()));
             if !p.allowed.is_empty() {
                 p.restrict_allowed = true;
             }
@@ -161,6 +172,10 @@ impl Settings {
                 || p.target_energy
                     .is_some_and(|e| !e.is_finite() || !(1. ..=10.).contains(&e))
                 || p.recent_repeat > 1000
+                || p.genres.len() > 256
+                || p.genres
+                    .iter()
+                    .any(|g| g.trim().is_empty() || g.len() > 256)
             {
                 return Err("Invalid Smart Playlist rule".into());
             }
@@ -314,7 +329,8 @@ pub fn eligible(p: &SmartPlaylist, t: &Track) -> bool {
     // an empty-source guard; do not require per-song Allow ticks after a folder is chosen.
     let allowed = p.allowed.contains(&id)
         || (p.allowed.is_empty() && (!p.restrict_allowed || !p.folders.is_empty()));
-    !p.excluded.contains(&id)
+    (p.genres.is_empty() || crate::genres::matches(&p.genres, &t.preparation))
+        && !p.excluded.contains(&id)
         && ((allowed
             && ((!p.restrict_folders && p.folders.is_empty())
                 || p.folders.iter().any(|f| crate::folder_contains(&t.path, f))))
@@ -580,6 +596,7 @@ mod portable_playlist_tests {
         let mut p = Settings::default().playlists.remove(0);
         p.name = "Portable mix".into();
         p.style = Style::Hype;
+        p.genres = vec!["Rock".into(), "R&B".into()];
         p.folders = vec!["Dance/House".into()];
         p.restrict_folders = true;
         p.allowed = vec!["song_allowed".into()];

@@ -9,6 +9,7 @@ default = []
 analysis = []
 
 [dependencies]
+lofty = "0.25.5"
 rusqlite = { version = "0.37", features = ["bundled", "blob"] }
 serde.workspace = true
 serde_json.workspace = true

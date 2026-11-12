@@ -8,6 +8,7 @@ pub mod coordination;
 pub mod discovery;
 pub mod energy_profile;
 pub mod engine_api;
+pub mod genres;
 pub mod mix_schedule;
 pub mod offline;
 pub mod preparation;
@@ -139,11 +140,12 @@ pub fn scan(root: &Path) -> io::Result<Library> {
                         .to_string_lossy()
                         .replace('\\', "/")
                 );
-                let preparation = if let Some(prep) = catalog.get(&key) {
+                let mut preparation = if let Some(prep) = catalog.get(&key) {
                     prep.clone()
                 } else {
                     preparation::load(&path).map_err(io::Error::other)?
                 };
+                genres::read_embedded(&path, &mut preparation);
                 folder.tracks.push(tracks.len());
                 tracks.push(Track {
                     path: path.strip_prefix(root).unwrap().into(),

@@ -369,6 +369,32 @@ impl Editor {
                 if let Some(i)=remove_playlist {p.playlist_sources.remove(i);}
                 ui.weak("Sources are combined; overlapping songs appear once. Save Playlist to apply.");
                 ui.add_space(18.);
+                ui.strong("Genres");
+                ui.horizontal_wrapped(|ui| {
+                    if ui.selectable_label(p.genres.is_empty(), "All genres").clicked() { p.genres.clear(); }
+                    let mut choices = std::collections::BTreeSet::from(["Rock".to_owned(), "R&B".to_owned()]);
+                    choices.extend(p.genres.iter().cloned());
+                    if let Some(lib) = library {
+                        for track in &lib.tracks { choices.extend(amp_core::genres::values(&track.preparation)); }
+                    }
+                    egui::ComboBox::from_id_salt("smart-genres")
+                        .selected_text(if p.genres.is_empty() { "Choose genres…".to_owned() } else if p.genres.join(" + ").chars().count() <= 36 { p.genres.join(" + ") } else { format!("{} genres selected", p.genres.len()) })
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show_ui(ui, |ui| {
+                            for genre in choices {
+                                let mut checked = p.genres.contains(&genre);
+                                if ui.checkbox(&mut checked, &genre).changed() {
+                                    if checked { p.genres.push(genre); } else { p.genres.retain(|g| g != &genre); }
+                                }
+                            }
+                        });
+                });
+                if !p.genres.is_empty() {
+                    let count = library.map_or(0, |lib| lib.tracks.iter().filter(|t| amp_core::show::eligible(p,t)).count());
+                    ui.label(format!("{count} matching songs · any selected genre"));
+                    ui.weak("Uses saved genre tags. Untagged songs are skipped. Edit a song’s genre in Library tags.");
+                }
+                ui.add_space(16.);
                 ui.strong("Mixing style");
                 ui.horizontal(|ui| {
                     let width = ((ui.available_width()-12.)/3.).max(45.);
@@ -1295,6 +1321,7 @@ mod tests {
         let mut editor = Editor::default();
         editor.open_playlist("demo", root.path(), &saved);
         editor.draft.as_mut().unwrap().playlists[0].name = "Saved by top button".into();
+        editor.draft.as_mut().unwrap().playlists[0].genres = vec!["Rock".into(), "R&B".into()];
         let context = egui::Context::default();
         let mut draw = |position: egui::Pos2, pressed: Option<bool>| {
             let mut raw = egui::RawInput {
@@ -1328,6 +1355,10 @@ mod tests {
         assert_eq!(
             Settings::load(root.path()).unwrap().playlists[0].name,
             "Saved by top button"
+        );
+        assert_eq!(
+            Settings::load(root.path()).unwrap().playlists[0].genres,
+            vec!["Rock", "R&B"]
         );
         assert!(!editor.has_unsaved());
     }
