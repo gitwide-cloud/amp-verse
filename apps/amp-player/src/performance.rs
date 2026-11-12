@@ -1683,7 +1683,15 @@ impl Player {
                     Some(crate::transition_styles::Style::Mashup)
                 } else if self.run.auto && !self.run.locked && self.run.effect_done != Some(started)
                 {
-                    self.run.transitions.pick(self.run.completed_handoffs)
+                    self.loaded_track(outgoing)
+                        .zip(self.loaded_track(incoming))
+                        .and_then(|(a, b)| {
+                            self.run.transitions.pick_for_pair(
+                                self.run.completed_handoffs,
+                                &a.preparation,
+                                &b.preparation,
+                            )
+                        })
                 } else {
                     None
                 };
@@ -1742,6 +1750,12 @@ impl Player {
                         None
                     };
                 let bridge_needed = self.run.scratch_assist
+                    && !(chosen.is_none()
+                        && self
+                            .run
+                            .transitions
+                            .pick(self.run.completed_handoffs)
+                            .is_some())
                     && !self.run.locked
                     && self.run.effect_done != Some(started)
                     && self.audio.as_ref().is_some_and(|a| {

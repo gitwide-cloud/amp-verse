@@ -63,6 +63,31 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    /// Rhythmic tricks need measured timing, not a fictional 120 BPM fallback.
+    /// Missing/uncertain analysis falls back to the ordinary blend; saved choices stay intact.
+    pub fn pick_for_pair(
+        self,
+        completed: u32,
+        outgoing: &amp_core::Preparation,
+        incoming: &amp_core::Preparation,
+    ) -> Option<Style> {
+        let chosen = self.pick(completed)?;
+        if matches!(chosen, Style::Stutter | Style::LoopBuild | Style::Beatmatch) {
+            let timed = |p: &amp_core::Preparation| {
+                p.bpm
+                    .is_some_and(|b| b.is_finite() && (40. ..=240.).contains(&b))
+                    && p.beat_offset.is_some_and(|b| b.is_finite() && b >= 0.)
+                    && (p.manual_override
+                        || p.analysis
+                            .as_ref()
+                            .is_none_or(|a| a.reviewed || a.tempo_confidence >= 0.5))
+            };
+            if !timed(outgoing) || !timed(incoming) {
+                return None;
+            }
+        }
+        Some(chosen)
+    }
     pub fn pick(self, completed: u32) -> Option<Style> {
         if !self.enabled
             || !(2..=12).contains(&self.every)
@@ -128,6 +153,55 @@ pub fn save(settings: Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rhythmic_effects_require_both_grids_without_changing_preferences() {
+        let mut settings = Settings {
+            style: Style::Stutter,
+            every: 2,
+            ..Default::default()
+        };
+        let unknown = amp_core::Preparation::default();
+        let mut prepared = amp_core::Preparation {
+            bpm: Some(120.),
+            beat_offset: Some(0.),
+            ..Default::default()
+        };
+        assert_eq!(settings.pick_for_pair(1, &unknown, &prepared), None);
+        assert_eq!(settings.pick_for_pair(1, &prepared, &unknown), None);
+        assert_eq!(
+            settings.pick_for_pair(1, &prepared, &prepared),
+            Some(Style::Stutter)
+        );
+        prepared.analysis = Some(amp_core::preparation::AnalysisInfo {
+            engine: "test".into(),
+            duration: 120.,
+            tempo_confidence: 0.2,
+            key_confidence: 0.8,
+            reviewed: false,
+        });
+        assert_eq!(settings.pick_for_pair(1, &prepared, &prepared), None);
+        prepared.analysis.as_mut().unwrap().reviewed = true;
+        assert_eq!(
+            settings.pick_for_pair(1, &prepared, &prepared),
+            Some(Style::Stutter)
+        );
+        prepared.analysis.as_mut().unwrap().reviewed = false;
+        prepared.manual_override = true;
+        assert_eq!(
+            settings.pick_for_pair(1, &prepared, &prepared),
+            Some(Style::Stutter)
+        );
+        prepared.bpm = Some(f64::NAN);
+        assert_eq!(settings.pick_for_pair(1, &prepared, &prepared), None);
+        assert_eq!(settings.pick(1), Some(Style::Stutter));
+        settings.style = Style::Filter;
+        assert_eq!(
+            settings.pick_for_pair(1, &unknown, &unknown),
+            Some(Style::Filter)
+        );
+        settings.enabled = false;
+        assert_eq!(settings.pick_for_pair(1, &unknown, &unknown), None);
+    }
     #[test]
     fn pace_is_remembered_and_older_settings_default_to_balanced() {
         let settings = Settings {
