@@ -28,7 +28,7 @@ impl Player {
             ui.horizontal_wrapped(|ui|{for pace in [amp_core::dj_phrasing::Pace::Quick,amp_core::dj_phrasing::Pace::Balanced,amp_core::dj_phrasing::Pace::Full] {ui.selectable_value(&mut self.run.transitions.pace,pace,pace.label());}});
             ui.weak("Quick changes songs sooner. Balanced uses section/phrase estimates. Full track keeps the prepared end. Manual cue-outs take priority.");
             if old!=self.run.transitions && let Err(error)=transition_styles::save(self.run.transitions){self.status=error;}
-            ui.separator();ui.heading("Crossfade");skin::switch(ui,&mut self.run.crossfade,"Auto Crossfade");
+            ui.separator();ui.heading("Crossfade");ui.weak("Auto Mix handles crossfading automatically. Set the mix duration below.");
             let old=self.fade_seconds;
             ui.horizontal_wrapped(|ui|{ui.label("Mix duration");if ui.button("−").clicked(){self.fade_seconds-=0.5;}ui.add(egui::DragValue::new(&mut self.fade_seconds).range(0.5..=30.).speed(0.1).suffix(" seconds"));if ui.button("+").clicked(){self.fade_seconds+=0.5;}});
             self.fade_seconds=self.fade_seconds.clamp(0.5,30.);

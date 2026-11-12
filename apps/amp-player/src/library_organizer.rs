@@ -108,6 +108,9 @@ impl Organizer {
             ui.separator();ui.label(&self.status);
             if busy{ui.horizontal(|ui|{ui.spinner();if ui.button("Cancel").clicked(){self.cancel.store(true,Ordering::Relaxed);}});}
             if let Some(plan)=&mut self.plan {
+                let mut organize=plan.files.first().is_some_and(|f|f.organize_names);
+                if ui.add_enabled(!busy&&!self.destination.join("ampdj/consolidation.ampdb").exists(),egui::Checkbox::new(&mut organize,"Organize as Artist / Album / Title (rename files)")).changed(){for file in &mut plan.files{file.organize_names=organize;}self.confirmed=false;}
+                ui.weak("Renaming uses saved or embedded tags, with a short content ID to prevent filename collisions. Preview below before moving.");
                 let bytes:u64=plan.groups.iter().map(|g|plan.files[g.keeper].bytes).sum();
                 ui.strong(format!("Move preview: {} unique songs · {:.2} GiB",plan.groups.len(),bytes as f64/1073741824.));
                 ui.weak("A checksum-verified copy, preparation, playlist remap and recovery journal are written before any original is removed. Extra duplicate copies and their metadata stay in their source folders.");

@@ -815,7 +815,7 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(44., 24.), egui::Sense::click());
             #[cfg(test)]
-            if label.starts_with("Auto DJ") {
+            if label.starts_with("Auto DJ") || label.starts_with("Auto Mix") {
                 ui.ctx()
                     .data_mut(|data| data.insert_temp(egui::Id::unique("auto-dj-switch"), rect));
             }

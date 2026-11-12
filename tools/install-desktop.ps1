@@ -43,6 +43,7 @@ $ampLabNotices=Join-Path $Destination 'licenses/mp3-lab'
 New-Item -ItemType Directory -Force -Path $ampLabNotices | Out-Null
 foreach($name in @('LICENSE','PROVENANCE.md')) {Copy-Item -LiteralPath (Join-Path $repo "third-party/mp3-lab/$name") -Destination $ampLabNotices -Force}
 $catalogNotices=Join-Path $Destination 'licenses/rusqlite'
+Copy-Item -LiteralPath (Join-Path $repo 'licenses') -Destination $Destination -Recurse -Force
 New-Item -ItemType Directory -Force -Path $catalogNotices | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'licenses/rusqlite/LICENSE') -Destination $catalogNotices -Force
 $shell = New-Object -ComObject WScript.Shell

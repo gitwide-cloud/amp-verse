@@ -7,6 +7,7 @@ license.workspace = true
 
 [dependencies]
 url = "2"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object", "creation-flags"] }
 amp-core.workspace = true
 cpal = "=0.18.2"

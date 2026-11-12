@@ -60,6 +60,7 @@ fn buildup_halves(elapsed: f32, capture: f32, duration: f32) -> u8 {
     (1 + ((elapsed - capture) / (duration - capture) * 4.) as u8).min(4)
 }
 pub struct Run {
+    pub failure: Option<String>,
     recognition_context: Option<String>,
     pub requests: VecDeque<String>,
     pub force_mashup: bool,
@@ -80,7 +81,6 @@ pub struct Run {
     completed_handoffs: u32,
     pub future_candidates: VecDeque<usize>,
     failed_songs: Vec<String>,
-    pub locked: bool,
     pub progression: Option<show::Progression>,
     planned_progression: Option<show::EnergyPlan>,
     planned_force: bool,
@@ -96,6 +96,7 @@ impl Default for Run {
     fn default() -> Self {
         let transitions = crate::transition_styles::load();
         Self {
+            failure: None,
             recognition_context: None,
             requests: VecDeque::new(),
             force_mashup: false,
@@ -116,7 +117,6 @@ impl Default for Run {
             completed_handoffs: 0,
             future_candidates: VecDeque::new(),
             failed_songs: Vec::new(),
-            locked: false,
             progression: None,
             planned_progression: None,
             planned_force: false,
@@ -739,33 +739,6 @@ impl Player {
         }
     }
     pub(super) fn execute_control(&mut self, action: Action) -> Result<(), String> {
-        if self.run.locked
-            && !matches!(
-                action,
-                Action::GoogleCast { .. }
-                    | Action::BroadcastLevel { .. }
-                    | Action::EmergencyMute
-                    | Action::StopAllDecks
-                    | Action::StopPlayer
-                    | Action::StopSamplers { .. }
-                    | Action::StopSampler { .. }
-                    | Action::ManualLock { .. }
-                    | Action::StartLiveBroadcast { .. }
-                    | Action::StopLiveBroadcast
-                    | Action::AdjustVolume { .. }
-                    | Action::Stop { .. }
-                    | Action::Pause { .. }
-                    | Action::Play { .. }
-                    | Action::Sampler { .. }
-                    | Action::CueDeck { .. }
-                    | Action::SideSampler { .. }
-                    | Action::SetCrossfader { .. }
-                    | Action::AutoDj { enabled: false }
-                    | Action::AutoDjPause { paused: true }
-            )
-        {
-            return Err("Manual DJ Lock prevents automated takeover".into());
-        }
         match action {
             Action::SaveMusicScene { name } => self.save_music_scene(&name)?,
             Action::RecallMusicScene { scene, execution } => {
@@ -972,12 +945,13 @@ impl Player {
                 }
                 self.ensure_audio()?;
                 self.ensure_right_samples()?;
-                self.live_mix = Some(crate::live_mix::Broadcast::start_source(
+                self.live_mix = Some(crate::live_mix::Broadcast::start_source_normalized(
                     self.audio.as_ref().unwrap(),
                     self.right_sample_audio.as_ref().unwrap(),
                     address,
                     password,
                     player_only,
+                    self.cast.normalize,
                 )?);
             }
             Action::StopLiveBroadcast => {
@@ -1285,6 +1259,8 @@ impl Player {
                 self.run.preloaded = None;
                 self.run.pending = None;
                 if execution != Execution::LoadOnly {
+                    self.run.failure = None;
+                    self.run.crossfade = true;
                     self.preload_smart()?;
                     let (d, i) = self.run.preloaded.unwrap();
                     if execution == Execution::PlayNow {
@@ -1482,6 +1458,8 @@ impl Player {
                 }
                 // An explicit restart retries songs skipped by the previous run.
                 if enabled {
+                    self.run.failure = None;
+                    self.run.crossfade = true;
                     self.run.failed_songs.clear();
                 }
                 // Do not claim ON until loading/starting the first song succeeds.
@@ -1514,13 +1492,18 @@ impl Player {
                     }
                 }
                 if !enabled {
+                    if let Some(audio) = &self.audio {
+                        self.run.cancel_effects(audio);
+                        audio.set_fader(audio.fader());
+                    }
                     self.run.cancel_automation();
                 }
             }
             Action::ManualLock { enabled } => {
-                self.run.locked = enabled;
                 if enabled {
-                    self.run.cancel_automation();
+                    // Compatibility for older remotes: this now means Auto Mix OFF,
+                    // never a second hidden mode that can prevent later handoffs.
+                    self.execute_control(Action::AutoDj { enabled: false })?;
                 }
             }
             Action::SetCrossfader { value } => {
@@ -1621,8 +1604,7 @@ impl Player {
     pub(super) fn performance_tick(&mut self) {
         // Every temporary effect must release its transport when automation stops.
         if ((self.run.pending.is_none() && self.run.transition.is_none())
-            || !self.run.scratch_assist
-            || self.run.locked)
+            || !self.run.scratch_assist)
             && let Some(audio) = &self.audio
         {
             self.run.cancel_effects(audio);
@@ -1663,9 +1645,10 @@ impl Player {
                     && a.controls.ready[incoming].load(Relaxed)
             });
             let due = self.run.pending_at.is_none_or(|due| {
-                self.audio
-                    .as_ref()
-                    .is_some_and(|a| a.source_position(self.active_deck()) >= due)
+                self.audio.as_ref().is_some_and(|a| {
+                    a.controls.finished[self.other_deck(incoming)].load(Relaxed)
+                        || a.source_position(self.other_deck(incoming)) >= due
+                })
             });
             if !ready && started.elapsed() > Duration::from_secs(15) {
                 self.recover_failed_song(
@@ -1681,8 +1664,7 @@ impl Player {
                 }
                 let chosen = if self.run.force_mashup {
                     Some(crate::transition_styles::Style::Mashup)
-                } else if self.run.auto && !self.run.locked && self.run.effect_done != Some(started)
-                {
+                } else if self.run.auto && self.run.effect_done != Some(started) {
                     self.loaded_track(outgoing)
                         .zip(self.loaded_track(incoming))
                         .and_then(|(a, b)| {
@@ -1756,7 +1738,6 @@ impl Player {
                             .transitions
                             .pick(self.run.completed_handoffs)
                             .is_some())
-                    && !self.run.locked
                     && self.run.effect_done != Some(started)
                     && self.audio.as_ref().is_some_and(|a| {
                         a.playing(outgoing)
@@ -1938,7 +1919,6 @@ impl Player {
                     .iter()
                     .any(|d| matches!(a.controls.section_state[*d].load(Relaxed), 1 | 2))
             })
-            && !self.run.locked
             && self.run.pending.is_none()
             && self.run.transition.is_none()
         {
@@ -2004,6 +1984,7 @@ impl Player {
                 && let Err(e) = self.preload_smart()
             {
                 self.status = e;
+                self.run.failure = Some(self.status.clone());
                 self.run.auto = false;
             }
             let finished = self
@@ -2057,7 +2038,7 @@ impl Player {
             json!({"deck":crate::deck_rack::NAMES[d],"key_lock":a.is_some_and(|a|a.controls.key_lock[d].load(Relaxed)),"key_lock_available":a.is_some_and(|a|a.controls.key_lock_available[d].load(Relaxed)),"stem_levels":std::array::from_fn::<_,3,_>(|i|a.map_or(1.,|a|f32::from_bits(a.controls.stem_level[d][i].load(Relaxed)))),"stems_ready":a.is_some_and(|a|a.controls.stems_loaded[d].load(Relaxed)),"sync":a.is_some_and(|a|a.controls.synced[d].load(Relaxed)),"looping":a.is_some_and(|a|a.controls.looping[d].load(Relaxed)),"gain":a.map_or(0.,|a|a.channel_level(d)),"underruns":a.map_or(0,|a|a.controls.underruns[d].load(Relaxed)),"loaded":engine_loaded,"ready":engine_loaded&&a.is_some_and(|a|a.controls.ready[d].load(Relaxed)),"playing":playing,"state":if playing{"playing"}else if engine_loaded{"paused"}else{"stopped"},"song_id":if engine_loaded{t.map(show::song_id)}else{None},"title":if engine_loaded{t.map(|t|t.title.as_str())}else{None},"artist":if engine_loaded{t.and_then(|t|t.preparation.extensions.get("artist")).cloned()}else{None},"position":if engine_loaded{a.map(|a|a.source_position(d))}else{None},"remaining":if engine_loaded{a.and_then(|a|a.remaining(d))}else{None}})
         }).collect();
         let fading = a.is_some_and(|a| a.fading() || a.controls.level_fading.load(Relaxed));
-        json!({"version":1,"amp":{"connected":true,"status":self.status,"playback_state":tracks[active]["state"],"recognition_context":self.run.recognition_context,"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active.is_multiple_of(2){"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_dj_paused":self.run.paused,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"position":tracks[active]["position"],"crossfader":a.map_or(0.5,|a|a.fader()),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"shuffle":self.shuffle,"repeat":self.repeat_one,"manual_dj_locked":self.run.locked},"samplers":[self.sampler.snapshot(a),self.right_sampler.snapshot(self.right_sample_audio.as_ref())],"google_cast":self.cast.google.snapshot(),"live_broadcast":self.live_mix.as_ref().map(|b|json!({"running":b.running(),"source":if b.player_only{"player"}else{"dj"},"levels":b.levels(),"status":b.status.lock().ok().map(|s|s.clone())})),"deck_layers":tracks,"selected_decks":self.rack.live.map(|d|crate::deck_rack::NAMES[d]),"crossfade_pair":self.pair().map(|d|crate::deck_rack::NAMES[d]),"clock":{"bpm":a.map_or(120.,|a|f32::from_bits(a.controls.master_bpm.load(Relaxed))),"quantization":a.map_or(4,|a|a.controls.quantization.load(Relaxed)),"sample_frames":a.map_or(0,|a|a.controls.rendered.load(Relaxed)),"sample_rate":a.map_or(48000,|a|a.sample_rate),"beat":a.map_or(0.,|a|a.controls.beat_at(a.controls.rendered.load(Relaxed),a.sample_rate))},"decks":self.rack.live.map(|d|{let mut v=tracks[d].clone();v["deck"]=json!(if d%2==0{"A"}else{"B"});v}),"cue_decks":self.sides.iter().map(|side|side.snapshot()).collect::<Vec<_>>()})
+        json!({"version":1,"amp":{"connected":true,"status":self.status,"playback_state":tracks[active]["state"],"recognition_context":self.run.recognition_context,"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active.is_multiple_of(2){"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_dj_paused":self.run.paused,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"position":tracks[active]["position"],"crossfader":a.map_or(0.5,|a|a.fader()),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"shuffle":self.shuffle,"repeat":self.repeat_one,"manual_dj_locked":false},"samplers":[self.sampler.snapshot(a),self.right_sampler.snapshot(self.right_sample_audio.as_ref())],"google_cast":self.cast.google.snapshot(),"live_broadcast":self.live_mix.as_ref().map(|b|json!({"running":b.running(),"source":if b.player_only{"player"}else{"dj"},"levels":b.levels(),"status":b.status.lock().ok().map(|s|s.clone())})),"deck_layers":tracks,"selected_decks":self.rack.live.map(|d|crate::deck_rack::NAMES[d]),"crossfade_pair":self.pair().map(|d|crate::deck_rack::NAMES[d]),"clock":{"bpm":a.map_or(120.,|a|f32::from_bits(a.controls.master_bpm.load(Relaxed))),"quantization":a.map_or(4,|a|a.controls.quantization.load(Relaxed)),"sample_frames":a.map_or(0,|a|a.controls.rendered.load(Relaxed)),"sample_rate":a.map_or(48000,|a|a.sample_rate),"beat":a.map_or(0.,|a|a.controls.beat_at(a.controls.rendered.load(Relaxed),a.sample_rate))},"decks":self.rack.live.map(|d|{let mut v=tracks[d].clone();v["deck"]=json!(if d%2==0{"A"}else{"B"});v}),"cue_decks":self.sides.iter().map(|side|side.snapshot()).collect::<Vec<_>>()})
     }
 }
 
@@ -2535,7 +2516,6 @@ mod tests {
             !player.run.auto,
             "A failed start must not display Auto Mix ON"
         );
-        player.run.locked = true;
         assert!(
             player
                 .execute_control(Action::AutoDj { enabled: true })
@@ -2673,6 +2653,9 @@ mod tests {
             std::thread::sleep(Duration::from_millis(5));
         }
         player.auto_crossfade();
+        // A phrase boundary beyond EOF must never strand a prepared next deck.
+        assert!(player.run.pending.is_some());
+        player.run.pending_at = Some(1000.);
         wait(&mut player, |p| {
             p.loaded[p.active_deck()] == Some(2)
                 && p.run.pending.is_none()
@@ -2988,7 +2971,7 @@ mod tests {
         player
             .execute_control(Action::ManualLock { enabled: true })
             .unwrap();
-        assert!(player.execute_control(Action::AutoFade).is_err());
+        assert!(!player.run.auto);
         assert!(player.audio.as_ref().unwrap().playing(0));
         player
             .execute_control(Action::ManualLock { enabled: false })

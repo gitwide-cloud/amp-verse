@@ -186,6 +186,8 @@ struct Update {
     control_error: Option<String>,
 }
 pub struct Dashboard {
+    dlna: crate::dlna::Output,
+    pub normalize: bool,
     pending_live: Option<std::time::Instant>,
     attempted_host: bool,
     pub(super) google: crate::google_cast::Output,
@@ -280,6 +282,19 @@ impl Default for Dashboard {
             }
         });
         let mut dashboard = Self {
+            dlna: Default::default(),
+            normalize: !cfg!(test)
+                && crate::theme::settings_path()
+                    .and_then(|p| {
+                        amp_core::catalog_db::local_record(
+                            &p.with_file_name("media.ampdb"),
+                            "normalize-cast",
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
             pending_live: None,
             attempted_host: false,
             google: Default::default(),
@@ -318,6 +333,27 @@ impl Default for Dashboard {
     }
 }
 impl Dashboard {
+    fn normalize_control(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        ui.add_enabled_ui(!self.live_active, |ui| {
+            changed = ui
+                .checkbox(
+                    &mut self.normalize,
+                    "Normalize broadcast volume (adds buffering)",
+                )
+                .changed();
+        });
+        if changed
+            && let Some(path) = crate::theme::settings_path()
+            && let Err(e) = amp_core::catalog_db::save_local_record(
+                &path.with_file_name("media.ampdb"),
+                "normalize-cast",
+                &serde_json::json!(self.normalize),
+            )
+        {
+            self.live_status = format!("Could not remember volume setting: {e}");
+        }
+    }
     pub fn request_live(&mut self, player_only: bool) {
         if self.live_active || self.pending_live.is_some() {
             return;
@@ -363,6 +399,7 @@ impl Dashboard {
     }
     pub fn quick_cast(&mut self, ui: &mut egui::Ui) {
         ui.label("Cast current audio. Headphone cue stays private.");
+        self.normalize_control(ui);
         ui.label(&self.live_status);
         if self.pending_live.is_some() && ui.button("Cancel connection").clicked() {
             self.pending_live = None;
@@ -379,6 +416,15 @@ impl Dashboard {
             &self.connected_address,
             self.live_active && self.snapshot.as_ref().is_some_and(|s| s.status.running),
         );
+        self.dlna.show(
+            ui,
+            &self.connected_address,
+            self.live_active && self.snapshot.as_ref().is_some_and(|s| s.status.running),
+        );
+        if self.live_active && ui.button("Stop sending live audio").clicked() {
+            self.live_action = Some(false);
+            let _ = self.google.remote(crate::google_cast::Operation::Stop);
+        }
     }
     pub fn endpoint(&self) -> (String, String) {
         (
@@ -684,6 +730,7 @@ impl Dashboard {
             });
         } else if self.section == 1 {
             ui.heading("Broadcast live audio");
+            self.normalize_control(ui);
             ui.add_enabled_ui(!self.live_active, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.live_player_only, false, "DJ master mix");
@@ -856,6 +903,11 @@ impl Dashboard {
         }
         ui.separator();
         self.google.show(
+            ui,
+            &self.connected_address,
+            self.snapshot.as_ref().is_some_and(|s| s.status.running),
+        );
+        self.dlna.show(
             ui,
             &self.connected_address,
             self.snapshot.as_ref().is_some_and(|s| s.status.running),

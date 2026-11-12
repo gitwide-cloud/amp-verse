@@ -156,6 +156,9 @@ impl Default for Sampler {
     }
 }
 impl Sampler {
+    pub fn protected_paths(&self) -> Vec<PathBuf> {
+        self.bank.paths.iter().flatten().cloned().collect()
+    }
     pub fn snapshot(&self, engine: Option<&Engine>) -> serde_json::Value {
         serde_json::json!((0..9).map(|pad| serde_json::json!({
             "name": self.bank.names[pad], "loaded": self.ready[pad],

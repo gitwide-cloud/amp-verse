@@ -55,7 +55,7 @@ fn discover() -> Result<Vec<Device>, String> {
     devices.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(devices)
 }
-fn stream_url(address: &str, device: &str) -> Result<String, String> {
+pub(super) fn stream_url(address: &str, device: &str) -> Result<String, String> {
     let (host, port) = address
         .rsplit_once(':')
         .ok_or("Connect to an AMP Cast server first")?;

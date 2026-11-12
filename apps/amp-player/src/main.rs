@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 mod addons;
+mod audio_output;
 mod cast;
 mod control;
 mod controllers;
@@ -15,6 +16,7 @@ mod deck_rack;
 mod dj_browser;
 mod dj_mixer;
 mod dj_settings;
+mod dlna;
 mod docking;
 mod dragdrop;
 mod engine;
@@ -30,12 +32,15 @@ mod library_cache;
 mod library_organizer;
 mod live_mix;
 mod mashup;
+mod media_lookup;
 mod mix_schedule;
 mod mixer;
 mod monitor;
 mod music_scenes;
 mod organized_library;
 mod performance;
+mod podcast_cache;
+mod podcasts;
 mod preparer;
 mod resources;
 mod sample_editor;
@@ -127,6 +132,10 @@ struct Player {
     library: Option<Library>,
     source_roots: Vec<amp_core::music_sources::Source>,
     organizer: library_organizer::Organizer,
+    outputs: audio_output::Panel,
+    lookup: media_lookup::Lookup,
+    podcasts: podcasts::Podcasts,
+    podcast_play: Option<PathBuf>,
     auto_dj_controls: bool,
     scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
     last_scan: std::time::Instant,
@@ -221,6 +230,10 @@ impl Default for Player {
             library: None,
             source_roots: Vec::new(),
             organizer: Default::default(),
+            outputs: Default::default(),
+            lookup: Default::default(),
+            podcasts: Default::default(),
+            podcast_play: None,
             auto_dj_controls: false,
             scan: None,
             last_scan: std::time::Instant::now(),
@@ -540,7 +553,6 @@ impl Player {
         self.preparer.guard_preview(
             !self.library_open
                 || self.run.auto
-                || self.run.locked
                 || self.smart_preview.active()
                 || self.auxiliary_playing()
                 || self
@@ -571,7 +583,6 @@ impl Player {
         }
         if self.smart_preview.active()
             && (self.auxiliary_playing()
-                || self.run.locked
                 || self.run.auto
                 || self.audio.as_ref().is_some_and(|audio| {
                     audio.playing(0)
@@ -684,8 +695,11 @@ impl Player {
         }
     }
     fn ensure_audio(&mut self) -> Result<(), String> {
+        if self.podcasts.cache.purging() {
+            return Err("Podcast cleanup is finishing; try playback again in a moment.".into());
+        }
         if self.audio.is_none() {
-            let audio = mixer::Engine::new()?;
+            let audio = mixer::Engine::with_output(self.outputs.selected.as_deref())?;
             audio.set_master(self.volume as f32 / 100.);
             for d in 0..6 {
                 audio.set_gain(d, self.channel_gain[d]);
@@ -1822,47 +1836,51 @@ impl Player {
         }
     }
     fn performance_controls(&mut self, ui: &mut egui::Ui) {
-        let mut enabled = self.auto_dj_controls || self.run.auto;
+        let mut enabled = self.run.auto;
         let old = enabled;
-        let label = if self.run.auto {
-            "Auto DJ · ON"
-        } else if enabled {
-            "Auto DJ · setup"
-        } else {
-            "Auto DJ · OFF"
-        };
-        skin::switch(ui, &mut enabled, label);
+        skin::switch(
+            ui,
+            &mut enabled,
+            if old {
+                "Auto Mix · ON"
+            } else {
+                "Auto Mix · OFF"
+            },
+        );
         if enabled != old {
-            self.auto_dj_controls = enabled;
-            if !enabled {
-                if let Err(error) = self.execute_control(control::Action::AutoDj { enabled: false })
-                {
-                    self.status = error;
-                }
+            self.run.failure = None;
+            let result = if !enabled || self.run.profile.is_some() {
+                self.execute_control(control::Action::AutoDj { enabled })
             } else {
                 let choice = self
                     .dj_browser
                     .selected_smart()
                     .map(str::to_owned)
                     .unwrap_or_else(|| self.run.choice.clone());
-                if !choice.is_empty() {
-                    if let Err(error) = self.execute_control(control::Action::LoadSmartPlaylist {
+                if choice.is_empty() {
+                    Err("Choose a music source in DJ settings, then turn Auto Mix on.".into())
+                } else {
+                    self.execute_control(control::Action::LoadSmartPlaylist {
                         playlist: choice,
                         execution: control::Execution::PlayNow,
                         style: None,
                         energy: None,
-                    }) {
-                        self.status = error;
-                    }
-                } else {
-                    self.status =
-                        "Auto DJ setup: choose a Smart Playlist and press Load to begin.".into();
+                    })
                 }
+            };
+            if let Err(error) = result {
+                self.status = error.clone();
+                self.run.failure = Some(error);
             }
+            enabled = self.run.auto;
+            self.auto_dj_controls = enabled;
         }
         #[cfg(test)]
         ui.ctx()
             .data_mut(|data| data.insert_temp(egui::Id::unique("auto-dj-menu-visible"), enabled));
+        if let Some(error) = &self.run.failure {
+            ui.colored_label(egui::Color32::from_rgb(255, 180, 70), error);
+        }
         if !enabled {
             return;
         }
@@ -1919,7 +1937,6 @@ impl Player {
             {
                 self.status = e;
             }
-            skin::switch(ui, &mut self.run.crossfade, "Auto Crossfade");
             if ui.button(self.run.transitions.pace.label()).clicked() {
                 self.open_dj_settings(ui.ctx());
             }
@@ -1940,12 +1957,7 @@ impl Player {
         }
     }
     fn performance_mix_options(&mut self, ui: &mut egui::Ui) {
-        let old_lock = self.run.locked;
-        skin::switch(ui, &mut self.run.locked, "Manual DJ Lock");
-        if !old_lock && self.run.locked {
-            self.run.cancel_automation();
-        }
-        ui.weak("Lock pauses automation so you can mix manually.");
+        ui.weak("Auto Mix ON uses the engine. OFF leaves the decks under manual control.");
         let mut style = self.run.style;
         ui.horizontal_wrapped(|ui| {
             for value in [
@@ -2661,7 +2673,7 @@ impl Player {
     }
     fn ensure_right_samples(&mut self) -> Result<(), String> {
         if self.right_sample_audio.is_none() {
-            let audio = mixer::Engine::new()?;
+            let audio = mixer::Engine::with_output(self.outputs.selected.as_deref())?;
             audio.set_master(self.volume as f32 / 100.);
             self.right_sample_audio = Some(audio);
         }
@@ -3139,12 +3151,13 @@ impl Player {
                     self.ensure_audio()?;
                     self.ensure_right_samples()?;
                     let (address, password) = self.cast.endpoint();
-                    live_mix::Broadcast::start_source(
+                    live_mix::Broadcast::start_source_normalized(
                         self.audio.as_ref().unwrap(),
                         self.right_sample_audio.as_ref().unwrap(),
                         address,
                         password,
                         self.cast.live_player_only,
+                        self.cast.normalize,
                     )
                 })();
                 match result {
@@ -3210,8 +3223,7 @@ impl eframe::App for Player {
             }
         }
         if let Some((path, seconds)) = self.preparer.preview.take() {
-            if self.run.locked
-                || self.run.auto
+            if self.run.auto
                 || self.audio.as_ref().is_some_and(|a| {
                     a.playing(0)
                         || a.playing(1)
@@ -3236,6 +3248,67 @@ impl eframe::App for Player {
         if !self.lab_open {
             self.lab.stop_preview();
         }
+        self.lookup
+            .poll(ui.ctx(), &self.root, self.library.as_mut());
+        self.podcasts.poll(ui.ctx());
+        let mut protected: Vec<_> = self
+            .loaded_snapshot
+            .iter()
+            .zip(&self.loaded_origin)
+            .filter_map(|(track, root)| {
+                Some(amp_core::music_sources::audio_path(
+                    root.as_ref()?,
+                    &track.as_ref()?.path,
+                ))
+            })
+            .collect();
+        protected.extend(self.sides.iter().filter_map(|s| s.config.path.clone()));
+        protected.extend(self.sampler.protected_paths());
+        protected.extend(self.right_sampler.protected_paths());
+        let idle = self.scan.is_none()
+            && self.recovery.pending.is_none()
+            && !self.lab_open
+            && !self.preparer.busy()
+            && !self.stem_panel.busy()
+            && !self.run.auto
+            && !self.auxiliary_playing()
+            && !self
+                .audio
+                .as_ref()
+                .is_some_and(|a| (0..6).any(|d| a.playing(d)));
+        self.podcasts.cache.tick(ui.ctx(), protected, idle);
+        if self.podcasts.cache.changed {
+            self.podcasts.cache.changed = false;
+            self.scan();
+        }
+        if let Some((path, play)) = self.podcasts.downloaded.take() {
+            if let Some(folder) = path.parent() {
+                let present = amp_core::folder_contains(folder, &self.root)
+                    || self
+                        .source_roots
+                        .iter()
+                        .any(|s| amp_core::folder_contains(folder, &s.root));
+                if present {
+                    self.scan();
+                } else {
+                    self.add_music_source(folder.to_owned());
+                }
+            }
+            if play {
+                self.podcast_play = Some(path);
+            }
+        }
+        if self.scan.is_none()
+            && let Some(path) = self.podcast_play.as_ref()
+            && let Some(index) = self.library.as_ref().and_then(|l| {
+                l.tracks
+                    .iter()
+                    .position(|t| amp_core::music_sources::audio_path(&self.root, &t.path) == *path)
+            })
+        {
+            self.podcast_play = None;
+            self.play(0, index);
+        }
         self.cast.poll();
         self.update_live_broadcast();
         self.dj_effects(ui.ctx());
@@ -3259,6 +3332,14 @@ impl eframe::App for Player {
             }
             "sources" => {
                 self.library_page = 5;
+                self.library_ui(ui);
+            }
+            "tags-artwork" => {
+                self.library_page = 9;
+                self.library_ui(ui);
+            }
+            "podcasts" => {
+                self.library_page = 10;
                 self.library_ui(ui);
             }
             "analysis" => {
@@ -3438,7 +3519,7 @@ fn main() -> eframe::Result {
 mod window_tests {
     use super::*;
     #[test]
-    fn auto_dj_switch_reveals_setup_and_hides_the_menu_when_off() {
+    fn auto_mix_switch_never_claims_on_when_no_source_can_start() {
         let ctx = egui::Context::default();
         let mut player = Player::default();
         let mut frame = |events| {
@@ -3461,7 +3542,7 @@ mod window_tests {
         };
         let (rect, visible) = frame(vec![]);
         assert!(!visible);
-        for expected in [true, false] {
+        for expected in [false, false] {
             let pos = rect.center();
             frame(vec![
                 egui::Event::PointerMoved(pos),

@@ -4,6 +4,18 @@ use lofty::{
     file::{AudioFile, TaggedFileExt},
     tag::ItemKey,
 };
+pub fn artwork(path: &std::path::Path) -> Result<Option<Vec<u8>>, String> {
+    let file = lofty::probe::Probe::open(path)
+        .map_err(|e| e.to_string())?
+        .read()
+        .map_err(|e| e.to_string())?;
+    Ok(file
+        .tags()
+        .iter()
+        .flat_map(|t| t.pictures())
+        .find(|p| p.data().len() <= 8 * 1024 * 1024)
+        .map(|p| p.data().to_vec()))
+}
 
 pub fn canonical(value: &str) -> String {
     let value = value.trim();

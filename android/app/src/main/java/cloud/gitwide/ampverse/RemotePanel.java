@@ -19,6 +19,7 @@ final class RemotePanel extends LinearLayout {
     private int discoveryGeneration,discoveryPending,discoveryFound,discoveryErrors;
     private final EditText address,password,search;private final TextView status,now;
     private final LinearLayout songs,controls;
+    private Switch autoMix; private boolean updatingAutoMix;
     private JSONObject latestState=new JSONObject();
     private JSONArray catalog=new JSONArray(),playlists=new JSONArray();
     private String base="",secret="",session="",deck="a";private boolean closed,connected;
@@ -39,9 +40,7 @@ final class RemotePanel extends LinearLayout {
         row(controls,button("A",()->{deck="a";status.setText("Selected deck A");}),button("B",()->{deck="b";status.setText("Selected deck B");}));
         row(controls,button("Play",()->command("play","deck",deck)),button("Pause",()->command("pause","deck",deck)),button("Stop",()->command("stop","deck",deck)));
         row(controls,button("Restart cue",()->command("restart_cue","deck",deck)),button("Preload next",()->command("preload_next")),button("Mix next",()->command("mix_next","immediate",true)));
-        row(controls,button("Auto DJ ON",()->command("auto_dj","enabled",true)),button("Auto DJ OFF",()->command("auto_dj","enabled",false)));
-        row(controls,button("Crossfade ON",()->command("auto_crossfade","enabled",true)),button("Crossfade OFF",()->command("auto_crossfade","enabled",false)));
-        row(controls,button("DJ Lock ON",()->command("manual_lock","enabled",true)),button("DJ Lock OFF",()->command("manual_lock","enabled",false)));
+        autoMix=new Switch(a);autoMix.setText("Auto Mix");autoMix.setTextColor(colors.text);autoMix.setThumbTintList(android.content.res.ColorStateList.valueOf(colors.accent));autoMix.setContentDescription("Auto Mix on uses the engine; off is manual");autoMix.setOnCheckedChangeListener((view,enabled)->{if(!updatingAutoMix)command("auto_dj","enabled",enabled);});controls.addView(autoMix);
         controls.addView(label("Crossfader · A ↔ B",15));SeekBar fader=new SeekBar(a);fader.setMax(100);fader.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){command("set_crossfader","value",b.getProgress()/100.);}public void onProgressChanged(SeekBar b,int value,boolean user){}});controls.addView(fader);
         row(controls,button("Hype",()->command("set_style","style","hype")),button("Steady",()->command("set_style","style","steady")),button("Chill",()->command("set_style","style","chill")));
         controls.addView(label("Target energy",15));SeekBar energy=new SeekBar(a);energy.setMax(100);energy.setProgress(50);energy.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){command("set_energy","target",1.+9.*b.getProgress()/100.);}public void onProgressChanged(SeekBar b,int value,boolean user){}});controls.addView(energy);
@@ -138,8 +137,9 @@ final class RemotePanel extends LinearLayout {
     private void showState(JSONObject state){
         if(state!=null)latestState=state;
         JSONObject amp=state==null?null:state.optJSONObject("amp");if(amp==null){now.setText("Status unavailable");return;}
+        updatingAutoMix=true;autoMix.setChecked(amp.optBoolean("auto_dj_enabled"));updatingAutoMix=false;
         StringBuilder text=new StringBuilder(amp.isNull("current_song")?"No track":amp.optString("current_song"));
-        text.append(" · ").append(amp.optString("playback_state","stopped")).append(" · ").append(amp.optBoolean("auto_dj_enabled")?"Auto DJ ON":"Auto DJ OFF").append(" · ").append(amp.optBoolean("manual_dj_locked")?"DJ locked":"DJ unlocked");
+        text.append(" · ").append(amp.optString("playback_state","stopped")).append(" · ").append(amp.optBoolean("auto_dj_enabled")?"Auto Mix ON":"Auto Mix OFF");
         text.append("\nPlaylist: ").append(amp.isNull("playlist")?"None":amp.optString("playlist")).append(" · Master ").append(Math.round(amp.optDouble("master_level",0)*100)).append('%');
         JSONArray decks=state.optJSONArray("decks");if(decks!=null)for(int i=0;i<decks.length();i++){JSONObject d=decks.optJSONObject(i);if(d==null)continue;text.append("\n").append(d.optString("deck")).append(": ").append(d.optBoolean("loaded")?d.optString("title"):"Empty").append(" · ").append(d.optString("state"));}
         now.setText(text);

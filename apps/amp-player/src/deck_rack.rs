@@ -1154,7 +1154,7 @@ mod tests {
             (egui::vec2(1570., 1000.), true, false),
         ] {
             player.rack.expanded = expanded;
-            player.run.locked = locked;
+            let _ = locked;
             for _ in 0..3 {
                 let mut output = ctx.run_ui(
                     egui::RawInput {

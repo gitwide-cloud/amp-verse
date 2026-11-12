@@ -110,6 +110,7 @@ dependencies = [
  "cc",
  "cpal",
  "eframe",
+ "image",
  "libloading 0.8.9",
  "mdns-sd",
  "midir",
@@ -1932,6 +1933,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

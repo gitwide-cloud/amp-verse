@@ -339,6 +339,22 @@ pub fn eligible(p: &SmartPlaylist, t: &Track) -> bool {
         return false;
     }
     let id = song_id(t);
+    // Speech downloads stay out of broad music mixes. They can still be explicitly
+    // selected as songs, a dedicated folder, or an imported playlist source.
+    if t.preparation
+        .extensions
+        .get("media_kind")
+        .and_then(|v| v.as_str())
+        == Some("podcast")
+        && !p.allowed.contains(&id)
+        && !p
+            .folders
+            .iter()
+            .any(|f| !f.as_os_str().is_empty() && crate::folder_contains(&t.path, f))
+        && !p.playlist_sources.iter().any(|s| s.songs.contains(&id))
+    {
+        return false;
+    }
     // Folder sources include all descendants. Older drafts used restrict_allowed as
     // an empty-source guard; do not require per-song Allow ticks after a folder is chosen.
     let allowed = p.allowed.contains(&id)

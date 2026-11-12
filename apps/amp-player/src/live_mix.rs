@@ -30,12 +30,23 @@ impl Broadcast {
             self.muted.load(Relaxed),
         )
     }
+    #[cfg(test)]
     pub fn start_source(
         audio: &crate::mixer::Engine,
         aux: &crate::mixer::Engine,
         address: String,
         password: String,
         player_only: bool,
+    ) -> Result<Self, String> {
+        Self::start_source_normalized(audio, aux, address, password, player_only, false)
+    }
+    pub fn start_source_normalized(
+        audio: &crate::mixer::Engine,
+        aux: &crate::mixer::Engine,
+        address: String,
+        password: String,
+        player_only: bool,
+        normalize: bool,
     ) -> Result<Self, String> {
         if audio.sample_rate != aux.sample_rate {
             return Err(
@@ -48,18 +59,20 @@ impl Broadcast {
         } else {
             Some(aux.broadcast_tap()?)
         };
-        let mut child = amp_core::command("ffmpeg")
+        let mut command = amp_core::command("ffmpeg");
+        command
             .args(["-nostdin", "-v", "error", "-f", "f32le", "-ar"])
             .arg(audio.sample_rate.to_string())
+            .args(["-ac", "2", "-i", "pipe:0"]);
+        if normalize {
+            command.args(["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]);
+        }
+        let mut child = command
             .args([
-                "-ac",
-                "2",
-                "-i",
-                "pipe:0",
                 "-c:a",
                 "libmp3lame",
                 "-b:a",
-                "192k",
+                "256k",
                 "-reservoir",
                 "0",
                 "-f",
@@ -203,6 +216,14 @@ mod tests {
     #[test]
     #[ignore = "requires native audio and FFmpeg; output muted"]
     fn master_tap_encodes_and_streams_through_real_cast_server() {
+        check_stream(false);
+    }
+    #[test]
+    #[ignore = "requires native audio and FFmpeg; output muted"]
+    fn normalized_master_tap_encodes_and_streams_through_real_cast_server() {
+        check_stream(true);
+    }
+    fn check_stream(normalize: bool) {
         let root = tempfile::tempdir().unwrap();
         let library = amp_core::Library {
             tracks: vec![],
@@ -226,8 +247,19 @@ mod tests {
         main.set_master(0.);
         let aux = crate::mixer::Engine::new().unwrap();
         aux.set_master(0.);
-        let broadcast =
-            Broadcast::start_source(&main, &aux, address.clone(), String::new(), false).unwrap();
+        let broadcast = if normalize {
+            Broadcast::start_source_normalized(
+                &main,
+                &aux,
+                address.clone(),
+                String::new(),
+                false,
+                true,
+            )
+            .unwrap()
+        } else {
+            Broadcast::start_source(&main, &aux, address.clone(), String::new(), false).unwrap()
+        };
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_secs(5)))
             .proxy(None)

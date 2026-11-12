@@ -647,7 +647,7 @@ impl Player {
             }
         }
         if toggle {
-            if auto && self.dj_browser.source != Source::Smart && !self.run.locked {
+            if auto && self.dj_browser.source != Source::Smart {
                 // Snapshot the chosen browser source for this session only. Never
                 // silently fall back to a different Smart Playlist or all folders.
                 if let Some(library) = &self.library {

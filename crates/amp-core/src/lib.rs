@@ -2,6 +2,7 @@
 #[cfg(feature = "analysis")]
 pub mod analysis;
 pub mod arrangement;
+pub mod artwork;
 pub mod batch;
 pub mod catalog_db;
 pub mod consolidate;
@@ -183,7 +184,7 @@ pub fn supported(p: &Path) -> bool {
     p.extension().is_some_and(|e| {
         matches!(
             e.to_string_lossy().to_lowercase().as_str(),
-            "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac"
+            "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "m4b" | "aac"
         )
     })
 }

@@ -11,6 +11,8 @@ use std::{
 };
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Entry {
+    #[serde(default)]
+    pub organize_names: bool,
     pub original: PathBuf,
     pub relative: PathBuf,
     pub hash: String,
@@ -129,6 +131,7 @@ pub fn scan(
         }
         hashes.entry(digest.clone()).or_default().push(files.len());
         files.push(Entry {
+            organize_names: false,
             original,
             relative: track.path.clone(),
             hash: digest,
@@ -165,7 +168,91 @@ pub fn scan(
     })
 }
 pub fn target_relative(entry: &Entry) -> PathBuf {
+    if entry.organize_names {
+        let tag = |key: &str, embedded: &str, fallback: &str| {
+            let v = entry.preparation.extensions.get(key).or_else(|| {
+                entry
+                    .preparation
+                    .extensions
+                    .get("embedded_tags")?
+                    .get(embedded)
+            });
+            let value = v
+                .and_then(|v| v.as_str().or_else(|| v.as_array()?.first()?.as_str()))
+                .filter(|s| !s.trim().is_empty())
+                .unwrap_or(fallback);
+            safe_component(value)
+        };
+        let title = entry
+            .original
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .unwrap_or("Track");
+        let ext = entry
+            .original
+            .extension()
+            .and_then(|s| s.to_str())
+            .unwrap_or("mp3");
+        return PathBuf::from(tag("artist", "TrackArtist", "Unknown artist"))
+            .join(tag("album", "AlbumTitle", "Unknown album"))
+            .join(format!(
+                "{} - {}.{}",
+                tag("title", "TrackTitle", title),
+                entry
+                    .hash
+                    .get(..12)
+                    .filter(|v| v.bytes().all(|c| c.is_ascii_hexdigit()))
+                    .unwrap_or("unverified"),
+                ext
+            ));
+    }
     destination_path(&entry.relative)
+}
+fn safe_component(value: &str) -> String {
+    let value: String = value
+        .chars()
+        .map(|c| {
+            if c.is_control() || "<>:\"/\\|?*".contains(c) {
+                '_'
+            } else {
+                c
+            }
+        })
+        .take(80)
+        .collect();
+    let value = value.trim().trim_matches('.').trim();
+    let upper = value.to_ascii_uppercase();
+    if value.is_empty() {
+        "Unknown".into()
+    } else if matches!(
+        upper.as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    ) {
+        format!("_{value}")
+    } else {
+        value.into()
+    }
 }
 fn destination_path(relative: &Path) -> PathBuf {
     let path = if let Ok(tail) = relative.strip_prefix(crate::music_sources::PREFIX) {
@@ -339,7 +426,7 @@ pub fn execute(
             .files
             .get(group.keeper)
             .ok_or("Invalid keeper selection")?;
-        let relative = destination_path(&keeper.relative);
+        let relative = target_relative(keeper);
         for &index in &group.members {
             let entry = plan.files.get(index).ok_or("Invalid duplicate preview")?;
             if entry.hash != keeper.hash {
@@ -408,6 +495,15 @@ pub fn execute(
             return Err("Destination changed; originals retained.".into());
         }
         let mut prep = entry.preparation.clone();
+        if let Some(id) = prep.extensions.get("artwork_id").and_then(|v| v.as_str()) {
+            let (owner, _) = crate::music_sources::owner(&plan.root, &entry.relative)
+                .map_err(|e| e.to_string())?;
+            if let Some(data) = crate::artwork::read(&owner, id)? {
+                crate::artwork::save(&destination, &data)?;
+            } else {
+                return Err("A selected artwork asset is missing; originals retained".into());
+            }
+        }
         prep.extensions.remove("_amp_sync");
         if !resume || preparation::revision(&dest).is_none() {
             preparation::save(&destination, relative, &prep)?;
@@ -561,6 +657,41 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn artist_album_rename_preserves_portable_artwork_and_cues() {
+        let source = tempfile::tempdir().unwrap();
+        let dest = tempfile::tempdir().unwrap();
+        fs::write(source.path().join("song.mp3"), b"unique music").unwrap();
+        let id = crate::artwork::save(source.path(), b"cover bytes").unwrap();
+        let mut prep = Preparation {
+            cue_in: 5.,
+            bpm: Some(120.),
+            manual_override: true,
+            ..Default::default()
+        };
+        prep.extensions
+            .insert("title".into(), serde_json::json!("My song"));
+        prep.extensions
+            .insert("artist".into(), serde_json::json!("A/B"));
+        prep.extensions
+            .insert("album".into(), serde_json::json!("CON"));
+        prep.extensions
+            .insert("artwork_id".into(), serde_json::json!(id));
+        preparation::save(source.path(), Path::new("song.mp3"), &prep).unwrap();
+        let cancel = AtomicBool::new(false);
+        let mut plan = scan(source.path(), &cancel, |_| {}).unwrap();
+        plan.files[0].organize_names = true;
+        let relative = target_relative(&plan.files[0]);
+        assert!(relative.starts_with("A_B/_CON"));
+        execute(&plan, dest.path(), &cancel, |_| {}, |_, _| Ok(())).unwrap();
+        let saved = preparation::load(&dest.path().join(&relative)).unwrap();
+        assert_eq!(saved.cue_in, 5.);
+        assert_eq!(saved.bpm, Some(120.));
+        assert_eq!(
+            crate::artwork::read(dest.path(), &id).unwrap().unwrap(),
+            b"cover bytes"
+        );
+    }
     #[test]
     fn interrupted_deletion_resumes_even_when_source_playlist_tracks_have_moved() {
         let source = tempfile::tempdir().unwrap();

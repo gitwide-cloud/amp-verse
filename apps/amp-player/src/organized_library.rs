@@ -1,9 +1,9 @@
 use super::*;
 impl Player {
     pub(super) fn library_ui(&mut self, ui: &mut egui::Ui) {
-        let blocked = self.run.auto
+        let blocked = self.live_mix.as_ref().is_some_and(|b| b.running())
+            || self.run.auto
             || self.auto
-            || self.run.locked
             || self.auxiliary_playing()
             || self
                 .audio
@@ -29,7 +29,6 @@ impl Player {
                 .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.));
         }
         self.preparer.preview_blocked = self.run.auto
-            || self.run.locked
             || self.auxiliary_playing()
             || self
                 .audio
@@ -53,9 +52,11 @@ impl Player {
         let height = (ui.available_height() - 64.).max(350.);
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(176.,height - 70.),egui::Layout::top_down(egui::Align::Min),|ui| {
-                for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(7,icons::Icon::Analyze,"Equalizer"),(8,icons::Icon::Folder,"Organise library")] {
+                egui::ScrollArea::vertical().id_salt("library-navigation").max_height((height-180.).max(160.)).show(ui,|ui|{
+                for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(7,icons::Icon::Analyze,"Equalizer"),(8,icons::Icon::Folder,"Organise library"),(9,icons::Icon::List,"Tags & artwork"),(10,icons::Icon::List,"Podcasts")] {
                     if icons::button(ui,icon,title,self.library_page==page,egui::vec2(172.,46.)).clicked(){self.library_page=page;}
                 }
+                });
                 ui.add_space(20.);ui.separator();
                 let total=self.library.as_ref().map_or(0,|l|l.tracks.len());
                 ui.label(RichText::new("Library ready").color(skin::signal(ui)));ui.weak(format!("{total} tracks"));
@@ -67,11 +68,23 @@ impl Player {
                     0 => self.organized_music(ui,height),
                     1 => self.organized_smart(ui,height),
                     2 => self.organized_playlists(ui,height),
-                    3 => {egui::ScrollArea::vertical().max_height(height-50.).show(ui,|ui| {self.controllers.show(ui);ui.separator();ui.heading("AMP Cast devices");self.cast.show(ui, &self.root, self.library.is_some() && self.scan.is_none());});},
+                    3 => {egui::ScrollArea::vertical().max_height(height-50.).show(ui,|ui| {if self.outputs.show(ui,blocked) {
+                        let prepared=self.loaded;
+                        self.audio=None;self.right_sample_audio=None;
+                        self.loaded=[None;6];self.playing=[false;6];
+                        for (deck,index) in prepared.into_iter().enumerate() {if let Some(index)=index {self.load_deck(deck,index,false);}}
+                    }
+                    ui.separator();self.controllers.show(ui);ui.separator();ui.heading("AMP Cast devices");self.cast.show(ui, &self.root, self.library.is_some() && self.scan.is_none());});},
                     4 => {ui.heading("Playback history");ui.weak("Tracks started by this desktop session. A start does not mean the full track was played.");egui::ScrollArea::vertical().max_height(height-80.).show(ui,|ui|{for (deck,title) in self.playback_history.iter().rev(){ui.label(format!("Deck {}    {title}",deck+1));}if self.playback_history.is_empty(){ui.weak("Play a song to begin your session history.");}});},
                     5 => {ui.heading("Music sources");ui.label("Local folders and mounted network libraries");self.music_source_controls(ui);ui.separator();ui.heading("Remote control");ui.label(&self.control_status);ui.label("Listen address");ui.text_edit_singleline(&mut self.control_bind);ui.label("Optional password");ui.add(egui::TextEdit::singleline(&mut self.control_password).password(true));ui.horizontal(|ui|{if ui.button("Start / restart control").clicked(){self.start_control(ui.ctx());}
 if ui.button("Stop control").clicked(){self.control=None;self.control_restart=None;self.control_status="Control stopped".into();}});theme::selector(ui);},
                     7 => self.library_equalizer(ui),
+                    9 => {if self.selected.is_none() && self.library.as_ref().is_some_and(|l|!l.tracks.is_empty()){self.selected=Some(0);}egui::ScrollArea::vertical().id_salt("tags-artwork-page").max_height((height-60.).max(180.)).show(ui,|ui|{
+                        self.lookup.batch_controls(ui,&self.root,self.library.as_ref());
+                        if let Some(path)=self.lookup.review_song.take(){self.selected=self.library.as_ref().and_then(|l|l.tracks.iter().position(|t|t.path==path));}
+                        let track=self.selected.and_then(|i|self.library.as_ref()?.tracks.get(i));self.lookup.show(ui,&self.root,track);
+                    });},
+                    10 => self.podcasts.show(ui),
                     8 => {
                         let audio=&mut self.audio;
                         if let Some(destination)=self.organizer.show(ui,&self.root,blocked,||{if let Some(audio)=audio {for d in 0..6 {audio.stop(d);}}}) {self.connect_music_root(destination);}
@@ -95,7 +108,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
         ui.add(egui::Label::new(&self.status).truncate())
             .on_hover_text(&self.status);
     }
-    fn add_music_source(&mut self, folder: PathBuf) {
+    pub(super) fn add_music_source(&mut self, folder: PathBuf) {
         if self.root.as_os_str().is_empty() {
             self.connect_music_root(folder);
             return;
@@ -226,7 +239,6 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                         self.show_editor.preview_active = self.smart_preview.active();
                         self.show_editor.preview_status = self.smart_preview.status.clone();
                         self.show_editor.audition_blocked = self.auxiliary_playing()
-                            || self.run.locked
                             || self.run.auto
                             || self.audio.as_ref().is_some_and(|audio| {
                                 audio.playing(0)
@@ -546,6 +558,13 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 .id_salt("inline-prepare-panel")
                 .max_height(prepare_height)
                 .show(ui, |ui| {
+                    if let Some(track) = track.as_ref() {
+                        self.lookup.cover(ui, &self.root, track);
+                        if ui.button("Find tags / album artwork...").clicked() {
+                            self.library_page = 9;
+                            self.lookup.query.clear();
+                        }
+                    }
                     self.preparer.prepare_panel(
                         ui,
                         &self.root,
@@ -618,92 +637,69 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                     } else {
                         height * 0.34
                     };
-                    egui::ScrollArea::both()
-                        .auto_shrink([false, false])
-                        .id_salt("organized-tracks")
-                        .max_height(list_height)
-                        .min_scrolled_height(list_height)
-                        .show(ui, |ui| {
-                            egui::Grid::new("organized-track-grid")
-                                .striped(true)
-                                .spacing([16., 12.])
-                                .show(ui, |ui| {
-                                    for label in ["Queue", "Title", "BPM", "Key", "Rating"] {
-                                        ui.strong(label);
-                                    }
-                                    ui.end_row();
-                                    if let Some(lib) = &self.library {
-                                        for (index, track) in lib.tracks.iter().enumerate() {
-                                            if !track.path.starts_with(&self.folder)
-                                                || !format!(
-                                                    "{} {}",
-                                                    track.title,
-                                                    track.path.display()
-                                                )
-                                                .to_lowercase()
-                                                .contains(&self.search.to_lowercase())
-                                            {
-                                                continue;
-                                            }
-                                            let mut included = self.queue.contains(&index);
-                                            if ui.checkbox(&mut included, "").changed() {
-                                                if included {
-                                                    self.queue.push(index);
-                                                } else {
-                                                    self.queue.retain(|&i| i != index);
-                                                    self.queue_selected = None;
-                                                }
-                                            }
-                                            let row = ui.selectable_label(
-                                                self.selected == Some(index),
-                                                &track.title,
-                                            );
-                                            let row = row.interact(egui::Sense::click_and_drag());
-                                            dragdrop::source(&row, amp_core::music_sources::audio_path(&self.root, &track.path));
-                                            if row.clicked() {
-                                                self.selected = Some(index);
-                                            }
-                                            if row.double_clicked() {
-                                                play = Some(index);
-                                            }
-                                            row.context_menu(|ui| {
-                                                if ui
-                                                    .button("Edit cues, key, BPM and rating")
-                                                    .clicked()
-                                                {
-                                                    edit = Some(index);
-                                                    ui.close();
-                                                }
-                                            });
-                                            ui.label(
-                                                track
-                                                    .preparation
-                                                    .bpm
-                                                    .map(|v| format!("{v:.1}"))
-                                                    .unwrap_or_else(|| "—".into()),
-                                            );
-                                            ui.label(
-                                                track
-                                                    .preparation
-                                                    .harmonic_key
-                                                    .as_deref()
-                                                    .or(track.preparation.key.as_deref())
-                                                    .unwrap_or("—"),
-                                            );
-                                            ui.label(
-                                                track
-                                                    .preparation
-                                                    .extensions
-                                                    .get("rating")
-                                                    .and_then(|v| v.as_u64())
-                                                    .map(|v| format!("{v}/5"))
-                                                    .unwrap_or_else(|| "—".into()),
-                                            );
-                                            ui.end_row();
-                                        }
-                                    }
-                                });
-                        });
+                    let query=self.search.to_lowercase();
+                    let filtered:Vec<usize>=self.library.as_ref().map(|lib|lib.tracks.iter().enumerate().filter(|(_,t)|t.path.starts_with(&self.folder)&&(query.is_empty()||format!("{} {} {} {}",t.title,t.path.display(),track_columns::cell(t,"artist"),track_columns::cell(t,"album")).to_lowercase().contains(&query))).map(|(i,_)|i).collect()).unwrap_or_default();
+                    ui.weak(format!("{} matching tracks",filtered.len()));
+                    let title_width=(ui.available_width()-210.).max(130.);
+                    ui.horizontal(|ui|{ui.label("Queue");ui.add_sized([title_width,20.],egui::Label::new("Title"));ui.label("BPM    Key    Rating");});
+                    egui::ScrollArea::vertical().auto_shrink([false,false]).id_salt("organized-tracks").max_height(list_height).min_scrolled_height(list_height).show_rows(ui,28.,filtered.len(),|ui,range|{
+                        if let Some(lib)=&self.library {for position in range {let index=filtered[position];let track=&lib.tracks[index];
+                            ui.horizontal(|ui|{
+let mut included = self.queue.contains(&index);
+if ui.checkbox(&mut included, "").changed() {
+    if included {
+        self.queue.push(index);
+    } else {
+        self.queue.retain(|&i| i != index);
+        self.queue_selected = None;
+    }
+}
+let row = ui.add_sized([title_width,24.],egui::Button::selectable(self.selected==Some(index), &track.title).truncate());
+let row = row.interact(egui::Sense::click_and_drag());
+dragdrop::source(&row, amp_core::music_sources::audio_path(&self.root, &track.path));
+if row.clicked() {
+    self.selected = Some(index);
+}
+if row.double_clicked() {
+    play = Some(index);
+}
+row.context_menu(|ui| {
+    if ui
+        .button("Edit cues, key, BPM and rating")
+        .clicked()
+    {
+        edit = Some(index);
+        ui.close();
+    }
+});
+ui.label(
+    track
+        .preparation
+        .bpm
+        .map(|v| format!("{v:.1}"))
+        .unwrap_or_else(|| "—".into()),
+);
+ui.label(
+    track
+        .preparation
+        .harmonic_key
+        .as_deref()
+        .or(track.preparation.key.as_deref())
+        .unwrap_or("—"),
+);
+ui.label(
+    track
+        .preparation
+        .extensions
+        .get("rating")
+        .and_then(|v| v.as_u64())
+        .map(|v| format!("{v}/5"))
+        .unwrap_or_else(|| "—".into()),
+);
+
+                            });
+                        }}
+                    });
                     ui.horizontal_wrapped(|ui| {
                         if ui
                             .add_enabled(self.selected.is_some(), egui::Button::new("Play"))
