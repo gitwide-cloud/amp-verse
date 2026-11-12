@@ -45,7 +45,7 @@ with tempfile.TemporaryDirectory() as tmp:
     subprocess.run([binary,str(folder),"--jobs","3"],check=True)
     manual = read(folder,manual_sidecar)
     assert manual["bpm"] == 127 and manual["source_sha256"] == source_hash
-    assert manual["analysis_recommendation"]["analysis"]["engine"] == "amp-prep-heuristic-4"
+    assert manual["analysis_recommendation"]["analysis"]["engine"] == "amp-prep-heuristic-5"
     del manual["analysis_recommendation"]; write(folder,manual_sidecar,manual)
     declined_bytes = raw(folder,manual_sidecar)
     subprocess.run([binary,str(folder),"--jobs","3"],check=True)
