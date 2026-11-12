@@ -47,6 +47,12 @@ fn run() -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     wait(job.parent)?;
     let outcome = update_package::install(&job.stage, &job.destination, &job.files);
+    if outcome.is_ok() {
+        // Older local launchers copy this staged file on every launch. A stale
+        // copy must never roll a successfully installed release backwards.
+        let _ = std::fs::remove_file(job.destination.join("amp-player.next.exe"));
+        let _ = std::fs::remove_file(job.destination.join("PENDING_UPDATE.txt"));
+    }
     let message = match &outcome {
         Ok(()) => "Update installed".to_string(),
         Err(e) => format!("Update failed: {e}"),

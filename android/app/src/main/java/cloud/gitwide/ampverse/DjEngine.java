@@ -164,7 +164,8 @@ final class DjEngine {
     List<MediaItem> playerQueue(){
         List<MediaItem> result=new ArrayList<>();MediaItem current=decks[fader<.5?0:1].getCurrentMediaItem();
         if(current!=null)result.add(current);
-        for(int i=nextAuto;i<autoQueue.size();i++){MediaItem item=autoQueue.get(i);if(current==null||!item.mediaId.equals(current.mediaId))result.add(item);}
+        for(int i=nextAuto;i<autoQueue.size();i++){MediaItem item=autoQueue.get(i);if(i!=nextAuto||current==null||!item.mediaId.equals(current.mediaId))result.add(item);}
+        if(playerRepeats())for(MediaItem item:autoSource){boolean included=false;for(MediaItem existing:result)if(existing.mediaId.equals(item.mediaId)){included=true;break;}if(!included)result.add(item);}
         return result;
     }
     void pauseForPlayer(){auto(false);for(ExoPlayer deck:decks)deck.pause();for(int side=0;side<2;side++)for(int pad=0;pad<9;pad++)stopPad(side,pad);}

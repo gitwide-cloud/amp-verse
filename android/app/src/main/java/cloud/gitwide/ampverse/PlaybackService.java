@@ -40,7 +40,11 @@ public final class PlaybackService extends MediaSessionService {
     }};
     static DjEngine dj(){if(instance==null)return null;if(instance.dj==null)instance.dj=new DjEngine(instance);return instance.dj;}
     private android.content.SharedPreferences settings;
-    private final android.content.SharedPreferences.OnSharedPreferenceChangeListener changed=(prefs,key)->{if(key!=null&&key.startsWith("eq-"))AudioDsp.load(prefs);};
+    private final android.content.SharedPreferences.OnSharedPreferenceChangeListener changed=(prefs,key)->{
+        if(key!=null&&key.startsWith("eq-"))AudioDsp.load(prefs);
+        if(session!=null&&"repeat".equals(key))session.getPlayer().setRepeatMode(prefs.getBoolean("repeat",false)?Player.REPEAT_MODE_ALL:Player.REPEAT_MODE_OFF);
+        if(session!=null&&"shuffle".equals(key))session.getPlayer().setShuffleModeEnabled(prefs.getBoolean("shuffle",false));
+    };
     @Override public void onCreate() {
         super.onCreate();
         instance=this;
