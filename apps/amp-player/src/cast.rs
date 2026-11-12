@@ -186,6 +186,8 @@ struct Update {
     control_error: Option<String>,
 }
 pub struct Dashboard {
+    pending_live: Option<std::time::Instant>,
+    attempted_host: bool,
     pub(super) google: crate::google_cast::Output,
     listen_after_play: bool,
     pub live_action: Option<bool>,
@@ -278,6 +280,8 @@ impl Default for Dashboard {
             }
         });
         let mut dashboard = Self {
+            pending_live: None,
+            attempted_host: false,
             google: Default::default(),
             listen_after_play: false,
             live_action: None,
@@ -314,6 +318,68 @@ impl Default for Dashboard {
     }
 }
 impl Dashboard {
+    pub fn request_live(&mut self, player_only: bool) {
+        if self.live_active || self.pending_live.is_some() {
+            return;
+        }
+        self.live_player_only = player_only;
+        self.pending_live = Some(std::time::Instant::now());
+        self.attempted_host = false;
+        self.live_status = "Connecting to local broadcast service…".into();
+        self.address = "127.0.0.1:8787".into();
+        self.connected_address = self.address.clone();
+        self.snapshot = None;
+        self.send(Command::Connect(
+            self.address.clone(),
+            self.password.clone(),
+        ));
+    }
+    pub fn prepare_live(&mut self, root: &std::path::Path) {
+        let Some(started) = self.pending_live else {
+            return;
+        };
+        if started.elapsed() > Duration::from_secs(30) {
+            self.pending_live = None;
+            self.live_status = format!(
+                "Could not start local broadcast: {}. Check the Cast server and retry.",
+                self.message
+            );
+        } else if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.status.capabilities["live_dj"] == true)
+        {
+            self.pending_live = None;
+            self.live_action = Some(true);
+        } else if !self.busy && !self.attempted_host && self.snapshot.is_none() {
+            self.attempted_host = true;
+            self.host(root, false);
+            self.live_status = self.message.clone();
+        } else if !self.busy && self.snapshot.is_some() {
+            self.pending_live = None;
+            self.live_status =
+                "This Cast server does not support live audio. Update AMP Cast and retry.".into();
+        }
+    }
+    pub fn quick_cast(&mut self, ui: &mut egui::Ui) {
+        ui.label("Cast current audio. Headphone cue stays private.");
+        ui.label(&self.live_status);
+        if self.pending_live.is_some() && ui.button("Cancel connection").clicked() {
+            self.pending_live = None;
+            self.live_status = "Broadcast connection cancelled".into();
+        }
+        if !self.live_active
+            && self.pending_live.is_none()
+            && ui.button("Retry broadcast connection").clicked()
+        {
+            self.request_live(self.live_player_only);
+        }
+        self.google.show(
+            ui,
+            &self.connected_address,
+            self.live_active && self.snapshot.as_ref().is_some_and(|s| s.status.running),
+        );
+    }
     pub fn endpoint(&self) -> (String, String) {
         (
             if self.connected_address.is_empty() {
@@ -631,12 +697,16 @@ impl Dashboard {
                 .is_some_and(|s| s.status.capabilities["live_dj"] == true);
             if ui
                 .add_enabled(
-                    supported && !self.live_active,
+                    !self.live_active && self.pending_live.is_none(),
                     egui::Button::new("Start live broadcast"),
                 )
                 .clicked()
             {
-                self.live_action = Some(true);
+                if supported {
+                    self.live_action = Some(true);
+                } else {
+                    self.request_live(self.live_player_only);
+                }
             }
             if self.live_active && ui.button("Stop my live DJ broadcast").clicked() {
                 self.live_action = Some(false);
@@ -840,6 +910,32 @@ impl Drop for Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_start_waits_for_capability_and_times_out_readably() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut dashboard = Dashboard::default();
+        dashboard.request_live(true);
+        assert!(dashboard.busy);
+        assert!(dashboard.live_player_only);
+        assert_eq!(dashboard.endpoint().0, "127.0.0.1:8787");
+        dashboard.prepare_live(temp.path());
+        assert!(dashboard.live_action.is_none());
+        dashboard.snapshot = Some(Snapshot {
+            status: Status {
+                capabilities: serde_json::json!({"live_dj":true}),
+                ..Default::default()
+            },
+            queue: Queue::default(),
+            manifest: None,
+        });
+        dashboard.prepare_live(temp.path());
+        assert_eq!(dashboard.live_action.take(), Some(true));
+        assert!(dashboard.pending_live.is_none());
+        dashboard.pending_live = Some(std::time::Instant::now() - Duration::from_secs(31));
+        dashboard.prepare_live(temp.path());
+        assert!(dashboard.pending_live.is_none());
+        assert!(dashboard.live_status.contains("retry"));
+    }
     #[test]
     #[ignore = "uses the public Radio Browser directory"]
     fn radio_directory_returns_listenable_results() {

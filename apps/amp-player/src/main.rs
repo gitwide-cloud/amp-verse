@@ -323,6 +323,22 @@ impl Player {
     fn header(&mut self, ui: &mut egui::Ui, title: &str, purple: bool) {
         let action = skin::heading(ui, title, purple);
         self.activate(ui, action);
+        if ui
+            .ctx()
+            .data_mut(|d| d.remove_temp::<bool>(egui::Id::unique("quick-cast-click")))
+            .unwrap_or(false)
+        {
+            self.cast.request_live(title == "PLAYER");
+            let _ = self.cast.google.remote(google_cast::Operation::Discover);
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(egui::Id::unique("quick-cast-open"), true));
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::unique("quick-cast-pane"),
+                    if title == "PLAYER" { 0usize } else { 2usize },
+                )
+            });
+        }
     }
     fn activate(&mut self, ui: &mut egui::Ui, module: Option<skin::Module>) {
         let pane = match &module {
@@ -1135,6 +1151,23 @@ impl Player {
             }
             4 => self.cast_ui(ui),
             _ => self.addons_ui(ui),
+        }
+        let id = egui::Id::unique("quick-cast-open");
+        let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+        if open
+            && ui
+                .ctx()
+                .data(|d| d.get_temp::<usize>(egui::Id::unique("quick-cast-pane")))
+                == Some(pane)
+        {
+            egui::Window::new("Cast current audio")
+                .id(egui::Id::unique("quick-cast-window"))
+                .open(&mut open)
+                .default_width(480.)
+                .resizable(true)
+                .vscroll(true)
+                .show(ui.ctx(), |ui| self.cast.quick_cast(ui));
+            ui.ctx().data_mut(|d| d.insert_temp(id, open));
         }
     }
     fn group_ui(&mut self, ui: &mut egui::Ui, host: usize) {
@@ -3093,6 +3126,13 @@ impl Player {
                     );
                 });
         });
+    }
+    fn update_live_broadcast(&mut self) {
+        self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
+        if let Some(broadcast) = &self.live_mix {
+            self.cast.live_status = broadcast.status.lock().unwrap().clone();
+        }
+        self.cast.prepare_live(&self.root);
         if let Some(start) = self.cast.live_action.take() {
             if start {
                 let result = (|| {
@@ -3197,6 +3237,7 @@ impl eframe::App for Player {
             self.lab.stop_preview();
         }
         self.cast.poll();
+        self.update_live_broadcast();
         self.dj_effects(ui.ctx());
         let ctx = ui.ctx().clone();
         let mut active = vec![egui::ViewportId::ROOT];

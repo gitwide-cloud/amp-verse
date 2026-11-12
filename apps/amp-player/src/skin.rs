@@ -365,7 +365,7 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     let controls_left = rect.right() - 110.;
     let drag_rect = Rect::from_min_max(
         egui::pos2(menu_rect.right(), rect.top()),
-        egui::pos2(controls_left - 35., rect.bottom()),
+        egui::pos2(controls_left - 70., rect.bottom()),
     );
     let drag = ui.interact(
         drag_rect,
@@ -379,6 +379,44 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     if native && drag.double_clicked() {
         ui.ctx()
             .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
+    if title == "AMP DJ" || title == "PLAYER" {
+        let r = Rect::from_min_size(
+            egui::pos2(controls_left - 70., rect.top() + 5.),
+            egui::vec2(31., 31.),
+        );
+        if ui
+            .put(r, egui::Button::new(""))
+            .on_hover_text("Cast current audio to Google speakers")
+            .clicked()
+        {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(egui::Id::unique("quick-cast-click"), true));
+        }
+    }
+    if title == "AMP DJ" || title == "PLAYER" {
+        let origin = egui::pos2(controls_left - 63., rect.top() + 29.);
+        let stroke = Stroke::new(1.8, p.accent);
+        ui.painter().add(egui::Shape::line(
+            vec![
+                origin + Vec2::new(0., -11.),
+                origin + Vec2::new(0., -16.),
+                origin + Vec2::new(18., -16.),
+                origin + Vec2::new(18., 0.),
+                origin + Vec2::new(11., 0.),
+            ],
+            stroke,
+        ));
+        ui.painter().circle_filled(origin, 1.7, p.accent);
+        for radius in [6., 10.] {
+            let points = (0..=12)
+                .map(|i| {
+                    let angle = i as f32 * std::f32::consts::FRAC_PI_2 / 12.;
+                    origin + Vec2::new(radius * angle.cos(), -radius * angle.sin())
+                })
+                .collect();
+            ui.painter().add(egui::Shape::line(points, stroke));
+        }
     }
     let magnet_id = egui::Id::unique("pane-magnet");
     if let Some(mut magnet) = ui.ctx().data(|d| d.get_temp::<Magnet>(magnet_id)) {
