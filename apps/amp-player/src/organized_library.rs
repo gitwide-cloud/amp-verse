@@ -70,6 +70,8 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
             ui.separator();
             ui.add(egui::Label::new(self.root.display().to_string()).truncate());
         });
+        ui.add(egui::Label::new(&self.status).truncate())
+            .on_hover_text(&self.status);
     }
     fn organized_smart(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.heading("Smart Playlists");
@@ -611,7 +613,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                                     }
                                 });
                         });
-                    ui.horizontal(|ui| {
+                    ui.horizontal_wrapped(|ui| {
                         if ui
                             .add_enabled(self.selected.is_some(), egui::Button::new("Play"))
                             .clicked()
@@ -624,14 +626,26 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                         {
                             edit = self.selected;
                         }
-                        if ui.button("Add folder").clicked()
-                            && let Some(lib) = &self.library
+                        if ui.add_enabled(self.library.is_some(), egui::Button::new("Add folder…")).clicked()
+                            && let Some(folder) = rfd::FileDialog::new()
+                                .set_title("Add a music folder to the playlist queue")
+                                .set_directory(self.root.join(&self.folder))
+                                .pick_folder()
                         {
-                            for (i, t) in lib.tracks.iter().enumerate() {
-                                if t.path.starts_with(&self.folder) && !self.queue.contains(&i) {
-                                    self.queue.push(i);
+                            match self.root.canonicalize().and_then(|root| folder.canonicalize().map(|folder| (root, folder))) {
+                                Ok((root, folder)) => {
+                                    if let Some(relative) = amp_core::relative_folder(&folder, &root) {
+                                        self.folder = relative;
+                                        self.queue_library_folder();
+                                    } else {
+                                        self.status = "That folder is outside this library. Open Library > Sources to choose a different music library.".into();
+                                    }
                                 }
+                                Err(error) => self.status = format!("Could not open folder: {error}"),
                             }
+                        }
+                        if ui.add_enabled(self.library.is_some(), egui::Button::new("Add selected folder to queue")).clicked() {
+                            self.queue_library_folder();
                         }
                     });
                     if let Some(i) = play {
@@ -652,6 +666,33 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 }
             });
         });
+    }
+    fn queue_library_folder(&mut self) {
+        let Some(library) = &self.library else {
+            self.status = "Choose a music library first.".into();
+            return;
+        };
+        let mut matching = 0;
+        let mut added = 0;
+        for (index, track) in library.tracks.iter().enumerate() {
+            if amp_core::folder_contains(&track.path, &self.folder) {
+                matching += 1;
+                if !self.queue.contains(&index) {
+                    self.queue.push(index);
+                    added += 1;
+                }
+            }
+        }
+        self.status = if matching == 0 {
+            "No indexed songs in that folder or its subfolders. Use Rescan to check for new music."
+                .into()
+        } else if added == 0 {
+            format!("All {matching} songs from this folder are already in the playlist queue.")
+        } else {
+            format!(
+                "Added {added} songs from this folder and its subfolders to the playlist queue."
+            )
+        };
     }
     fn organized_queue(&mut self, ui: &mut egui::Ui, height: f32) {
         let mut drop = None;
@@ -758,6 +799,30 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn adding_folder_includes_descendants_and_reports_duplicates_and_empty_folders() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("Rock/Live")).unwrap();
+        for name in ["Rock/one.mp3", "Rock/Live/two.mp3", "outside.mp3"] {
+            std::fs::write(root.path().join(name), b"fixture").unwrap();
+        }
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            folder: "Rock".into(),
+            ..Default::default()
+        };
+        player.queue_library_folder();
+        assert_eq!(player.queue.len(), 2);
+        assert!(player.status.contains("Added 2"));
+        player.queue_library_folder();
+        assert_eq!(player.queue.len(), 2);
+        assert!(player.status.contains("already"));
+        player.folder = "Empty".into();
+        player.queue_library_folder();
+        assert_eq!(player.queue.len(), 2);
+        assert!(player.status.contains("No indexed songs"));
+    }
     #[test]
     fn regular_playlist_create_add_save_and_restart_discovery() {
         let directory = tempfile::tempdir().unwrap();
