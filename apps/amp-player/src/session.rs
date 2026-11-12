@@ -51,7 +51,24 @@ impl DeckSettings {
     }
 }
 #[derive(Clone, Serialize, Deserialize)]
+struct SideSnapshot {
+    deck: Option<Deck>,
+    config: side_deck::Config,
+}
+impl SideSnapshot {
+    fn valid(&self) -> bool {
+        self.config.volume.is_finite()
+            && (0. ..=1.).contains(&self.config.volume)
+            && self
+                .deck
+                .as_ref()
+                .is_none_or(|d| d.path.is_absolute() && d.position.is_finite() && d.position >= 0.)
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    side_decks: Option<[SideSnapshot; 2]>,
     #[serde(default)]
     deck_settings: Option<[DeckSettings; 6]>,
     #[serde(default)]
@@ -179,9 +196,13 @@ impl Recovery {
 }
 impl Snapshot {
     fn valid(&self, root: &Path) -> bool {
-        self.deck_settings
+        self.side_decks
             .as_ref()
-            .is_none_or(|decks| decks.iter().all(DeckSettings::valid))
+            .is_none_or(|sides| sides.iter().all(SideSnapshot::valid))
+            && self
+                .deck_settings
+                .as_ref()
+                .is_none_or(|decks| decks.iter().all(DeckSettings::valid))
             && self.clock.is_none_or(|(b, q)| {
                 b.is_finite() && (40. ..=240.).contains(&b) && [0, 1, 4, 8, 16, 32].contains(&q)
             })
@@ -310,6 +331,17 @@ impl Player {
     }
     fn session_snapshot(&self) -> Snapshot {
         Snapshot {
+            side_decks: Some(std::array::from_fn(|side| SideSnapshot {
+                config: self.sides[side].config.clone(),
+                deck: self.sides[side]
+                    .track
+                    .as_ref()
+                    .and_then(|_| self.sides[side].config.path.as_ref())
+                    .map(|path| Deck {
+                        path: path.clone(),
+                        position: self.sides[side].position().max(0.),
+                    }),
+            })),
             deck_settings: Some(std::array::from_fn(|d| DeckSettings {
                 gain: self.channel_gain[d],
                 pitch: self.pitch[d],
@@ -395,6 +427,7 @@ impl Player {
     }
     pub(super) fn checkpoint(&mut self, wait: bool) {
         if self.library.is_none()
+            || self.sides.iter().any(side_deck::SideDeck::playing)
             || self.recovery.file.is_none()
             || self.recovery.pending.is_some()
             || self.recovery.error.is_some()
@@ -486,6 +519,20 @@ impl Player {
                 && let Err(e) = self.safe_load_path(deck, saved.path.clone(), Some(saved.position))
             {
                 errors.push(e);
+            }
+        }
+        if let Some(sides) = &snapshot.side_decks {
+            for (side, saved) in sides.iter().enumerate() {
+                self.sides[side].config = saved.config.clone();
+                if let Some(deck) = &saved.deck {
+                    // load and seek preserve a paused state; never resume cue audio on recovery.
+                    if let Err(error) = self.sides[side]
+                        .load(deck.path.clone())
+                        .and_then(|_| self.sides[side].seek(deck.position))
+                    {
+                        errors.push(format!("Cue deck {}: {error}", side + 1));
+                    }
+                }
             }
         }
         if let Some(a) = &self.audio {
@@ -594,6 +641,48 @@ impl Player {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires local audio fixture and native output; recovery remains silent"]
+    fn auxiliary_cue_positions_restore_paused_without_changing_preparation() {
+        let path = PathBuf::from(std::env::var_os("AMP_WAVEFORM_FIXTURE").expect("fixture"))
+            .canonicalize()
+            .unwrap();
+        let root = path.parent().unwrap().to_path_buf();
+        let before = amp_core::preparation::load(&path).unwrap();
+        let mut original = Player {
+            root: root.clone(),
+            library: Some(amp_core::scan(&root).unwrap()),
+            ..Default::default()
+        };
+        original.sides[0].poll(0.);
+        original.sides[0].load(path.clone()).unwrap();
+        original.sides[0].seek(2.).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let snapshot = original.session_snapshot();
+        let saved = snapshot.side_decks.as_ref().unwrap()[0]
+            .deck
+            .as_ref()
+            .unwrap()
+            .position;
+        let mut restored = Player {
+            root: root.clone(),
+            library: Some(amp_core::scan(&root).unwrap()),
+            ..Default::default()
+        };
+        restored.sides[0].poll(0.);
+        restored.recovery.pending = Some(snapshot);
+        restored.restore_session(&egui::Context::default());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            restored.recovery.error.is_none(),
+            "{:?}",
+            restored.recovery.error
+        );
+        assert!(!restored.sides[0].playing());
+        assert!((restored.sides[0].position() - saved).abs() < 0.05);
+        assert!(!restored.run.auto);
+        assert_eq!(amp_core::preparation::load(&path).unwrap(), before);
+    }
+    #[test]
     fn delayed_recovery_does_not_reapply_window_size_after_manual_resize() {
         let dir = tempfile::tempdir().unwrap();
         let mut player = Player {
@@ -664,6 +753,11 @@ mod tests {
         };
         let mut s = player.session_snapshot();
         s.requests = vec!["requested-song".into()];
+        s.side_decks.as_mut().unwrap()[1].deck = Some(Deck {
+            path: dir.path().join("cue.wav"),
+            position: 23.5,
+        });
+        s.side_decks.as_mut().unwrap()[1].config.volume = 0.42;
         s.queue = vec![dir.path().join("missing.mp3")];
         let file = dir.path().join("session.ampdb");
         let mut recovery = Recovery {
@@ -679,6 +773,25 @@ mod tests {
         let loaded: Snapshot = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.requests, s.requests);
         assert_eq!(loaded.queue, s.queue);
+        assert_eq!(
+            loaded.side_decks.as_ref().unwrap()[1]
+                .deck
+                .as_ref()
+                .unwrap()
+                .position,
+            23.5
+        );
+        assert_eq!(loaded.side_decks.as_ref().unwrap()[1].config.volume, 0.42);
+        let mut invalid = loaded.clone();
+        invalid.side_decks.as_mut().unwrap()[0].config.volume = f32::NAN;
+        assert!(!invalid.valid(&player.root));
+        let mut legacy = serde_json::to_value(&s).unwrap();
+        legacy.as_object_mut().unwrap().remove("side_decks");
+        assert!(
+            serde_json::from_value::<Snapshot>(legacy)
+                .unwrap()
+                .valid(&player.root)
+        );
         assert!(loaded.valid(&player.root));
     }
     #[test]

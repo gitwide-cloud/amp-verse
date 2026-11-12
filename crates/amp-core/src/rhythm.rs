@@ -79,9 +79,79 @@ pub(super) fn estimate(energy: &[f64], hz: f64) -> (Option<f64>, Option<f64>, f6
     (Some(hz * 60. / fitted), Some(offset), confidence)
 }
 
+/// Compare local onset phase across the recording. This is a drift diagnostic,
+/// not a downbeat/section classifier. Ambiguous/sparse windows return unknown.
+pub(super) fn stability(energy: &[f64], hz: f64, bpm: f64, offset: f64) -> serde_json::Value {
+    let period = 60. / bpm;
+    let width = (hz * period * 16.).round().max(1.) as usize;
+    let mut phases = Vec::new();
+    for (window, samples) in energy.chunks(width).enumerate() {
+        if samples.len() < width / 2 {
+            continue;
+        }
+        let mut x = 0.;
+        let mut y = 0.;
+        let mut total = 0.;
+        let mut hits = 0;
+        let peak = samples.iter().copied().fold(0., f64::max);
+        for (i, pair) in samples.windows(2).enumerate() {
+            let weight = (pair[1] - pair[0]).max(0.).min(peak * 0.5);
+            if weight <= peak * 0.02 {
+                continue;
+            }
+            let seconds = (window * width + i + 1) as f64 / hz;
+            let angle = (seconds - offset) / period * std::f64::consts::TAU;
+            x += angle.cos() * weight;
+            y += angle.sin() * weight;
+            total += weight;
+            hits += 1;
+        }
+        if hits >= 6 && total > 1e-6 && x.hypot(y) / total >= 0.25 {
+            phases.push(y.atan2(x));
+        }
+    }
+    let mean = phases
+        .iter()
+        .map(|p| p.sin())
+        .sum::<f64>()
+        .atan2(phases.iter().map(|p| p.cos()).sum::<f64>());
+    let drift = phases
+        .iter()
+        .map(|p| {
+            ((p - mean + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU)
+                - std::f64::consts::PI)
+                .abs()
+                / std::f64::consts::TAU
+        })
+        .fold(0., f64::max);
+    serde_json::json!({"version":1,"windows":phases.len(),"max_phase_deviation_beats":drift,
+        "stable":if phases.len()>=3 {Some(drift<=0.12)}else{None::<bool>},"downbeat_verified":false})
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn stability_distinguishes_steady_grid_from_sustained_drift_without_claiming_downbeats() {
+        let mut steady = vec![0.; 12000];
+        let mut drift = steady.clone();
+        for i in 0..240 {
+            let at = 20 + i * 50;
+            if at < steady.len() {
+                steady[at] = 1.;
+            }
+            let shifted = (20. + i as f64 * 50.8).round() as usize;
+            if shifted < drift.len() {
+                drift[shifted] = 1.;
+            }
+        }
+        assert_eq!(stability(&steady, 100., 120., 0.2)["stable"], true);
+        assert_eq!(stability(&drift, 100., 120., 0.2)["stable"], false);
+        assert!(stability(&vec![0.; 12000], 100., 120., 0.)["stable"].is_null());
+        assert_eq!(
+            stability(&steady, 100., 120., 0.2)["downbeat_verified"],
+            false
+        );
+    }
     #[test]
     fn fractional_tempo_and_phase_ignore_opening_click() {
         let hz = 11025. / 110.;

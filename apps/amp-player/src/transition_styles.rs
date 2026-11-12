@@ -74,8 +74,9 @@ impl Settings {
         let chosen = self.pick(completed)?;
         if matches!(chosen, Style::Stutter | Style::LoopBuild | Style::Beatmatch) {
             let timed = |p: &amp_core::Preparation| {
-                p.bpm
-                    .is_some_and(|b| b.is_finite() && (40. ..=240.).contains(&b))
+                amp_core::mix_schedule::timing_reliable(p)
+                    && p.bpm
+                        .is_some_and(|b| b.is_finite() && (40. ..=240.).contains(&b))
                     && p.beat_offset.is_some_and(|b| b.is_finite() && b >= 0.)
                     && (p.manual_override
                         || p.analysis

@@ -204,11 +204,17 @@ fn result(
         alternatives.push(value / 2.);
         bpm = Some(value / 2.); // Display the slower pulse; the double-time candidate remains reviewable.
     }
+    let rhythm_quality = bpm
+        .zip(offset)
+        .map(|(bpm, offset)| rhythm::stability(energy, RATE / BLOCK as f64, bpm, offset));
+    let stable = rhythm_quality.as_ref().and_then(|q| q["stable"].as_bool()) != Some(false);
     let (key, harmonic_key, key_confidence) = key(chroma);
     let audio_start = first as f64 * BLOCK as f64 / RATE;
     let mut energy_cues = energy_cues::candidates(energy, first, last);
     // Snap only within half a beat; never invent a bar/downbeat from tempo alone.
-    if let (Some(bpm), Some(offset)) = (bpm, offset) {
+    if let (Some(bpm), Some(offset)) = (bpm, offset)
+        && stable
+    {
         for (seconds, _) in &mut energy_cues {
             *seconds = rhythm::snap(*seconds, bpm, offset).clamp(audio_start, duration);
         }
@@ -229,11 +235,16 @@ fn result(
                 energy,
                 RATE / BLOCK as f64,
                 duration,
-                bpm,
-                offset,
+                bpm.filter(|_| stable),
+                offset.filter(|_| stable),
             ))
             .map_err(|e| e.to_string())?,
         );
+    }
+    if let Some(quality) = rhythm_quality {
+        p.extensions.insert("rhythm_quality".into(), quality);
+    } else {
+        p.extensions.remove("rhythm_quality");
     }
     p.schema_version = Some(1);
     // Relative loudness/activity proxy, not a calibrated perceptual energy detector.
@@ -294,7 +305,7 @@ fn result(
         .enumerate()
     {
         let seconds = match (bpm, offset) {
-            (Some(bpm), Some(offset)) => rhythm::snap(seconds, bpm, offset),
+            (Some(bpm), Some(offset)) if stable => rhythm::snap(seconds, bpm, offset),
             _ => seconds,
         }
         .clamp(audio_start, cue_out);
@@ -318,7 +329,9 @@ fn result(
         kind: "mix-in".into(),
         ..Default::default()
     });
-    if let (Some(bpm), Some(offset)) = (bpm, offset) {
+    if let (Some(bpm), Some(offset)) = (bpm, offset)
+        && stable
+    {
         let phrase = 64. * 60. / bpm;
         let mut at = offset;
         let mut i = 1;

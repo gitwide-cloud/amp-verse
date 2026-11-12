@@ -117,3 +117,13 @@ Filters use the desktop field names, types and scales (energy 1–10, confidence
 Loading a Smart Playlist from the DJ source picker applies its options to that Auto DJ session. At queue exhaustion, Stop ends playback; Continue refills from the eligible source, avoiding recent songs when possible, relaxing recency if necessary, and never selecting the currently sounding track. Ordinary playlists remain finite. Recognition is first only if it is in the selected source and passes every filter/exclusion. Preferences affect ordering without overriding eligibility. Hype's manual cue preference uses saved build/drop labels within the saved cue-out.
 
 Verification: Android build/lint and focused Pixel 7 instrumentation tests cover saved metadata scales, missing values, all filter field definitions, manual cue preference, multiple sources/subfolders/deduplication, exclusions, recognition, local overrides and persistence. Test fixtures use a private temporary catalog and namespaced preferences. No phone analysis engine is bundled.
+
+
+## Android 0.2.3 preview — connection and preparation compatibility
+
+Queued Remote commands check their original connection generation before network dispatch; leaving, disconnecting or selecting another host discards commands that have not started. A command already sent is not retried. Follow-up state reads include the host session and reject responses from another session. Tests use an isolated HTTP responder and a deliberately blocked command queue.
+
+Smart Playlist filters now read canonical Rust preparation extensions as flattened top-level fields, retaining compatibility with older nested phone drafts. Genre, artist, codec properties, energy profile and other analysis filters therefore work on the actual synced document format. Android still runs no analyzer and does not publish offline edits just because it reconnects. Explicit offline edit review/publishing remains outstanding.
+
+
+The 0.2.3 Remote reconnect path also invalidates queued commands immediately on connection loss, before waiting to reconnect. Temporary network failures retry automatically with 3–30 second backoff; password/incompatible API errors stop automatic attempts for manual correction. Four focused Remote tests cover queued work on disconnect/loss, repeated refused handshakes and restarted-host state. Together with nine Smart Playlist checks, 13 tests pass on Pixel 7. The app is left installed after verification.

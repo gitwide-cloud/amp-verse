@@ -237,6 +237,26 @@ mod tests {
         assert_eq!(a.0, 10000 + dry.latency);
     }
     #[test]
+    fn tempo_extremes_preserve_pitch_after_settling() {
+        for ratio in [0.84, 1.0, 1.16] {
+            let mut processor = Processor::new(48000).unwrap();
+            let mut crossings = 0;
+            let mut last = 0.;
+            for i in 0..144000 {
+                let input = (i as f32 * std::f32::consts::TAU * 440. * ratio / 48000.).sin() * 0.2;
+                let output = processor.frame([input, input], ratio, true, false)[0];
+                if i >= 96000 && last <= 0. && output > 0. {
+                    crossings += 1;
+                }
+                last = output;
+            }
+            assert!(
+                (crossings as f32 - 440.).abs() < 5.,
+                "rate {ratio}: measured {crossings} Hz"
+            );
+        }
+    }
+    #[test]
     fn locked_tempo_preserves_a_measured_sine_pitch() {
         let rate = 48000;
         let mut processor = Processor::new(rate).unwrap();

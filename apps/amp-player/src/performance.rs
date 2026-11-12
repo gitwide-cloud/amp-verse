@@ -539,6 +539,10 @@ impl Player {
             && self.audio.as_ref().is_some_and(|a| a.playing(active))
         {
             self.loaded_track(active)
+                .filter(|t| {
+                    amp_core::mix_schedule::timing_reliable(&t.preparation)
+                        && amp_core::mix_schedule::timing_reliable(&track.preparation)
+                })
                 .and_then(|t| t.preparation.bpm)
                 .zip(track.preparation.bpm)
                 .map(|(outgoing, incoming)| outgoing * (self.deck_rate(active)) / incoming)

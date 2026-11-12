@@ -209,6 +209,7 @@ async fn audio(
     State(cast): State<Arc<Cast>>,
     Path(id): Path<usize>,
     headers: HeaderMap,
+    method: axum::http::Method,
 ) -> Response {
     if !allowed(&cast, &headers) {
         return StatusCode::FORBIDDEN.into_response();
@@ -223,6 +224,21 @@ async fn audio(
         Ok(Err(code)) => return code.into_response(),
         _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
+    let mime = match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "ogg" | "opus" => "audio/ogg",
+        "m4a" | "m4b" | "mp4" => "audio/mp4",
+        "aac" => "audio/aac",
+        _ => "application/octet-stream",
+    };
     let mut file = match tokio::fs::File::open(path).await {
         Ok(f) => f,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
@@ -231,20 +247,151 @@ async fn audio(
         Ok(m) => m.len(),
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let stream = async_stream::stream! {let mut buffer=vec![0;65536];loop {match file.read(&mut buffer).await { Ok(0)=>break, Ok(n)=>yield Ok::<Bytes,std::io::Error>(Bytes::copy_from_slice(&buffer[..n])), Err(e)=>{yield Err(e);break;} }}};
-    Response::builder()
-        .header("content-type", "application/octet-stream")
-        .header("content-length", size)
-        .header("cache-control", "no-store")
-        .body(Body::from_stream(stream))
-        .unwrap()
+    let range = if method == axum::http::Method::GET && !headers.contains_key("if-range") {
+        match headers
+            .get("range")
+            .and_then(|v| v.to_str().ok())
+            .map(|value| byte_range(value, size))
+            .transpose()
+        {
+            Ok(value) => value.flatten(),
+            Err(()) => {
+                return Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header("content-range", format!("bytes */{size}"))
+                    .body(Body::empty())
+                    .unwrap();
+            }
+        }
+    } else {
+        None
+    };
+    let (start, length) = range.map_or((0, size), |(start, end)| (start, end - start + 1));
+    use tokio::io::AsyncSeekExt;
+    if start > 0 && file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let mut remaining = length;
+    let stream = async_stream::stream! {
+        let mut buffer=vec![0;65536];
+        while remaining>0 {let limit=remaining.min(buffer.len() as u64) as usize;
+            match file.read(&mut buffer[..limit]).await {
+                Ok(0)=>{yield Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof,"Shared audio changed during transfer"));break;},
+                Ok(n)=>{remaining-=n as u64;yield Ok::<Bytes,std::io::Error>(Bytes::copy_from_slice(&buffer[..n]));},
+                Err(e)=>{yield Err(e);break;}
+            }
+        }
+    };
+    let mut response = Response::builder()
+        .status(if range.is_some() {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        })
+        .header("content-type", mime)
+        .header("accept-ranges", "bytes")
+        .header("content-length", length)
+        .header("cache-control", "no-store");
+    if let Some((start, end)) = range {
+        response = response.header("content-range", format!("bytes {start}-{end}/{size}"));
+    }
+    response.body(Body::from_stream(stream)).unwrap()
 }
 
+// Multiple ranges/unknown units are deliberately ignored (full response), not
+// incorrectly represented as a single partial response. If-Range is ignored
+// until a strong validator is available, so changed files cannot be stitched.
+fn byte_range(value: &str, size: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(spec) = value.strip_prefix("bytes=") else {
+        return Ok(None);
+    };
+    if spec.contains(',') {
+        return Ok(None);
+    }
+    let (first, last) = spec.trim().split_once('-').ok_or(())?;
+    if size == 0 {
+        return Err(());
+    }
+    let (start, end) = if first.is_empty() {
+        let suffix = last.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        (size.saturating_sub(suffix), size - 1)
+    } else {
+        let start = first.parse::<u64>().map_err(|_| ())?;
+        let end = if last.is_empty() {
+            size - 1
+        } else {
+            last.parse::<u64>().map_err(|_| ())?.min(size - 1)
+        };
+        (start, end)
+    };
+    if start >= size || start > end {
+        return Err(());
+    }
+    Ok(Some((start, end)))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::Request;
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn shared_audio_supports_seeking_head_and_unsatisfiable_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("song.mp3"), b"0123456789").unwrap();
+        amp_core::show::Settings::default()
+            .save(dir.path())
+            .unwrap();
+        let cast = Cast::new(dir.path().into(), amp_core::scan(dir.path()).unwrap(), None);
+        cast.sharing.store(true, Relaxed);
+        let app = router(cast);
+        for (range, status, body) in [
+            ("bytes=2-4", 206, "234"),
+            ("bytes=-3", 206, "789"),
+            ("bytes=8-", 206, "89"),
+            ("bytes=0-999", 206, "0123456789"),
+            ("bytes=20-", 416, ""),
+            ("bytes=0-1,4-5", 200, "0123456789"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get("/api/smart/tracks/0/audio")
+                        .header("range", range)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status, "{range}");
+            assert_eq!(
+                &axum::body::to_bytes(response.into_body(), 100)
+                    .await
+                    .unwrap()[..],
+                body.as_bytes()
+            );
+        }
+        let response = app
+            .oneshot(
+                Request::head("/api/smart/tracks/0/audio")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["content-type"], "audio/mpeg");
+        assert_eq!(response.headers()["content-length"], "10");
+        assert!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(byte_range("bytes=0-0", 0), Err(()));
+        assert_eq!(byte_range("bytes=-0", 10), Err(()));
+    }
     #[tokio::test]
     async fn sharing_is_opt_in_authenticated_and_copies_originals_with_cues() {
         let dir = tempfile::tempdir().unwrap();

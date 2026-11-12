@@ -54,6 +54,24 @@ pub fn phrase_anchor(p: &Preparation) -> Option<f64> {
         })
         .or(p.beat_offset)
 }
+/// Hand-approved grids retain priority. Automatic constant grids must not drive
+/// quantized transitions when analysis reports low confidence or audible drift.
+pub fn timing_reliable(p: &Preparation) -> bool {
+    p.bpm
+        .is_some_and(|b| b.is_finite() && (40. ..=300.).contains(&b))
+        && p.beat_offset.is_some_and(|o| o.is_finite() && o >= 0.)
+        && (p.manual_override
+            || p.analysis.as_ref().is_some_and(|a| a.reviewed)
+            || (p
+                .analysis
+                .as_ref()
+                .is_none_or(|a| a.tempo_confidence.is_finite() && a.tempo_confidence >= 0.5)
+                && p.extensions
+                    .get("rhythm_quality")
+                    .and_then(|v| v.get("stable"))
+                    .and_then(|v| v.as_bool())
+                    != Some(false)))
+}
 /// Source-time grid. Bar anchors are explicit user corrections, never inferred from beat phase.
 pub fn grid(
     out: &Preparation,
@@ -62,7 +80,7 @@ pub fn grid(
     origin: f64,
     timing: Timing,
 ) -> Option<Grid> {
-    if timing == Timing::Immediate {
+    if timing == Timing::Immediate || !timing_reliable(out) || !timing_reliable(incoming) {
         return None;
     }
     let beat = 60.
@@ -100,6 +118,19 @@ pub fn grid(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn drifting_automatic_grids_fall_back_until_reviewed() {
+        let mut p = Preparation {
+            bpm: Some(120.),
+            beat_offset: Some(0.),
+            ..Default::default()
+        };
+        p.extensions
+            .insert("rhythm_quality".into(), serde_json::json!({"stable":false}));
+        assert!(grid(&p, &p, 0., 0., Timing::Phrase16).is_none());
+        p.manual_override = true;
+        assert!(grid(&p, &p, 0., 0., Timing::Phrase16).is_some());
+    }
     #[test]
     fn phase_matches_entry_and_bars_require_reviewed_anchors() {
         let mut p = Preparation {

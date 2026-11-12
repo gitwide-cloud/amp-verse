@@ -55,6 +55,7 @@ async fn decode(
     let mut preparation = amp_core::preparation::load(&path)?;
     preparation.cue_in = entry(&preparation, profile.as_ref(), target);
     let rate = out_bpm
+        .filter(|_| amp_core::mix_schedule::timing_reliable(&preparation))
         .zip(preparation.bpm)
         .and_then(|(out, next)| {
             let ratio = out / next;
@@ -127,7 +128,10 @@ impl Clock {
         bytes: &[u8],
     ) -> Result<(), String> {
         self.frames += bytes.len() as u64 / 8;
-        input.write_all(bytes).await.map_err(|e| e.to_string())?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), input.write_all(bytes))
+            .await
+            .map_err(|_| "Station encoder stopped accepting audio".to_string())?
+            .map_err(|e| e.to_string())?;
         tokio::time::sleep_until(
             self.start + std::time::Duration::from_secs_f64(self.frames as f64 / RATE as f64),
         )
@@ -180,6 +184,75 @@ fn pick(
         Ok(index)
     }
 }
+/// A corrupt/missing candidate must not take an otherwise healthy station down.
+/// Exclusions are local to this preparation attempt, never saved to library rules.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_next(
+    cast: Arc<Cast>,
+    first: usize,
+    mut profile: Option<SmartPlaylist>,
+    indices: Vec<usize>,
+    current: Option<usize>,
+    recent: Vec<String>,
+    target: Option<f64>,
+    bpm: Option<f64>,
+) -> Result<Decoded, String> {
+    let mut index = first;
+    let mut failed = std::collections::HashSet::new();
+    let mut cursor = indices.iter().position(|i| *i == first).unwrap_or(0) + 1;
+    let mut errors = Vec::new();
+    for _ in 0..cast.tracks.len().min(16) {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            decode(cast.clone(), index, profile.clone(), target, bpm),
+        )
+        .await;
+        match result {
+            Ok(Ok(decoded)) => return Ok(decoded),
+            Ok(Err(error)) => errors.push(error),
+            Err(_) => errors.push(format!(
+                "Audio preparation timed out: {}",
+                cast.tracks[index].title
+            )),
+        }
+        failed.insert(index);
+        if let Some(rules) = &mut profile {
+            rules.excluded.push(show::song_id(&cast.tracks[index]));
+        }
+        let start = indices.iter().position(|i| *i == index).unwrap_or(0) + 1;
+        let candidates: Vec<_> = indices
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(indices.len())
+            .copied()
+            .filter(|i| !failed.contains(i))
+            .collect();
+        if candidates.is_empty() {
+            break;
+        }
+        if profile.is_none() {
+            cursor = 0;
+        }
+        match pick(
+            &cast,
+            profile.as_ref(),
+            &candidates,
+            &mut cursor,
+            current,
+            &recent,
+            target,
+        ) {
+            Ok(next) if !failed.contains(&next) => index = next,
+            _ => break,
+        }
+    }
+    Err(format!(
+        "No playable next song after {} attempts: {}",
+        errors.len(),
+        errors.last().map_or("Playlist empty", String::as_str)
+    ))
+}
 pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String> {
     let selection = cast.selection.lock().unwrap().clone();
     let indices: Vec<usize> = selection
@@ -206,7 +279,24 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
         &recent,
         target,
     )?;
-    let mut current = decode(cast.clone(), first, profile.clone(), target, None).await?;
+    let mut current = prepare_next(
+        cast.clone(),
+        first,
+        profile.clone(),
+        indices.clone(),
+        None,
+        recent.clone(),
+        target,
+        None,
+    )
+    .await?;
+    if profile.is_none() {
+        cursor = indices
+            .iter()
+            .position(|i| *i == current.index)
+            .unwrap_or(0)
+            + 1;
+    }
     let mut progression = profile
         .as_ref()
         .and_then(|p| p.energy_progression.as_ref())
@@ -345,8 +435,21 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
         };
         let source = cast.clone();
         let rules = profile.clone();
-        let bpm = current.preparation.bpm.map(|b| b * current.rate);
-        let mut prefetch = AbortTask(tokio::spawn(decode(source, next_index, rules, target, bpm)));
+        let bpm = current
+            .preparation
+            .bpm
+            .filter(|_| amp_core::mix_schedule::timing_reliable(&current.preparation))
+            .map(|b| b * current.rate);
+        let mut prefetch = AbortTask(tokio::spawn(prepare_next(
+            source,
+            next_index,
+            rules,
+            indices.clone(),
+            Some(current.index),
+            recent.clone(),
+            target,
+            bpm,
+        )));
         let fade_seconds = std::env::var("AMP_CAST_FADE_SECONDS")
             .ok()
             .and_then(|v| v.parse::<f64>().ok())
@@ -385,6 +488,9 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
                 return Err(error);
             }
         };
+        if profile.is_none() {
+            cursor = indices.iter().position(|i| *i == next.index).unwrap_or(0) + 1;
+        }
         let overlap = tail.min(next.frames / 2);
         let extra = tail - overlap;
         emit(&mut current, extra, &mut input, &mut clock).await?;
@@ -432,5 +538,131 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             return Err("Station encoder stopped".into());
         }
         let _ = &output_guard;
+    }
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+    use tower::ServiceExt;
+    #[tokio::test]
+    #[ignore = "requires FFmpeg; real encoded short-session test, no receiver hardware"]
+    async fn repeated_handoffs_survive_bad_files_and_shutdown_cleanly() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("broken.wav"), b"broken").unwrap();
+        for (name, hz) in [("a.wav", 440), ("b.wav", 660)] {
+            assert!(
+                amp_core::command("ffmpeg")
+                    .args(["-v", "error", "-f", "lavfi", "-i"])
+                    .arg(format!("sine=frequency={hz}:duration=0.4"))
+                    .arg(root.path().join(name))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        let mut receiver = cast.audio.subscribe();
+        let response = router(cast.clone())
+            .oneshot(
+                axum::http::Request::post("/api/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let mut last = None;
+        let mut changes = 0;
+        let mut bytes = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Ok(chunk)) =
+                tokio::time::timeout(std::time::Duration::from_millis(30), receiver.recv()).await
+            {
+                bytes.extend_from_slice(&chunk);
+            }
+            let station = cast.station.lock().await;
+            assert!(station.running, "{:?}", station.error);
+            if station.current_index.is_some() && station.current_index != last {
+                changes += 1;
+                last = station.current_index;
+            }
+        }
+        cast.shutdown().await;
+        assert!(!cast.station.lock().await.running);
+        assert!(changes >= 4, "Only {changes} handoffs");
+        let mp3 = root.path().join("captured.mp3");
+        std::fs::write(&mp3, &bytes).unwrap();
+        let decoded = amp_core::command("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(mp3)
+            .args(["-f", "f32le", "-ac", "1", "pipe:1"])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        assert!(decoded.stdout.len() > 44100 * 4);
+    }
+    #[tokio::test]
+    #[ignore = "requires FFmpeg; isolated generated audio, no hardware playback"]
+    async fn skips_unreadable_candidates_without_rewriting_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("broken.wav"), b"not audio").unwrap();
+        let generated = amp_core::command("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.25",
+            ])
+            .arg(root.path().join("good.wav"))
+            .status()
+            .unwrap();
+        assert!(generated.success());
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        let bad = cast
+            .tracks
+            .iter()
+            .position(|t| t.path == std::path::Path::new("broken.wav"))
+            .unwrap();
+        let good = cast
+            .tracks
+            .iter()
+            .position(|t| t.path == std::path::Path::new("good.wav"))
+            .unwrap();
+        let before = amp_core::preparation::load(&root.path().join("good.wav")).unwrap();
+        let decoded = prepare_next(
+            cast.clone(),
+            bad,
+            None,
+            vec![bad, good],
+            None,
+            vec![],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(decoded.index, good);
+        assert!(decoded.frames > 0);
+        assert_eq!(
+            amp_core::preparation::load(&root.path().join("good.wav")).unwrap(),
+            before
+        );
+        let failure = prepare_next(cast, bad, None, vec![bad], None, vec![], None, None)
+            .await
+            .err()
+            .unwrap();
+        assert!(failure.contains("No playable next song"));
     }
 }

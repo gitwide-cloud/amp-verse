@@ -55,6 +55,11 @@ public class SmartPlaylistDeviceTest {
         assertFalse(PhoneSmartRules.matches(context,item("unknown.wav","{}"),rules));
         rules.put("filters",new JSONArray("[{\"type\":\"Number\",\"field\":\"TempoConfidence\",\"min\":0,\"max\":100}]"));assertFalse(PhoneSmartRules.matches(context,song,rules));
     }
+    @Test public void realRustFlattenedPreparationSupportsGenresTagsAndAudioProperties() throws Exception {
+        MediaItem song=item("rust-schema.wav","{\"cue_in\":0,\"cue_out\":120,\"bpm\":128,\"energy\":0.8,\"embedded_genres\":[\"Rock\"],\"artist\":\"Test artist\",\"audio_properties\":{\"bitrate\":256},\"energy_profile\":{\"sections\":[{\"energy\":0.9,\"name\":\"Peak\"}]}}");
+        JSONObject rules=list().put("genres",new JSONArray("[\"Rock\"]")).put("filters",new JSONArray("[{\"type\":\"Text\",\"field\":\"Artist\",\"terms\":\"Test artist\",\"exact\":true},{\"type\":\"Number\",\"field\":\"Bitrate\",\"min\":200,\"max\":320},{\"type\":\"Flag\",\"field\":\"EnergyProfile\",\"value\":true}]"));
+        assertTrue(PhoneSmartRules.matches(context,song,rules));assertEquals(.8,PhonePlaylists.energy(context,song),.001);
+    }
     @Test public void allDesktopFilterFieldsHaveKnownTypesAndFlagSemantics() throws Exception {
         assertEquals(32,PhoneSmartRules.FIELDS.length);assertEquals(PhoneSmartRules.FIELDS.length,PhoneSmartRules.LABELS.length);
         MediaItem song=item("manual.wav","{\"manual_cues\":[{\"label\":\"Drop\",\"kind\":\"hot\"}],\"analysis\":{\"reviewed\":true},\"stems\":[{},{}]}");
