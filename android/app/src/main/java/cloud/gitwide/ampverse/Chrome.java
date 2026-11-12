@@ -15,7 +15,7 @@ final class Chrome {
     static Drawable button(Appearance colors, boolean selected) {
         StateListDrawable states=new StateListDrawable();
         states.addState(new int[]{android.R.attr.state_pressed}, gradient(selected?colors.accent:colors.surface,selected?colors.accent:colors.surface,colors.accent,8));
-        states.addState(new int[]{}, gradient(selected?colors.accent:colors.surface,selected?colors.accent:colors.surface,Color.argb(70,128,138,150),8));
+        states.addState(new int[]{}, gradient(selected?colors.accent:colors.classic?0xff424852:colors.surface,selected?(colors.classic?0xffefa92b:colors.accent):colors.classic?0xff292e36:colors.surface,selected?colors.accent:Color.argb(100,128,138,150),8));
         return states;
     }
     static void slider(android.widget.SeekBar slider,int color){android.content.res.ColorStateList tint=android.content.res.ColorStateList.valueOf(color);slider.setProgressTintList(tint);slider.setThumbTintList(tint);}

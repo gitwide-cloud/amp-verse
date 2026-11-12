@@ -156,3 +156,12 @@ Windows/Linux expose **Update** and **GitHub** in Plugin Manager. The external h
 Release contract: `amp-update.json`, schema 1, stable version and `windows-x86_64`, `linux-x86_64`, `android-arm64` entries contain versioned asset name, exact byte size and SHA-256; Android additionally requires `version_code`. `tools/update_manifest.py` creates it from completed packages. The tagged release workflow requires persistent Android signing secrets (`AMP_ANDROID_KEYSTORE_BASE64`, `AMP_ANDROID_STORE_PASSWORD`, `AMP_ANDROID_KEY_ALIAS`, `AMP_ANDROID_KEY_PASSWORD`) and publishes all three platforms together. Signing keys are never committed. Preview CI debug keys are not stable update identities. A local APK must continue using its existing key to update without losing app data.
 
 Earlier sections describe older milestones; this section replaces the old browser-only updater behavior. Local tests do not by themselves prove public release download/installation; that requires published matching assets and a newer installed version.
+
+
+## 0.2.6 Android UI testing build
+
+The main navigation is Player, Library, DJ and Devices. Devices separates Listen & Cast from Remote Control. The Audio button explains phone output, station casting and remote control; Lab and Settings remain in the overflow menu. Classic retains grey beveled controls, amber active controls, cyan deck B, spectrum bars and vector vinyl-style jog wheels.
+
+Portrait DJ uses one focused A/B deck with a persistent crossfader/Mix next strip above navigation. Wider windows put the mixer between both decks. Mixer settings open a scrollable dialog with master volume, remembered crossfade-time steppers and EQ access. Detailed seeking/staging and deck settings are expandable. Panel expansion and browsing scroll positions are retained. Short Player windows use independently scrollable transport and queue panes. Navigation uses inline icons in short windows, with at least 48dp targets.
+
+This changes Android UI only; the desktop UI research remains a future pass. No phone analysis engine was added. The test build has versionCode 26 and preserves the existing signing identity. It is installed for device testing rather than replacing the shared stable desktop/Android update manifest with an Android-only release.
