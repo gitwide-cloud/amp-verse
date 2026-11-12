@@ -517,11 +517,14 @@ impl Dashboard {
             command
                 .env(
                     "PATH",
-                    format!(
-                        "{};{}",
-                        binary.parent().unwrap().display(),
-                        std::env::var("PATH").unwrap_or_default()
-                    ),
+                    std::env::join_paths(
+                        std::iter::once(binary.parent().unwrap().to_path_buf()).chain(
+                            std::env::var_os("PATH")
+                                .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+                                .unwrap_or_default(),
+                        ),
+                    )
+                    .map_err(failure)?,
                 )
                 .arg(root)
                 .env("AMP_CAST_BIND", "0.0.0.0:8787")
@@ -809,7 +812,7 @@ impl Dashboard {
                     self.host(root, self.section == 2);
                 }
                 if !ready {
-                    ui.weak("Choose a music library and let its scan finish first.");
+                    ui.weak("Add a music folder in Library first, then return here.");
                 }
             } else {
                 ui.label(&self.hosting);

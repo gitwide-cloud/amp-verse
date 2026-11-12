@@ -315,6 +315,9 @@ impl Sampler {
                 });
             }
         });
+        if !self.status.starts_with("Load sound effects") {
+            ui.add(egui::Label::new(&self.status).wrap());
+        }
         actions
     }
     pub fn compact(
@@ -502,8 +505,24 @@ impl Sampler {
         }
     }
     pub fn request_load(&mut self, pad: usize, path: PathBuf) {
+        if pad >= 9 {
+            self.status = "Choose a sampler pad from 1 to 9.".into();
+            return;
+        }
         self.queue.push_back((pad, path));
         self.status = format!("Loading pad {}…", pad + 1);
+    }
+    fn take_ready_load(&mut self, playing: [bool; 9]) -> Option<(usize, PathBuf)> {
+        if let Some(index) = self.queue.iter().position(|(pad, _)| !playing[*pad]) {
+            return self.queue.remove(index);
+        }
+        if let Some((pad, _)) = self.queue.front() {
+            self.status = format!(
+                "Stop pad {} to apply its replacement. Other pads remain available.",
+                pad + 1
+            );
+        }
+        None
     }
     pub fn poll(&mut self, engine: &mut Engine) {
         engine.sample_maintenance();
@@ -538,13 +557,10 @@ impl Sampler {
                 Err(mpsc::TryRecvError::Empty) => (),
             }
         }
-        if self.queue.front().is_some_and(|(pad, _)| {
-            engine.controls.sample_playing[*pad].load(std::sync::atomic::Ordering::Relaxed)
-        }) {
-            return;
-        }
         if self.job.is_none()
-            && let Some((pad, path)) = self.queue.pop_front()
+            && let Some((pad, path)) = self.take_ready_load(std::array::from_fn(|pad| {
+                engine.controls.sample_playing[pad].load(std::sync::atomic::Ordering::Relaxed)
+            }))
         {
             let rate = engine.sample_rate;
             let (tx, rx) = mpsc::channel();
@@ -653,6 +669,27 @@ pub(super) fn shortcut(key: egui::Key) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn looping_pad_replacement_does_not_block_other_pads_or_replace_playing_audio() {
+        let mut sampler = Sampler::default();
+        sampler.request_load(0, "replace-loop.wav".into());
+        sampler.request_load(1, "new-effect.wav".into());
+        let mut playing = [false; 9];
+        playing[0] = true;
+        assert_eq!(
+            sampler.take_ready_load(playing),
+            Some((1, PathBuf::from("new-effect.wav")))
+        );
+        assert!(sampler.take_ready_load(playing).is_none());
+        assert!(sampler.status.contains("Stop pad 1"));
+        playing[0] = false;
+        assert_eq!(
+            sampler.take_ready_load(playing),
+            Some((0, PathBuf::from("replace-loop.wav")))
+        );
+        sampler.request_load(9, "invalid.wav".into());
+        assert!(sampler.queue.is_empty());
+    }
     #[test]
     fn bank_replacement_persists_independent_assignments() {
         let dir = tempfile::tempdir().unwrap();

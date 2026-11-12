@@ -30,6 +30,8 @@ pub struct Preparer {
     library_id: String,
     root: PathBuf,
     path: PathBuf,
+    selection_root: PathBuf,
+    selection_path: PathBuf,
     title: String,
     draft: Preparation,
     job: Option<mpsc::Receiver<Update>>,
@@ -49,6 +51,28 @@ impl Preparer {
             .unwrap_or_default()
             != self.draft
     }
+    fn selected_track(&self, root: &std::path::Path, track: &Track) -> bool {
+        !self.title.is_empty() && self.selection_root == root && self.selection_path == track.path
+    }
+    fn published_track_changed(&self, track: &Track) -> bool {
+        if self.draft.extensions.contains_key("_amp_sync")
+            || track.preparation.extensions.contains_key("_amp_sync")
+        {
+            return !crate::library_cache::keep_current_preparation(
+                &self.draft,
+                &track.preparation,
+            ) && self.draft.extensions.get("_amp_sync")
+                != track.preparation.extensions.get("_amp_sync");
+        }
+        let clean = |p: &Preparation| {
+            let mut p = p.clone();
+            for field in ["embedded_tags", "embedded_genres", "audio_properties"] {
+                p.extensions.remove(field);
+            }
+            p
+        };
+        clean(&self.draft) != clean(&track.preparation)
+    }
     pub fn prepare_panel(
         &mut self,
         ui: &mut egui::Ui,
@@ -63,14 +87,14 @@ impl Preparer {
         };
         if !self.busy()
             && !self.title.is_empty()
-            && (self.root != root || self.path != track.path)
+            && !self.selected_track(root, track)
             && self.dirty()
         {
             ui.heading(format!("Unsaved preparation: {}", self.title));
             ui.weak("Save or discard this draft before preparing another song. Select the original song below to keep editing.");
             ui.horizontal(|ui| {
                 if ui.button("Save current draft").clicked() {
-                    let same = self.root == root;
+                    let same = self.selection_root == root;
                     self.save_inline(if same { library } else { None });
                 }
                 if ui.button("Discard draft").clicked() {
@@ -79,23 +103,28 @@ impl Preparer {
             });
             return;
         }
-        if !self.busy() && (self.root != root || self.path != track.path || self.title.is_empty()) {
+        if !self.busy() && (!self.selected_track(root, track) || self.title.is_empty()) {
             self.edit(root, track);
             self.open = false;
             self.position = 0.;
             self.section = None;
         }
         if !self.busy()
-            && self.root == root
-            && self.path == track.path
+            && self.selected_track(root, track)
             && !self.dirty()
-            && self.draft != track.preparation
+            && self.published_track_changed(track)
         {
             self.edit(root, track);
             self.open = false;
         }
-        if self.root != root || self.path != track.path {
-            ui.weak("Finish the current analysis before changing the prepared track.");
+        if !self.selected_track(root, track) {
+            ui.weak(if self.busy() {
+                "Finish the current analysis before changing the prepared track."
+            } else if self.status.is_empty() {
+                "Could not prepare this song. Check that its music source is connected."
+            } else {
+                &self.status
+            });
             return;
         }
         ui.horizontal_wrapped(|ui| {
@@ -150,9 +179,18 @@ impl Preparer {
             .map(|p| p.duration)
             .or(self.draft.analysis.as_ref().map(|a| a.duration))
             .or(self.draft.cue_out)
+            .or_else(|| {
+                track
+                    .preparation
+                    .extensions
+                    .get("audio_properties")?
+                    .get("duration")?
+                    .as_f64()
+                    .filter(|v| v.is_finite() && *v > 0.)
+            })
             .unwrap_or(32.)
             .max(0.1);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if self.draft.bpm.is_some() && self.draft.beat_offset.is_none() {
                 ui.weak("Tempo estimated; align the beatgrid before beat-sensitive mixing.");
             }
@@ -292,8 +330,10 @@ impl Preparer {
                         .add_enabled(!dirty, egui::Button::new("Mix this section into DJ"))
                         .clicked()
                     {
-                        self.mix_section =
-                            Some((self.path.clone(), format!("energy-section:{}", section.id)));
+                        self.mix_section = Some((
+                            self.selection_path.clone(),
+                            format!("energy-section:{}", section.id),
+                        ));
                     }
                 });
             } else {
@@ -406,8 +446,8 @@ impl Preparer {
                 Ok((p, revision)) => {
                     self.draft = p;
                     self.editing_revision = revision;
-                    if let Some(t) =
-                        library.and_then(|l| l.tracks.iter_mut().find(|t| t.path == self.path))
+                    if let Some(t) = library
+                        .and_then(|l| l.tracks.iter_mut().find(|t| t.path == self.selection_path))
                     {
                         t.preparation = self.draft.clone();
                     }
@@ -501,6 +541,8 @@ impl Preparer {
             self.title = title.into();
         }
         self.library_id = amp_core::coordination::library_id(&self.root).unwrap_or_default();
+        self.selection_root = root.into();
+        self.selection_path = track.path.clone();
         self.review_selected.clear();
         self.open = true;
     }
@@ -639,7 +681,7 @@ impl Preparer {
             if ui.button("Analyze track").clicked(){self.total=1;self.done=0;self.failures=0;let track=Track{path:self.path.clone(),title:self.title.clone(),preparation:self.draft.clone()};self.status="Analyzing decoded audio...".into();self.start(self.root.clone(),vec![track],true);}
             if ui.button("Save approved metadata").clicked(){
 self.draft.schema_version=Some(1);self.draft.manual_override=true;if let Some(a)=&mut self.draft.analysis{a.reviewed=true;}match preparation::save_if_unchanged(&self.root,&self.path,&self.draft,self.editing_revision.as_deref()){Ok(())=>{if let Ok(fresh)=preparation::load(&self.root.join(&self.path)){self.draft=fresh;}
-if let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|amp_core::music_sources::audio_path(root,&t.path)==self.root.join(&self.path)){t.preparation=self.draft.clone();if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.editing_revision=preparation::revision(&self.root.join(&self.path));self.status="Approved metadata saved in ampdj. Original audio unchanged.".into();},Err(e)=>{
+if let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|self.selection_root==root && t.path==self.selection_path){t.preparation=self.draft.clone();if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.editing_revision=preparation::revision(&self.root.join(&self.path));self.status="Approved metadata saved in ampdj. Original audio unchanged.".into();},Err(e)=>{
 let queued=(||{let base=if let Some(bytes)=&self.editing_revision{serde_json::from_slice(bytes).map_err(|e:serde_json::Error|e.to_string())?}else{Preparation::default()};amp_core::offline::Edit::new(self.library_id.clone(),self.path.clone(),base,self.draft.clone())?.queue()})();
 self.status=match queued{Ok(path)=>format!("{e}. Draft kept locally at {}. Reconnection will not publish it automatically.",path.display()),Err(_)=>format!("{e}. Unsaved draft remains open; local queue unavailable.")};}}}
         });});
@@ -783,5 +825,41 @@ ui.add(egui::TextEdit::singleline(&mut cue.label).desired_width(220.));ui.add(eg
             }
         }
         ui.weak("Saved defaults apply on the next load; playing decks keep their current mix. Other computers need prepared stems too.");
+    }
+}
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+    #[test]
+    fn preparation_uses_display_selection_and_saves_to_added_source_without_false_busy_or_reload() {
+        let main = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        std::fs::write(extra.path().join("song.mp3"), b"fixture").unwrap();
+        amp_core::music_sources::add(main.path(), extra.path()).unwrap();
+        let mut library = amp_core::scan(main.path()).unwrap();
+        library.tracks[0].preparation.extensions.insert(
+            "embedded_tags".into(),
+            serde_json::json!({"Artist":["Display tags"]}),
+        );
+        let track = library.tracks[0].clone();
+        let mut editor = Preparer::default();
+        editor.edit(main.path(), &track);
+        assert!(editor.selected_track(main.path(), &track));
+        assert!(!editor.busy());
+        assert!(
+            !editor.published_track_changed(&track),
+            "derived tags must not reopen metadata every frame"
+        );
+        editor.draft.bpm = Some(127.);
+        editor.save_inline(Some(&mut library));
+        assert_eq!(library.tracks[0].preparation.bpm, Some(127.));
+        assert_eq!(
+            preparation::load(&extra.path().join("song.mp3"))
+                .unwrap()
+                .bpm,
+            Some(127.)
+        );
+        assert!(editor.selected_track(main.path(), &track));
     }
 }

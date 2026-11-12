@@ -432,7 +432,7 @@ impl Panel {
         ui.label(&self.status[0]);
         prepared
     }
-    pub fn library(&mut self, ui: &mut egui::Ui, root: &Path, tracks: &[amp_core::Track]) {
+    pub fn library(&mut self, ui: &mut egui::Ui, root: &Path) {
         if let Some(rx) = &self.batch_rx {
             while let Ok((done, total, title)) = rx.try_recv() {
                 self.batch_progress = (done, total);
@@ -462,7 +462,7 @@ impl Panel {
             ui.ctx().request_repaint_after(Duration::from_millis(150));
         } else if ui
             .add_enabled(
-                !tracks.is_empty() && self.job.is_none() && runtime().is_some(),
+                !root.as_os_str().is_empty() && self.job.is_none() && runtime().is_some(),
                 egui::Button::new("Prepare library stems"),
             )
             .clicked()

@@ -42,6 +42,21 @@ impl Player {
             theme::current(ui.ctx()).palette().background,
         );
         self.header(ui, "AMP Library", false);
+        let add_music = ui.button("Add music folder…");
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::unique("library-add-music"),
+                (add_music.rect, add_music.enabled()),
+            )
+        });
+        if add_music.clicked()
+            && let Some(folder) = rfd::FileDialog::new()
+                .set_title("Add music to Library (includes subfolders)")
+                .pick_folder()
+        {
+            self.add_music_source(folder);
+        }
         if ui
             .button("Find duplicates / Consolidate library…")
             .clicked()
@@ -49,7 +64,8 @@ impl Player {
             self.library_page = 8;
         }
 
-        let height = (ui.available_height() - 64.).max(350.);
+        let height = (ui.available_height() - 64.).max(260.);
+        egui::ScrollArea::vertical().id_salt("library-workflow-body").max_height((ui.available_height()-62.).max(80.)).auto_shrink([false,false]).show(ui,|ui| {
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(176.,height - 70.),egui::Layout::top_down(egui::Align::Min),|ui| {
                 egui::ScrollArea::vertical().id_salt("library-navigation").max_height((height-180.).max(160.)).show(ui,|ui|{
@@ -59,8 +75,8 @@ impl Player {
                 });
                 ui.add_space(20.);ui.separator();
                 let total=self.library.as_ref().map_or(0,|l|l.tracks.len());
-                ui.label(RichText::new("Library ready").color(skin::signal(ui)));ui.weak(format!("{total} tracks"));
-                ui.weak(if self.preparer.busy(){"Analysis running"}else{"No active analysis"});
+                ui.label(RichText::new(if self.root.as_os_str().is_empty() {"Add a music folder"} else if self.scan.is_some() && self.library.is_none() {"Finding music…"} else if self.scan.is_some() {"Library ready · refreshing"} else {"Library ready"}).color(skin::signal(ui)));ui.weak(format!("{total} tracks"));
+                ui.weak(if self.analyze_after_scan {"Finding analysis inputs…"} else if self.preparer.busy(){"Analysis running"}else{"No active analysis"});
             });
             ui.separator();
             ui.vertical(|ui| {ui.set_width(ui.available_width()-8.);
@@ -74,7 +90,7 @@ impl Player {
                         self.loaded=[None;6];self.playing=[false;6];
                         for (deck,index) in prepared.into_iter().enumerate() {if let Some(index)=index {self.load_deck(deck,index,false);}}
                     }
-                    ui.separator();self.controllers.show(ui);ui.separator();ui.heading("AMP Cast devices");self.cast.show(ui, &self.root, self.library.is_some() && self.scan.is_none());});},
+                    ui.separator();self.controllers.show(ui);ui.separator();ui.heading("AMP Cast devices");self.cast.show(ui, &self.root, self.library.is_some());});},
                     4 => {ui.heading("Playback history");ui.weak("Tracks started by this desktop session. A start does not mean the full track was played.");egui::ScrollArea::vertical().max_height(height-80.).show(ui,|ui|{for (deck,title) in self.playback_history.iter().rev(){ui.label(format!("Deck {}    {title}",deck+1));}if self.playback_history.is_empty(){ui.weak("Play a song to begin your session history.");}});},
                     5 => {ui.heading("Music sources");ui.label("Local folders and mounted network libraries");self.music_source_controls(ui);ui.separator();ui.heading("Remote control");ui.label(&self.control_status);ui.label("Listen address");ui.text_edit_singleline(&mut self.control_bind);ui.label("Optional password");ui.add(egui::TextEdit::singleline(&mut self.control_password).password(true));ui.horizontal(|ui|{if ui.button("Start / restart control").clicked(){self.start_control(ui.ctx());}
 if ui.button("Stop control").clicked(){self.control=None;self.control_restart=None;self.control_status="Control stopped".into();}});theme::selector(ui);},
@@ -93,6 +109,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 }
             });
         });
+        });
         ui.separator();
         ui.horizontal(|ui| {
             ui.colored_label(
@@ -105,8 +122,15 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
             ui.separator();
             ui.add(egui::Label::new(self.root.display().to_string()).truncate());
         });
-        ui.add(egui::Label::new(&self.status).truncate())
+        let status = ui
+            .add(egui::Label::new(&self.status).truncate())
             .on_hover_text(&self.status);
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::unique("library-workflow-status"), status.rect)
+        });
+        #[cfg(not(test))]
+        let _ = status;
     }
     pub(super) fn add_music_source(&mut self, folder: PathBuf) {
         if self.root.as_os_str().is_empty() {
@@ -341,37 +365,16 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 if ui
                     .add_enabled(
                         !name.trim().is_empty(),
-                        egui::Button::new("Create playlist..."),
+                        egui::Button::new(if self.queue.is_empty() {
+                            "Create playlist"
+                        } else {
+                            "Create from queue"
+                        }),
                     )
                     .clicked()
+                    && let Err(error) = self.create_named_playlist(&name)
                 {
-                    let directory = self.root.join("ampdj/playlists");
-                    match std::fs::create_dir_all(&directory) {
-                        Ok(()) => {
-                            let filename: String = name
-                                .chars()
-                                .map(|c| {
-                                    if c.is_control() || "<>:\"/\\|?*".contains(c) {
-                                        '_'
-                                    } else {
-                                        c
-                                    }
-                                })
-                                .collect();
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_directory(directory)
-                                .add_filter("AMP playlist", &["json"])
-                                .set_file_name(format!("{}.json", filename.trim()))
-                                .save_file()
-                                && let Err(error) = self.create_playlist_at(path, &name)
-                            {
-                                self.status = error;
-                            }
-                        }
-                        Err(error) => {
-                            self.status = format!("Could not create playlist folder: {error}")
-                        }
-                    }
+                    self.status = error;
                 }
                 if ui.button("Cancel").clicked() {
                     self.new_playlist_name = None;
@@ -498,12 +501,23 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 );
             }
             ui.label(if self.preparer.status.is_empty() {
-                "Ready to analyze your library"
+                if self.root.as_os_str().is_empty() {
+                    "Add a music folder above to begin."
+                } else {
+                    "Ready to analyze your library"
+                }
             } else {
                 &self.preparer.status
             });
-            if self.preparer.busy() {
+            if self.preparer.busy() || self.analyze_after_scan {
                 ui.spinner();
+            }
+            if crate::engine::path().is_none() {
+                ui.weak("The optional analysis engine is not installed. Playback and manual editing still work.");
+                if ui.button("Install analysis engine…").clicked() {
+                    self.addons.selected = 5;
+                    self.activate(ui, Some(skin::Module::Addons));
+                }
             }
             ui.add_space(12.);
             if ui
@@ -528,11 +542,12 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
         ui.add_space(18.);
         skin::panel(ui, false, |ui| {
             ui.set_min_width(ui.available_width());
-            let tracks = self
-                .library
-                .as_ref()
-                .map_or(&[][..], |l| l.tracks.as_slice());
-            self.stem_panel.library(ui, &self.root, tracks);
+            self.stem_panel.library(ui, &self.root);
+            if crate::stems::runtime().is_none() && ui.button("Open stem add-on setup…").clicked()
+            {
+                self.addons.selected = 6;
+                self.activate(ui, Some(skin::Module::Addons));
+            }
         });
         ui.add_space(18.);
         let blocked = self.run.auto
@@ -714,7 +729,7 @@ ui.label(
                         {
                             edit = self.selected;
                         }
-                        if ui.add_enabled(self.library.is_some(), egui::Button::new("Add folder…")).clicked()
+                        if ui.add_enabled(self.library.is_some(), egui::Button::new("Add folder to queue…")).clicked()
                             && let Some(folder) = rfd::FileDialog::new()
                                 .set_title("Add a music folder to the playlist queue")
                                 .set_directory(self.root.join(&self.folder))
@@ -726,7 +741,7 @@ ui.label(
                                         self.folder = relative;
                                         self.queue_library_folder();
                                     } else {
-                                        self.status = "That folder is outside this library. Open Library > Sources to choose a different music library.".into();
+                                        self.status = "That folder is not indexed yet. Use Add music folder to include it, then add it to the queue.".into();
                                     }
                                 }
                                 Err(error) => self.status = format!("Could not open folder: {error}"),
@@ -914,6 +929,75 @@ mod tests {
         player.queue_library_folder();
         assert_eq!(player.queue.len(), 2);
         assert!(player.status.contains("No indexed songs"));
+    }
+    #[test]
+    fn empty_library_exposes_add_music_and_keeps_status_reachable_in_a_short_window() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            root: PathBuf::new(),
+            status: "Add music to begin".into(),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800., 460.),
+                )),
+                ..Default::default()
+            },
+            |ui| player.library_ui(ui),
+        );
+        output.textures_delta.clear();
+        let (button, enabled) = ctx.data(|data| {
+            data.get_temp::<(egui::Rect, bool)>(egui::Id::unique("library-add-music"))
+                .unwrap()
+        });
+        let status = ctx.data(|data| {
+            data.get_temp::<egui::Rect>(egui::Id::unique("library-workflow-status"))
+                .unwrap()
+        });
+        assert!(enabled);
+        assert!(button.min.y >= 0. && button.max.y < 460.);
+        assert!(status.max.y <= 460., "status clipped at {status:?}");
+    }
+    #[test]
+    fn named_playlist_creation_preserves_queue_and_avoids_file_naming_and_overwrite_traps() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("song.mp3"), b"fixture").unwrap();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            queue: vec![0, 0],
+            ..Default::default()
+        };
+        player
+            .create_named_playlist("Friday: night / favourites")
+            .unwrap();
+        let (path, list) = player.playlist_snapshot.clone().unwrap();
+        assert!(path.starts_with(root.path().join("ampdj/playlists")));
+        assert_eq!(list.name, "Friday: night / favourites");
+        assert_eq!(
+            list.tracks,
+            vec![PathBuf::from("song.mp3"), PathBuf::from("song.mp3")]
+        );
+        assert_eq!(player.queue, vec![0, 0]);
+        amp_core::catalog_db::compact(root.path()).unwrap();
+        if path.is_file() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        assert!(
+            player
+                .create_playlist_at(path.clone(), "Overwrite")
+                .unwrap_err()
+                .contains("already exists")
+        );
+        assert_eq!(Playlist::load(&path, root.path()).unwrap().name, list.name);
+        player
+            .create_named_playlist("Friday: night / favourites")
+            .unwrap();
+        assert_ne!(player.playlist_snapshot.as_ref().unwrap().0, path);
+        assert_eq!(player.queue, vec![0, 0]);
     }
     #[test]
     fn regular_playlist_create_add_save_and_restart_discovery() {

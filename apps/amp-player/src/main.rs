@@ -471,6 +471,17 @@ impl Player {
         });
     }
     fn request_library_analysis(&mut self) {
+        if self.root.as_os_str().is_empty() {
+            self.preparer.status =
+                "Add a music folder using Add music folder above, then analyze it.".into();
+            return;
+        }
+        if crate::engine::path().is_none() {
+            self.preparer.status = "Install the optional analysis engine in Plugin Manager, then retry. No library scan was started.".into();
+            self.addons.selected = 5;
+            self.addons_open = true;
+            return;
+        }
         if self.preparer.busy() || self.analyze_after_scan {
             return;
         }
@@ -498,7 +509,26 @@ impl Player {
             self.analysis_scan = None;
             self.analyze_after_scan = false;
             match result {
-                Ok(library) => self.preparer.batch(self.root.clone(), library.tracks),
+                Ok(mut library) => {
+                    if let Some(current) = &self.library {
+                        let known: std::collections::HashMap<_, _> = current
+                            .tracks
+                            .iter()
+                            .map(|track| (&track.path, track))
+                            .collect();
+                        for track in &mut library.tracks {
+                            if let Some(old) = known.get(&track.path) {
+                                track.preparation = old.preparation.clone();
+                                track.title = old.title.clone();
+                            }
+                        }
+                    }
+                    self.accept_library_scan(library);
+                    self.preparer.batch(
+                        self.root.clone(),
+                        self.library.as_ref().unwrap().tracks.clone(),
+                    );
+                }
                 Err(error) => {
                     self.preparer.status = format!(
                         "Could not refresh music sources: {error}. Analysis was not started; retry when the folders are available."
@@ -528,7 +558,22 @@ impl Player {
             }
         }
     }
-    fn accept_library_scan(&mut self, lib: Library) {
+    fn accept_library_scan(&mut self, mut lib: Library) {
+        if let Some(current) = &self.library {
+            let known: std::collections::HashMap<_, _> = current
+                .tracks
+                .iter()
+                .map(|track| (&track.path, track))
+                .collect();
+            for track in &mut lib.tracks {
+                if let Some(old) = known.get(&track.path)
+                    && library_cache::keep_current_preparation(&old.preparation, &track.preparation)
+                {
+                    track.preparation = old.preparation.clone();
+                    track.title = old.title.clone();
+                }
+            }
+        }
         self.library_generation = self.library_generation.wrapping_add(1);
         let lookup: std::collections::HashMap<_, _> = lib
             .tracks
@@ -1010,6 +1055,10 @@ impl Player {
         }
     }
     fn connect_music_root(&mut self, root: PathBuf) {
+        if !root.is_dir() {
+            self.status = "That music folder is unavailable. Existing library and playback were kept. Choose a connected folder.".into();
+            return;
+        }
         self.checkpoint(true);
         let recover = self.recovery.enabled();
         if let Some(audio) = &mut self.audio {
@@ -1045,30 +1094,59 @@ impl Player {
         let _ = std::fs::write(pref, self.root.to_string_lossy().as_bytes());
         self.scan();
     }
+    fn create_named_playlist(&mut self, name: &str) -> Result<(), String> {
+        if self.root.as_os_str().is_empty() {
+            return Err("Add a music folder first, then create a playlist.".into());
+        }
+        if name.trim().is_empty() {
+            return Err("Enter a playlist name".into());
+        }
+        let directory = self.root.join("ampdj/playlists");
+        std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+        self.create_playlist_at(
+            directory.join(format!("playlist-{}.json", amp_core::coordination::token())),
+            name,
+        )
+    }
     fn create_playlist_at(&mut self, path: PathBuf, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {
             return Err("Enter a playlist name".into());
         }
-        if path.exists() {
+        if path.exists() || amp_core::catalog_db::read(&path)?.is_some() {
             return Err("A playlist already exists there. Choose a different filename.".into());
         }
+        let tracks: Option<Vec<_>> = self
+            .queue
+            .iter()
+            .map(|index| {
+                self.library
+                    .as_ref()?
+                    .tracks
+                    .get(*index)
+                    .map(|t| t.path.clone())
+            })
+            .collect();
+        let tracks = tracks
+            .ok_or("Some queued songs are not indexed. Refresh the library before saving.")?;
         let list = Playlist {
             companion_available: false,
             sync: None,
             version: 1,
             name: name.into(),
-            tracks: Vec::new(),
+            tracks,
         };
         list.save_in_library(&path, &self.root)
             .map_err(|error| error.to_string())?;
         let saved = Playlist::load(&path, &self.root).map_err(|error| error.to_string())?;
-        self.queue.clear();
         self.queue_selected = None;
         self.playlist_snapshot = Some((path.clone(), saved.clone()));
         self.dj_browser.playlists.push((path, saved));
         self.new_playlist_name = None;
-        self.status = "Playlist created. Add songs from Library, then Save.".into();
+        self.status = format!(
+            "Playlist created with {} songs. Add songs from Library, then Save.",
+            self.queue.len()
+        );
         Ok(())
     }
     fn save_playlist(&mut self) {
@@ -3202,11 +3280,7 @@ impl Player {
                 .id_salt("cast-content")
                 .max_height(ui.available_height())
                 .show(ui, |ui| {
-                    self.cast.show(
-                        ui,
-                        &self.root,
-                        self.library.is_some() && self.scan.is_none(),
-                    );
+                    self.cast.show(ui, &self.root, self.library.is_some());
                 });
         });
     }
@@ -3617,11 +3691,13 @@ fn main() -> eframe::Result {
 mod window_tests {
     use super::*;
     #[test]
-    fn analysis_job_inputs_include_added_subfolders_without_replacing_loaded_library() {
+    fn analysis_job_inputs_publish_added_subfolders_while_preserving_existing_metadata() {
         let main = tempfile::tempdir().unwrap();
         let extra = tempfile::tempdir().unwrap();
         std::fs::write(main.path().join("old.mp3"), b"fixture").unwrap();
-        let old = amp_core::scan(main.path()).unwrap();
+        let mut old = amp_core::scan(main.path()).unwrap();
+        old.tracks[0].preparation.bpm = Some(123.);
+        old.tracks[0].preparation.manual_override = true;
         std::fs::create_dir_all(extra.path().join("Artist/Album")).unwrap();
         std::fs::write(extra.path().join("Artist/Album/new.mp3"), b"fixture").unwrap();
         amp_core::music_sources::add(main.path(), extra.path()).unwrap();
@@ -3643,7 +3719,40 @@ mod window_tests {
         player.poll_analysis_scan();
         assert!(!player.analyze_after_scan);
         assert_eq!(player.preparer.progress().1, 2);
-        assert_eq!(player.library.as_ref().unwrap().tracks.len(), 1);
+        assert_eq!(player.library.as_ref().unwrap().tracks.len(), 2);
+        let old = player
+            .library
+            .as_ref()
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|t| t.path == Path::new("old.mp3"))
+            .unwrap();
+        assert_eq!(old.preparation.bpm, Some(123.));
+        assert!(old.preparation.manual_override);
+    }
+    #[test]
+    fn unavailable_root_does_not_clear_existing_library_or_live_session() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("song.mp3"), b"fixture").unwrap();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            queue: vec![0],
+            loaded: [Some(0), None, None, None, None, None],
+            ..Default::default()
+        };
+        player.run.auto = true;
+        player.connect_music_root(root.path().join("not-connected"));
+        assert_eq!(player.root, root.path());
+        assert_eq!(player.queue, vec![0]);
+        assert_eq!(player.loaded[0], Some(0));
+        assert!(player.run.auto);
+        assert!(
+            player
+                .status
+                .contains("Existing library and playback were kept")
+        );
     }
     #[test]
     fn failed_refresh_does_not_analyze_an_outdated_song_list() {

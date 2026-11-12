@@ -29,3 +29,7 @@ This cache is for the visible DJ song table. Auto DJ still performs its existing
 New Smart Playlists start with all indexed music as their source. Genre and analysis filters then narrow that pool. The source editor has a visible **Use all indexed music** button, which preserves those filters and existing song exclusions. Selecting folders or importing playlists still creates a narrower source explicitly. Existing saved source restrictions are retained on upgrade.
 
 An empty selected-folder source deliberately matches no songs. The editor now explains this beside the source controls and offers the all-music choice; it does not treat the indexed-library count as a selected source. Save Playlist publishes the chosen source and filters to DJ. Refresh playlists reads the saved rules without reanalyzing audio.
+
+## Basic Library actions
+
+Use **Add music folder…** to index another source, including subfolders. **Add folder to queue…** adds indexed songs to a regular playlist queue. New regular playlists need only a display name; **Create from queue** keeps the current song order and duplicates, and storage is handled inside ampdj. Existing playlists are protected from overwrite even after metadata is packed into the catalog.
