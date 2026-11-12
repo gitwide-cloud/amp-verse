@@ -39,6 +39,14 @@ mod native {
                     .ok()?
                     .parent()?
                     .join("amp-keylock.dll");
+                // Cargo's test executable location varies across toolchains.
+                // Production always loads the DLL beside the installed app.
+                #[cfg(test)]
+                let path = if path.is_file() {
+                    path
+                } else {
+                    std::path::PathBuf::from(env!("OUT_DIR")).join("amp-keylock.dll")
+                };
                 let library = libloading::Library::new(path).ok()?;
                 Some(Backend {
                     create: *library.get(b"signalsmith_stretch_create\0").ok()?,

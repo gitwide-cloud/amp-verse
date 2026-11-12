@@ -13,6 +13,7 @@ from pathlib import Path
 import platform
 import tempfile
 import urllib.request
+import urllib.parse
 import zipfile
 
 YT_VERSION = "2026.10.26"
@@ -21,7 +22,16 @@ DENO_VERSION = "v2.9.8"
 
 def fetch(url):
     request = urllib.request.Request(url, headers={"User-Agent": "AMPVerse-Lab-Setup", "Accept": "application/vnd.github+json"})
-    with urllib.request.urlopen(request, timeout=120) as response:
+    token = os.environ.get("GH_TOKEN")
+    if token and urllib.parse.urlsplit(url).hostname == "api.github.com":
+        request.add_header("Authorization", "Bearer " + token)
+    class SafeRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            redirected = super().redirect_request(req, fp, code, msg, headers, newurl)
+            if redirected and urllib.parse.urlsplit(newurl).hostname != urllib.parse.urlsplit(req.full_url).hostname:
+                redirected.remove_header("Authorization")
+            return redirected
+    with urllib.request.build_opener(SafeRedirect).open(request, timeout=120) as response:
         return response.read()
 
 
