@@ -508,13 +508,14 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
             ui.add_space(12.);
             if ui
                 .add_enabled(
-                    !self.preparer.busy() && self.library.is_some(),
+                    !self.preparer.busy()
+                        && !self.analyze_after_scan
+                        && !self.root.as_os_str().is_empty(),
                     egui::Button::new("Analyze library"),
                 )
                 .clicked()
-                && let Some(lib) = &self.library
             {
-                self.preparer.batch(self.root.clone(), lib.tracks.clone());
+                self.request_library_analysis();
             }
             ui.label("Parallel songs (0 = automatic)");
             ui.add_enabled(
