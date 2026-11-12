@@ -435,6 +435,10 @@ impl Control {
                 .expect("Show control runtime");
             runtime.block_on(async move {
                 let router = Router::new()
+                    .route("/", get(request_page))
+                    .route("/requests", get(request_page))
+                    .route("/requests.js", get(request_script))
+                    .route("/api/v1/request-songs", get(request_songs))
                     .route("/api/v1/info", get(info))
                     .route("/api/v1/state", get(state))
                     .route("/api/v1/catalog", get(catalog))
@@ -506,6 +510,36 @@ fn authorized(s: &Shared, h: &HeaderMap) -> bool {
     s.password
         .as_ref()
         .is_none_or(|p| h.get("x-amp-password").and_then(|v| v.to_str().ok()) == Some(p.as_str()))
+}
+async fn request_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../web/requests.html"))
+}
+async fn request_script() -> impl IntoResponse {
+    (
+        [("content-type", "text/javascript; charset=utf-8")],
+        include_str!("../web/requests.js"),
+    )
+}
+async fn request_songs(State(s): State<Arc<Shared>>, h: HeaderMap) -> axum::response::Response {
+    if !authorized(&s, &h) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let songs = s
+        .catalog
+        .lock()
+        .ok()
+        .and_then(|catalog| {
+            catalog["songs"].as_array().map(|songs| {
+                songs
+                    .iter()
+                    .filter_map(|song| {
+                        Some(json!({"id":song["id"].as_str()?,"title":song["title"].as_str()?}))
+                    })
+                    .collect::<Vec<_>>()
+            })
+        })
+        .unwrap_or_default();
+    Json(json!({"session":s.session,"songs":songs})).into_response()
 }
 async fn state(State(s): State<Arc<Shared>>, h: HeaderMap) -> axum::response::Response {
     if !authorized(&s, &h) {
@@ -745,6 +779,79 @@ mod tests {
             }
         ));
         assert!(serde_json::from_value::<Request>(json!({"id":"x","action":"invented"})).is_err());
+    }
+    #[test]
+    fn web_request_page_uses_authenticated_compact_catalog_and_current_dj_queue() {
+        let control = Control::start(
+            &eframe::egui::Context::default(),
+            "127.0.0.1:0",
+            Some("secret".into()),
+        )
+        .unwrap();
+        control.catalog(json!({"songs":[{"id":"song-one","title":"A song","path":"private/path.mp3","cues":[1,2]}]}));
+        let base = format!("http://{}", control.address);
+        let html = ureq::get(&format!("{base}/requests"))
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_to_string()
+            .unwrap();
+        assert!(html.contains("id=\"search\""));
+        assert!(
+            ureq::get(&format!("{base}/api/v1/request-songs"))
+                .call()
+                .is_err()
+        );
+        let info: Value = ureq::get(&format!("{base}/api/v1/info"))
+            .header("x-amp-password", "secret")
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_json()
+            .unwrap();
+        let session = info["session"].as_str().unwrap();
+        let catalog: Value = ureq::get(&format!("{base}/api/v1/request-songs"))
+            .header("x-amp-password", "secret")
+            .header("x-amp-session", session)
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_json()
+            .unwrap();
+        assert_eq!(
+            catalog["songs"],
+            json!([{"id":"song-one","title":"A song"}])
+        );
+        assert_eq!(catalog["session"], session);
+        assert!(
+            ureq::get(&format!("{base}/api/v1/request-songs"))
+                .header("x-amp-password", "secret")
+                .header("x-amp-session", "stale")
+                .call()
+                .is_err()
+        );
+        let worker = std::thread::spawn(move || {
+            let envelope = control
+                .commands
+                .recv_timeout(Duration::from_secs(3))
+                .unwrap();
+            assert!(
+                matches!(&envelope.request.command,Action::RequestSong { song, within:3 } if song=="song-one")
+            );
+            envelope
+                .reply
+                .send(Reply {
+                    id: envelope.request.id,
+                    ok: true,
+                    status: "accepted".into(),
+                    error: None,
+                })
+                .unwrap();
+            std::thread::sleep(Duration::from_millis(50));
+        });
+        let reply:Value=ureq::post(&format!("{base}/api/v1/command")).header("x-amp-password","secret").header("x-amp-session",session).send_json(json!({"id":"web-request-test","action":"request_song","song":"song-one","within":3})).unwrap().body_mut().read_json().unwrap();
+        assert_eq!(reply["ok"], true);
+        worker.join().unwrap();
     }
     #[test]
     fn retries_return_same_reply_without_replaying() {

@@ -238,6 +238,20 @@ impl Player {
             .inner;
         let mut cancel_request = None;
         egui::Popup::menu(&requests).show(|ui| {
+            if let Some(control) = &self.control {
+                let address = control
+                    .address
+                    .replace("0.0.0.0", "127.0.0.1")
+                    .replace("[::]", "127.0.0.1");
+                ui.hyperlink_to(
+                    "Open song-request web page",
+                    format!("http://{address}/requests"),
+                );
+                ui.weak(
+                    "On your phone, use this PC’s LAN address with the same port and /requests.",
+                );
+                ui.separator();
+            }
             if self.run.requests.is_empty() {
                 ui.label("No pending requests. Right-click a song to request it.");
             }
