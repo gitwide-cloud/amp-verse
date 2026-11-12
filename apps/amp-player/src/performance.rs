@@ -604,6 +604,7 @@ impl Player {
                     self.run.profile.as_ref().is_none_or(|p| {
                         let track = &self.library.as_ref().unwrap().tracks[*index];
                         !p.excluded.contains(&id)
+                            && p.filters.iter().all(|filter| filter.matches(track))
                             && (p.genres.is_empty()
                                 || amp_core::genres::matches(&p.genres, &track.preparation))
                     })
@@ -1083,9 +1084,10 @@ impl Player {
                 if let Some(p) = &self.run.profile
                     && ((!p.genres.is_empty()
                         && !amp_core::genres::matches(&p.genres, &track.preparation))
+                        || !p.filters.iter().all(|filter| filter.matches(track))
                         || p.excluded.contains(&id))
                 {
-                    return Err("That song does not match this Smart Playlist’s genre filter or is excluded".into());
+                    return Err("That song does not match this Smart Playlist’s genre / analysis filters or is excluded".into());
                 }
                 if self.run.requests.contains(&id) {
                     return Err("That song is already requested".into());
@@ -2244,6 +2246,23 @@ mod tests {
         );
         assert!(player.run.requests.is_empty());
         player.run.profile.as_mut().unwrap().genres.clear();
+        player.run.profile.as_mut().unwrap().filters =
+            vec![amp_core::smart_filters::Filter::Number {
+                field: amp_core::smart_filters::Field::Bpm,
+                min: 90.,
+                max: 110.,
+            }];
+        assert!(
+            player
+                .execute_control(Action::RequestSong {
+                    song: "Song 0".into(),
+                    within: 5
+                })
+                .is_err()
+        );
+        assert!(player.run.requests.is_empty());
+        player.run.profile.as_mut().unwrap().filters.clear();
+
         let saved = serde_json::to_value(&player.run.settings).unwrap();
         assert!(
             player

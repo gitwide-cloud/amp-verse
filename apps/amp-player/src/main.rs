@@ -45,6 +45,7 @@ mod show_editor;
 mod side_deck;
 mod skin;
 mod smart_actions;
+mod smart_filter_ui;
 mod smart_preview;
 mod station_download;
 mod stems;
@@ -3267,6 +3268,13 @@ impl eframe::App for Player {
             }
             "dj" => self.dj_ui(ui),
             "dj-window" => self.group_ui(ui, 2),
+            "dj-transitions" => {
+                self.auto_dj_controls = true;
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::unique("transitions-window-open"), true);
+                });
+                self.group_ui(ui, 2);
+            }
             "dj-auto-setup" => {
                 self.auto_dj_controls = true;
                 self.group_ui(ui, 2);

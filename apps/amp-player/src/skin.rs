@@ -802,7 +802,12 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
                 9.,
                 C::WHITE,
             );
-            ui.label(label);
+            if ui
+                .add(egui::Label::new(label).sense(egui::Sense::click()))
+                .clicked()
+            {
+                *value = !*value;
+            }
         },
     );
 }

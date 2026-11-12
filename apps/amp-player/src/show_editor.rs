@@ -394,6 +394,7 @@ impl Editor {
                     ui.label(format!("{count} matching songs · any selected genre"));
                     ui.weak("Uses saved genre tags. Untagged songs are skipped. Edit a song’s genre in Library tags.");
                 }
+                crate::smart_filter_ui::show(ui,p,library);
                 ui.add_space(16.);
                 ui.strong("Mixing style");
                 ui.horizontal(|ui| {

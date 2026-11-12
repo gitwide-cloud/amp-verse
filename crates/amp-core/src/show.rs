@@ -52,6 +52,8 @@ pub struct SmartPlaylist {
     /// Empty means all genres; selected genres are combined with OR.
     #[serde(default)]
     pub genres: Vec<String>,
+    #[serde(default)]
+    pub filters: Vec<crate::smart_filters::Filter>,
     pub style: Style,
     #[serde(default)]
     pub folders: Vec<PathBuf>,
@@ -108,6 +110,7 @@ impl Default for Settings {
                     source_root_hint: None,
                     source_unavailable: false,
                     genres: vec![],
+                    filters: vec![],
                     style,
                     folders: vec![],
                     playlist_sources: vec![],
@@ -144,6 +147,13 @@ impl Settings {
         }
     }
     fn normalize(&mut self) {
+        if (1..=2).contains(&self.version) {
+            self.version = if self.playlists.iter().any(|p| !p.filters.is_empty()) {
+                2
+            } else {
+                1
+            };
+        }
         for p in &mut self.playlists {
             p.genres = p
                 .genres
@@ -161,7 +171,7 @@ impl Settings {
         }
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 || self.playlists.len() > 1000 {
+        if !(1..=2).contains(&self.version) || self.playlists.len() > 1000 {
             return Err("Unsupported show settings".into());
         }
         let mut ids = std::collections::HashSet::new();
@@ -172,6 +182,8 @@ impl Settings {
                 || p.target_energy
                     .is_some_and(|e| !e.is_finite() || !(1. ..=10.).contains(&e))
                 || p.recent_repeat > 1000
+                || p.filters.len() > 64
+                || p.filters.iter().any(|f| f.validate().is_err())
                 || p.genres.len() > 256
                 || p.genres
                     .iter()
@@ -262,7 +274,9 @@ impl SmartPlaylistExport {
         }
         let package = Self {
             format: "ampverse-smart-playlist".into(),
-            version: if playlist.playlist_sources.is_empty() {
+            version: if !playlist.filters.is_empty() {
+                3
+            } else if playlist.playlist_sources.is_empty() {
                 1
             } else {
                 2
@@ -277,7 +291,7 @@ impl SmartPlaylistExport {
         Ok(bytes)
     }
     fn validate(&self) -> Result<(), String> {
-        if self.format != "ampverse-smart-playlist" || !(1..=2).contains(&self.version) {
+        if self.format != "ampverse-smart-playlist" || !(1..=3).contains(&self.version) {
             return Err("Unsupported AMP Smart Playlist file".into());
         }
         let p = &self.playlist;
@@ -329,7 +343,8 @@ pub fn eligible(p: &SmartPlaylist, t: &Track) -> bool {
     // an empty-source guard; do not require per-song Allow ticks after a folder is chosen.
     let allowed = p.allowed.contains(&id)
         || (p.allowed.is_empty() && (!p.restrict_allowed || !p.folders.is_empty()));
-    (p.genres.is_empty() || crate::genres::matches(&p.genres, &t.preparation))
+    p.filters.iter().all(|f| f.matches(t))
+        && (p.genres.is_empty() || crate::genres::matches(&p.genres, &t.preparation))
         && !p.excluded.contains(&id)
         && ((allowed
             && ((!p.restrict_folders && p.folders.is_empty())

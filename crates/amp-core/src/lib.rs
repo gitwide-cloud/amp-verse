@@ -18,6 +18,7 @@ pub mod preparation;
 pub mod review;
 pub mod show;
 pub mod smart;
+pub mod smart_filters;
 pub mod stem_archive;
 pub mod stem_mix;
 pub mod storage;
