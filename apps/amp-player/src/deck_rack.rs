@@ -139,75 +139,74 @@ impl Player {
             }
         });
         ui.separator();
-        ui.columns(2, |columns| {
-            for (side, column) in columns.iter_mut().enumerate() {
-                let d = self.rack.live[side];
-                column.horizontal(|ui| {
-                    ui.label(
-                        egui::RichText::new(NAMES[d])
-                            .size(17.)
-                            .strong()
-                            .color(accent(d)),
-                    );
-                    let title_width = (ui.available_width() - 190.).max(80.);
-                    ui.allocate_ui_with_layout(
-                        egui::vec2(title_width, 20.),
-                        egui::Layout::left_to_right(egui::Align::Center),
-                        |ui| {
-                            ui.set_min_width(title_width);
-                            ui.add(
-                                egui::Label::new(
-                                    egui::RichText::new(self.title(d))
-                                        .size(15.)
-                                        .strong()
-                                        .color(accent(d)),
-                                )
-                                .truncate(),
-                            );
-                        },
-                    );
-                    if let Some(track) = self.loaded_track(d) {
-                        ui.colored_label(
-                            accent(d),
-                            format!(
-                                "{}  {}",
-                                track.preparation.bpm.map_or("--".into(), |b| format!(
-                                    "{:.1}",
-                                    b * self.deck_rate(d)
-                                )),
-                                track.preparation.harmonic_key.as_deref().unwrap_or("--")
-                            ),
-                        );
-                    }
-                    if let Some(a) = &self.audio {
-                        ui.label(format!("−{:.0}s", a.remaining(d).unwrap_or(0.)));
-                    }
-                });
-                let t = self.loaded_snapshot[d]
-                    .as_ref()
-                    .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
-                self.waveforms[d].hide_caption = true;
-                self.waveforms[d].height = Some(if compact {
-                    56.
-                } else if self.rack.expanded {
-                    100.
-                } else {
-                    82.
-                });
-                self.waveforms[d].show(
-                    column,
-                    self.loaded_origin[d].as_deref().unwrap_or(&self.root),
-                    t,
-                    self.audio.as_ref().map_or(0., |a| a.source_position(d)),
-                    self.wave_span,
-                    d,
+        for side in 0..2 {
+            let d = self.rack.live[side];
+            ui.horizontal(|ui| {
+                ui.label(
+                    egui::RichText::new(NAMES[d])
+                        .size(17.)
+                        .strong()
+                        .color(accent(d)),
                 );
-                if let Some(at) = self.waveforms[d].seek.take() {
-                    let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
-                    self.seek_deck_relative(d, at - position);
+                let title_width = (ui.available_width() - 190.).max(80.);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(title_width, 20.),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_width(title_width);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(self.title(d))
+                                    .size(15.)
+                                    .strong()
+                                    .color(accent(d)),
+                            )
+                            .truncate(),
+                        );
+                    },
+                );
+                if let Some(track) = self.loaded_track(d) {
+                    ui.colored_label(
+                        accent(d),
+                        format!(
+                            "{}  {}",
+                            track
+                                .preparation
+                                .bpm
+                                .map_or("--".into(), |b| format!("{:.1}", b * self.deck_rate(d))),
+                            track.preparation.harmonic_key.as_deref().unwrap_or("--")
+                        ),
+                    );
                 }
+                if let Some(a) = &self.audio {
+                    ui.label(format!("−{:.0}s", a.remaining(d).unwrap_or(0.)));
+                }
+            });
+            let t = self.loaded_snapshot[d]
+                .as_ref()
+                .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
+            self.waveforms[d].hide_caption = true;
+            self.waveforms[d].overview = false;
+            self.waveforms[d].height = Some(if compact {
+                24.
+            } else if self.rack.expanded {
+                38.
+            } else {
+                30.
+            });
+            self.waveforms[d].show(
+                ui,
+                self.loaded_origin[d].as_deref().unwrap_or(&self.root),
+                t,
+                self.audio.as_ref().map_or(0., |a| a.source_position(d)),
+                self.wave_span,
+                d,
+            );
+            if let Some(at) = self.waveforms[d].seek.take() {
+                let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
+                self.seek_deck_relative(d, at - position);
             }
-        });
+        }
         ui.add_space(6.);
         let library_id = egui::Id::unique("dj-library-height");
         let minimum_library = if compact { 112. } else { 160. };
@@ -852,6 +851,12 @@ mod tests {
                 ctx.data(|data| data.get_temp::<egui::Rect>(egui::Id::unique((kind, d))))
                     .unwrap()
             };
+            let wave_a = rect("waveform-lane", 0);
+            let wave_b = rect("waveform-lane", 1);
+            assert!(wave_a.bottom() <= wave_b.top());
+            assert!((wave_a.left() - wave_b.left()).abs() < 1.);
+            assert!((wave_a.width() - wave_b.width()).abs() < 1.);
+            assert!(wave_a.width() > size.x * 0.9);
             let a = rect("rack-wheel", 0);
             let b = rect("rack-wheel", 1);
             assert!(rect("rack-knobs", 0).right() <= a.left());

@@ -231,6 +231,9 @@ impl Lane {
             egui::vec2(ui.available_width(), self.height.unwrap_or(80.)),
             egui::Sense::click(),
         );
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::unique(("waveform-lane", deck)), rect));
         let painter = ui.painter_at(rect);
         painter.rect_filled(rect, 3., Color32::from_rgb(5, 7, 10));
         let graph = graph_rect(rect);
