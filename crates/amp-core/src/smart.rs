@@ -17,7 +17,9 @@ fn harmonic(s: &str) -> Option<(i32, u8)> {
 }
 pub(crate) fn cost(a: &Preparation, b: &Preparation, target: Option<f64>) -> f64 {
     let tempo = match (a.bpm, b.bpm) {
-        (Some(a), Some(b)) if a > 0. && b > 0. => ((a / b).ln().abs() * 12.).min(4.),
+        (Some(a), Some(b)) if a > 0. && b > 0. => {
+            (crate::transition_plan::tempo_distance(a, b) * 12.).min(4.)
+        }
         _ => 2.,
     };
     let key = match (

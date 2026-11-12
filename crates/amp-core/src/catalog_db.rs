@@ -36,7 +36,9 @@ pub fn location(document: &Path) -> Option<(PathBuf, String)> {
     let root = crate::storage::root_for(document);
     let relative = document.strip_prefix(root.join("ampdj")).ok()?;
     let key = relative.to_string_lossy().replace('\\', "/");
-    ((key.starts_with("tracks/") || key.starts_with("playlists/") || key == "smart-playlists.json")
+    ((key.starts_with("tracks/")
+        || key.starts_with("playlists/")
+        || matches!(key.as_str(), "smart-playlists.json" | "music-sources.json"))
         && key.ends_with(".json"))
     .then_some((root, key))
 }
@@ -291,6 +293,12 @@ pub fn compact(root: &Path) -> Result<usize, String> {
         let value: serde_json::Value =
             serde_json::from_slice(&fs::read(rules).map_err(error)?).map_err(error)?;
         rows.push(("smart-playlists.json".into(), value.to_string()));
+    }
+    let sources = root.join("ampdj/music-sources.json");
+    if sources.is_file() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(sources).map_err(error)?).map_err(error)?;
+        rows.push(("music-sources.json".into(), value.to_string()));
     }
     fn recovery_json(
         dir: &Path,

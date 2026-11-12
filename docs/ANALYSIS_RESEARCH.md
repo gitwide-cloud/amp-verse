@@ -14,3 +14,10 @@ AMP changes are independently implemented; no upstream source or models are vend
 Limits: constant tempo estimate, 60–180 BPM; half/double-tempo ambiguity remains possible. Beat phase is not a verified bar/downbeat. Breakdown labels are relative-energy suggestions, not semantic verse/chorus recognition. Existing energy remains an uncalibrated proxy. Synthetic regression tests are not a real-music accuracy benchmark. No promise of Mixed In Key parity.
 
 The optional engine ID advances to amp-prep-heuristic-3. Existing revision-aware coordination permits an explicitly requested analysis to refresh older results, while newer results and manual changes remain protected. Installation alone does not reanalyze the library. Loaded playback snapshots remain unchanged; prepare/reload a track to use updated analysis. No new Python, neural-model or GPL dependency is added to the base player.
+
+
+## Revision 5: conservative timing reliability
+
+`rhythm_quality` records local onset-phase agreement over 16-beat windows. At least three sufficiently concentrated windows are required to classify stability; otherwise it is unknown. Maximum local deviation greater than 0.12 beat marks a constant grid as drifting. This independent diagnostic does not identify bar one, meter, vocals, choruses or semantic phrases. Automatic cue/grid snapping and runtime tempo/quantized tricks fall back when drift is detected; user-reviewed/manual timing remains authoritative. The original constant BPM estimate remains available for review.
+
+Tests distinguish a steady pulse, sustained phase drift and silence, preserve unknown versus false, and verify that reviewed grids can override conservative fallbacks. They are synthetic regression checks, not a benchmark against annotated commercial recordings. No neural models or additional analysis dependencies were introduced. Engine ID is `amp-prep-heuristic-5`; changing the installed binary does not trigger unsolicited library reanalysis.

@@ -37,6 +37,8 @@ pub struct PlaylistSource {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartPlaylist {
+    #[serde(default)]
+    pub companion_available: bool,
     pub id: String,
     pub name: String,
     /// Imported sources stay bound to their originating library until explicitly remapped.
@@ -47,6 +49,11 @@ pub struct SmartPlaylist {
     // Keep the conservative state in device-local startup caches; shared loads recompute it.
     #[serde(default)]
     pub source_unavailable: bool,
+    /// Empty means all genres; selected genres are combined with OR.
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub filters: Vec<crate::smart_filters::Filter>,
     pub style: Style,
     #[serde(default)]
     pub folders: Vec<PathBuf>,
@@ -96,11 +103,14 @@ impl Default for Settings {
             playlists: [("demo", "Demo", Style::Steady)]
                 .into_iter()
                 .map(|(id, name, style)| SmartPlaylist {
+                    companion_available: false,
                     id: id.into(),
                     name: name.into(),
                     source_library: None,
                     source_root_hint: None,
                     source_unavailable: false,
+                    genres: vec![],
+                    filters: vec![],
                     style,
                     folders: vec![],
                     playlist_sources: vec![],
@@ -137,7 +147,21 @@ impl Settings {
         }
     }
     fn normalize(&mut self) {
+        if (1..=2).contains(&self.version) {
+            self.version = if self.playlists.iter().any(|p| !p.filters.is_empty()) {
+                2
+            } else {
+                1
+            };
+        }
         for p in &mut self.playlists {
+            p.genres = p
+                .genres
+                .iter()
+                .map(|g| crate::genres::canonical(g))
+                .collect();
+            let mut seen_genres = std::collections::HashSet::new();
+            p.genres.retain(|g| seen_genres.insert(g.clone()));
             if !p.allowed.is_empty() {
                 p.restrict_allowed = true;
             }
@@ -147,7 +171,7 @@ impl Settings {
         }
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 || self.playlists.len() > 1000 {
+        if !(1..=2).contains(&self.version) || self.playlists.len() > 1000 {
             return Err("Unsupported show settings".into());
         }
         let mut ids = std::collections::HashSet::new();
@@ -158,6 +182,12 @@ impl Settings {
                 || p.target_energy
                     .is_some_and(|e| !e.is_finite() || !(1. ..=10.).contains(&e))
                 || p.recent_repeat > 1000
+                || p.filters.len() > 64
+                || p.filters.iter().any(|f| f.validate().is_err())
+                || p.genres.len() > 256
+                || p.genres
+                    .iter()
+                    .any(|g| g.trim().is_empty() || g.len() > 256)
             {
                 return Err("Invalid Smart Playlist rule".into());
             }
@@ -244,7 +274,9 @@ impl SmartPlaylistExport {
         }
         let package = Self {
             format: "ampverse-smart-playlist".into(),
-            version: if playlist.playlist_sources.is_empty() {
+            version: if !playlist.filters.is_empty() {
+                3
+            } else if playlist.playlist_sources.is_empty() {
                 1
             } else {
                 2
@@ -259,7 +291,7 @@ impl SmartPlaylistExport {
         Ok(bytes)
     }
     fn validate(&self) -> Result<(), String> {
-        if self.format != "ampverse-smart-playlist" || !(1..=2).contains(&self.version) {
+        if self.format != "ampverse-smart-playlist" || !(1..=3).contains(&self.version) {
             return Err("Unsupported AMP Smart Playlist file".into());
         }
         let p = &self.playlist;
@@ -307,11 +339,29 @@ pub fn eligible(p: &SmartPlaylist, t: &Track) -> bool {
         return false;
     }
     let id = song_id(t);
+    // Speech downloads stay out of broad music mixes. They can still be explicitly
+    // selected as songs, a dedicated folder, or an imported playlist source.
+    if t.preparation
+        .extensions
+        .get("media_kind")
+        .and_then(|v| v.as_str())
+        == Some("podcast")
+        && !p.allowed.contains(&id)
+        && !p
+            .folders
+            .iter()
+            .any(|f| !f.as_os_str().is_empty() && crate::folder_contains(&t.path, f))
+        && !p.playlist_sources.iter().any(|s| s.songs.contains(&id))
+    {
+        return false;
+    }
     // Folder sources include all descendants. Older drafts used restrict_allowed as
     // an empty-source guard; do not require per-song Allow ticks after a folder is chosen.
     let allowed = p.allowed.contains(&id)
         || (p.allowed.is_empty() && (!p.restrict_allowed || !p.folders.is_empty()));
-    !p.excluded.contains(&id)
+    p.filters.iter().all(|f| f.matches(t))
+        && (p.genres.is_empty() || crate::genres::matches(&p.genres, &t.preparation))
+        && !p.excluded.contains(&id)
         && ((allowed
             && ((!p.restrict_folders && p.folders.is_empty())
                 || p.folders.iter().any(|f| crate::folder_contains(&t.path, f))))
@@ -402,7 +452,9 @@ pub fn ranked_with_snapshot(
         let tempo = playing
             .and_then(|p| p.bpm)
             .zip(t.preparation.bpm)
-            .map_or(1., |(a, b)| (a / b).ln().abs() * 5.);
+            .map_or(1., |(a, b)| {
+                crate::transition_plan::tempo_distance(a, b) * 5.
+            });
         e + tempo
             + playing.map_or(1., |p| {
                 crate::smart::cost(p, &prepared, wanted.map(|e| (e - 1.) / 9.))
@@ -577,6 +629,7 @@ mod portable_playlist_tests {
         let mut p = Settings::default().playlists.remove(0);
         p.name = "Portable mix".into();
         p.style = Style::Hype;
+        p.genres = vec!["Rock".into(), "R&B".into()];
         p.folders = vec!["Dance/House".into()];
         p.restrict_folders = true;
         p.allowed = vec!["song_allowed".into()];

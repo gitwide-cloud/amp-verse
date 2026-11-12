@@ -44,9 +44,9 @@ impl Theme {
         match self {
             Self::Classic => Palette {
                 background: C::from_rgb(7, 8, 12),
-                surface: C::from_rgb(27, 25, 39),
-                elevated: C::from_rgb(63, 59, 78),
-                border: C::from_rgb(143, 138, 161),
+                surface: C::from_rgb(24, 28, 34),
+                elevated: C::from_rgb(44, 50, 58),
+                border: C::from_rgb(98, 108, 120),
                 text: C::from_rgb(235, 235, 242),
                 accent: C::from_rgb(255, 194, 26),
                 signal: C::from_rgb(130, 245, 61),

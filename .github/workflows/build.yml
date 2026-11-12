@@ -22,6 +22,13 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Determine download version
+        id: package_version
+        shell: bash
+        run: echo "version=$(python tools/package_downloads.py desktop-version)" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
@@ -31,6 +38,12 @@ jobs:
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev ffmpeg xvfb
+      - name: Prepare verified official Lab URL-import dependencies
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python tools/test_setup_lab_youtube.py
+          python tools/setup_lab_youtube.py --dest test-output/lab-tools
       - run: cargo fmt --all --check
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -42,6 +55,18 @@ jobs:
       - name: Verify MP3 Lab editor foundation with real codecs
         if: runner.os == 'Linux'
         run: cargo test -p amp-player --bin amp-player lab_editor::tests::ffmpeg_export_smoke -- --ignored
+      - name: Verify sampler clip export with real codecs
+        if: runner.os == 'Linux'
+        run: cargo test -p amp-player --bin amp-player sample_editor::tests::clip_export_preserves_source_and_respects_selection -- --ignored
+      - name: Verify Lab URL import with local downloader and real codecs
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p test-output/lab-import
+          rustc tools/lab_youtube_fixture.rs -o test-output/lab-import/yt-dlp-fixture
+          ffmpeg -n -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=2 test-output/lab-import/fixture.wav
+          ffmpeg -n -hide_banner -loglevel error -i test-output/lab-import/fixture.wav -c:a libmp3lame -b:a 256k test-output/lab-import/loaded.mp3
+          AMP_LAB_TOOLS="$PWD/test-output/lab-tools" AMP_LAB_YOUTUBE_FIXTURE="$PWD/test-output/lab-import/yt-dlp-fixture" cargo test -p amp-player --bin amp-player lab_youtube::tests::local_pipeline -- --ignored --test-threads=1
+          AMP_LAB_LOADED_MP3="$PWD/test-output/lab-import/loaded.mp3" cargo test -p amp-player --bin amp-player lab_editor::tests::downloaded_mp3 -- --ignored
       - run: cargo build --workspace --release --locked
       - name: Build base player without analysis implementation
         run: cargo build -p amp-player --release --locked
@@ -62,14 +87,14 @@ jobs:
       - name: Capture actual desktop UI
         if: runner.os == 'Linux'
         run: |
-          mkdir -p test-output/music
-          ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 test-output/music/Tone.wav
-          target/release/amp-prepare test-output/music
-          python3 -c "import json,pathlib; p=pathlib.Path('test-output/music/ampdj/tracks/Tone.wav.json'); d=json.loads(p.read_text()); d['cue_in']=0.2; d['manual_override']=True; p.write_text(json.dumps(d))"
-          target/release/amp-prepare test-output/music --force
+          fixture_music="$(mktemp -d)"
+          ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 "$fixture_music/Tone.wav"
+          target/release/amp-prepare "$fixture_music"
+          python3 -c "import sys; sys.path.insert(0,'tools'); from fixture_catalog import read,write; d=read(sys.argv[1],'tracks/Tone.wav.json'); d['cue_in']=0.2; d['manual_override']=True; write(sys.argv[1],'tracks/Tone.wav.json',d)" "$fixture_music"
+          target/release/amp-prepare "$fixture_music" --force
           for theme in classic modern-light modern-dark; do
             for view in player compact mini combined library playlists analysis devices preparation rules dj dj-window dj-library sampler lab addons cast; do
-              timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_THEME="$theme" AMP_VERSE_CONFIG_DIR=test-output/theme-config AMP_SCREENSHOT_VIEW="$view" AMP_SCREENSHOT="test-output/$theme-$view.png" target/release/amp-player test-output/music
+              timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_THEME="$theme" AMP_VERSE_CONFIG_DIR=test-output/theme-config AMP_SCREENSHOT_VIEW="$view" AMP_SCREENSHOT="test-output/$theme-$view.png" target/release/amp-player "$fixture_music"
               test -s "test-output/$theme-$view.png"
             done
           done
@@ -87,15 +112,28 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} target/release/amp-prepare${{ matrix.suffix }} dist/
+          cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} target/release/amp-prepare${{ matrix.suffix }} target/release/amp-update${{ matrix.suffix }} dist/
+          if [ "${{ runner.os }}" = "Windows" ]; then cp target/release/amp-keylock.dll dist/; fi
+          mkdir -p dist/licenses/signalsmith
+          cp -r apps/amp-player/vendor/signalsmith/* dist/licenses/signalsmith/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
           cp -r docs dist/
           cp -r licenses dist/
           mkdir -p dist/licenses/mp3-lab
           cp third-party/mp3-lab/LICENSE third-party/mp3-lab/PROVENANCE.md dist/licenses/mp3-lab/
+      - name: Package official AMP Lab YouTube tools
+        shell: bash
+        run: |
+          mkdir -p dist/tools
+          cp -r test-output/lab-tools dist/tools/lab-youtube
+      - name: Include Lab tool recovery setup
+        shell: bash
+        run: |
+          mkdir -p dist/setup
+          cp tools/setup_lab_youtube.py dist/setup/
       - uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.artifact }}
+          name: ${{ matrix.artifact }}-v${{ steps.package_version.outputs.version }}
           path: dist/
       - name: Package optional analysis add-on
         shell: bash
@@ -111,9 +149,64 @@ jobs:
           name: amp-analysis-engine-${{ runner.os }}
           path: engine-dist/
 
+  companion:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '26'
+          cache: npm
+          cache-dependency-path: integrations/companion/package-lock.json
+      - run: npm ci
+        working-directory: integrations/companion
+      - run: npm test
+        working-directory: integrations/companion
+      - run: npm run package
+        working-directory: integrations/companion
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ampverse-companion
+          path: integrations/companion/*.tgz
+
+  android-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build with the persistent Android signing identity
+        env:
+          KEYSTORE_BASE64: ${{ secrets.AMP_ANDROID_KEYSTORE_BASE64 }}
+          AMP_ANDROID_KEYSTORE: ${{ runner.temp }}/amp-release.keystore
+          AMP_ANDROID_STORE_PASSWORD: ${{ secrets.AMP_ANDROID_STORE_PASSWORD }}
+          AMP_ANDROID_KEY_ALIAS: ${{ secrets.AMP_ANDROID_KEY_ALIAS }}
+          AMP_ANDROID_KEY_PASSWORD: ${{ secrets.AMP_ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" || { echo 'Configure the persistent AMP Android signing secrets before publishing an update.'; exit 1; }
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$AMP_ANDROID_KEYSTORE"
+          trap 'rm -f "$AMP_ANDROID_KEYSTORE"' EXIT
+          gradle -p android :app:assembleRelease :app:lintRelease
+          python tools/package_downloads.py android --source android/app/build/outputs/apk/release --destination android-dist
+          python -c 'import json,pathlib; m=json.loads(pathlib.Path("android/app/build/outputs/apk/release/output-metadata.json").read_text()); pathlib.Path("android-dist/version-code.txt").write_text(str(m["elements"][0]["versionCode"]))'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-published
+          path: android-dist/
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: desktop
+    needs: [desktop, android-release]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -128,15 +221,28 @@ jobs:
           path: packages
       - run: |
           cd packages
-          for dir in amp-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
+          # Artifact storage strips executable bits. Restore them before making
+          # Linux ZIPs so the updater can restart the newly installed binaries.
+          find . -type f \( -name amp-player -o -name amp-update -o -name amp-cast -o -name amp-prepare -o -name amp-engine -o -name amp-engine-linux-x86_64 -o -name deno -o -name yt-dlp \) -exec chmod +x {} +
+          for dir in amp-verse-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
+          for dir in amp-analysis-engine-*; do (cd "$dir" && zip -r "../$dir-${GITHUB_REF_NAME}.zip" .); done
           cp amp-analysis-engine-Windows/amp-engine-windows-x86_64.exe* .
           cp amp-analysis-engine-Linux/amp-engine-linux-x86_64* .
           sha256sum *.zip > SHA256SUMS.txt
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-published
+          path: packages
+      - name: Generate verified cross-platform update manifest
+        run: python tools/update_manifest.py --version "${GITHUB_REF_NAME#v}" --directory packages --apk "$(find packages -maxdepth 1 -name '*.apk' -print -quit)" --version-code "$(cat packages/version-code.txt)"
       - uses: softprops/action-gh-release@v2
         with:
           prerelease: false
           generate_release_notes: true
           files: |
             packages/*.zip
+            packages/*.apk
             packages/SHA256SUMS.txt
+            packages/amp-update.json
             packages/amp-engine-*

@@ -6,13 +6,26 @@ android {
         applicationId 'cloud.gitwide.ampverse'
         minSdk 28
         targetSdk 35
-        versionCode 19
-        versionName '0.1.18'
+        versionCode 26
+        versionName '0.2.6'
         ndk { abiFilters 'arm64-v8a' }
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     buildFeatures { buildConfig true }
+    // Stable releases must use the existing installation's signing identity.
+    // Keys live outside the repository; never publish an ephemeral CI debug key.
+    signingConfigs {
+        published {
+            if (System.getenv('AMP_ANDROID_KEYSTORE')) {
+                storeFile file(System.getenv('AMP_ANDROID_KEYSTORE'))
+                storePassword System.getenv('AMP_ANDROID_STORE_PASSWORD')
+                keyAlias System.getenv('AMP_ANDROID_KEY_ALIAS')
+                keyPassword System.getenv('AMP_ANDROID_KEY_PASSWORD')
+            }
+        }
+    }
+    buildTypes { release { signingConfig signingConfigs.published } }
 }
 dependencies {
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'

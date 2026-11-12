@@ -1,4 +1,4 @@
-//! Shared two-deck device stream. FFmpeg decoding stays off the audio callback.
+//! Shared six-deck device stream. FFmpeg decoding stays off the audio callback.
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Consumer, PushError, RingBuffer};
 use std::{
@@ -24,57 +24,104 @@ fn get(v: &AtomicU32) -> f32 {
 fn set(v: &AtomicU32, x: f32) {
     v.store(x.to_bits(), Relaxed);
 }
+pub const DECKS: usize = 6;
+pub const MASTER: usize = DECKS;
 pub struct Controls {
+    pub broadcast_player_only: AtomicBool,
+    pub pair: [AtomicU32; 2],
+    pub master_bpm: AtomicU32,
+    clock_origin_frame: AtomicU64,
+    clock_origin_beat: AtomicU64,
+    pub quantization: AtomicU32,
+    pub synced: [AtomicBool; 6],
+    pub key_lock: [AtomicBool; 6],
+    pub key_lock_available: [AtomicBool; 6],
+    pub bpm: [AtomicU32; 6],
+    pub beat_offset: [AtomicU64; 6],
     pub sample_playing: [AtomicBool; 9],
     pub sample_looping: [AtomicBool; 9],
     sample_generation: [AtomicU64; 9],
     sample_gain: [AtomicU32; 9],
     sample_master: AtomicU32,
-    pub deck_generation: [AtomicU64; 2],
+    pub deck_generation: [AtomicU64; 6],
     pub level_fading: AtomicBool,
     pub fade_progress: AtomicU32,
-    pub play: [AtomicBool; 2],
-    pub loaded: [AtomicBool; 2],
-    pub ready: [AtomicBool; 2],
-    pub finished: [AtomicBool; 2],
-    pub gain: [AtomicU32; 2],
-    pub rate: [AtomicU32; 2],
-    pub scratching: [AtomicBool; 2],
-    pub scratch_rate: [AtomicU32; 2],
-    vinyl_target: [AtomicU64; 2],
-    vinyl_follow: [AtomicBool; 2],
-    pub section_state: [AtomicU32; 2],
-    source_origin: [AtomicU64; 2],
-    section_epoch: [AtomicU64; 2],
-    pub eq: [[AtomicU32; 3]; 2],
-    pub trim_db: [AtomicU32; 2],
-    pub stem_level: [[AtomicU32; 3]; 2],
-    pub stem_knobs: [[AtomicU32; 3]; 2],
-    pub stems_loaded: [AtomicBool; 2],
-    pub eq_kill: [[AtomicBool; 3]; 2],
-    pub sweep: [AtomicU32; 2],
-    pub cue: [AtomicBool; 2],
+    pub play: [AtomicBool; 6],
+    pub loaded: [AtomicBool; 6],
+    pub ready: [AtomicBool; 6],
+    pub finished: [AtomicBool; 6],
+    pub gain: [AtomicU32; 6],
+    pub rate: [AtomicU32; 6],
+    pub scratching: [AtomicBool; 6],
+    pub scratch_rate: [AtomicU32; 6],
+    vinyl_target: [AtomicU64; 6],
+    vinyl_follow: [AtomicBool; 6],
+    pub section_state: [AtomicU32; 6],
+    source_origin: [AtomicU64; 6],
+    section_epoch: [AtomicU64; 6],
+    pub eq: [[AtomicU32; 3]; 6],
+    pub trim_db: [AtomicU32; 6],
+    pub stem_level: [[AtomicU32; 3]; 6],
+    pub stem_knobs: [[AtomicU32; 3]; 6],
+    pub stems_loaded: [AtomicBool; 6],
+    pub eq_kill: [[AtomicBool; 3]; 6],
+    pub sweep: [AtomicU32; 6],
+    pub cue: [AtomicBool; 6],
     pub cue_blend: AtomicU32,
     pub cue_volume: AtomicU32,
-    pub cutoff: [AtomicU32; 2],
-    pub position: [AtomicU64; 2],
-    pub duration_frames: [AtomicU64; 2],
-    pub peak: [AtomicU32; 2],
-    pub scope: [[AtomicU32; 96]; 2],
-    pub looping: [AtomicBool; 2],
+    pub cutoff: [AtomicU32; 6],
+    pub position: [AtomicU64; 6],
+    pub duration_frames: [AtomicU64; 6],
+    pub peak: [AtomicU32; 6],
+    pub scope: [[AtomicU32; 96]; 6],
+    pub looping: [AtomicBool; 6],
     pub crossfader: AtomicU32,
     pub master: AtomicU32,
+    player_envelope: AtomicU32,
     pub fading: AtomicBool,
     pub mashup_active: AtomicBool,
-    pub underruns: [AtomicU64; 2],
+    pub underruns: [AtomicU64; 6],
     pub rendered: AtomicU64,
     pub error: Mutex<Option<String>>,
     pub monitor_error: Mutex<Option<String>>,
     pub decode_errors: Mutex<Vec<(usize, u64, String)>>,
 }
+impl Controls {
+    pub fn beat_at(&self, frame: u64, rate: u32) -> f64 {
+        f64::from_bits(self.clock_origin_beat.load(Relaxed))
+            + frame.saturating_sub(self.clock_origin_frame.load(Relaxed)) as f64 / rate as f64
+                * get(&self.master_bpm) as f64
+                / 60.
+    }
+    pub fn effective_rate(&self, d: usize) -> f32 {
+        if self.synced[d].load(Relaxed) && get(&self.bpm[d]) > 0. {
+            get(&self.master_bpm) / get(&self.bpm[d])
+        } else {
+            get(&self.rate[d])
+        }
+        .clamp(0.5, 2.)
+    }
+    pub fn pair_indices(&self) -> [usize; 2] {
+        std::array::from_fn(|i| self.pair[i].load(Relaxed) as usize)
+    }
+    pub fn other(&self, deck: usize) -> usize {
+        self.pair_indices()[1 - deck % 2]
+    }
+}
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            broadcast_player_only: AtomicBool::new(false),
+            pair: [AtomicU32::new(0), AtomicU32::new(1)],
+            key_lock: std::array::from_fn(|_| AtomicBool::new(false)),
+            key_lock_available: std::array::from_fn(|_| AtomicBool::new(false)),
+            master_bpm: atom(120.),
+            clock_origin_frame: AtomicU64::new(0),
+            clock_origin_beat: AtomicU64::new(0),
+            quantization: AtomicU32::new(4),
+            synced: std::array::from_fn(|_| AtomicBool::new(false)),
+            bpm: std::array::from_fn(|_| atom(0.)),
+            beat_offset: std::array::from_fn(|_| AtomicU64::new(0)),
             sample_playing: std::array::from_fn(|_| AtomicBool::new(false)),
             sample_looping: std::array::from_fn(|_| AtomicBool::new(false)),
             sample_generation: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -114,6 +161,7 @@ impl Default for Controls {
             looping: std::array::from_fn(|_| AtomicBool::new(false)),
             crossfader: atom(0.),
             master: atom(0.75),
+            player_envelope: atom(1.),
             fading: AtomicBool::new(false),
             mashup_active: AtomicBool::new(false),
             underruns: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -125,6 +173,7 @@ impl Default for Controls {
     }
 }
 struct Source {
+    key_lock: Option<Box<crate::key_lock::Processor>>,
     ring: Consumer<DeckFrame>,
     duration: Arc<AtomicU64>,
     done: Arc<AtomicBool>,
@@ -185,6 +234,8 @@ struct Voice {
     stem_mix: [f32; 3],
     gain: f32,
     looped: Option<Loop>,
+    pending_loop: Option<(u64, Vec<DeckFrame>)>,
+    tail_frames: usize,
 }
 struct LevelFade {
     from: f32,
@@ -211,6 +262,11 @@ struct SampleVoice {
     playing: bool,
 }
 enum Command {
+    StemLevels(usize, [f32; 3]),
+    RestoreSync(usize, bool),
+    Clock(f32, u32),
+    Launch(usize),
+    Pair([usize; 2]),
     Monitor(Option<rtrb::Producer<Frame>>),
     Broadcast(Option<rtrb::Producer<Frame>>),
     SampleLoad(usize, u64, Option<Arc<[Frame]>>),
@@ -220,6 +276,8 @@ enum Command {
     Level(usize, f32, f32, bool),
     LevelSet(usize, f32),
     Stop(usize),
+    Pause(usize),
+    Play(usize),
     Fader(f32),
     Fade {
         to: f32,
@@ -254,20 +312,24 @@ struct SectionChange {
     old: Option<Source>,
 }
 struct Mixer {
-    sections: [Option<SectionChange>; 2],
-    voices: [Voice; 2],
+    player_envelope: f32,
+    launches: [Option<u64>; 6],
+    sections: [Option<SectionChange>; 6],
+    voices: [Voice; 6],
     samples: [SampleVoice; 9],
     commands: mpsc::Receiver<Command>,
     pub controls: Arc<Controls>,
     rate: u32,
     fade: Option<Fade>,
-    levels: [Option<LevelFade>; 3],
+    levels: [Option<LevelFade>; 7],
     monitor: Option<rtrb::Producer<Frame>>,
     broadcast: Option<rtrb::Producer<Frame>>,
 }
 impl Mixer {
     fn new(rate: u32, commands: mpsc::Receiver<Command>, controls: Arc<Controls>) -> Self {
         Self {
+            player_envelope: 1.,
+            launches: Default::default(),
             sections: Default::default(),
             voices: Default::default(),
             samples: Default::default(),
@@ -283,6 +345,48 @@ impl Mixer {
     fn process_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
             match command {
+                Command::RestoreSync(d, enabled) => {
+                    let bpm = get(&self.controls.bpm[d]);
+                    let ratio = get(&self.controls.master_bpm) / bpm;
+                    self.controls.synced[d].store(
+                        enabled
+                            && self.controls.loaded[d].load(Relaxed)
+                            && bpm > 0.
+                            && (0.5..=2.).contains(&ratio),
+                        Relaxed,
+                    );
+                }
+                Command::StemLevels(d, levels) => {
+                    for (i, value) in levels.into_iter().enumerate() {
+                        set(&self.controls.stem_level[d][i], value);
+                        set(&self.controls.stem_knobs[d][i], value - 1.);
+                    }
+                }
+                Command::Clock(bpm, q) => {
+                    let frame = self.controls.rendered.load(Relaxed);
+                    let beat = self.controls.beat_at(frame, self.rate);
+                    self.controls
+                        .clock_origin_beat
+                        .store(beat.to_bits(), Relaxed);
+                    self.controls.clock_origin_frame.store(frame, Relaxed);
+                    set(&self.controls.master_bpm, bpm);
+                    self.controls.quantization.store(q, Relaxed);
+                }
+                Command::Launch(d) => {
+                    self.launches[d] = Some(u64::MAX);
+                }
+                Command::Pair(pair) => {
+                    if self.fade.is_none()
+                        && pair
+                            .iter()
+                            .chain(self.controls.pair_indices().iter())
+                            .all(|d| !self.controls.play[*d].load(Relaxed))
+                    {
+                        for (side, d) in pair.into_iter().enumerate() {
+                            self.controls.pair[side].store(d as u32, Relaxed);
+                        }
+                    }
+                }
                 Command::Monitor(producer) => self.monitor = producer,
                 Command::Broadcast(producer) => self.broadcast = producer,
                 Command::SampleLoad(pad, generation, frames) => {
@@ -312,7 +416,7 @@ impl Mixer {
                 }
 
                 Command::Level(slot, to, seconds, stop) => {
-                    let from = if slot == 2 {
+                    let from = if slot == MASTER {
                         get(&self.controls.master)
                     } else {
                         get(&self.controls.gain[slot])
@@ -327,7 +431,7 @@ impl Mixer {
                 }
                 Command::LevelSet(slot, value) => {
                     self.levels[slot] = None;
-                    if slot == 2 {
+                    if slot == MASTER {
                         set(&self.controls.master, value);
                     } else {
                         set(&self.controls.gain[slot], value);
@@ -354,7 +458,7 @@ impl Mixer {
                         to,
                         total: fade * 2 + hold,
                         elapsed: 0,
-                        incoming: usize::from(to > 0.5),
+                        incoming: self.controls.pair_indices()[usize::from(to > 0.5)],
                         started: false,
                         grid: Some(grid),
                         boundary: None,
@@ -371,7 +475,7 @@ impl Mixer {
                         to,
                         total: (seconds * self.rate as f32).max(1.) as u64,
                         elapsed: 0,
-                        incoming: usize::from(to > 0.5),
+                        incoming: self.controls.pair_indices()[usize::from(to > 0.5)],
                         started: false,
                         grid: Some(grid),
                         boundary: None,
@@ -380,12 +484,14 @@ impl Mixer {
                     self.controls.fading.store(true, Relaxed);
                 }
                 Command::Load(d, s, play, generation) => {
+                    self.launches[d] = None;
                     self.sections[d] = None;
                     self.controls.section_state[d].store(0, Relaxed);
                     self.levels[d] = None;
                     self.controls.scratching[d].store(false, Relaxed);
                     self.controls.play[d].store(play, Relaxed);
                     self.controls.stems_loaded[d].store(s.separated, Relaxed);
+                    self.controls.key_lock_available[d].store(s.key_lock.is_some(), Relaxed);
                     let gains = amp_core::stem_mix::gains(s.stem_knobs);
                     for (i, gain) in gains.iter().enumerate() {
                         set(&self.controls.stem_knobs[d][i], s.stem_knobs[i]);
@@ -404,23 +510,44 @@ impl Mixer {
                     self.controls.position[d].store(0, Relaxed);
                     self.controls.deck_generation[d]
                         .store(generation, std::sync::atomic::Ordering::Release);
-                    self.fade = None;
-                    self.controls.mashup_active.store(false, Relaxed);
-                    self.controls.fading.store(false, Relaxed);
+                    if self.controls.pair_indices().contains(&d) {
+                        self.fade = None;
+                        self.controls.mashup_active.store(false, Relaxed);
+                        self.controls.fading.store(false, Relaxed);
+                    }
+                }
+                Command::Play(d) => {
+                    self.controls.play[d].store(true, Relaxed);
+                }
+                Command::Pause(d) => {
+                    self.launches[d] = None;
+                    self.sections[d] = None;
+                    self.levels[d] = None;
+                    self.controls.section_state[d].store(0, Relaxed);
+                    self.controls.play[d].store(false, Relaxed);
+                    self.controls.scratching[d].store(false, Relaxed);
+                    if self.controls.pair_indices().contains(&d) {
+                        self.fade = None;
+                        self.controls.fading.store(false, Relaxed);
+                        self.controls.mashup_active.store(false, Relaxed);
+                    }
                 }
                 Command::Stop(d) => {
+                    self.launches[d] = None;
                     self.sections[d] = None;
                     self.controls.section_state[d].store(0, Relaxed);
                     self.levels[d] = None;
-                    self.levels[2] = None;
+
                     self.voices[d] = Voice::default();
                     self.controls.play[d].store(false, Relaxed);
                     self.controls.loaded[d].store(false, Relaxed);
                     self.controls.ready[d].store(false, Relaxed);
                     self.controls.looping[d].store(false, Relaxed);
-                    self.fade = None;
-                    self.controls.mashup_active.store(false, Relaxed);
-                    self.controls.fading.store(false, Relaxed);
+                    if self.controls.pair_indices().contains(&d) {
+                        self.fade = None;
+                        self.controls.mashup_active.store(false, Relaxed);
+                        self.controls.fading.store(false, Relaxed);
+                    }
                 }
                 Command::Fader(x) => {
                     set(&self.controls.crossfader, x.clamp(0., 1.));
@@ -435,7 +562,7 @@ impl Mixer {
                         to,
                         total: (seconds * self.rate as f32).max(1.) as u64,
                         elapsed: 0,
-                        incoming: usize::from(to > 0.5),
+                        incoming: self.controls.pair_indices()[usize::from(to > 0.5)],
                         started: false,
                         grid: None,
                         boundary: None,
@@ -444,8 +571,8 @@ impl Mixer {
                     self.controls.fading.store(true, Relaxed);
                 }
                 Command::Cancel => {
-                    self.sections = Default::default();
-                    for d in 0..2 {
+                    for d in self.controls.pair_indices() {
+                        self.sections[d] = None;
                         self.controls.section_state[d].store(0, Relaxed);
                     }
                     self.fade = None;
@@ -472,15 +599,36 @@ impl Mixer {
                     {
                         source.position = old.origin + old.frames.len() as f64 * old.rate as f64;
                     }
+                    self.voices[d].pending_loop = None;
+                    let frames = if self.controls.synced[d].load(Relaxed)
+                        && self.controls.quantization.load(Relaxed) > 0
+                    {
+                        if let Some(frames) = frames {
+                            let clock = self.controls.rendered.load(Relaxed);
+                            let beat = self.controls.beat_at(clock, self.rate);
+                            let q = self.controls.quantization.load(Relaxed) as f64;
+                            let delay = ((beat / q).floor().mul_add(q, q) - beat) * 60.
+                                / get(&self.controls.master_bpm) as f64
+                                * self.rate as f64;
+                            self.voices[d].pending_loop =
+                                Some((clock + delay.round().max(0.) as u64, frames));
+                        }
+                        None
+                    } else {
+                        frames
+                    };
                     self.voices[d].looped = frames.map(|frames| Loop {
                         length: frames.capacity(),
                         frames,
                         phase: 0.,
                         origin: self.voices[d].source.as_ref().map_or(0., |s| s.position),
-                        rate: get(&self.controls.rate[d]),
+                        rate: self.controls.effective_rate(d),
                         capturing: true,
                     });
-                    self.controls.looping[d].store(self.voices[d].looped.is_some(), Relaxed);
+                    self.controls.looping[d].store(
+                        self.voices[d].looped.is_some() || self.voices[d].pending_loop.is_some(),
+                        Relaxed,
+                    );
                 }
             }
         }
@@ -488,15 +636,30 @@ impl Mixer {
     fn render(&mut self, frames: usize, mut output: impl FnMut(usize, Frame)) {
         self.process_commands();
         let c = &self.controls;
-        let rates = std::array::from_fn::<_, 2, _>(|d| {
+        let rates = std::array::from_fn::<_, 6, _>(|d| {
             if c.scratching[d].load(Relaxed) {
                 get(&c.scratch_rate[d]).clamp(-4., 4.)
             } else {
-                get(&c.rate[d]).clamp(0.5, 2.)
+                if c.synced[d].load(Relaxed) && get(&c.bpm[d]) > 0. {
+                    let tempo = get(&c.master_bpm) / get(&c.bpm[d]);
+                    let seconds = (self.voices[d]
+                        .source
+                        .as_ref()
+                        .map_or(0., |s| s.position / self.rate as f64)
+                        + f64::from_bits(c.source_origin[d].load(Relaxed))
+                        - f64::from_bits(c.beat_offset[d].load(Relaxed)))
+                        * get(&c.bpm[d]) as f64
+                        / 60.;
+                    let master = c.beat_at(c.rendered.load(Relaxed), self.rate);
+                    let phase = (seconds - master + 0.5).rem_euclid(1.) - 0.5;
+                    (tempo * (1. - phase as f32 * 0.003)).clamp(0.5, 2.)
+                } else {
+                    get(&c.rate[d]).clamp(0.5, 2.)
+                }
             }
         });
 
-        let eq = std::array::from_fn::<_, 2, _>(|d| {
+        let eq = std::array::from_fn::<_, 6, _>(|d| {
             std::array::from_fn::<_, 3, _>(|b| {
                 if c.eq_kill[d][b].load(Relaxed) {
                     0.
@@ -505,11 +668,11 @@ impl Mixer {
                 }
             })
         });
-        let trims = std::array::from_fn::<_, 2, _>(|d| {
+        let trims = std::array::from_fn::<_, 6, _>(|d| {
             10f32.powf(get(&c.trim_db[d]).clamp(-12., 12.) / 20.)
         });
-        let sweeps = std::array::from_fn::<_, 2, _>(|d| get(&c.sweep[d]).clamp(-1., 1.));
-        let sweep_alpha = std::array::from_fn::<_, 2, _>(|d| {
+        let sweeps = std::array::from_fn::<_, 6, _>(|d| get(&c.sweep[d]).clamp(-1., 1.));
+        let sweep_alpha = std::array::from_fn::<_, 6, _>(|d| {
             let hz = if sweeps[d] < 0. {
                 20000. * (30_f32 / 20000.).powf(-sweeps[d])
             } else {
@@ -519,15 +682,15 @@ impl Mixer {
         });
         let alpha_low = 1. - (-std::f32::consts::TAU * 200. / self.rate as f32).exp();
         let alpha_high = 1. - (-std::f32::consts::TAU * 2000. / self.rate as f32).exp();
-        let filter = std::array::from_fn::<_, 2, _>(|d| {
+        let filter = std::array::from_fn::<_, 6, _>(|d| {
             1. - (-std::f32::consts::TAU * get(&c.cutoff[d]).min(self.rate as f32 * 0.45)
                 / self.rate as f32)
                 .exp()
         });
 
-        let mut peaks = [0f32; 2];
-        let mut waves = [[0f32; 96]; 2];
-        for d in 0..2 {
+        let mut peaks = [0f32; 6];
+        let mut waves = [[0f32; 96]; 6];
+        for d in 0..6 {
             if let Some(source) = &mut self.voices[d].source {
                 c.duration_frames[d].store(source.duration.load(Relaxed), Relaxed);
                 if !source.primed && source.buffered(self.rate) {
@@ -544,12 +707,40 @@ impl Mixer {
             }
         }
         for i in 0..frames {
-            for slot in 0..3 {
+            self.player_envelope += (get(&c.player_envelope).clamp(0., 1.) - self.player_envelope)
+                * (1. / (self.rate as f32 * 0.01)).min(1.);
+            let clock = c.rendered.load(Relaxed) + i as u64;
+            for d in 0..DECKS {
+                if let Some(at) = self.launches[d] {
+                    if c.ready[d].load(Relaxed) {
+                        if at == u64::MAX {
+                            let beats = c.quantization.load(Relaxed);
+                            let beat = c.beat_at(clock, self.rate);
+                            let next = if beats == 0 {
+                                beat
+                            } else {
+                                (beat / beats as f64)
+                                    .floor()
+                                    .mul_add(beats as f64, beats as f64)
+                            };
+                            let delay =
+                                (next - beat) * 60. / get(&c.master_bpm) as f64 * self.rate as f64;
+                            self.launches[d] = Some(clock + delay.max(0.).round() as u64);
+                        } else if clock >= at {
+                            c.play[d].store(true, Relaxed);
+                            self.launches[d] = None;
+                        }
+                    } else {
+                        self.launches[d] = Some(u64::MAX);
+                    }
+                }
+            }
+            for slot in 0..7 {
                 if let Some(fade) = &mut self.levels[slot] {
                     fade.elapsed = (fade.elapsed + 1).min(fade.total);
                     let progress = fade.elapsed as f32 / fade.total as f32;
                     let value = fade.from + (fade.to - fade.from) * progress;
-                    if slot == 2 {
+                    if slot == MASTER {
                         set(&c.master, value);
                     } else {
                         set(&c.gain[slot], value);
@@ -557,8 +748,8 @@ impl Mixer {
                     set(&c.fade_progress, progress);
                     if fade.elapsed == fade.total {
                         if fade.stop {
-                            for d in 0..2 {
-                                if slot == 2 || slot == d {
+                            for d in 0..6 {
+                                if slot == MASTER || slot == d {
                                     c.play[d].store(false, Relaxed);
                                     c.loaded[d].store(false, Relaxed);
                                     c.ready[d].store(false, Relaxed);
@@ -567,7 +758,7 @@ impl Mixer {
                                     self.voices[d] = Voice::default();
                                 }
                             }
-                            if slot == 2 {
+                            if slot == MASTER {
                                 for (pad, v) in self.samples.iter_mut().enumerate() {
                                     v.playing = false;
                                     c.sample_playing[pad].store(false, Relaxed);
@@ -587,14 +778,14 @@ impl Mixer {
                 .is_some_and(|fade| c.finished[fade.incoming].load(Relaxed))
             {
                 if let Some(fade) = &self.fade {
-                    set(&c.crossfader, (1 - fade.incoming) as f32);
+                    set(&c.crossfader, (1 - fade.incoming % 2) as f32);
                 }
                 self.fade = None;
                 c.fading.store(false, Relaxed);
             }
             let mut mashup_mix = None;
             if let Some(fade) = &mut self.fade {
-                let outgoing = 1 - fade.incoming;
+                let outgoing = c.other(fade.incoming);
                 let position = self.voices[outgoing]
                     .source
                     .as_ref()
@@ -622,7 +813,7 @@ impl Mixer {
                             fade.elapsed,
                             ramp,
                             hold,
-                            fade.incoming,
+                            fade.incoming % 2,
                         ));
                     }
                     let t = (fade.elapsed as f32 / fade.total as f32).clamp(0., 1.);
@@ -631,14 +822,14 @@ impl Mixer {
                     fade.elapsed += 1;
                     if fade.elapsed > fade.total {
                         set(&c.crossfader, fade.to);
-                        c.play[1 - fade.incoming].store(false, Relaxed);
+                        c.play[c.other(fade.incoming)].store(false, Relaxed);
                         c.fading.store(false, Relaxed);
                         self.fade = None;
                         self.controls.mashup_active.store(false, Relaxed);
                     }
                 }
             }
-            for d in 0..2 {
+            for d in 0..6 {
                 let Some(pending) = &mut self.sections[d] else {
                     continue;
                 };
@@ -687,6 +878,13 @@ impl Mixer {
                         pending.previous_origin = f64::from_bits(c.source_origin[d].load(Relaxed));
                         pending.old =
                             std::mem::replace(&mut self.voices[d].source, pending.source.take());
+                        // Keep one output-delay/pitch history across section jumps.
+                        if let (Some(incoming), Some(previous)) =
+                            (&mut self.voices[d].source, &mut pending.old)
+                        {
+                            incoming.key_lock = previous.key_lock.take();
+                        }
+                        self.voices[d].tail_frames = 0;
                         c.source_origin[d].store(pending.origin.to_bits(), Relaxed);
                         c.section_epoch[d].fetch_add(1, Relaxed);
                         c.section_state[d].store(2, Relaxed);
@@ -694,10 +892,10 @@ impl Mixer {
                 }
             }
             let x = get(&c.crossfader);
-            let mut weights = amp_core::show::crossfade_weights(x);
+            let mut buses = amp_core::show::crossfade_weights(x);
             let mut stem_masks = [[1.; 3]; 2];
-            if let Some((buses, masks)) = mashup_mix {
-                weights = buses;
+            if let Some((buses_override, masks)) = mashup_mix {
+                buses = buses_override;
                 stem_masks = masks;
             }
             c.mashup_active.store(
@@ -705,9 +903,23 @@ impl Mixer {
                 Relaxed,
             );
             let mut mix = [0.; 2];
+            let mut player_mix = [0.; 2];
             let mut cue_mix = [0.; 2];
-            for d in 0..2 {
+            for d in 0..6 {
                 let v = &mut self.voices[d];
+                if v.pending_loop.as_ref().is_some_and(|(at, _)| clock >= *at)
+                    && c.play[d].load(Relaxed)
+                {
+                    let (_, frames) = v.pending_loop.take().unwrap();
+                    v.looped = Some(Loop {
+                        length: frames.capacity(),
+                        frames,
+                        phase: 0.,
+                        origin: v.source.as_ref().map_or(0., |s| s.position),
+                        rate: c.effective_rate(d),
+                        capturing: true,
+                    });
+                }
                 if !c.play[d].load(Relaxed) {
                     continue;
                 }
@@ -743,12 +955,25 @@ impl Mixer {
                     && let Some(pending) = &mut self.sections[d]
                     && let Some(old) = pending.old.take()
                 {
+                    let processor = source.key_lock.take();
                     *source = old;
+                    source.key_lock = processor;
                     frame = source.next(rates[d]);
                     c.source_origin[d].store(pending.previous_origin.to_bits(), Relaxed);
                     c.section_epoch[d].fetch_sub(1, Relaxed);
                     c.section_state[d].store(3, Relaxed);
                     self.sections[d] = None;
+                }
+                if frame.is_some() {
+                    v.tail_frames = 0;
+                } else if source.done.load(std::sync::atomic::Ordering::Acquire)
+                    && source
+                        .key_lock
+                        .as_ref()
+                        .is_some_and(|processor| v.tail_frames < processor.latency)
+                {
+                    v.tail_frames += 1;
+                    frame = Some([0.; 6]);
                 }
                 let Some(mut frame) = frame else {
                     if source.done.load(std::sync::atomic::Ordering::Acquire) {
@@ -783,8 +1008,13 @@ impl Mixer {
                         l.capturing = false;
                     }
                 }
-                for (stem, mask) in stem_masks[d].iter().enumerate() {
-                    v.stem_mix[stem] += (get(&c.stem_level[d][stem]).clamp(0., 1.) * mask
+                for (stem, mask) in stem_masks[d % 2].iter().enumerate() {
+                    v.stem_mix[stem] += (get(&c.stem_level[d][stem]).clamp(0., 1.)
+                        * if c.pair_indices().contains(&d) {
+                            *mask
+                        } else {
+                            1.
+                        }
                         - v.stem_mix[stem])
                         * 0.004;
                 }
@@ -797,6 +1027,14 @@ impl Mixer {
                 } else {
                     [frame[0], frame[1]]
                 };
+                if let Some(key_lock) = &mut source.key_lock {
+                    frame = key_lock.frame(
+                        frame,
+                        rates[d],
+                        c.key_lock[d].load(Relaxed),
+                        c.scratching[d].load(Relaxed),
+                    );
+                }
                 v.gain += (get(&c.gain[d]).clamp(0., 1.) - v.gain) * 0.004;
                 v.trim += (trims[d] - v.trim) * 0.004;
                 for ch in 0..2 {
@@ -822,8 +1060,22 @@ impl Mixer {
                         cue_mix[ch] += frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
                     }
                     frame[ch] *= v.gain;
+                    if d == 0 {
+                        frame[ch] *= self.player_envelope;
+                    }
+                    if d == 0 {
+                        player_mix[ch] = frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
+                    }
                     peaks[d] = peaks[d].max(frame[ch].abs());
-                    mix[ch] += frame[ch] * weights[d] * std::f32::consts::FRAC_1_SQRT_2;
+                    let pair = c.pair_indices();
+                    let weight = if d == pair[0] {
+                        buses[0]
+                    } else if d == pair[1] {
+                        buses[1]
+                    } else {
+                        1.
+                    };
+                    mix[ch] += frame[ch] * weight * std::f32::consts::FRAC_1_SQRT_2;
                 }
                 let bin = i * 96 / frames.max(1);
                 waves[d][bin] = waves[d][bin].max((frame[0] + frame[1]).abs() * 0.5);
@@ -868,17 +1120,27 @@ impl Mixer {
                 (mix[1] * get(&c.master)).clamp(-0.98, 0.98),
             ];
             if let Some(tap) = &mut self.broadcast {
-                let _ = tap.push(master);
+                let output = if c.broadcast_player_only.load(Relaxed) {
+                    player_mix.map(|value| (value * get(&c.master)).clamp(-0.98, 0.98))
+                } else {
+                    master
+                };
+                let _ = tap.push(output);
             }
             output(i, master);
         }
-        for d in 0..2 {
+        for d in 0..6 {
             set(&c.peak[d], peaks[d]);
             for (i, value) in waves[d].iter().enumerate() {
                 set(&c.scope[d][i], *value);
             }
             if let Some(s) = &self.voices[d].source {
-                c.position[d].store(s.position as u64, Relaxed);
+                let remaining_delay = s.key_lock.as_ref().map_or(0, |processor| {
+                    processor.latency.saturating_sub(self.voices[d].tail_frames)
+                });
+                let audible =
+                    (s.position - remaining_delay as f64 * c.effective_rate(d) as f64).max(0.);
+                c.position[d].store(audible as u64, Relaxed);
             }
         }
         c.rendered.fetch_add(frames as u64, Relaxed);
@@ -891,10 +1153,10 @@ pub struct Engine {
     pub controls: Arc<Controls>,
     pub sample_rate: u32,
     pub device: String,
-    cancel: [Option<Arc<AtomicBool>>; 2],
-    section_cancel: [Option<Arc<AtomicBool>>; 2],
-    observed_epoch: [u64; 2],
-    requested_generation: [u64; 2],
+    cancel: [Option<Arc<AtomicBool>>; 6],
+    section_cancel: [Option<Arc<AtomicBool>>; 6],
+    observed_epoch: [u64; 6],
+    requested_generation: [u64; 6],
     sample_buffers: [Option<Arc<[Frame]>>; 9],
     sample_retired: Vec<(usize, u64, Arc<[Frame]>)>,
     sample_generation: u64,
@@ -959,12 +1221,97 @@ impl Engine {
             device: name,
             cancel: Default::default(),
             section_cancel: Default::default(),
-            observed_epoch: [0; 2],
-            requested_generation: [0; 2],
+            observed_epoch: [0; 6],
+            requested_generation: [0; 6],
             sample_buffers: Default::default(),
             sample_retired: Vec::new(),
             sample_generation: 0,
         })
+    }
+    pub fn restore_stems(&self, deck: usize, levels: [f32; 3]) -> Result<(), String> {
+        if deck >= DECKS
+            || levels
+                .iter()
+                .any(|v| !v.is_finite() || !(0. ..=1.).contains(v))
+        {
+            return Err("Invalid restored stem levels".into());
+        }
+        self.send(Command::StemLevels(deck, levels))
+    }
+    pub fn launch(&self, deck: usize) -> Result<(), String> {
+        if deck >= DECKS || !self.loaded(deck) {
+            return Err("Load the deck before launching".into());
+        }
+        self.send(Command::Launch(deck))
+    }
+    pub fn set_clock(&self, bpm: f32, quantization: u32) -> Result<(), String> {
+        if !bpm.is_finite()
+            || !(40. ..=240.).contains(&bpm)
+            || ![0, 1, 4, 8, 16, 32].contains(&quantization)
+        {
+            return Err("Invalid master tempo or quantization".into());
+        }
+        self.send(Command::Clock(bpm, quantization))
+    }
+    pub fn sync(&self, deck: usize, enabled: bool) -> Result<(), String> {
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        let bpm = get(&self.controls.bpm[deck]);
+        let ratio = get(&self.controls.master_bpm) / bpm;
+        if enabled && (!self.loaded(deck) || bpm <= 0. || !(0.5..=2.).contains(&ratio)) {
+            return Err(
+                "Prepare BPM before synchronizing; supported tempo range is 50–200%".into(),
+            );
+        }
+        if !enabled {
+            set(
+                &self.controls.rate[deck],
+                self.controls.effective_rate(deck),
+            );
+        }
+        self.controls.synced[deck].store(enabled, Relaxed);
+        Ok(())
+    }
+    pub fn restore_sync(&self, deck: usize, enabled: bool) -> Result<(), String> {
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        // Ordered after queued Load and Clock, unlike interactive sync validation.
+        self.send(Command::RestoreSync(deck, enabled))
+    }
+    pub fn assign_pair(&self, pair: [usize; 2]) -> Result<(), String> {
+        if pair[0] >= DECKS || pair[1] >= DECKS || !pair[0].is_multiple_of(2) || pair[1] % 2 != 1 {
+            return Err("Choose one A-side and one B-side deck".into());
+        }
+        if self.fading()
+            || pair
+                .iter()
+                .chain(self.controls.pair_indices().iter())
+                .any(|d| self.playing(*d))
+        {
+            return Err(
+                "Pause the current and requested pair before reassigning the crossfader".into(),
+            );
+        }
+        self.send(Command::Pair(pair))
+    }
+    pub fn fade_deck(
+        &self,
+        deck: usize,
+        target: f32,
+        seconds: f32,
+        stop: bool,
+    ) -> Result<(), String> {
+        if deck >= DECKS
+            || !target.is_finite()
+            || !(0. ..=1.).contains(&target)
+            || !seconds.is_finite()
+            || !(0.01..=120.).contains(&seconds)
+        {
+            return Err("Invalid deck fade".into());
+        }
+        self.send(Command::Level(deck, target, seconds, stop))
     }
     pub fn configure_monitor(&mut self, name: Option<&str>) -> Result<(), String> {
         if let Some(name) = name {
@@ -980,6 +1327,12 @@ impl Engine {
         Ok(())
     }
     pub fn broadcast_tap(&self) -> Result<rtrb::Consumer<Frame>, String> {
+        self.broadcast_source_tap(false)
+    }
+    pub fn broadcast_source_tap(&self, player_only: bool) -> Result<rtrb::Consumer<Frame>, String> {
+        self.controls
+            .broadcast_player_only
+            .store(player_only, Relaxed);
         let (producer, consumer) = RingBuffer::new(self.sample_rate as usize);
         self.send(Command::Broadcast(Some(producer)))?;
         Ok(consumer)
@@ -1024,11 +1377,20 @@ impl Engine {
                     .into(),
             );
         }
+        let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
         if section.is_none() {
             self.cancel_section(deck);
             self.controls.source_origin[deck].store(track.preparation.cue_in.to_bits(), Relaxed);
+            set(
+                &self.controls.bpm[deck],
+                track.preparation.bpm.unwrap_or(0.) as f32,
+            );
+            self.controls.synced[deck].store(false, Relaxed);
+            self.controls.beat_offset[deck].store(
+                track.preparation.beat_offset.unwrap_or(0.).to_bits(),
+                Relaxed,
+            );
         }
-        let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
         let separated = stems.is_some();
         if section.is_none()
             && let Some(cancel) = self.cancel[deck].take()
@@ -1185,6 +1547,7 @@ impl Engine {
             eof.store(true, std::sync::atomic::Ordering::Release);
         });
         let source = Source {
+            key_lock: crate::key_lock::Processor::new(self.sample_rate).map(Box::new),
             ring: consumer,
             duration,
             done,
@@ -1245,7 +1608,12 @@ impl Engine {
         {
             return Err("Invalid fade target or duration".into());
         }
-        self.send(Command::Level(slot, target, seconds, stop))
+        self.send(Command::Level(
+            if slot == 2 { MASTER } else { slot },
+            target,
+            seconds,
+            stop,
+        ))
     }
     pub fn sample_maintenance(&mut self) {
         self.sample_retired.retain(|(pad, generation, _)| {
@@ -1306,9 +1674,14 @@ impl Engine {
     pub fn loaded(&self, deck: usize) -> bool {
         self.controls.loaded[deck].load(Relaxed)
     }
+    #[cfg(test)]
     pub fn toggle(&self, deck: usize) {
         let c = &self.controls.play[deck];
         c.store(!c.load(Relaxed), Relaxed);
+    }
+    #[cfg(test)]
+    pub(super) fn simulate_source_origin(&self, deck: usize, seconds: f64) {
+        self.controls.source_origin[deck].store(seconds.to_bits(), Relaxed);
     }
     pub fn source_position(&self, deck: usize) -> f64 {
         f64::from_bits(self.controls.source_origin[deck].load(Relaxed)) + self.position(deck)
@@ -1322,6 +1695,22 @@ impl Engine {
     pub fn set_fader(&self, x: f32) {
         let _ = self.send(Command::Fader(x));
     }
+    pub fn pause(&mut self, deck: usize) {
+        if deck >= 6 {
+            return;
+        }
+        self.cancel_section(deck);
+        self.controls.play[deck].store(false, Relaxed);
+        let _ = self.send(Command::Pause(deck));
+    }
+    pub fn play(&self, deck: usize) -> Result<(), String> {
+        if deck >= 6 {
+            return Err("Choose a valid deck".into());
+        }
+        self.send(Command::Play(deck))?;
+        self.controls.play[deck].store(true, Relaxed);
+        Ok(())
+    }
     pub fn fading(&self) -> bool {
         self.controls.fading.load(Relaxed)
     }
@@ -1333,23 +1722,36 @@ impl Engine {
         Some(
             (frames.saturating_sub(self.controls.position[deck].load(Relaxed)) as f32
                 / self.sample_rate as f32
-                / get(&self.controls.rate[deck]))
+                / self.controls.effective_rate(deck))
             .max(0.),
         )
+    }
+    pub fn settle_pair(&self, active: usize, seconds: f32) -> Result<(), String> {
+        if !self.controls.pair_indices().contains(&active)
+            || !self.playing(active)
+            || !seconds.is_finite()
+            || !(0.05..=30.).contains(&seconds)
+        {
+            return Err("Cannot settle the current pair".into());
+        }
+        self.send(Command::Fade {
+            to: (active % 2) as f32,
+            seconds,
+        })
     }
     pub fn crossfade(&self, seconds: f32) -> Result<(), String> {
         if self.fading() {
             return self.send(Command::Cancel);
         }
-        let incoming = if self.fader() < 0.5 { 1 } else { 0 };
+        let incoming = self.controls.pair_indices()[if self.fader() < 0.5 { 1 } else { 0 }];
         if !self.loaded(incoming) || self.controls.finished[incoming].load(Relaxed) {
             return Err("Load or cue the incoming deck before crossfading".into());
         }
-        if !self.playing(1 - incoming) {
+        if !self.playing(self.controls.other(incoming)) {
             return Err("Start the outgoing deck before Auto Crossfade".into());
         }
         let mut duration = seconds.clamp(0.05, 30.);
-        for deck in 0..2 {
+        for deck in self.controls.pair_indices() {
             if self.controls.looping[deck].load(Relaxed) {
                 continue;
             }
@@ -1362,7 +1764,7 @@ impl Engine {
             duration = duration.min(remaining - 0.05);
         }
         self.send(Command::Fade {
-            to: incoming as f32,
+            to: (incoming % 2) as f32,
             seconds: duration,
         })
     }
@@ -1371,7 +1773,8 @@ impl Engine {
             None
         } else {
             Some(Vec::with_capacity(
-                (seconds.clamp(0.1, 30.) * self.sample_rate as f32) as usize,
+                (seconds.clamp(0.1, 30.) * self.sample_rate as f32
+                    / self.controls.effective_rate(deck)) as usize,
             ))
         };
         self.send(Command::Loop(deck, frames))
@@ -1400,6 +1803,16 @@ impl Engine {
     }
     pub fn set_gain(&self, deck: usize, value: f32) {
         let _ = self.send(Command::LevelSet(deck, value.clamp(0., 1.)));
+    }
+    pub fn set_player_envelope(&self, value: f32) {
+        set(
+            &self.controls.player_envelope,
+            if value.is_finite() {
+                value.clamp(0., 1.)
+            } else {
+                1.
+            },
+        );
     }
     pub fn scratch(&self, deck: usize, active: bool, rate: f32) {
         self.controls.vinyl_follow[deck].store(false, Relaxed);
@@ -1464,7 +1877,7 @@ impl Engine {
         hold: f32,
         grid: crate::mix_schedule::Grid,
     ) -> Result<(), String> {
-        let incoming = usize::from(self.fader() < 0.5);
+        let incoming = self.controls.pair_indices()[usize::from(self.fader() < 0.5)];
         if !seconds.is_finite()
             || !hold.is_finite()
             || !(0.05..=30.).contains(&seconds)
@@ -1472,8 +1885,12 @@ impl Engine {
         {
             return Err("Invalid mashup timing".into());
         }
-        if !self.controls.stems_loaded.iter().all(|v| v.load(Relaxed))
-            || !self.playing(1 - incoming)
+        if !self
+            .controls
+            .pair_indices()
+            .iter()
+            .all(|d| self.controls.stems_loaded[*d].load(Relaxed))
+            || !self.playing(self.controls.other(incoming))
             || self.playing(incoming)
             || self.fading()
         {
@@ -1481,16 +1898,24 @@ impl Engine {
                 "Mashup needs two prepared stem decks, with the incoming deck paused".into(),
             );
         }
-        if self.controls.looping.iter().any(|v| v.load(Relaxed))
-            || self.controls.scratching.iter().any(|v| v.load(Relaxed))
+        if self
+            .controls
+            .pair_indices()
+            .iter()
+            .any(|d| self.controls.looping[*d].load(Relaxed))
+            || self
+                .controls
+                .pair_indices()
+                .iter()
+                .any(|d| self.controls.scratching[*d].load(Relaxed))
         {
             return Err("Release loops and scratching before a mashup".into());
         }
-        let delay = (grid.next(self.position(1 - incoming) + 0.1) - self.position(1 - incoming))
-            as f32
-            / get(&self.controls.rate[1 - incoming]);
+        let delay = (grid.next(self.position(self.controls.other(incoming)) + 0.1)
+            - self.position(self.controls.other(incoming))) as f32
+            / get(&self.controls.rate[self.controls.other(incoming)]);
         if self
-            .remaining(1 - incoming)
+            .remaining(self.controls.other(incoming))
             .is_none_or(|r| r < seconds * 2. + hold + delay + 0.2)
             || self
                 .remaining(incoming)
@@ -1498,7 +1923,7 @@ impl Engine {
         {
             return Err("Not enough prepared audio remains for this mashup".into());
         }
-        if get(&self.controls.stem_level[1 - incoming][0]) < 0.05
+        if get(&self.controls.stem_level[self.controls.other(incoming)][0]) < 0.05
             || get(&self.controls.stem_level[incoming][1])
                 + get(&self.controls.stem_level[incoming][2])
                 < 0.05
@@ -1506,7 +1931,7 @@ impl Engine {
             return Err("The selected vocal or backing is muted by your stem settings".into());
         }
         self.send(Command::Mashup {
-            to: incoming as f32,
+            to: (incoming % 2) as f32,
             fade: seconds,
             hold,
             grid,
@@ -1517,15 +1942,17 @@ impl Engine {
         seconds: f32,
         grid: crate::mix_schedule::Grid,
     ) -> Result<(), String> {
-        let incoming = usize::from(self.fader() < 0.5);
-        if !self.loaded(incoming) || !self.playing(1 - incoming) {
+        let incoming = self.controls.pair_indices()[usize::from(self.fader() < 0.5)];
+        if !self.loaded(incoming) || !self.playing(self.controls.other(incoming)) {
             return Err("Prepare the incoming deck and start the outgoing deck".into());
         }
-        if self.controls.looping[1 - incoming].load(Relaxed) || self.playing(incoming) {
+        if self.controls.looping[self.controls.other(incoming)].load(Relaxed)
+            || self.playing(incoming)
+        {
             return self.crossfade(seconds);
         }
         self.send(Command::ScheduledFade {
-            to: incoming as f32,
+            to: (incoming % 2) as f32,
             seconds: seconds.clamp(0.05, 30.),
             grid,
         })
@@ -1534,7 +1961,7 @@ impl Engine {
         set(&self.controls.rate[deck], value);
     }
     pub fn set_master(&self, value: f32) {
-        let _ = self.send(Command::LevelSet(2, value.clamp(0., 1.)));
+        let _ = self.send(Command::LevelSet(MASTER, value.clamp(0., 1.)));
     }
     pub fn set_eq(&self, deck: usize, band: usize, db: f32) {
         set(&self.controls.eq[deck][band], db);
@@ -1620,6 +2047,7 @@ mod tests {
             p.push([value, value, 0., 0., 0., 0.]).unwrap();
         }
         Source {
+            key_lock: None,
             ring: c,
             duration: Arc::new(AtomicU64::new(frames as u64)),
             done: Arc::new(AtomicBool::new(true)),
@@ -1643,6 +2071,7 @@ mod tests {
                 .unwrap();
         }
         Source {
+            key_lock: None,
             ring: consumer,
             duration: Arc::new(AtomicU64::new(frames as u64)),
             done: Arc::new(AtomicBool::new(true)),
@@ -1713,7 +2142,10 @@ mod tests {
             }
         };
         wait(&engine, &|e| {
-            e.controls.ready.iter().all(|v| v.load(Relaxed))
+            e.controls
+                .pair_indices()
+                .iter()
+                .all(|d| e.controls.ready[*d].load(Relaxed))
         });
         set(&engine.controls.stem_level[0][1], 0.4);
         let saved: [[u32; 3]; 2] = std::array::from_fn(|d| {
@@ -1975,6 +2407,61 @@ mod tests {
         assert_eq!(get(&controls.crossfader), 1.);
         assert!(!controls.play[0].load(Relaxed));
     }
+    #[test]
+    fn rendered_preroll_drop_lands_after_exact_three_second_phrase_blend() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(32);
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        let mut incoming = source(0.02, 10000);
+        let (mut producer, consumer) = RingBuffer::new(10001);
+        for frame in 0..10000 {
+            let value = if frame < 3000 { 0.02 } else { 0.2 };
+            let value = value * (frame as f32 * std::f32::consts::TAU / 10.).sin();
+            producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+        }
+        incoming.ring = consumer;
+        let mut outgoing = source(0.2, 12000);
+        let (mut producer, consumer) = RingBuffer::new(12001);
+        for frame in 0..12000 {
+            let value = 0.2 * (frame as f32 * std::f32::consts::TAU / 10.).sin();
+            producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+        }
+        outgoing.ring = consumer;
+        tx.send(Command::Load(0, outgoing, true, 1)).unwrap();
+        tx.send(Command::Load(1, incoming, false, 1)).unwrap();
+        // The selected section at source second 20 is prepared from second 17.
+        // Launch at outgoing second 5; its drop lands on the phrase at second 8.
+        tx.send(Command::ScheduledFade {
+            to: 1.,
+            seconds: 3.,
+            grid: crate::mix_schedule::Grid {
+                period: 8.,
+                anchor: 5.,
+            },
+        })
+        .unwrap();
+        let mut rendered = Vec::new();
+        mixer.render(5000, |_, frame| rendered.push(frame[0]));
+        assert!(!controls.play[1].load(Relaxed));
+        mixer.render(3000, |_, frame| rendered.push(frame[0]));
+        assert!(controls.position[1].load(Relaxed) >= 2999);
+        mixer.render(200, |_, frame| rendered.push(frame[0]));
+        assert!(!controls.fading.load(Relaxed));
+        assert_eq!(get(&controls.crossfader), 1.);
+        assert!(!controls.play[0].load(Relaxed));
+        assert!(rendered.iter().all(|sample| sample.is_finite()));
+        let rms = |samples: &[f32]| {
+            (samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32).sqrt()
+        };
+        assert!(
+            rendered
+                .as_chunks::<100>()
+                .0
+                .iter()
+                .all(|chunk| rms(chunk) > 0.001)
+        );
+        assert!(rms(&rendered[8100..8200]) > rms(&rendered[7800..7900]) * 2.);
+    }
     fn section(source: Source, expected: u64) -> SectionChange {
         SectionChange {
             source: Some(source),
@@ -2113,6 +2600,7 @@ mod tests {
                 .unwrap();
         }
         let mut source = Source {
+            key_lock: None,
             ring: consumer,
             duration: Arc::new(AtomicU64::new(64)),
             done: Arc::new(AtomicBool::new(true)),
@@ -2181,16 +2669,16 @@ mod tests {
         tx.send(Command::Load(0, source(0.2, 4000), true, 1))
             .unwrap();
         m.render(1000, |_, _| {});
-        tx.send(Command::Level(2, 0.2, 0.1, false)).unwrap();
+        tx.send(Command::Level(MASTER, 0.2, 0.1, false)).unwrap();
         let mut values = Vec::new();
         m.render(100, |_, f| values.push(f[0]));
         assert!(values.windows(2).all(|w| w[1] <= w[0] + 0.0001));
         assert!((get(&controls.master) - 0.2).abs() < 0.001);
         assert!(controls.play[0].load(Relaxed));
-        tx.send(Command::Level(2, 0.75, 0.1, false)).unwrap();
+        tx.send(Command::Level(MASTER, 0.75, 0.1, false)).unwrap();
         m.render(100, |_, _| {});
         assert!((get(&controls.master) - 0.75).abs() < 0.001);
-        tx.send(Command::Level(2, 0., 0.1, true)).unwrap();
+        tx.send(Command::Level(MASTER, 0., 0.1, true)).unwrap();
         m.render(100, |_, _| {});
         assert!(!controls.play[0].load(Relaxed));
         assert!(!controls.loaded[0].load(Relaxed));
@@ -2261,14 +2749,14 @@ mod tests {
         }
         let mut with = 0.;
         mixer.render(200, |_, f| with = f[0]);
-        assert!(controls.play.iter().all(|p| p.load(Relaxed)));
+        assert!(controls.play.iter().take(2).all(|p| p.load(Relaxed)));
         assert!(controls.sample_playing.iter().all(|p| p.load(Relaxed)));
         tx.send(Command::SampleStop(None)).unwrap();
         let mut without = 0.;
         mixer.render(1, |_, f| without = f[0]);
         assert!(without > 0.);
         assert!(with - without > 0.06);
-        assert!(controls.play.iter().all(|p| p.load(Relaxed)));
+        assert!(controls.play.iter().take(2).all(|p| p.load(Relaxed)));
     }
     #[test]
     fn replacement_acknowledges_after_callback_releases_old_buffer() {
@@ -2713,6 +3201,7 @@ mod tests {
         tx.send(Command::Load(
             1,
             Source {
+                key_lock: crate::key_lock::Processor::new(48000).map(Box::new),
                 ring: r,
                 duration: Arc::new(AtomicU64::new(0)),
                 done: Arc::new(AtomicBool::new(false)),
@@ -2738,5 +3227,347 @@ mod tests {
         assert_eq!(get(&c.crossfader), 0.);
         assert!(c.play[0].load(Relaxed));
         assert!(!c.play[1].load(Relaxed));
+    }
+    #[test]
+    fn six_voices_crossfade_pair_and_background_fade_are_isolated() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(32);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        for d in 0..6 {
+            tx.send(Command::Load(d, source(0.03, 20000), true, 1))
+                .unwrap();
+        }
+        m.render(1000, |_, _| {});
+        assert!(c.play.iter().all(|p| p.load(Relaxed)));
+        assert!(c.position.iter().all(|p| p.load(Relaxed) == 1000));
+        tx.send(Command::Loop(4, Some(vec![[0.03; 6]; 100])))
+            .unwrap();
+        tx.send(Command::Fade {
+            to: 1.,
+            seconds: 1.,
+        })
+        .unwrap();
+        m.render(100, |_, _| {});
+        assert!(c.fading.load(Relaxed));
+        tx.send(Command::Load(2, source(0.02, 20000), true, 2))
+            .unwrap();
+        tx.send(Command::Level(3, 0., 0.2, true)).unwrap();
+        m.render(100, |_, _| {});
+        assert!(
+            c.fading.load(Relaxed),
+            "Background load/fade canceled the pair handoff"
+        );
+        m.render(1000, |_, _| {});
+        assert!(!c.play[0].load(Relaxed));
+        assert!(c.play[1].load(Relaxed));
+        assert!(c.play[2].load(Relaxed));
+        assert!(!c.play[3].load(Relaxed));
+        assert!(c.play[4].load(Relaxed) && c.looping[4].load(Relaxed));
+        assert!(c.play[5].load(Relaxed));
+        assert_eq!(get(&c.gain[2]), 1.);
+        assert_eq!(c.pair_indices(), [0, 1]);
+    }
+    #[test]
+    fn pair_reassignment_requires_both_pairs_paused() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.03, 10000), true, 1))
+            .unwrap();
+        tx.send(Command::Pair([2, 5])).unwrap();
+        m.render(10, |_, _| {});
+        assert_eq!(c.pair_indices(), [0, 1]);
+        c.play[0].store(false, Relaxed);
+        tx.send(Command::Pair([2, 5])).unwrap();
+        m.render(10, |_, _| {});
+        assert_eq!(c.pair_indices(), [2, 5]);
+        tx.send(Command::Load(2, source(0.03, 10000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(5, source(0.03, 10000), false, 1))
+            .unwrap();
+        tx.send(Command::Fade {
+            to: 1.,
+            seconds: 0.1,
+        })
+        .unwrap();
+        m.render(500, |_, _| {});
+        assert!(!c.play[2].load(Relaxed));
+        assert!(c.play[5].load(Relaxed));
+    }
+    #[test]
+    fn quantized_background_launch_uses_audio_clock_not_ui_ticks() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(4, source(0.03, 10000), false, 1))
+            .unwrap();
+        tx.send(Command::Launch(4)).unwrap();
+        m.render(1999, |_, _| {});
+        assert!(!c.play[4].load(Relaxed));
+        m.render(1, |_, _| {});
+        assert!(!c.play[4].load(Relaxed));
+        m.render(1, |_, _| {});
+        assert!(c.play[4].load(Relaxed));
+        assert_eq!(c.position[4].load(Relaxed), 1);
+    }
+    #[test]
+    fn ownership_pause_cancels_future_launch_and_retains_loaded_position() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(4, source(0.03, 10000), false, 1))
+            .unwrap();
+        tx.send(Command::Launch(4)).unwrap();
+        tx.send(Command::Pause(4)).unwrap();
+        m.render(3000, |_, _| {});
+        assert!(!c.play[4].load(Relaxed));
+        assert!(c.loaded[4].load(Relaxed));
+        assert_eq!(c.position[4].load(Relaxed), 0);
+        c.play[4].store(true, Relaxed);
+        m.render(100, |_, _| {});
+        let before = c.position[4].load(Relaxed);
+        tx.send(Command::Pause(4)).unwrap();
+        m.render(3000, |_, _| {});
+        assert_eq!(c.position[4].load(Relaxed), before);
+        assert!(before > 0);
+        tx.send(Command::Play(4)).unwrap();
+        m.render(100, |_, _| {});
+        assert!(c.play[4].load(Relaxed));
+        assert!(c.position[4].load(Relaxed) > before);
+    }
+    #[test]
+    fn player_envelope_attenuates_audio_without_rewriting_mixer_gain() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.1, 10000), true, 1))
+            .unwrap();
+        let gain = get(&c.gain[0]);
+        set(&c.player_envelope, 0.);
+        let mut quiet = 1.;
+        m.render(300, |_, frame| quiet = frame[0].abs());
+        assert!(quiet < 0.00001);
+        set(&c.player_envelope, 1.);
+        let mut loud = 0.;
+        m.render(300, |_, frame| loud = frame[0].abs());
+        assert!(loud > 0.001);
+        assert_eq!(get(&c.gain[0]), gain);
+    }
+    #[test]
+    fn synced_loop_capture_waits_for_master_grid_without_stopping_other_voice() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(2, source(0.03, 10000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(5, source(0.04, 10000), true, 1))
+            .unwrap();
+        m.render(100, |_, _| {});
+        set(&c.bpm[2], 120.);
+        c.synced[2].store(true, Relaxed);
+        tx.send(Command::Loop(2, Some(Vec::with_capacity(500))))
+            .unwrap();
+        m.render(1900, |_, _| {});
+        assert!(m.voices[2].looped.is_none());
+        assert!(m.voices[2].pending_loop.is_some());
+        m.render(1, |_, _| {});
+        assert!(m.voices[2].looped.is_some());
+        assert!(c.play[5].load(Relaxed));
+        tx.send(Command::Loop(2, None)).unwrap();
+        m.render(1, |_, _| {});
+        assert!(m.voices[2].pending_loop.is_none());
+        assert!(!c.looping[2].load(Relaxed));
+    }
+    #[test]
+    fn player_broadcast_tap_excludes_other_decks_and_preserves_local_mix() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut mixer = Mixer::new(48000, rx, c.clone());
+        let (producer, mut consumer) = RingBuffer::new(2048);
+        tx.send(Command::Broadcast(Some(producer))).unwrap();
+        tx.send(Command::Load(0, source(0.01, 4000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(1, source(0.03, 4000), true, 1))
+            .unwrap();
+        c.broadcast_player_only.store(true, Relaxed);
+        set(&c.crossfader, 1.);
+        let mut local = 0.;
+        mixer.render(1000, |_, f| local = f[0]);
+        let mut broadcast = 0.;
+        while let Ok(f) = consumer.pop() {
+            broadcast = f[0];
+        }
+        assert!((local / broadcast - 3.).abs() < 0.01);
+        assert!(broadcast > 0.004);
+        assert!(c.play[0].load(Relaxed) && c.play[1].load(Relaxed));
+    }
+    #[test]
+    fn section_handoff_preserves_pitch_history_without_a_silent_gap() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut mixer = Mixer::new(48000, rx, controls.clone());
+        let mut prepared = source(0.03, 48000);
+        prepared.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+        tx.send(Command::Load(0, prepared, true, 1)).unwrap();
+        mixer.render(6000, |_, _| {});
+        let mut jump = section(source(0.03, 48000), 1);
+        jump.grid = None;
+        tx.send(Command::Section(0, jump)).unwrap();
+        mixer.render(6000, |_, frame| {
+            assert!(frame[0] > 0.01, "A section handoff inserted silence")
+        });
+        assert!(mixer.voices[0].source.as_ref().unwrap().key_lock.is_some());
+    }
+    #[test]
+    fn restored_sync_uses_the_queued_clock_and_loaded_paused_deck() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut mixer = Mixer::new(48000, rx, c.clone());
+        set(&c.bpm[4], 40.);
+        // The previous 120 BPM clock would reject this ratio before restoration.
+        tx.send(Command::Load(4, source(0.03, 48000), false, 1))
+            .unwrap();
+        tx.send(Command::Clock(40., 4)).unwrap();
+        tx.send(Command::RestoreSync(4, true)).unwrap();
+        mixer.render(1, |_, _| {});
+        assert!(c.synced[4].load(Relaxed));
+        assert!(!c.play[4].load(Relaxed));
+        assert_eq!(c.effective_rate(4), 1.);
+    }
+    #[test]
+    fn pitch_backend_drains_the_delayed_tail_before_finishing() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(4);
+        let mut mixer = Mixer::new(48000, rx, controls.clone());
+        let mut prepared = source(0.03, 10000);
+        prepared.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+        let latency = prepared.key_lock.as_ref().unwrap().latency;
+        tx.send(Command::Load(0, prepared, true, 1)).unwrap();
+        let mut first = None;
+        let mut last = 0;
+        mixer.render(15000, |i, frame| {
+            if frame[0] > 0.0001 {
+                first.get_or_insert(i);
+                last = i;
+            }
+        });
+        assert_eq!(first, Some(latency));
+        assert!(last > 10000 + latency - 5);
+        assert!(controls.finished[0].load(Relaxed));
+    }
+    #[test]
+    #[ignore = "Synthetic DSP performance matrix; no hardware output"]
+    fn benchmark_dsp_matrix() {
+        for mode in [
+            "two-dry",
+            "six-dry",
+            "six-sync-keylock",
+            "six-stems",
+            "six-loops",
+            "six-effects",
+            "pair-auto-fade-with-four-layers",
+        ] {
+            let c = Arc::new(Controls::default());
+            let (tx, rx) = mpsc::sync_channel(64);
+            let mut mixer = Mixer::new(48000, rx, c.clone());
+            let decks = if mode == "two-dry" { 2 } else { 6 };
+            for d in 0..decks {
+                let mut voice = if mode == "six-stems" {
+                    layered_source([0.005, 0.003, 0.002], 48000 * 3)
+                } else {
+                    source(0.01, 48000 * 3)
+                };
+                let (mut pcm, ring) = RingBuffer::new(48000 * 3 + 1);
+                for frame in 0..48000 * 3 {
+                    let tone = (frame as f32 * std::f32::consts::TAU * 440. / 48000.).sin();
+                    pcm.push(if mode == "six-stems" {
+                        [
+                            tone * 0.005,
+                            tone * 0.005,
+                            tone * 0.003,
+                            tone * 0.003,
+                            tone * 0.002,
+                            tone * 0.002,
+                        ]
+                    } else {
+                        [tone * 0.01, tone * 0.01, 0., 0., 0., 0.]
+                    })
+                    .unwrap();
+                }
+                voice.ring = ring;
+                if mode == "six-sync-keylock" {
+                    voice.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+                    set(&c.bpm[d], 120.);
+                    c.synced[d].store(true, Relaxed);
+                    c.key_lock[d].store(true, Relaxed);
+                }
+                tx.send(Command::Load(d, voice, true, 1)).unwrap();
+                if mode == "six-loops" {
+                    tx.send(Command::Loop(d, Some(Vec::with_capacity(12000))))
+                        .unwrap();
+                }
+                if mode == "six-effects" {
+                    set(&c.eq[d][0], -6.);
+                    set(&c.sweep[d], -0.35);
+                }
+            }
+            if mode == "six-sync-keylock" {
+                tx.send(Command::Clock(126., 4)).unwrap();
+            }
+            if mode == "pair-auto-fade-with-four-layers" {
+                tx.send(Command::Fade {
+                    to: 1.,
+                    seconds: 0.5,
+                })
+                .unwrap();
+            }
+            let started = std::time::Instant::now();
+            let mut energy = 0.;
+            for _ in 0..200 {
+                mixer.render(480, |_, f| {
+                    assert!(f.iter().all(|v| v.is_finite()));
+                    energy += f[0].abs();
+                });
+            }
+            let elapsed = started.elapsed();
+            let underruns: Vec<_> = c.underruns.iter().map(|u| u.load(Relaxed)).collect();
+            eprintln!(
+                "{mode}: 2 s rendered in {elapsed:?}; underruns {underruns:?}; signal {energy:.1}"
+            );
+            assert!(elapsed.as_secs_f32() < 2. && energy > 1.);
+            assert!(underruns.iter().all(|n| *n == 0));
+            if mode == "pair-auto-fade-with-four-layers" {
+                assert!(!c.play[0].load(Relaxed));
+                assert!((2..6).all(|d| c.play[d].load(Relaxed)));
+            }
+        }
+    }
+    #[test]
+    #[ignore = "CPU benchmark: generated six-stream PCM, no hardware output"]
+    fn benchmark_six_keylocked_layers() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(48000, rx, c.clone());
+        for d in 0..6 {
+            let mut prepared = source(0.03, 48000 * 6);
+            prepared.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+            tx.send(Command::Load(d, prepared, true, 1)).unwrap();
+            c.key_lock[d].store(true, Relaxed);
+            set(&c.rate[d], 1.08);
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..500 {
+            m.render(480, |_, _| {});
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "Six streams + Key Lock: 5 seconds rendered in {elapsed:?}; underruns {:?}",
+            c.underruns
+                .iter()
+                .map(|u| u.load(Relaxed))
+                .collect::<Vec<_>>()
+        );
+        assert!(c.underruns.iter().all(|u| u.load(Relaxed) == 0));
+        assert!(elapsed.as_secs_f64() < 5.);
     }
 }

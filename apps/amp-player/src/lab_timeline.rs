@@ -727,7 +727,7 @@ mod tests {
             .take(2)
             .enumerate()
             .map(|(i, t)| Clip {
-                path: root.join(&t.path),
+                path: amp_core::music_sources::audio_path(&root, &t.path),
                 start: i as f64 * 3.,
                 lane: i,
                 preparation: amp_core::Preparation {

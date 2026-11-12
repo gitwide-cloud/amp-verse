@@ -14,6 +14,10 @@ final class AudioDsp extends BaseAudioProcessor {
     static volatile float[] spectrum=new float[24];
     static volatile long spectrumTime;
     static volatile boolean visible;
+    static volatile float playerEnvelope=1f;
+    private final boolean playerFade;
+    AudioDsp(){this(false);}
+    AudioDsp(boolean playerFade){this.playerFade=playerFade;}
     private static volatile float[] gains=new float[5];
     private static volatile boolean enabled;
     private float[] applied;
@@ -38,6 +42,7 @@ final class AudioDsp extends BaseAudioProcessor {
         while(input.remaining()>=2){
             double value=input.getShort()/32768.;
             if(active)for(int band=0;band<5;band++){double[] c=coefficients[band],m=memory[frameChannel][band];double filtered=c[0]*value+m[0];m[0]=c[1]*value-c[3]*filtered+m[1];m[1]=c[2]*value-c[4]*filtered;value=filtered;}
+            if(playerFade)value*=playerEnvelope;
             value=Math.max(-1,Math.min(32767./32768.,value));output.putShort((short)Math.round(value*32768));sum+=value;
             if(++frameChannel==channels){samples[count++]=sum/channels;frameChannel=0;sum=0;if(count==samples.length){if(visible)analyze(samples,rate);count=0;}}
         }

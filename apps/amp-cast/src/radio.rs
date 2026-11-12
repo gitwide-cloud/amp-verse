@@ -20,6 +20,14 @@ impl<T> Drop for AbortTask<T> {
         self.0.abort();
     }
 }
+fn fade_seconds() -> f64 {
+    std::env::var("AMP_CAST_FADE_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(3.)
+        .clamp(0.1, 30.)
+}
 fn entry(p: &Preparation, profile: Option<&SmartPlaylist>, target: Option<f64>) -> f64 {
     if profile.is_some_and(|r| r.style == Style::Hype && r.use_manual_cues)
         && let Some(c) = p.manual_cues.iter().find(|c| {
@@ -55,12 +63,23 @@ async fn decode(
     let mut preparation = amp_core::preparation::load(&path)?;
     preparation.cue_in = entry(&preparation, profile.as_ref(), target);
     let rate = out_bpm
+        .filter(|_| amp_core::mix_schedule::timing_reliable(&preparation))
         .zip(preparation.bpm)
         .and_then(|(out, next)| {
-            let ratio = out / next;
-            (ratio.is_finite() && (0.92..=1.08).contains(&ratio)).then_some(ratio)
+            amp_core::transition_plan::tempo_match(out, 1., next, 0.08).map(|m| m.rate)
         })
         .unwrap_or(1.);
+    if profile.is_some()
+        && out_bpm.is_some()
+        && let Some(plan) = amp_core::transition_plan::landing(
+            &preparation,
+            preparation.cue_in,
+            rate,
+            fade_seconds(),
+        )
+    {
+        preparation.cue_in = plan.entry;
+    }
     let temp = tempfile::NamedTempFile::new()
         .map_err(|e| e.to_string())?
         .into_temp_path();
@@ -127,7 +146,10 @@ impl Clock {
         bytes: &[u8],
     ) -> Result<(), String> {
         self.frames += bytes.len() as u64 / 8;
-        input.write_all(bytes).await.map_err(|e| e.to_string())?;
+        tokio::time::timeout(std::time::Duration::from_secs(15), input.write_all(bytes))
+            .await
+            .map_err(|_| "Station encoder stopped accepting audio".to_string())?
+            .map_err(|e| e.to_string())?;
         tokio::time::sleep_until(
             self.start + std::time::Duration::from_secs_f64(self.frames as f64 / RATE as f64),
         )
@@ -180,6 +202,75 @@ fn pick(
         Ok(index)
     }
 }
+/// A corrupt/missing candidate must not take an otherwise healthy station down.
+/// Exclusions are local to this preparation attempt, never saved to library rules.
+#[allow(clippy::too_many_arguments)]
+async fn prepare_next(
+    cast: Arc<Cast>,
+    first: usize,
+    mut profile: Option<SmartPlaylist>,
+    indices: Vec<usize>,
+    current: Option<usize>,
+    recent: Vec<String>,
+    target: Option<f64>,
+    bpm: Option<f64>,
+) -> Result<Decoded, String> {
+    let mut index = first;
+    let mut failed = std::collections::HashSet::new();
+    let mut cursor = indices.iter().position(|i| *i == first).unwrap_or(0) + 1;
+    let mut errors = Vec::new();
+    for _ in 0..cast.tracks.len().min(16) {
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            decode(cast.clone(), index, profile.clone(), target, bpm),
+        )
+        .await;
+        match result {
+            Ok(Ok(decoded)) => return Ok(decoded),
+            Ok(Err(error)) => errors.push(error),
+            Err(_) => errors.push(format!(
+                "Audio preparation timed out: {}",
+                cast.tracks[index].title
+            )),
+        }
+        failed.insert(index);
+        if let Some(rules) = &mut profile {
+            rules.excluded.push(show::song_id(&cast.tracks[index]));
+        }
+        let start = indices.iter().position(|i| *i == index).unwrap_or(0) + 1;
+        let candidates: Vec<_> = indices
+            .iter()
+            .cycle()
+            .skip(start)
+            .take(indices.len())
+            .copied()
+            .filter(|i| !failed.contains(i))
+            .collect();
+        if candidates.is_empty() {
+            break;
+        }
+        if profile.is_none() {
+            cursor = 0;
+        }
+        match pick(
+            &cast,
+            profile.as_ref(),
+            &candidates,
+            &mut cursor,
+            current,
+            &recent,
+            target,
+        ) {
+            Ok(next) if !failed.contains(&next) => index = next,
+            _ => break,
+        }
+    }
+    Err(format!(
+        "No playable next song after {} attempts: {}",
+        errors.len(),
+        errors.last().map_or("Playlist empty", String::as_str)
+    ))
+}
 pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String> {
     let selection = cast.selection.lock().unwrap().clone();
     let indices: Vec<usize> = selection
@@ -191,7 +282,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
                 .collect()
         })
         .unwrap_or_else(|| (0..cast.tracks.len()).collect());
-    let profile: Option<SmartPlaylist> = selection
+    let mut profile: Option<SmartPlaylist> = selection
         .as_ref()
         .and_then(|v| serde_json::from_value(v["rules"].clone()).ok());
     let mut cursor = 0;
@@ -206,7 +297,24 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
         &recent,
         target,
     )?;
-    let mut current = decode(cast.clone(), first, profile.clone(), target, None).await?;
+    let mut current = prepare_next(
+        cast.clone(),
+        first,
+        profile.clone(),
+        indices.clone(),
+        None,
+        recent.clone(),
+        target,
+        None,
+    )
+    .await?;
+    if profile.is_none() {
+        cursor = indices
+            .iter()
+            .position(|i| *i == current.index)
+            .unwrap_or(0)
+            + 1;
+    }
     let mut progression = profile
         .as_ref()
         .and_then(|p| p.energy_progression.as_ref())
@@ -277,6 +385,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
         frames: 0,
     };
     let mut consumed = 0;
+    let mut mix_revision = 0;
     loop {
         {
             let mut station = cast.station.lock().await;
@@ -285,6 +394,39 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             }
             station.now_playing = Some(cast.tracks[current.index].title.clone());
             station.current_index = Some(current.index);
+        }
+        let requested = cast.mix.lock().unwrap().clone();
+        if requested.revision != mix_revision {
+            if profile.is_none() {
+                let mut rules = show::Settings::default().playlists.remove(0);
+                rules.allowed = indices
+                    .iter()
+                    .map(|i| show::song_id(&cast.tracks[*i]))
+                    .collect();
+                rules.restrict_allowed = true;
+                rules.fallback = show::Fallback::RelaxRecent;
+                profile = Some(rules);
+            }
+            if let Some(rules) = &mut profile {
+                if let Some(style) = requested.style {
+                    rules.style = style;
+                }
+                rules.target_energy = requested.target;
+                target = requested.target;
+            }
+            progression = requested
+                .transitions
+                .map(|n| {
+                    show::Progression::new(
+                        show::energy(&current.preparation).unwrap_or(5.),
+                        requested.target.unwrap_or(5.),
+                        n,
+                        requested.hold,
+                    )
+                })
+                .transpose()?;
+            mix_revision = requested.revision;
+            cast.station.lock().await.mix_revision = mix_revision;
         }
         recent.push(show::song_id(&cast.tracks[current.index]));
         if recent.len() > 100 {
@@ -311,25 +453,46 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
         };
         let source = cast.clone();
         let rules = profile.clone();
-        let bpm = current.preparation.bpm.map(|b| b * current.rate);
-        let mut prefetch = AbortTask(tokio::spawn(decode(source, next_index, rules, target, bpm)));
-        let fade_seconds = std::env::var("AMP_CAST_FADE_SECONDS")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|v| v.is_finite())
-            .unwrap_or(3.)
-            .clamp(0.1, 30.);
+        let bpm = current
+            .preparation
+            .bpm
+            .filter(|_| amp_core::mix_schedule::timing_reliable(&current.preparation))
+            .map(|b| b * current.rate);
+        let mut prefetch = AbortTask(tokio::spawn(prepare_next(
+            source,
+            next_index,
+            rules,
+            indices.clone(),
+            Some(current.index),
+            recent.clone(),
+            target,
+            bpm,
+        )));
+        let fade_seconds = fade_seconds();
         let fade = (fade_seconds * RATE as f64) as u64;
         let tail = fade.min(current.frames.saturating_sub(consumed) / 2);
         let mut before = current.frames.saturating_sub(consumed + tail);
         let incoming = &cast.tracks[next_index].preparation;
-        let next_entry = entry(incoming, profile.as_ref(), target);
-        if let Some(grid) = amp_core::mix_schedule::grid(
+        let mut next_entry = entry(incoming, profile.as_ref(), target);
+        let in_rate = bpm
+            .zip(incoming.bpm)
+            .filter(|_| amp_core::mix_schedule::timing_reliable(incoming))
+            .and_then(|(out, next)| amp_core::transition_plan::tempo_match(out, 1., next, 0.08))
+            .map_or(1., |m| m.rate);
+        if profile.is_some()
+            && let Some(plan) =
+                amp_core::transition_plan::landing(incoming, next_entry, in_rate, fade_seconds)
+        {
+            next_entry = plan.entry;
+        }
+        if let Some(grid) = amp_core::mix_schedule::grid_at_rates(
             &current.preparation,
             incoming,
             next_entry,
             0.,
             amp_core::mix_schedule::Timing::Beat,
+            current.rate,
+            in_rate,
         ) {
             let desired = current.preparation.cue_in
                 + (consumed + before) as f64 / RATE as f64 * current.rate;
@@ -351,6 +514,9 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
                 return Err(error);
             }
         };
+        if profile.is_none() {
+            cursor = indices.iter().position(|i| *i == next.index).unwrap_or(0) + 1;
+        }
         let overlap = tail.min(next.frames / 2);
         let extra = tail - overlap;
         emit(&mut current, extra, &mut input, &mut clock).await?;
@@ -398,5 +564,131 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             return Err("Station encoder stopped".into());
         }
         let _ = &output_guard;
+    }
+}
+
+#[cfg(test)]
+mod reliability_tests {
+    use super::*;
+    use tower::ServiceExt;
+    #[tokio::test]
+    #[ignore = "requires FFmpeg; real encoded short-session test, no receiver hardware"]
+    async fn repeated_handoffs_survive_bad_files_and_shutdown_cleanly() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("broken.wav"), b"broken").unwrap();
+        for (name, hz) in [("a.wav", 440), ("b.wav", 660)] {
+            assert!(
+                amp_core::command("ffmpeg")
+                    .args(["-v", "error", "-f", "lavfi", "-i"])
+                    .arg(format!("sine=frequency={hz}:duration=0.4"))
+                    .arg(root.path().join(name))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        let mut receiver = cast.audio.subscribe();
+        let response = router(cast.clone())
+            .oneshot(
+                axum::http::Request::post("/api/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let mut last = None;
+        let mut changes = 0;
+        let mut bytes = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(3);
+        while tokio::time::Instant::now() < deadline {
+            if let Ok(Ok(chunk)) =
+                tokio::time::timeout(std::time::Duration::from_millis(30), receiver.recv()).await
+            {
+                bytes.extend_from_slice(&chunk);
+            }
+            let station = cast.station.lock().await;
+            assert!(station.running, "{:?}", station.error);
+            if station.current_index.is_some() && station.current_index != last {
+                changes += 1;
+                last = station.current_index;
+            }
+        }
+        cast.shutdown().await;
+        assert!(!cast.station.lock().await.running);
+        assert!(changes >= 4, "Only {changes} handoffs");
+        let mp3 = root.path().join("captured.mp3");
+        std::fs::write(&mp3, &bytes).unwrap();
+        let decoded = amp_core::command("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(mp3)
+            .args(["-f", "f32le", "-ac", "1", "pipe:1"])
+            .output()
+            .unwrap();
+        assert!(decoded.status.success());
+        assert!(decoded.stdout.len() > 44100 * 4);
+    }
+    #[tokio::test]
+    #[ignore = "requires FFmpeg; isolated generated audio, no hardware playback"]
+    async fn skips_unreadable_candidates_without_rewriting_metadata() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("broken.wav"), b"not audio").unwrap();
+        let generated = amp_core::command("ffmpeg")
+            .args([
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=0.25",
+            ])
+            .arg(root.path().join("good.wav"))
+            .status()
+            .unwrap();
+        assert!(generated.success());
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        let bad = cast
+            .tracks
+            .iter()
+            .position(|t| t.path == std::path::Path::new("broken.wav"))
+            .unwrap();
+        let good = cast
+            .tracks
+            .iter()
+            .position(|t| t.path == std::path::Path::new("good.wav"))
+            .unwrap();
+        let before = amp_core::preparation::load(&root.path().join("good.wav")).unwrap();
+        let decoded = prepare_next(
+            cast.clone(),
+            bad,
+            None,
+            vec![bad, good],
+            None,
+            vec![],
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+        assert_eq!(decoded.index, good);
+        assert!(decoded.frames > 0);
+        assert_eq!(
+            amp_core::preparation::load(&root.path().join("good.wav")).unwrap(),
+            before
+        );
+        let failure = prepare_next(cast, bad, None, vec![bad], None, vec![], None, None)
+            .await
+            .err()
+            .unwrap();
+        assert!(failure.contains("No playable next song"));
     }
 }

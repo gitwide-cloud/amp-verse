@@ -11,6 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -22,11 +25,14 @@ jobs:
         with:
           gradle-version: '8.9'
       - run: gradle -p android :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+      - name: Name APK downloads with embedded version
+        id: package
+        run: python tools/package_downloads.py android --source android/app/build/outputs/apk/debug --destination android-dist >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         with:
-          name: amp-verse-android-preview
+          name: amp-verse-android-v${{ steps.package.outputs.version }}-${{ github.run_number }}
           path: |
-            android/app/build/outputs/apk/debug/*.apk
+            android-dist/*.apk
             third-party/mp3-lab/android-third-party-sources.zip
             third-party/mp3-lab/LICENSE
             third-party/mp3-lab/THIRD_PARTY_NOTICES.md

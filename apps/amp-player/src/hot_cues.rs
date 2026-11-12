@@ -18,20 +18,43 @@ pub fn slot(p: &Preparation, number: u16) -> Option<&Cue> {
         .find(|c| c.number == Some(number))
 }
 pub fn pads(ui: &mut egui::Ui, p: Option<&Preparation>, accent: egui::Color32) -> Option<Action> {
+    pads_count(ui, p, accent, 8)
+}
+pub fn pads_count(
+    ui: &mut egui::Ui,
+    p: Option<&Preparation>,
+    accent: egui::Color32,
+    count: usize,
+) -> Option<Action> {
+    pads_count_named(ui, p, accent, count, true)
+}
+pub fn pads_count_named(
+    ui: &mut egui::Ui,
+    p: Option<&Preparation>,
+    accent: egui::Color32,
+    count: usize,
+    heading: bool,
+) -> Option<Action> {
     let mut action = None;
-    ui.label("HOT CUES");
+    if count == 8 && heading {
+        ui.label("HOT CUES");
+    }
     let columns = if ui.available_width() < 210. { 2 } else { 4 };
     let width = ((ui.available_width() - ui.spacing().item_spacing.x * (columns - 1) as f32)
         / columns as f32)
         .max(30.);
-    for row in 0..8 / columns {
+    for row in 0..count / columns {
         ui.horizontal(|ui| {
             for col in 0..columns {
                 let number = (row * columns + col + 1) as u16;
                 let cue = p.and_then(|p| slot(p, number));
                 let response = ui
                     .add_enabled_ui(p.is_some(), |ui| {
-                        ui.add_sized(egui::vec2(width, 48.), egui::Button::new(""))
+                        ui.add_sized(
+                            egui::vec2(width, if count == 4 { 30. } else { 48. }),
+                            egui::Button::new("")
+                                .stroke(egui::Stroke::new(1., accent.gamma_multiply(0.6))),
+                        )
                     })
                     .inner;
                 let painter = ui.painter().with_clip_rect(response.rect.shrink(2.));
@@ -41,8 +64,16 @@ pub fn pads(ui: &mut egui::Ui, p: Option<&Preparation>, accent: egui::Color32) -
                     ui.visuals().weak_text_color()
                 };
                 painter.text(
-                    response.rect.center_top() + egui::vec2(0., 5.),
-                    egui::Align2::CENTER_TOP,
+                    if count == 4 {
+                        response.rect.center()
+                    } else {
+                        response.rect.center_top() + egui::vec2(0., 5.)
+                    },
+                    if count == 4 {
+                        egui::Align2::CENTER_CENTER
+                    } else {
+                        egui::Align2::CENTER_TOP
+                    },
                     format!("{number}"),
                     egui::FontId::proportional(13.),
                     color,
@@ -51,13 +82,15 @@ pub fn pads(ui: &mut egui::Ui, p: Option<&Preparation>, accent: egui::Color32) -
                     || "Set cue".into(),
                     |cue| format!("{:02}:{:05.2}", cue.seconds as u64 / 60, cue.seconds % 60.),
                 );
-                painter.text(
-                    response.rect.center_bottom() - egui::vec2(0., 5.),
-                    egui::Align2::CENTER_BOTTOM,
-                    time,
-                    egui::FontId::proportional(11.),
-                    color,
-                );
+                if count != 4 {
+                    painter.text(
+                        response.rect.center_bottom() - egui::vec2(0., 5.),
+                        egui::Align2::CENTER_BOTTOM,
+                        time,
+                        egui::FontId::proportional(11.),
+                        color,
+                    );
+                }
                 let response = response.on_hover_text(cue.map_or(
                     "Click to save the current position. Right-click for cue options.".into(),
                     |cue| {
@@ -144,8 +177,7 @@ pub fn edit(
     current.schema_version = Some(1);
     preparation::save_if_unchanged(
         root,
-        path.strip_prefix(root)
-            .map_err(|_| "Track is outside the library")?,
+        &amp_core::relative_folder(path, root).ok_or("Track is outside the library")?,
         &current,
         revision.as_deref(),
     )?;

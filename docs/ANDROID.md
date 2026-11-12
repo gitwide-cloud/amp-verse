@@ -99,3 +99,69 @@ Phone Smart Playlist ordering is a lightweight heuristic over saved BPM, energy 
 Reverse-audio scratching, scrolling DJ waveforms/beatgrids, full analysis/cue detection, separate hardware headphone routing, desktop-only window docking/add-ons, multitrack editing, shared-library metadata editing/sync review, and individual desktop-song downloads/offline Cast collections are not implemented by this update. Jogging seeks; it does not pretend to scratch. Android cue/sampler audio uses the current system output and does not promise a separate headphone bus. The full desktop engine remains on the computer, accessible through its supported Remote commands. AMP Lab retains its existing single-track trim/fades/gain/normalize/MP3 export foundation.
 
 Build: `:app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug`. The installed preview uses the same local debug signing key as 0.1.11, allowing an in-place update without clearing imports/settings. CI preview APKs use the CI debug key and are not guaranteed compatible with that installation.
+
+
+## Android 0.2.1 preview — Remote discovery
+
+AMP Remote opens with a prominent Discover devices button and automatically searches the current LAN. Player/DJ and Cast discovery run concurrently, independently of the command queue, with nearby hosts listed directly on screen. Tap a Player/DJ host to connect; password-protected hosts first select the address and request its control password. Tap a Cast host to open AMP Cast with that server selected. Manual address entry remains available. Refresh disables only during the bounded scan, and leaving Remote discards late discovery callbacks. Discovery never starts playback or sends control commands.
+
+Device verification: debug APK and instrumentation APK built and installed in place on Pixel 7. Three discovery tests passed, covering malformed replies, deduplication, sender-derived host addresses, password flags and the actual Remote screen’s automatic discovery/password flow. Tests use an isolated UDP responder and do not play audio.
+
+
+## Android 0.2.2 preview — Smart Playlist options
+
+Open Library, tap a Smart Playlist, then choose **Genres, analysis filters & advanced options**. The editor provides Hype/Steady/Chill buttons, Auto/Manual target energy, multiple folder/regular-playlist sources and individual songs (union with deduplication and subfolders), genres, all 32 desktop analysis/track filter fields, excluded/preferred songs, recognition-first selection, saved energy progression, recent-song protection, end-of-source fallback, and approved manual build/drop cue preference for Hype. Empty sources mean no songs; an empty genre selection means all genres. Every filter must match, and missing numeric/text metadata does not match a range/text condition. Stem count describes saved preparation entries, not downloaded/usable stem audio.
+
+Filters use the desktop field names, types and scales (energy 1–10, confidence percent); phone overrides take precedence where present. Saved BPM, Camelot and energy are read from synced preparation without running an analyzer. Preview runs off the UI thread; it and Play use the current draft. Advanced Apply updates the draft, Save Playlist persists it, and Cancel leaves saved rules intact. Phone rules remain local and never publish to a NAS on reconnect. This does not add shared-library rule synchronization or the Rust desktop mixing engine to Android.
+
+Loading a Smart Playlist from the DJ source picker applies its options to that Auto DJ session. At queue exhaustion, Stop ends playback; Continue refills from the eligible source, avoiding recent songs when possible, relaxing recency if necessary, and never selecting the currently sounding track. Ordinary playlists remain finite. Recognition is first only if it is in the selected source and passes every filter/exclusion. Preferences affect ordering without overriding eligibility. Hype's manual cue preference uses saved build/drop labels within the saved cue-out.
+
+Verification: Android build/lint and focused Pixel 7 instrumentation tests cover saved metadata scales, missing values, all filter field definitions, manual cue preference, multiple sources/subfolders/deduplication, exclusions, recognition, local overrides and persistence. Test fixtures use a private temporary catalog and namespaced preferences. No phone analysis engine is bundled.
+
+
+## Android 0.2.3 preview — connection and preparation compatibility
+
+Queued Remote commands check their original connection generation before network dispatch; leaving, disconnecting or selecting another host discards commands that have not started. A command already sent is not retried. Follow-up state reads include the host session and reject responses from another session. Tests use an isolated HTTP responder and a deliberately blocked command queue.
+
+Smart Playlist filters now read canonical Rust preparation extensions as flattened top-level fields, retaining compatibility with older nested phone drafts. Genre, artist, codec properties, energy profile and other analysis filters therefore work on the actual synced document format. Android still runs no analyzer and does not publish offline edits just because it reconnects. Explicit offline edit review/publishing remains outstanding.
+
+
+The 0.2.3 Remote reconnect path also invalidates queued commands immediately on connection loss, before waiting to reconnect. Temporary network failures retry automatically with 3–30 second backoff; password/incompatible API errors stop automatic attempts for manual correction. Four focused Remote tests cover queued work on disconnect/loss, repeated refused handshakes and restarted-host state. Together with nine Smart Playlist checks, 13 tests pass on Pixel 7. The app is left installed after verification.
+
+
+## Android 0.2.4 preview — simpler phone interface
+
+- Persistent Player / Library / DJ / Cast / Remote tabs. More opens a full app chooser containing Lab and Settings. Existing themes and local files are retained; the shared chrome uses neutral grey surfaces, readable text and amber selection, with amber A / cyan B accents.
+- Player keeps four transport buttons and Equalizer / Cast / Options. Empty queues offer Add music. Unavailable transport is disabled. Portrait keeps the queue below; short landscape windows put the player and queue side by side. Placeholder artwork is a scalable music-note vector.
+- Library separates searchable Songs from Playlists, with one Add music entry. Playlist creation, Smart Playlist sources, genres, all saved-analysis filters, preview and editing remain available. Automatic energy hides its manual slider until needed.
+- Phone DJ uses one Auto Mix switch. Turning it on without a queue opens the playlist chooser; choosing a nonempty list can start the mix. Turning it off cancels the automatic fade without stopping manual deck audio. Auto Crossfade prepares the next queued song before fading, waits for playback readiness, and abandons a stalled incoming track after 15 seconds while retaining the outgoing deck. Crossfade timing stepper, hot cues, jog seeking, sync and loops remain. Sampler / Cue Decks are grouped behind a labelled expander. A/B selection also sets and remembers the DJ browser's load destination.
+- Remote puts discovery first, manual connection settings behind an expander and less-used mixer/sampler tools under More DJ controls. Host password selection expands the connection fields. The existing generation/session safety and reconnect backoff remain.
+- Cast starts with nearby station discovery, optional Internet radio search and Offline playlists. Connected listening/Google Cast actions appear after connection; host startup/broadcast/speaker settings live under Station controls. Start radio & listen now explicitly selects the chosen host playlist before opening its stream. It controls the shared station, not a private independent phone stream. Google Cast's picker uses the same palette and insets, and accepts HTTP/HTTPS station streams; local-phone DJ broadcasting remains outside this update.
+- Startup does not request a generic notification permission before the user can explore. Android's media-session notification exemption is documented by [Android Developers](https://developer.android.com/develop/ui/views/notifications/notification-permission#exemptions); notification settings remain available in Settings.
+
+No analysis engine or background NAS editing was added. These screens use synced preparation and local overrides. Reverse scratching, full desktop DJ DSP/stems, offline-edit publishing and physical receiver acceptance remain separate work; controls do not pretend those features are implemented.
+
+
+0.2.4 verification: build and lint pass; 22 Pixel 7 checks cover the new navigation/portrait-landscape bounds, advanced-control access, Smart Playlist data and filters, Remote reconnect/session safety and discovery, real silent DJ handoffs/staging/recreation, square pads in all three themes, authenticated playlist selection, and Google Cast picker initialization. Additional final-device checks verify screen-off Media3 playback with notification permission denied and recheck the primary layouts. Physical speaker playback was not repeated by this UI pass. APK names retain version/build/commit, and installation is in place without uninstall cleanup.
+
+
+## 0.2.5: playback ownership and Update
+
+Android's service owns the Player/DJ handoff. Starting a DJ deck or sampler pauses normal Player playback. Selecting Player carries the active main song, position, and remaining playlist into normal sequential playback and pauses all DJ decks and samples. Smart Playlist repeat policy is retained; normal Player uses full-song playback and short fades rather than DJ transitions. The fade envelope runs in PCM processing separately from the volume control. Synced analysis remains read-only playback preparation; no analysis engine is installed on Android.
+
+**Settings → App updater → Update** checks the stable GitHub release, downloads its versioned APK, verifies its size/SHA-256, package identity, increasing version code and matching signing certificate, then opens Android's installer. The **GitHub** link sits immediately underneath Update. Cancel removes partial downloads. Completed APKs can be installed again after cancelling the OS prompt. Android may first ask to allow installation from AMP Verse; return to Settings after granting it.
+
+Windows/Linux expose **Update** and **GitHub** in Plugin Manager. The external helper waits for Player to close, installs a verified portable package with rollback and restarts Player. Configuration, music and prepared metadata remain outside the package. System-owned application folders must be writable by the user; otherwise the updater reports the permission problem. Other AMP processes holding package files open cause rollback and an instruction to close them and retry.
+
+Release contract: `amp-update.json`, schema 1, stable version and `windows-x86_64`, `linux-x86_64`, `android-arm64` entries contain versioned asset name, exact byte size and SHA-256; Android additionally requires `version_code`. `tools/update_manifest.py` creates it from completed packages. The tagged release workflow requires persistent Android signing secrets (`AMP_ANDROID_KEYSTORE_BASE64`, `AMP_ANDROID_STORE_PASSWORD`, `AMP_ANDROID_KEY_ALIAS`, `AMP_ANDROID_KEY_PASSWORD`) and publishes all three platforms together. Signing keys are never committed. Preview CI debug keys are not stable update identities. A local APK must continue using its existing key to update without losing app data.
+
+Earlier sections describe older milestones; this section replaces the old browser-only updater behavior. Local tests do not by themselves prove public release download/installation; that requires published matching assets and a newer installed version.
+
+
+## 0.2.6 Android UI testing build
+
+The main navigation is Player, Library, DJ and Devices. Devices separates Listen & Cast from Remote Control. The Audio button explains phone output, station casting and remote control; Lab and Settings remain in the overflow menu. Classic retains grey beveled controls, amber active controls, cyan deck B, spectrum bars and vector vinyl-style jog wheels.
+
+Portrait DJ uses one focused A/B deck with a persistent crossfader/Mix next strip above navigation. Wider windows put the mixer between both decks. Mixer settings open a scrollable dialog with master volume, remembered crossfade-time steppers and EQ access. Detailed seeking/staging and deck settings are expandable. Panel expansion and browsing scroll positions are retained. Short Player windows use independently scrollable transport and queue panes. Navigation uses inline icons in short windows, with at least 48dp targets.
+
+This changes Android UI only; the desktop UI research remains a future pass. No phone analysis engine was added. The test build has versionCode 26 and preserves the existing signing identity. It is installed for device testing rather than replacing the shared stable desktop/Android update manifest with an Android-only release.

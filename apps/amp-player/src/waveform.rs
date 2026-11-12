@@ -10,17 +10,66 @@ use std::{
         mpsc,
     },
 };
+type Peaks = Arc<[[f32; 2]]>;
 const BIN: usize = 160; // 20 ms, independent of device sample rate.
 #[derive(Default)]
 pub struct Lane {
     pub height: Option<f32>,
     pub overview: bool,
+    pub overlay: bool,
+    pub ignore_seek: bool,
+    pub tint: Option<Color32>,
+    pub hide_caption: bool,
     pub seek: Option<f64>,
     path: Option<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
-    rx: Option<mpsc::Receiver<Result<Vec<[f32; 2]>, String>>>,
-    peaks: Vec<[f32; 2]>,
+    rx: Option<mpsc::Receiver<Result<Peaks, String>>>,
+    peaks: Arc<[[f32; 2]]>,
     error: Option<String>,
+}
+#[derive(Default)]
+struct CacheEntry {
+    peaks: Option<std::sync::Weak<[[f32; 2]]>>,
+    building: bool,
+}
+fn shared_decode(path: &Path, cancel: &AtomicBool) -> Result<Arc<[[f32; 2]]>, String> {
+    use std::sync::{Condvar, Mutex, OnceLock};
+    type Entry = Arc<(Mutex<CacheEntry>, Condvar)>;
+    static CACHE: OnceLock<Mutex<std::collections::HashMap<PathBuf, Entry>>> = OnceLock::new();
+    let entry = CACHE
+        .get_or_init(Default::default)
+        .lock()
+        .map_err(|_| "Waveform cache unavailable")?
+        .entry(path.to_path_buf())
+        .or_insert_with(|| Arc::new((Mutex::new(CacheEntry::default()), Condvar::new())))
+        .clone();
+    let mut state = entry.0.lock().map_err(|_| "Waveform cache unavailable")?;
+    loop {
+        if cancel.load(Ordering::Relaxed) {
+            return Err("Waveform replaced".into());
+        }
+        if let Some(peaks) = state.peaks.as_ref().and_then(std::sync::Weak::upgrade) {
+            return Ok(peaks);
+        }
+        if !state.building {
+            state.building = true;
+            break;
+        }
+        state = entry
+            .1
+            .wait_timeout(state, std::time::Duration::from_millis(100))
+            .map_err(|_| "Waveform cache unavailable")?
+            .0;
+    }
+    drop(state);
+    let result = decode(path, cancel).map(Arc::<[[f32; 2]]>::from);
+    let mut state = entry.0.lock().map_err(|_| "Waveform cache unavailable")?;
+    state.building = false;
+    if let Ok(peaks) = &result {
+        state.peaks = Some(Arc::downgrade(peaks));
+    }
+    entry.1.notify_all();
+    result
 }
 fn decode(path: &Path, cancel: &AtomicBool) -> Result<Vec<[f32; 2]>, String> {
     let mut child = amp_core::command("ffmpeg")
@@ -88,22 +137,14 @@ fn graph_rect(rect: egui::Rect) -> egui::Rect {
     )
 }
 impl Lane {
-    pub fn show(
-        &mut self,
-        ui: &mut egui::Ui,
-        root: &Path,
-        track: Option<&amp_core::Track>,
-        position: f64,
-        span: f64,
-        deck: usize,
-    ) {
+    fn prepare(&mut self, ui: &egui::Ui, root: &Path, track: Option<&amp_core::Track>) {
         let path = track.and_then(|t| amp_core::resolve(root, &t.path).ok());
         if path != self.path {
             if let Some(cancel) = self.cancel.take() {
                 cancel.store(true, Ordering::Relaxed);
             }
             self.path = path.clone();
-            self.peaks.clear();
+            self.peaks = Arc::default();
             self.error = None;
             self.rx = None;
             if let Some(path) = path {
@@ -112,7 +153,7 @@ impl Lane {
                 let (tx, rx) = mpsc::channel();
                 self.rx = Some(rx);
                 std::thread::spawn(move || {
-                    let _ = tx.send(decode(&path, &cancel));
+                    let _ = tx.send(shared_decode(&path, &cancel));
                 });
             }
         }
@@ -135,21 +176,183 @@ impl Lane {
                 }
             }
         }
-        let color = if deck == 0 {
-            super::skin::ORANGE
-        } else {
-            super::skin::CYAN
-        };
+    }
+    pub fn thumbnail(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &Path,
+        track: Option<&amp_core::Track>,
+        position: f64,
+        accent: egui::Color32,
+        height: f32,
+    ) -> Option<f64> {
+        self.prepare(ui, root, track);
         let (rect, response) = ui.allocate_exact_size(
-            egui::vec2(ui.available_width(), self.height.unwrap_or(80.)),
+            egui::vec2(ui.available_width().max(1.), height.max(1.)),
             egui::Sense::click(),
         );
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 3., Color32::from_rgb(5, 7, 10));
+        let profile = track
+            .and_then(|t| amp_core::energy_profile::read(&t.preparation))
+            .filter(|p| p.duration > 0. && !p.sections.is_empty());
+        let mut choice = None;
+        if let (Some(profile), Some(track)) = (&profile, track) {
+            for (index, section) in profile.sections.iter().enumerate() {
+                let section_rect = egui::Rect::from_min_max(
+                    egui::pos2(
+                        rect.left() + (section.start / profile.duration) as f32 * rect.width(),
+                        rect.top(),
+                    ),
+                    egui::pos2(
+                        rect.left() + (section.end / profile.duration) as f32 * rect.width(),
+                        rect.bottom(),
+                    ),
+                )
+                .intersect(rect);
+                let allowed = section.start
+                    >= amp_core::energy_profile::entry_bound(&track.preparation)
+                    && track
+                        .preparation
+                        .cue_out
+                        .is_none_or(|out| section.start < out);
+                let current = position >= section.start && position < section.end;
+                let hovered = response
+                    .hover_pos()
+                    .is_some_and(|p| section_rect.contains(p));
+                let color = if allowed { accent } else { egui::Color32::GRAY };
+                painter.rect_filled(
+                    section_rect,
+                    1.,
+                    color.gamma_multiply(if current {
+                        0.28
+                    } else if hovered {
+                        0.2
+                    } else {
+                        0.08
+                    }),
+                );
+                painter.line_segment(
+                    [section_rect.left_top(), section_rect.left_bottom()],
+                    Stroke::new(1., color),
+                );
+                let band = egui::Rect::from_min_max(
+                    egui::pos2(section_rect.left(), (rect.bottom() - 14.).max(rect.top())),
+                    section_rect.right_bottom(),
+                );
+                painter.rect_filled(band, 0., color.gamma_multiply(0.5));
+                if section_rect.width() >= 16. {
+                    painter.text(
+                        band.center(),
+                        egui::Align2::CENTER_CENTER,
+                        format!("{}", index + 1),
+                        egui::FontId::monospace(10.),
+                        egui::Color32::WHITE,
+                    );
+                }
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(
+                        ui.scope_id().with(("thumbnail-section", index)),
+                        section_rect,
+                    )
+                });
+                if hovered {
+                    response.clone().on_hover_text(format!(
+                        "{} · {:.1}–{:.1}s · energy {:.0}/10\n{}",
+                        section.name,
+                        section.start,
+                        section.end,
+                        1. + section.energy * 9.,
+                        if allowed {
+                            "Click: prepare here when paused; queue a timed jump when playing."
+                        } else {
+                            "Outside protected cue bounds. Edit cues in Library to enable."
+                        }
+                    ));
+                    if allowed && response.clicked() {
+                        choice = Some(section.start);
+                    }
+                }
+            }
+        }
+        let n = self.peaks.len();
+        if n > 0 {
+            let graph = if profile.is_some() {
+                egui::Rect::from_min_max(
+                    rect.min,
+                    egui::pos2(rect.right(), (rect.bottom() - 14.).max(rect.top() + 1.)),
+                )
+            } else {
+                rect
+            };
+            let count = (rect.width().max(1.) as usize).min(n);
+            for x in 0..count {
+                let index = x * n / count;
+                let peak = self.peaks[index];
+                let px = rect.left() + x as f32 * rect.width() / count as f32;
+                painter.line_segment(
+                    [
+                        egui::pos2(px, graph.center().y + -peak[0] * graph.height() * 0.45),
+                        egui::pos2(px, graph.center().y - peak[1] * graph.height() * 0.45),
+                    ],
+                    egui::Stroke::new(1., accent),
+                );
+            }
+            let duration = n as f64 / 50.;
+            let x = rect.left() + (position / duration).clamp(0., 1.) as f32 * rect.width();
+            painter.line_segment(
+                [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
+                egui::Stroke::new(1., egui::Color32::WHITE),
+            );
+        }
+        if profile.is_none() && track.is_some() {
+            painter.text(
+                rect.left_bottom(),
+                egui::Align2::LEFT_BOTTOM,
+                "Analyze for sections",
+                egui::FontId::proportional(10.),
+                egui::Color32::GRAY,
+            );
+            response
+                .on_hover_text("Analyze this song in Library to enable clickable energy sections.");
+        }
+        choice
+    }
+    pub fn show(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &Path,
+        track: Option<&amp_core::Track>,
+        position: f64,
+        span: f64,
+        deck: usize,
+    ) {
+        self.prepare(ui, root, track);
+        let color = self.tint.unwrap_or(if deck.is_multiple_of(2) {
+            super::skin::ORANGE
+        } else {
+            super::skin::CYAN
+        });
+        let (rect, response) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width(), self.height.unwrap_or(80.)),
+            if self.ignore_seek {
+                egui::Sense::hover()
+            } else {
+                egui::Sense::click()
+            },
+        );
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::unique(("waveform-lane", deck)), rect));
+        let painter = ui.painter_at(rect);
+        if !self.overlay {
+            painter.rect_filled(rect, 3., Color32::from_rgb(5, 7, 10));
+        }
         let graph = graph_rect(rect);
         let camera = if self.overview { span * 0.3 } else { position };
         let start = camera - span * 0.3;
-        if response.clicked()
+        if !self.ignore_seek
+            && response.clicked()
             && let Some(at) = response.interact_pointer_pos()
         {
             self.seek =
@@ -269,6 +472,9 @@ impl Lane {
                         label_edge[row] = x + short.len() as f32 * 6. + 12.;
                     }
                     if response.hover_pos().is_some_and(|p| (p.x - x).abs() < 5.) {
+                        if response.clicked() {
+                            self.seek = Some(*seconds);
+                        }
                         response
                             .clone()
                             .on_hover_text(format!("{label} · {seconds:.3} s (source)"));
@@ -284,17 +490,19 @@ impl Lane {
             ],
             Stroke::new(2., Color32::WHITE),
         );
-        let name = track.map_or("Load a track", |t| t.title.as_str());
-        painter.text(
-            rect.left_top() + egui::vec2(5., 2.),
-            egui::Align2::LEFT_TOP,
-            format!(
-                "{} · {position:.2}s · {name}",
-                if deck == 0 { "A" } else { "B" }
-            ),
-            egui::FontId::monospace(12.),
-            color,
-        );
+        if !self.hide_caption {
+            let name = track.map_or("Load a track", |t| t.title.as_str());
+            painter.text(
+                rect.left_top() + egui::vec2(5., 2.),
+                egui::Align2::LEFT_TOP,
+                format!(
+                    "{} · {position:.2}s · {name}",
+                    if deck.is_multiple_of(2) { "A" } else { "B" }
+                ),
+                egui::FontId::monospace(12.),
+                color,
+            );
+        }
         if self.peaks.is_empty() && track.is_some() {
             painter.text(
                 graph.center(),
@@ -318,6 +526,59 @@ impl Drop for Lane {
 mod tests {
     use super::*;
     #[test]
+    fn strip_sections_click_their_start_and_protect_manual_cue_bounds() {
+        for (section_index, expected) in [(0usize, None), (1, Some(10.))] {
+            let ctx = egui::Context::default();
+            let mut lane = Lane::default();
+            let mut track = amp_core::Track {
+                path: "missing.wav".into(),
+                title: "Sections".into(),
+                preparation: Default::default(),
+            };
+            track.preparation.cue_in = 5.;
+            track.preparation.manual_override = true;
+            track.preparation.extensions.insert("energy_profile".into(),serde_json::json!({"version":1,"duration":20.,"step":1.,"curve":[],"sections":[{"id":"intro","name":"Beginning","start":0.,"end":10.,"energy":0.3},{"id":"drop","name":"High energy","start":10.,"end":20.,"energy":0.9}]}));
+            let mut point = egui::Pos2::ZERO;
+            let mut chosen = None;
+            for frame in 0..4 {
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300., 100.),
+                    )),
+                    ..Default::default()
+                };
+                raw.events.push(egui::Event::PointerMoved(point));
+                if frame >= 2 {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: frame == 2,
+                        modifiers: Default::default(),
+                    });
+                }
+                let mut output = ctx.run_ui(raw, |ui| {
+                    if let Some(at) =
+                        lane.thumbnail(ui, Path::new(""), Some(&track), 6., Color32::YELLOW, 60.)
+                    {
+                        chosen = Some(at);
+                    }
+                    point = ui
+                        .ctx()
+                        .data(|data| {
+                            data.get_temp::<egui::Rect>(
+                                ui.scope_id().with(("thumbnail-section", section_index)),
+                            )
+                        })
+                        .unwrap()
+                        .center();
+                });
+                output.textures_delta.clear();
+            }
+            assert_eq!(chosen, expected);
+        }
+    }
+    #[test]
     #[ignore = "requires ffmpeg and AMP_WAVEFORM_FIXTURE"]
     fn real_audio_has_silence_then_signal() {
         let path = std::env::var_os("AMP_WAVEFORM_FIXTURE").expect("fixture path");
@@ -330,6 +591,25 @@ mod tests {
         );
         assert!(peaks[60..400].iter().any(|p| p[1] > 0.01 && p[0] < -0.01));
         assert!(decode(Path::new(&path), &AtomicBool::new(true)).is_err());
+    }
+    #[test]
+    #[ignore = "requires ffmpeg and AMP_WAVEFORM_FIXTURE"]
+    fn concurrent_views_share_the_same_decoded_peak_buffer() {
+        let path = PathBuf::from(std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(6));
+        let workers: Vec<_> = (0..6)
+            .map(|_| {
+                let path = path.clone();
+                let barrier = barrier.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    shared_decode(&path, &AtomicBool::new(false)).unwrap()
+                })
+            })
+            .collect();
+        let buffers: Vec<_> = workers.into_iter().map(|w| w.join().unwrap()).collect();
+        assert!(!buffers[0].is_empty());
+        assert!(buffers.iter().all(|peaks| Arc::ptr_eq(&buffers[0], peaks)));
     }
     #[test]
     fn compact_waveforms_have_positive_visible_signal_area() {

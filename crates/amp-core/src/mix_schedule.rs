@@ -54,6 +54,24 @@ pub fn phrase_anchor(p: &Preparation) -> Option<f64> {
         })
         .or(p.beat_offset)
 }
+/// Hand-approved grids retain priority. Automatic constant grids must not drive
+/// quantized transitions when analysis reports low confidence or audible drift.
+pub fn timing_reliable(p: &Preparation) -> bool {
+    p.bpm
+        .is_some_and(|b| b.is_finite() && (40. ..=300.).contains(&b))
+        && p.beat_offset.is_some_and(|o| o.is_finite() && o >= 0.)
+        && (p.manual_override
+            || p.analysis.as_ref().is_some_and(|a| a.reviewed)
+            || (p
+                .analysis
+                .as_ref()
+                .is_none_or(|a| a.tempo_confidence.is_finite() && a.tempo_confidence >= 0.5)
+                && p.extensions
+                    .get("rhythm_quality")
+                    .and_then(|v| v.get("stable"))
+                    .and_then(|v| v.as_bool())
+                    != Some(false)))
+}
 /// Source-time grid. Bar anchors are explicit user corrections, never inferred from beat phase.
 pub fn grid(
     out: &Preparation,
@@ -62,7 +80,7 @@ pub fn grid(
     origin: f64,
     timing: Timing,
 ) -> Option<Grid> {
-    if timing == Timing::Immediate {
+    if timing == Timing::Immediate || !timing_reliable(out) || !timing_reliable(incoming) {
         return None;
     }
     let beat = 60.
@@ -97,9 +115,78 @@ pub fn grid(
         anchor: anchor - origin + phase * beat * multiple,
     })
 }
+/// Account for actual playback rates and half/double-time pulse interpretations.
+/// Ambiguous half-time pairs may align beats, but do not claim matching musical bars/phrases.
+#[allow(clippy::too_many_arguments)]
+pub fn grid_at_rates(
+    out: &Preparation,
+    incoming: &Preparation,
+    entry: f64,
+    origin: f64,
+    timing: Timing,
+    out_rate: f64,
+    in_rate: f64,
+) -> Option<Grid> {
+    if ![out_rate, in_rate].iter().all(|r| r.is_finite() && *r > 0.) {
+        return None;
+    }
+    let ratio = out.bpm? * out_rate / (incoming.bpm? * in_rate);
+    let factor = [1., 0.5, 2.]
+        .into_iter()
+        .find(|factor| (ratio / factor - 1.).abs() <= 0.005)?;
+    if factor != 1. && timing.phrase_beats().is_some() {
+        return None;
+    }
+    let mut pulse = incoming.clone();
+    pulse.bpm = pulse.bpm.map(|b| b * factor);
+    grid(
+        out,
+        &pulse,
+        entry,
+        origin,
+        if factor != 1. && timing == Timing::Bar {
+            Timing::Beat
+        } else {
+            timing
+        },
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preroll_and_exact_fade_land_on_reviewed_phrase_boundary() {
+        let a = Preparation {
+            bpm: Some(120.),
+            beat_offset: Some(0.),
+            ..Default::default()
+        };
+        let mut b = a.clone();
+        b.extensions
+            .insert("mix_phrase_anchor".into(), serde_json::json!(20.));
+        let grid = grid_at_rates(&a, &b, 17., 0., Timing::Phrase16, 1., 1.).unwrap();
+        let start = grid.next(0.1);
+        assert!((start - 5.).abs() < 1e-9);
+        assert!(((start + 3.) / grid.period).fract().abs() < 1e-9);
+        let mut half = b.clone();
+        half.bpm = Some(60.);
+        assert!(grid_at_rates(&a, &half, 17., 0., Timing::Beat, 1., 1.).is_some());
+        assert!(grid_at_rates(&a, &half, 17., 0., Timing::Phrase16, 1., 1.).is_none());
+        assert!(grid_at_rates(&a, &b, 17., 0., Timing::Beat, 1., 1.1).is_none());
+    }
+    #[test]
+    fn drifting_automatic_grids_fall_back_until_reviewed() {
+        let mut p = Preparation {
+            bpm: Some(120.),
+            beat_offset: Some(0.),
+            ..Default::default()
+        };
+        p.extensions
+            .insert("rhythm_quality".into(), serde_json::json!({"stable":false}));
+        assert!(grid(&p, &p, 0., 0., Timing::Phrase16).is_none());
+        p.manual_override = true;
+        assert!(grid(&p, &p, 0., 0., Timing::Phrase16).is_some());
+    }
     #[test]
     fn phase_matches_entry_and_bars_require_reviewed_anchors() {
         let mut p = Preparation {

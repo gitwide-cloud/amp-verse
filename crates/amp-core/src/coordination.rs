@@ -456,6 +456,11 @@ impl Lease {
         device: &str,
         ttl: Duration,
     ) -> Result<Claimed, String> {
+        let (owner, path) =
+            crate::music_sources::owner(root, relative).map_err(|e| e.to_string())?;
+        if owner != root.canonicalize().map_err(|e| e.to_string())? {
+            return Self::claim(&owner, &path, analysis_type, device, ttl);
+        }
         crate::storage::enroll(root)?;
         let _migration = Lock::acquire(&root.join("ampdj/catalog-migration"))?;
         let library = library_id(root)?;
@@ -656,6 +661,11 @@ fn valid_engine(p: &crate::Preparation) -> bool {
 
 #[cfg(feature = "analysis")]
 pub fn analyze_shared(root: &Path, relative: &Path, force: bool) -> Result<AnalysisResult, String> {
+    let (owner, path) = crate::music_sources::owner(root, relative).map_err(|e| e.to_string())?;
+    if owner != root.canonicalize().map_err(|e| e.to_string())? {
+        return analyze_shared(&owner, &path, force);
+    }
+
     let audio = crate::resolve(root, relative).map_err(|e| e.to_string())?;
     let signature = source_stat(&audio)?;
     let cached = crate::preparation::load(&audio)?;
@@ -716,6 +726,10 @@ pub fn analyze_draft(
     relative: &Path,
     draft: &crate::Preparation,
 ) -> Result<crate::Preparation, String> {
+    let (owner, path) = crate::music_sources::owner(root, relative).map_err(|e| e.to_string())?;
+    if owner != root.canonicalize().map_err(|e| e.to_string())? {
+        return analyze_draft(&owner, &path, draft);
+    }
     let device = device_id()?;
     let lease = match Lease::claim(
         root,

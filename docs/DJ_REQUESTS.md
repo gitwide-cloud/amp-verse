@@ -1,5 +1,13 @@
 # Live song requests and transition techniques
 
+Web requests: open DJ Library → Song requests → Open song-request web page. The page is served by the running desktop DJ at `/requests`, normally on port 8790. On a phone use the DJ computer's LAN address and the same port. Its existing password applies.
+
+Type any part of a title, select a matching song, choose within 1–5 songs and press Send request. Matching ignores capitalization and searches all loaded titles; up to 100 rows appear, with a prompt to narrow larger results. Filtering out a selected song clears the selection. Selecting a song never loads a deck.
+
+The page uses the existing session-bound request queue. The title catalog omits paths and cues, and requires the usual authentication. Network retries retain the command ID. Requests rejected by the DJ show the reason. The DJ must have a Smart Playlist loaded to accept requests.
+
+Verification includes simulated-browser filter, selection, submission and retry tests, plus isolated HTTP tests for compact catalog delivery, password/session checks and request dispatch. The tests do not submit requests to the running user session.
+
 Fresh installs start with a single **Demo** playlist. It contains no supplied songs or private event lists. Existing saved playlists remain intact on upgrade.
 
 Desktop DJ / Transition options offers six independent technique switches: Scratch, Stutter, Tape brake, Filter sweep, Bass swap and Beatmatch. Variety rotates the enabled techniques at the saved frequency; Clean fade bypasses effects. The beatmatch technique uses prepared BPM and the deck's existing tempo sync range; it is tempo matching, not a new beat-phase or key-lock algorithm. These are deterministic performance presets, not a trained or self-learning model. Mix time remains independently adjustable.

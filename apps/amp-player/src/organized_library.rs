@@ -1,6 +1,18 @@
 use super::*;
 impl Player {
     pub(super) fn library_ui(&mut self, ui: &mut egui::Ui) {
+        let blocked = self.live_mix.as_ref().is_some_and(|b| b.running())
+            || self.run.auto
+            || self.auto
+            || self.auxiliary_playing()
+            || self
+                .audio
+                .as_ref()
+                .is_some_and(|a| (0..6).any(|d| a.playing(d)))
+            || self.preparer.busy()
+            || self.stem_panel.busy()
+            || self.lab_open;
+
         if theme::current(ui.ctx()) != theme::Theme::Classic {
             let style = ui.style_mut();
             style
@@ -16,13 +28,7 @@ impl Player {
                 .text_styles
                 .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.));
         }
-        self.preparer.preview_blocked = self.run.auto
-            || self.run.locked
-            || self.auxiliary_playing()
-            || self
-                .audio
-                .as_ref()
-                .is_some_and(|a| a.playing(0) || a.playing(1));
+        self.preparer.preview_blocked = self.library_preview_blocked();
         self.preparer
             .show(ui.ctx(), &self.root, self.library.as_mut());
         ui.painter().rect_filled(
@@ -31,16 +37,42 @@ impl Player {
             theme::current(ui.ctx()).palette().background,
         );
         self.header(ui, "AMP Library", false);
-        let height = (ui.available_height() - 64.).max(350.);
+        self.remote_access_button(ui);
+        let add_music = ui.button("Add music folder…");
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::unique("library-add-music"),
+                (add_music.rect, add_music.enabled()),
+            )
+        });
+        if add_music.clicked()
+            && let Some(folder) = rfd::FileDialog::new()
+                .set_title("Add music to Library (includes subfolders)")
+                .pick_folder()
+        {
+            self.add_music_source(folder);
+        }
+        if ui
+            .button("Find duplicates / Consolidate library…")
+            .clicked()
+        {
+            self.library_page = 8;
+        }
+
+        let height = (ui.available_height() - 64.).max(260.);
+        egui::ScrollArea::vertical().id_salt("library-workflow-body").max_height((ui.available_height()-62.).max(80.)).auto_shrink([false,false]).show(ui,|ui| {
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(176.,height - 70.),egui::Layout::top_down(egui::Align::Min),|ui| {
-                for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(7,icons::Icon::Analyze,"Equalizer")] {
+                egui::ScrollArea::vertical().id_salt("library-navigation").max_height((height-180.).max(160.)).show(ui,|ui|{
+                for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(7,icons::Icon::Analyze,"Equalizer"),(8,icons::Icon::Folder,"Organise library"),(9,icons::Icon::List,"Tags & artwork"),(10,icons::Icon::List,"Podcasts")] {
                     if icons::button(ui,icon,title,self.library_page==page,egui::vec2(172.,46.)).clicked(){self.library_page=page;}
                 }
+                });
                 ui.add_space(20.);ui.separator();
                 let total=self.library.as_ref().map_or(0,|l|l.tracks.len());
-                ui.label(RichText::new("Library ready").color(skin::signal(ui)));ui.weak(format!("{total} tracks"));
-                ui.weak(if self.preparer.busy(){"Analysis running"}else{"No active analysis"});
+                ui.label(RichText::new(if self.root.as_os_str().is_empty() {"Add a music folder"} else if self.scan.is_some() && self.library.is_none() {"Finding music…"} else if self.scan.is_some() {"Library ready · refreshing"} else {"Library ready"}).color(skin::signal(ui)));ui.weak(format!("{total} tracks"));
+                ui.weak(if self.analyze_after_scan {"Finding analysis inputs…"} else if self.preparer.busy(){"Analysis running"}else{"No active analysis"});
             });
             ui.separator();
             ui.vertical(|ui| {ui.set_width(ui.available_width()-8.);
@@ -48,15 +80,30 @@ impl Player {
                     0 => self.organized_music(ui,height),
                     1 => self.organized_smart(ui,height),
                     2 => self.organized_playlists(ui,height),
-                    3 => {egui::ScrollArea::vertical().max_height(height-50.).show(ui,|ui| {self.controllers.show(ui);ui.separator();ui.heading("AMP Cast devices");self.cast.show(ui, &self.root, self.library.is_some() && self.scan.is_none());});},
+                    3 => {egui::ScrollArea::vertical().max_height(height-50.).show(ui,|ui| {self.remote_access_button(ui);ui.weak("Control Player / DJ from Android or a web browser; open Cast and song requests.");ui.separator();if self.outputs.show(ui,blocked) {
+                        let prepared=self.loaded;
+                        self.audio=None;self.right_sample_audio=None;
+                        self.loaded=[None;6];self.playing=[false;6];
+                        for (deck,index) in prepared.into_iter().enumerate() {if let Some(index)=index {self.load_deck(deck,index,false);}}
+                    }
+                    ui.separator();self.controllers.show(ui);ui.separator();ui.heading("AMP Cast devices");self.cast.show(ui, &self.root, self.library.is_some());});},
                     4 => {ui.heading("Playback history");ui.weak("Tracks started by this desktop session. A start does not mean the full track was played.");egui::ScrollArea::vertical().max_height(height-80.).show(ui,|ui|{for (deck,title) in self.playback_history.iter().rev(){ui.label(format!("Deck {}    {title}",deck+1));}if self.playback_history.is_empty(){ui.weak("Play a song to begin your session history.");}});},
-                    5 => {ui.heading("Music sources");ui.label("Local folders and mounted network libraries");ui.label(self.root.display().to_string());ui.horizontal(|ui|{if ui.button("Browse music folder").clicked(){self.choose_folder();}
-if ui.add_enabled(self.scan.is_none(),egui::Button::new("Rescan")).clicked(){self.scan();}});ui.separator();ui.heading("Remote control");ui.label(&self.control_status);ui.label("Listen address");ui.text_edit_singleline(&mut self.control_bind);ui.label("Optional password");ui.add(egui::TextEdit::singleline(&mut self.control_password).password(true));ui.horizontal(|ui|{if ui.button("Start / restart control").clicked(){self.start_control(ui.ctx());}
-if ui.button("Stop control").clicked(){self.control=None;self.control_restart=None;self.control_status="Control stopped".into();}});theme::selector(ui);},
+                    5 => {ui.heading("Music sources");ui.label("Local folders and mounted network libraries");self.music_source_controls(ui);ui.separator();self.remote_access_button(ui);theme::selector(ui);},
                     7 => self.library_equalizer(ui),
+                    9 => {if self.selected.is_none() && self.library.as_ref().is_some_and(|l|!l.tracks.is_empty()){self.selected=Some(0);}egui::ScrollArea::vertical().id_salt("tags-artwork-page").max_height((height-60.).max(180.)).show(ui,|ui|{
+                        self.lookup.batch_controls(ui,&self.root,self.library.as_ref());
+                        if let Some(path)=self.lookup.review_song.take(){self.selected=self.library.as_ref().and_then(|l|l.tracks.iter().position(|t|t.path==path));}
+                        let track=self.selected.and_then(|i|self.library.as_ref()?.tracks.get(i));self.lookup.show(ui,&self.root,track);
+                    });},
+                    10 => self.podcasts.show(ui),
+                    8 => {
+                        let audio=&mut self.audio;
+                        if let Some(destination)=self.organizer.show(ui,&self.root,blocked,||{if let Some(audio)=audio {for d in 0..6 {audio.stop(d);}}}) {self.connect_music_root(destination);}
+                    },
                     _ => self.organized_analysis(ui),
                 }
             });
+        });
         });
         ui.separator();
         ui.horizontal(|ui| {
@@ -70,6 +117,84 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
             ui.separator();
             ui.add(egui::Label::new(self.root.display().to_string()).truncate());
         });
+        let status = ui
+            .add(egui::Label::new(&self.status).truncate())
+            .on_hover_text(&self.status);
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::unique("library-workflow-status"), status.rect)
+        });
+        #[cfg(not(test))]
+        let _ = status;
+    }
+    pub(super) fn add_music_source(&mut self, folder: PathBuf) {
+        if self.root.as_os_str().is_empty() {
+            self.connect_music_root(folder);
+            return;
+        }
+        match amp_core::music_sources::add(&self.root, &folder) {
+            Ok(sources) => {
+                self.source_roots = sources;
+                self.scan = None;
+                self.scan();
+                self.status="Music source added. Existing songs stay available while new folders scan in the background.".into();
+            }
+            Err(error) => self.status = error,
+        }
+    }
+    fn music_source_controls(&mut self, ui: &mut egui::Ui) {
+        ui.strong("Main library");
+        ui.label(self.root.display().to_string());
+        ui.horizontal_wrapped(|ui| {
+            if ui.button("Add music folder…").clicked()
+                && let Some(folder) = rfd::FileDialog::new()
+                    .set_title("Add another music source (includes subfolders)")
+                    .pick_folder()
+            {
+                self.add_music_source(folder);
+            }
+            if ui
+                .add_enabled(self.scan.is_none(), egui::Button::new("Rescan all sources"))
+                .clicked()
+            {
+                self.scan();
+            }
+            if ui.button("Change main library…").clicked() {
+                self.choose_folder();
+            }
+        });
+        ui.weak("Added folders are combined with the main library. Music files stay in their original locations.");
+        let mut remove = None;
+        egui::ScrollArea::vertical()
+            .id_salt("additional-music-sources")
+            .max_height(180.)
+            .show(ui, |ui| {
+                for source in &self.source_roots {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(source.root.display().to_string());
+                        if ui.small_button("Remove source").clicked() {
+                            remove = Some(source.id.clone());
+                        }
+                    });
+                }
+            });
+        if let Some(id) = remove {
+            match amp_core::music_sources::remove(&self.root, &id) {
+                Ok(sources) => {
+                    self.source_roots = sources;
+                    self.scan = None;
+                    self.scan();
+                    self.status =
+                        "Source removed from this library. Audio and preparation files were kept."
+                            .into();
+                }
+                Err(error) => self.status = error,
+            }
+        }
+        if self.scan.is_some() {
+            ui.label("Scanning sources in the background…");
+        }
+        ui.label(&self.status);
     }
     fn organized_smart(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.heading("Smart Playlists");
@@ -133,7 +258,6 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                         self.show_editor.preview_active = self.smart_preview.active();
                         self.show_editor.preview_status = self.smart_preview.status.clone();
                         self.show_editor.audition_blocked = self.auxiliary_playing()
-                            || self.run.locked
                             || self.run.auto
                             || self.audio.as_ref().is_some_and(|audio| {
                                 audio.playing(0)
@@ -236,37 +360,16 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 if ui
                     .add_enabled(
                         !name.trim().is_empty(),
-                        egui::Button::new("Create playlist..."),
+                        egui::Button::new(if self.queue.is_empty() {
+                            "Create playlist"
+                        } else {
+                            "Create from queue"
+                        }),
                     )
                     .clicked()
+                    && let Err(error) = self.create_named_playlist(&name)
                 {
-                    let directory = self.root.join("ampdj/playlists");
-                    match std::fs::create_dir_all(&directory) {
-                        Ok(()) => {
-                            let filename: String = name
-                                .chars()
-                                .map(|c| {
-                                    if c.is_control() || "<>:\"/\\|?*".contains(c) {
-                                        '_'
-                                    } else {
-                                        c
-                                    }
-                                })
-                                .collect();
-                            if let Some(path) = rfd::FileDialog::new()
-                                .set_directory(directory)
-                                .add_filter("AMP playlist", &["json"])
-                                .set_file_name(format!("{}.json", filename.trim()))
-                                .save_file()
-                                && let Err(error) = self.create_playlist_at(path, &name)
-                            {
-                                self.status = error;
-                            }
-                        }
-                        Err(error) => {
-                            self.status = format!("Could not create playlist folder: {error}")
-                        }
-                    }
+                    self.status = error;
                 }
                 if ui.button("Cancel").clicked() {
                     self.new_playlist_name = None;
@@ -317,6 +420,8 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                         .collect();
                     if let Some(indices) = indices {
                         self.queue = indices;
+                        self.player_sequence.smart=None;
+                        self.player_sequence.explicit_regular=true;
                         self.queue_selected = None;
                         self.playlist_snapshot = Some((path, list));
                     } else {
@@ -333,6 +438,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                             .as_ref()
                             .map_or("New playlist", |(_, p)| p.name.as_str()),
                     );
+                    if let Some((_,p))=&mut self.playlist_snapshot {ui.checkbox(&mut p.companion_available,"Available in Companion").on_hover_text("Save playlist to publish this preference.");}
                     ui.weak(format!("{} tracks", self.queue.len()));
                     ui.horizontal_wrapped(|ui| {
                         if ui.button("Add songs from Library").clicked() { self.library_page = 0; self.status = "Select songs with the library checkboxes, or use Add folder. Then save the playlist queue.".into(); }
@@ -344,6 +450,9 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                     {
                         self.selected = self.queue.first().copied();
                         if let Some(index) = self.selected {
+                            self.queue.remove(0);
+                            self.player_sequence.smart=None;
+                            self.player_sequence.explicit_regular=true;
                             self.play(0, index);
                             self.auto = true;
                             if let Some(a) = &self.audio {
@@ -392,23 +501,35 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 );
             }
             ui.label(if self.preparer.status.is_empty() {
-                "Ready to analyze your library"
+                if self.root.as_os_str().is_empty() {
+                    "Add a music folder above to begin."
+                } else {
+                    "Ready to analyze your library"
+                }
             } else {
                 &self.preparer.status
             });
-            if self.preparer.busy() {
+            if self.preparer.busy() || self.analyze_after_scan {
                 ui.spinner();
+            }
+            if crate::engine::path().is_none() {
+                ui.weak("The optional analysis engine is not installed. Playback and manual editing still work.");
+                if ui.button("Install analysis engine…").clicked() {
+                    self.addons.selected = 5;
+                    self.activate(ui, Some(skin::Module::Addons));
+                }
             }
             ui.add_space(12.);
             if ui
                 .add_enabled(
-                    !self.preparer.busy() && self.library.is_some(),
+                    !self.preparer.busy()
+                        && !self.analyze_after_scan
+                        && !self.root.as_os_str().is_empty(),
                     egui::Button::new("Analyze library"),
                 )
                 .clicked()
-                && let Some(lib) = &self.library
             {
-                self.preparer.batch(self.root.clone(), lib.tracks.clone());
+                self.request_library_analysis();
             }
             ui.label("Parallel songs (0 = automatic)");
             ui.add_enabled(
@@ -421,11 +542,12 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
         ui.add_space(18.);
         skin::panel(ui, false, |ui| {
             ui.set_min_width(ui.available_width());
-            let tracks = self
-                .library
-                .as_ref()
-                .map_or(&[][..], |l| l.tracks.as_slice());
-            self.stem_panel.library(ui, &self.root, tracks);
+            self.stem_panel.library(ui, &self.root);
+            if crate::stems::runtime().is_none() && ui.button("Open stem add-on setup…").clicked()
+            {
+                self.addons.selected = 6;
+                self.activate(ui, Some(skin::Module::Addons));
+            }
         });
         ui.add_space(18.);
         let blocked = self.run.auto
@@ -447,19 +569,36 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
             .and_then(|i| self.library.as_ref()?.tracks.get(i))
             .cloned();
         let prepare_height = (height * 0.4).clamp(150., 300.);
-        skin::panel(ui, false, |ui| {
-            egui::ScrollArea::vertical()
-                .id_salt("inline-prepare-panel")
-                .max_height(prepare_height)
-                .show(ui, |ui| {
-                    self.preparer.prepare_panel(
-                        ui,
-                        &self.root,
-                        track.as_ref(),
-                        self.library.as_mut(),
-                    );
+        let preparation = egui::CollapsingHeader::new("Prepare selected song")
+            .id_salt("library-selected-preparation")
+            .default_open(height >= 400.)
+            .show(ui, |ui| {
+                skin::panel(ui, false, |ui| {
+                    egui::ScrollArea::vertical()
+                        .id_salt("inline-prepare-panel")
+                        .max_height(prepare_height)
+                        .show(ui, |ui| {
+                            if let Some(track) = track.as_ref() {
+                                self.lookup.cover(ui, &self.root, track);
+                                if ui.button("Find tags / album artwork...").clicked() {
+                                    self.library_page = 9;
+                                    self.lookup.query.clear();
+                                }
+                            }
+                            self.preparer.prepare_panel(
+                                ui,
+                                &self.root,
+                                track.as_ref(),
+                                self.library.as_mut(),
+                            );
+                        });
                 });
-        });
+            });
+        let preparation_used = preparation.header_response.rect.height()
+            + preparation
+                .body_response
+                .as_ref()
+                .map_or(0., |response| response.rect.height());
         if let Some((path, section)) = self.preparer.mix_section.take()
             && let Some(t) = self
                 .library
@@ -478,7 +617,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 self.dj_open = true;
             }
         }
-        let height = (height - prepare_height - 24.).max(180.);
+        let height = (height - preparation_used - 12.).max(180.);
         ui.horizontal(|ui| {
             let (search_icon, _) =
                 ui.allocate_exact_size(egui::vec2(24., 24.), egui::Sense::hover());
@@ -524,93 +663,71 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                     } else {
                         height * 0.34
                     };
-                    egui::ScrollArea::both()
-                        .auto_shrink([false, false])
-                        .id_salt("organized-tracks")
-                        .max_height(list_height)
-                        .min_scrolled_height(list_height)
-                        .show(ui, |ui| {
-                            egui::Grid::new("organized-track-grid")
-                                .striped(true)
-                                .spacing([16., 12.])
-                                .show(ui, |ui| {
-                                    for label in ["Queue", "Title", "BPM", "Key", "Rating"] {
-                                        ui.strong(label);
-                                    }
-                                    ui.end_row();
-                                    if let Some(lib) = &self.library {
-                                        for (index, track) in lib.tracks.iter().enumerate() {
-                                            if !track.path.starts_with(&self.folder)
-                                                || !format!(
-                                                    "{} {}",
-                                                    track.title,
-                                                    track.path.display()
-                                                )
-                                                .to_lowercase()
-                                                .contains(&self.search.to_lowercase())
-                                            {
-                                                continue;
-                                            }
-                                            let mut included = self.queue.contains(&index);
-                                            if ui.checkbox(&mut included, "").changed() {
-                                                if included {
-                                                    self.queue.push(index);
-                                                } else {
-                                                    self.queue.retain(|&i| i != index);
-                                                    self.queue_selected = None;
-                                                }
-                                            }
-                                            let row = ui.selectable_label(
-                                                self.selected == Some(index),
-                                                &track.title,
-                                            );
-                                            let row = row.interact(egui::Sense::click_and_drag());
-                                            dragdrop::source(&row, self.root.join(&track.path));
-                                            if row.clicked() {
-                                                self.selected = Some(index);
-                                            }
-                                            if row.double_clicked() {
-                                                play = Some(index);
-                                            }
-                                            row.context_menu(|ui| {
-                                                if ui
-                                                    .button("Edit cues, key, BPM and rating")
-                                                    .clicked()
-                                                {
-                                                    edit = Some(index);
-                                                    ui.close();
-                                                }
-                                            });
-                                            ui.label(
-                                                track
-                                                    .preparation
-                                                    .bpm
-                                                    .map(|v| format!("{v:.1}"))
-                                                    .unwrap_or_else(|| "—".into()),
-                                            );
-                                            ui.label(
-                                                track
-                                                    .preparation
-                                                    .harmonic_key
-                                                    .as_deref()
-                                                    .or(track.preparation.key.as_deref())
-                                                    .unwrap_or("—"),
-                                            );
-                                            ui.label(
-                                                track
-                                                    .preparation
-                                                    .extensions
-                                                    .get("rating")
-                                                    .and_then(|v| v.as_u64())
-                                                    .map(|v| format!("{v}/5"))
-                                                    .unwrap_or_else(|| "—".into()),
-                                            );
-                                            ui.end_row();
-                                        }
-                                    }
-                                });
-                        });
-                    ui.horizontal(|ui| {
+                    let query=self.search.to_lowercase();
+                    let filtered:Vec<usize>=self.library.as_ref().map(|lib|lib.tracks.iter().enumerate().filter(|(_,t)|t.path.starts_with(&self.folder)&&(query.is_empty()||format!("{} {} {} {}",t.title,t.path.display(),track_columns::cell(t,"artist"),track_columns::cell(t,"album")).to_lowercase().contains(&query))).map(|(i,_)|i).collect()).unwrap_or_default();
+                    ui.weak(format!("{} matching tracks",filtered.len()));
+                    let title_width=(ui.available_width()-210.).max(130.);
+                    ui.horizontal(|ui|{ui.label("Queue");ui.add_sized([title_width,20.],egui::Label::new("Title"));ui.label("BPM    Key    Rating");});
+                    egui::ScrollArea::vertical().auto_shrink([false,false]).id_salt("organized-tracks").max_height(list_height).min_scrolled_height(list_height).show_rows(ui,28.,filtered.len(),|ui,range|{
+                        if let Some(lib)=&self.library {for position in range {let index=filtered[position];let track=&lib.tracks[index];
+                            ui.horizontal(|ui|{
+let mut included = self.queue.contains(&index);
+if ui.checkbox(&mut included, "").changed() {
+    if included {
+        self.queue.push(index);
+    } else {
+        self.queue.retain(|&i| i != index);
+        self.queue_selected = None;
+    }
+}
+let row = ui.add_sized([title_width,24.],egui::Button::selectable(self.selected==Some(index), &track.title).truncate());
+let row = row.interact(egui::Sense::click_and_drag());
+#[cfg(test)]if position==0 {ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique("library-first-track"),row.rect));}
+dragdrop::source(&row, amp_core::music_sources::audio_path(&self.root, &track.path));
+if row.clicked() {
+    self.selected = Some(index);
+}
+if row.double_clicked() {
+    play = Some(index);
+}
+row.context_menu(|ui| {
+    if ui
+        .button("Edit cues, key, BPM and rating")
+        .clicked()
+    {
+        edit = Some(index);
+        ui.close();
+    }
+});
+ui.label(
+    track
+        .preparation
+        .bpm
+        .map(|v| format!("{v:.1}"))
+        .unwrap_or_else(|| "—".into()),
+);
+ui.label(
+    track
+        .preparation
+        .harmonic_key
+        .as_deref()
+        .or(track.preparation.key.as_deref())
+        .unwrap_or("—"),
+);
+ui.label(
+    track
+        .preparation
+        .extensions
+        .get("rating")
+        .and_then(|v| v.as_u64())
+        .map(|v| format!("{v}/5"))
+        .unwrap_or_else(|| "—".into()),
+);
+
+                            });
+                        }}
+                    });
+                    ui.horizontal_wrapped(|ui| {
                         if ui
                             .add_enabled(self.selected.is_some(), egui::Button::new("Play"))
                             .clicked()
@@ -623,16 +740,29 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                         {
                             edit = self.selected;
                         }
-                        if ui.button("Add folder").clicked()
-                            && let Some(lib) = &self.library
+                        if ui.add_enabled(self.library.is_some(), egui::Button::new("Add folder to queue…")).clicked()
+                            && let Some(folder) = rfd::FileDialog::new()
+                                .set_title("Add a music folder to the playlist queue")
+                                .set_directory(self.root.join(&self.folder))
+                                .pick_folder()
                         {
-                            for (i, t) in lib.tracks.iter().enumerate() {
-                                if t.path.starts_with(&self.folder) && !self.queue.contains(&i) {
-                                    self.queue.push(i);
+                            match self.root.canonicalize().and_then(|root| folder.canonicalize().map(|folder| (root, folder))) {
+                                Ok((root, folder)) => {
+                                    if let Some(relative) = amp_core::relative_folder(&folder, &root) {
+                                        self.folder = relative;
+                                        self.queue_library_folder();
+                                    } else {
+                                        self.status = "That folder is not indexed yet. Use Add music folder to include it, then add it to the queue.".into();
+                                    }
                                 }
+                                Err(error) => self.status = format!("Could not open folder: {error}"),
                             }
                         }
+                        if ui.add_enabled(self.library.is_some(), egui::Button::new("Add selected folder to queue")).clicked() {
+                            self.queue_library_folder();
+                        }
                     });
+                    ui.add(egui::Label::new(&self.status).truncate()).on_hover_text(&self.status);
                     if let Some(i) = play {
                         self.play(0, i);
                         if let Some(a) = &self.audio {
@@ -651,6 +781,33 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                 }
             });
         });
+    }
+    fn queue_library_folder(&mut self) {
+        let Some(library) = &self.library else {
+            self.status = "Choose a music library first.".into();
+            return;
+        };
+        let mut matching = 0;
+        let mut added = 0;
+        for (index, track) in library.tracks.iter().enumerate() {
+            if amp_core::folder_contains(&track.path, &self.folder) {
+                matching += 1;
+                if !self.queue.contains(&index) {
+                    self.queue.push(index);
+                    added += 1;
+                }
+            }
+        }
+        self.status = if matching == 0 {
+            "No indexed songs in that folder or its subfolders. Use Rescan to check for new music."
+                .into()
+        } else if added == 0 {
+            format!("All {matching} songs from this folder are already in the playlist queue.")
+        } else {
+            format!(
+                "Added {added} songs from this folder and its subfolders to the playlist queue."
+            )
+        };
     }
     fn organized_queue(&mut self, ui: &mut egui::Ui, height: f32) {
         let mut drop = None;
@@ -733,7 +890,10 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                                     .truncate()
                                     .sense(egui::Sense::click_and_drag()),
                                 );
-                                dragdrop::source(&response, self.root.join(&track.path));
+                                dragdrop::source(
+                                    &response,
+                                    amp_core::music_sources::audio_path(&self.root, &track.path),
+                                );
                                 if response.clicked() {
                                     self.queue_selected = Some(row);
                                 }
@@ -757,6 +917,133 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn adding_folder_includes_descendants_and_reports_duplicates_and_empty_folders() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(root.path().join("Rock/Live")).unwrap();
+        for name in ["Rock/one.mp3", "Rock/Live/two.mp3", "outside.mp3"] {
+            std::fs::write(root.path().join(name), b"fixture").unwrap();
+        }
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            folder: "Rock".into(),
+            ..Default::default()
+        };
+        player.queue_library_folder();
+        assert_eq!(player.queue.len(), 2);
+        assert!(player.status.contains("Added 2"));
+        player.queue_library_folder();
+        assert_eq!(player.queue.len(), 2);
+        assert!(player.status.contains("already"));
+        player.folder = "Empty".into();
+        player.queue_library_folder();
+        assert_eq!(player.queue.len(), 2);
+        assert!(player.status.contains("No indexed songs"));
+    }
+    #[test]
+    fn empty_library_exposes_add_music_and_keeps_status_reachable_in_a_short_window() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            root: PathBuf::new(),
+            status: "Add music to begin".into(),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800., 460.),
+                )),
+                ..Default::default()
+            },
+            |ui| player.library_ui(ui),
+        );
+        output.textures_delta.clear();
+        let (button, enabled) = ctx.data(|data| {
+            data.get_temp::<(egui::Rect, bool)>(egui::Id::unique("library-add-music"))
+                .unwrap()
+        });
+        let status = ctx.data(|data| {
+            data.get_temp::<egui::Rect>(egui::Id::unique("library-workflow-status"))
+                .unwrap()
+        });
+        assert!(enabled);
+        assert!(button.min.y >= 0. && button.max.y < 460.);
+        assert!(status.max.y <= 460., "status clipped at {status:?}");
+    }
+    #[test]
+    fn short_library_starts_with_a_visible_song_list_and_optional_preparation() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("Song.mp3"), b"fixture").unwrap();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(800., 460.),
+                )),
+                ..Default::default()
+            },
+            |ui| player.library_ui(ui),
+        );
+        output.textures_delta.clear();
+        let row = ctx.data(|data| {
+            data.get_temp::<egui::Rect>(egui::Id::unique("library-first-track"))
+                .unwrap()
+        });
+        let footer = ctx.data(|data| {
+            data.get_temp::<egui::Rect>(egui::Id::unique("library-workflow-status"))
+                .unwrap()
+        });
+        assert!(
+            row.min.y >= 0. && row.max.y < footer.min.y,
+            "song row hidden: {row:?}, footer {footer:?}"
+        );
+    }
+    #[test]
+    fn named_playlist_creation_preserves_queue_and_avoids_file_naming_and_overwrite_traps() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("song.mp3"), b"fixture").unwrap();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            queue: vec![0, 0],
+            ..Default::default()
+        };
+        player
+            .create_named_playlist("Friday: night / favourites")
+            .unwrap();
+        let (path, list) = player.playlist_snapshot.clone().unwrap();
+        assert!(path.starts_with(root.path().join("ampdj/playlists")));
+        assert_eq!(list.name, "Friday: night / favourites");
+        assert_eq!(
+            list.tracks,
+            vec![PathBuf::from("song.mp3"), PathBuf::from("song.mp3")]
+        );
+        assert_eq!(player.queue, vec![0, 0]);
+        amp_core::catalog_db::compact(root.path()).unwrap();
+        if path.is_file() {
+            std::fs::remove_file(&path).unwrap();
+        }
+        assert!(
+            player
+                .create_playlist_at(path.clone(), "Overwrite")
+                .unwrap_err()
+                .contains("already exists")
+        );
+        assert_eq!(Playlist::load(&path, root.path()).unwrap().name, list.name);
+        player
+            .create_named_playlist("Friday: night / favourites")
+            .unwrap();
+        assert_ne!(player.playlist_snapshot.as_ref().unwrap().0, path);
+        assert_eq!(player.queue, vec![0, 0]);
+    }
     #[test]
     fn regular_playlist_create_add_save_and_restart_discovery() {
         let directory = tempfile::tempdir().unwrap();
@@ -808,8 +1095,8 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx, theme::Theme::ModernDark);
         let mut player = Player {
-            loaded: [Some(3), None],
-            playing: [true, false],
+            loaded: [Some(3), None, None, None, None, None],
+            playing: [true, false, false, false, false, false],
             queue: vec![3, 2, 3],
             ..Default::default()
         };
@@ -825,7 +1112,7 @@ mod tests {
         let rect = ctx
             .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique(("navigation-button", "Sources"))))
             .unwrap();
-        for pressed in [true, false] {
+        for pressed in [true, false, false, false, false, false] {
             let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(screen),
@@ -845,8 +1132,8 @@ mod tests {
             output.textures_delta.clear();
         }
         assert_eq!(player.library_page, 5);
-        assert_eq!(player.loaded, [Some(3), None]);
-        assert_eq!(player.playing, [true, false]);
+        assert_eq!(player.loaded, [Some(3), None, None, None, None, None]);
+        assert_eq!(player.playing, [true, false, false, false, false, false]);
         assert_eq!(player.queue, vec![3, 2, 3]);
     }
 }

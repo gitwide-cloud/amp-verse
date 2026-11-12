@@ -2,10 +2,10 @@
 use super::*;
 use std::sync::atomic::Ordering::Relaxed;
 pub struct Panel {
-    gain: [f32; 2],
-    kill: [[bool; 3]; 2],
-    sweep: [f32; 2],
-    cue: [bool; 2],
+    gain: [f32; 6],
+    kill: [[bool; 3]; 6],
+    sweep: [f32; 6],
+    cue: [bool; 6],
     cue_mix: f32,
     cue_volume: f32,
     output: Option<String>,
@@ -16,10 +16,10 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
-            gain: [0.; 2],
-            kill: [[false; 3]; 2],
-            sweep: [0.; 2],
-            cue: [false; 2],
+            gain: [0.; 6],
+            kill: [[false; 3]; 6],
+            sweep: [0.; 6],
+            cue: [false; 6],
             cue_mix: 0.,
             cue_volume: 0.5,
             output: None,
@@ -30,12 +30,38 @@ impl Default for Panel {
     }
 }
 impl Panel {
+    pub fn deck_tools(&mut self, ui: &mut egui::Ui, deck: usize, accent: egui::Color32) -> bool {
+        let mut changed = false;
+        ui.horizontal(|ui| {
+            changed |= dial(ui, "Gain dB", &mut self.gain[deck], -12. ..=12., accent).changed();
+            ui.label("Gain");
+            changed |= dial(
+                ui,
+                "Filter (left low-pass; right high-pass)",
+                &mut self.sweep[deck],
+                -1. ..=1.,
+                accent,
+            )
+            .changed();
+            ui.label("Filter");
+        });
+        changed |= ui
+            .toggle_value(&mut self.cue[deck], "Headphone cue")
+            .on_hover_text(
+                "Private pre-fader monitoring; select a headphone output in the center mixer.",
+            )
+            .changed();
+        changed
+    }
+    pub fn set_filter(&mut self, deck: usize, value: f32) {
+        self.sweep[deck] = value;
+    }
     pub fn toggle_cue(&mut self, deck: usize) {
         self.cue[deck] = !self.cue[deck];
     }
     pub fn apply(&self, engine: &mixer::Engine) {
         let controls = &engine.controls;
-        for d in 0..2 {
+        for d in 0..6 {
             controls.trim_db[d].store(self.gain[d].to_bits(), Relaxed);
             controls.sweep[d].store(self.sweep[d].to_bits(), Relaxed);
             controls.cue[d].store(self.cue[d], Relaxed);
@@ -56,7 +82,7 @@ pub(super) fn dial(
     range: std::ops::RangeInclusive<f32>,
     accent: egui::Color32,
 ) -> egui::Response {
-    let dial_size = ui.spacing().interact_size.y.clamp(24., 44.);
+    let dial_size = ui.spacing().interact_size.y.clamp(32., 64.);
     let (rect, mut response) = ui.allocate_exact_size(
         egui::vec2(dial_size + 4., dial_size),
         egui::Sense::click_and_drag(),
@@ -130,10 +156,11 @@ impl Player {
         ui.spacing_mut().item_spacing.y = 1.;
         ui.strong("MIXER");
         ui.columns(2, |columns| {
-            for (d, column) in columns.iter_mut().enumerate() {
-                let accent = if d == 0 { ORANGE } else { CYAN };
+            for (side, column) in columns.iter_mut().enumerate() {
+                let d = if self.rack.six { self.rack.live[side] } else { side };
+                let accent = if d % 2 == 0 { ORANGE } else { CYAN };
                 column.push_id(("mixer-channel", d), |ui| {
-                    ui.colored_label(accent, if d == 0 { "A" } else { "B" });
+                    ui.colored_label(accent, crate::deck_rack::NAMES[d]);
                     ui.horizontal(|ui| { dial(ui, "Gain dB", &mut self.mixer_panel.gain[d], -12. ..=12., accent); ui.label("Gain"); });
                     for (band, label) in [(2,"High"),(1,"Mid"),(0,"Low")] {
                         ui.horizontal(|ui| {
@@ -156,29 +183,9 @@ impl Player {
             }
         });
         ui.separator();
-        egui::CollapsingHeader::new("Headphones / output").id_salt("dj-monitor-output").show(ui, |ui| {
-            if !self.mixer_panel.scanned || ui.button("Refresh outputs").clicked() {
-                self.mixer_panel.devices = mixer::Engine::output_names();
-                self.mixer_panel.scanned = true;
-            }
-            let previous = self.mixer_panel.output.clone();
-            egui::ComboBox::from_id_salt("dj-headphone-device").width(230.).selected_text(previous.as_deref().unwrap_or("Headphone output: off")).show_ui(ui, |ui| {
-                ui.selectable_value(&mut self.mixer_panel.output, None, "Off");
-                for device in &self.mixer_panel.devices { ui.selectable_value(&mut self.mixer_panel.output, Some(device.clone()), device); }
-            });
-            if previous != self.mixer_panel.output {
-                let result = self.ensure_audio().and_then(|()| self.audio.as_mut().unwrap().configure_monitor(self.mixer_panel.output.as_deref()));
-                if let Err(error) = result { self.mixer_panel.output = previous; self.mixer_panel.status = error; }
-                else { self.mixer_panel.status = "Live headphone output connected. Use a different device from the speakers for private monitoring.".into(); }
-            }
-            ui.add(egui::Slider::new(&mut self.mixer_panel.cue_mix, 0. ..=1.).text("Cue / Master"));
-            ui.add(egui::Slider::new(&mut self.mixer_panel.cue_volume, 0. ..=1.).text("Phones"));
-            ui.label(&self.mixer_panel.status);
-            ui.horizontal(|ui| {
-                if ui.button("Expanded EQ").clicked() { self.eq_open = true; }
-                if ui.button("Filter FX").clicked() { self.fx_open = true; }
-            });
-        });
+        egui::CollapsingHeader::new("Headphones / output")
+            .id_salt("dj-monitor-output")
+            .show(ui, |ui| self.headphone_output(ui));
         if let Some(audio) = &self.audio {
             self.mixer_panel.apply(audio);
             let error = audio
@@ -188,6 +195,61 @@ impl Player {
                 .ok()
                 .and_then(|mut e| e.take());
             if let Some(error) = error {
+                self.mixer_panel.status = error;
+            }
+        }
+    }
+    pub(super) fn headphone_output(&mut self, ui: &mut egui::Ui) {
+        ui.set_max_width(340.);
+        if !self.mixer_panel.scanned || ui.button("Refresh outputs").clicked() {
+            self.mixer_panel.devices = mixer::Engine::output_names();
+            self.mixer_panel.scanned = true;
+        }
+        let previous = self.mixer_panel.output.clone();
+        egui::ComboBox::from_id_salt("dj-headphone-device")
+            .width(230.)
+            .truncate()
+            .selected_text(previous.as_deref().unwrap_or("Headphone output: off"))
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut self.mixer_panel.output, None, "Off");
+                for device in &self.mixer_panel.devices {
+                    ui.selectable_value(&mut self.mixer_panel.output, Some(device.clone()), device);
+                }
+            });
+        if previous != self.mixer_panel.output {
+            let result = self.ensure_audio().and_then(|()| {
+                self.audio
+                    .as_mut()
+                    .unwrap()
+                    .configure_monitor(self.mixer_panel.output.as_deref())
+            });
+            if let Err(error) = result {
+                self.mixer_panel.output = previous;
+                self.mixer_panel.status = error;
+            } else {
+                self.mixer_panel.status = "Live headphone output connected. Use a different device from the speakers for private monitoring.".into();
+            }
+        }
+        ui.add(egui::Slider::new(&mut self.mixer_panel.cue_mix, 0. ..=1.).text("Cue / Master"));
+        ui.add(egui::Slider::new(&mut self.mixer_panel.cue_volume, 0. ..=1.).text("Phones"));
+        ui.label(&self.mixer_panel.status);
+        ui.horizontal(|ui| {
+            if ui.button("Expanded EQ").clicked() {
+                self.eq_open = true;
+            }
+            if ui.button("Filter FX").clicked() {
+                self.fx_open = true;
+            }
+        });
+        if let Some(audio) = &self.audio {
+            self.mixer_panel.apply(audio);
+            if let Some(error) = audio
+                .controls
+                .monitor_error
+                .lock()
+                .ok()
+                .and_then(|mut value| value.take())
+            {
                 self.mixer_panel.status = error;
             }
         }

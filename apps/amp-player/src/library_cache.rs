@@ -11,8 +11,45 @@ pub struct Snapshot {
     version: u32,
     root: PathBuf,
     pub library: Library,
+    #[serde(default)]
+    pub sources: Vec<amp_core::music_sources::Source>,
     pub settings: Option<amp_core::show::Settings>,
     pub playlists: Vec<(PathBuf, Playlist)>,
+}
+/// Retain a newer published snapshot while an earlier scan completes.
+pub fn keep_current_preparation(
+    current: &amp_core::Preparation,
+    incoming: &amp_core::Preparation,
+) -> bool {
+    let Some(current) = current.extensions.get("_amp_sync") else {
+        return false;
+    };
+    let Some(revision) = current["revision"].as_u64() else {
+        return false;
+    };
+    let Some(id) = current["library_id"].as_str().filter(|id| !id.is_empty()) else {
+        return false;
+    };
+    let Some(incoming) = incoming.extensions.get("_amp_sync") else {
+        return true;
+    };
+    incoming["library_id"].as_str() == Some(id)
+        && incoming["revision"]
+            .as_u64()
+            .is_some_and(|other| revision > other)
+}
+/// A scan may finish after the user saves newer rules. Never roll those back.
+pub fn accept_settings(
+    current: &amp_core::show::Settings,
+    incoming: &amp_core::show::Settings,
+) -> bool {
+    match (&current.sync, &incoming.sync) {
+        (Some(current), Some(incoming)) if current.library_id == incoming.library_id => {
+            incoming.revision >= current.revision
+        }
+        (Some(_), None) => false,
+        _ => true,
+    }
 }
 fn path(root: &Path) -> Option<PathBuf> {
     // No canonicalize/stat here: startup must not wait for a sleeping NAS.
@@ -37,6 +74,7 @@ pub fn scan(root: &Path) -> Result<Snapshot, String> {
         version: 1,
         root: root.into(),
         library,
+        sources: amp_core::music_sources::list(root)?,
         settings,
         playlists,
     })
@@ -105,6 +143,50 @@ pub fn save(root: &Path, snapshot: &Snapshot) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn slow_scan_preserves_new_analysis_and_manual_revisions_but_accepts_newer_shared_data() {
+        let mut current = amp_core::Preparation::default();
+        current.extensions.insert(
+            "_amp_sync".into(),
+            serde_json::json!({"library_id":"same-library","revision":8}),
+        );
+        current.bpm = Some(123.);
+        current.manual_override = true;
+        let mut scanned = current.clone();
+        scanned.extensions.get_mut("_amp_sync").unwrap()["revision"] = serde_json::json!(7);
+        assert!(keep_current_preparation(&current, &scanned));
+        assert!(keep_current_preparation(
+            &current,
+            &amp_core::Preparation::default()
+        ));
+        scanned.extensions.get_mut("_amp_sync").unwrap()["revision"] = serde_json::json!(9);
+        assert!(!keep_current_preparation(&current, &scanned));
+        scanned.extensions.get_mut("_amp_sync").unwrap()["library_id"] =
+            serde_json::json!("another-library");
+        assert!(!keep_current_preparation(&current, &scanned));
+    }
+
+    #[test]
+    fn delayed_scan_cannot_hide_a_newly_saved_smart_playlist() {
+        let old = amp_core::show::Settings {
+            sync: Some(amp_core::coordination::Revision {
+                library_id: "library".into(),
+                revision: 8,
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let mut saved = old.clone();
+        saved.sync.as_mut().unwrap().revision = 9;
+        saved.playlists[0].name = "R&B".into();
+        assert!(!accept_settings(&saved, &old));
+        assert!(!accept_settings(
+            &saved,
+            &amp_core::show::Settings::default()
+        ));
+        assert!(accept_settings(&old, &saved));
+        assert!(accept_settings(&saved, &saved));
+    }
     #[test]
     fn saved_catalog_survives_offline_share_and_additions_refresh_atomically() {
         let dir = tempfile::tempdir().unwrap();

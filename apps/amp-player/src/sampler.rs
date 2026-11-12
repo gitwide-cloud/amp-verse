@@ -13,6 +13,7 @@ pub type Frames = Arc<[[f32; 2]]>;
 #[derive(Serialize, Deserialize)]
 #[serde(default)]
 struct Bank {
+    favorites: [usize; 4],
     paths: [Option<PathBuf>; 9],
     gains: [f32; 9],
     master: f32,
@@ -24,6 +25,7 @@ struct Bank {
 impl Default for Bank {
     fn default() -> Self {
         Self {
+            favorites: [0, 1, 2, 3],
             paths: Default::default(),
             gains: [1.; 9],
             master: 0.7,
@@ -120,6 +122,7 @@ struct Loaded {
     result: Result<Frames, String>,
 }
 pub enum Action {
+    Browse(usize),
     Load(usize),
     Trigger(usize),
     Stop(usize),
@@ -154,6 +157,16 @@ impl Default for Sampler {
     }
 }
 impl Sampler {
+    pub fn protected_paths(&self) -> Vec<PathBuf> {
+        self.bank.paths.iter().flatten().cloned().collect()
+    }
+    pub fn snapshot(&self, engine: Option<&Engine>) -> serde_json::Value {
+        serde_json::json!((0..9).map(|pad| serde_json::json!({
+            "name": self.bank.names[pad], "loaded": self.ready[pad],
+            "playing": engine.is_some_and(|a| a.controls.sample_playing[pad].load(std::sync::atomic::Ordering::Relaxed)),
+            "loop": self.bank.loops[pad], "gain": self.bank.gains[pad],
+        })).collect::<Vec<_>>())
+    }
     pub fn trigger(&self, engine: &Engine, pad: usize) -> Result<(), String> {
         if pad >= 9 {
             return Err("Unknown sampler pad".into());
@@ -206,6 +219,107 @@ impl Sampler {
             self.status = format!("Sampler settings were not saved: {error}");
         }
     }
+    pub fn inline_pads(
+        &mut self,
+        ui: &mut egui::Ui,
+        engine: Option<&Engine>,
+        all: bool,
+    ) -> Vec<Action> {
+        let count = if all { 9 } else { 4 };
+        let mut actions = Vec::new();
+        if ui.small_button("Sound effects…").clicked() {
+            actions.push(Action::Browse(self.selected_pad));
+        }
+        let pad_width = ((ui.available_width() - ui.spacing().item_spacing.x * (count - 1) as f32)
+            / count as f32)
+            .max(30.);
+        ui.horizontal(|ui| {
+            for favorite in 0..count {
+                let pad = if all {
+                    favorite
+                } else {
+                    self.bank.favorites[favorite].min(8)
+                };
+                let name = if self.bank.paths[pad].is_none() {
+                    format!("+ S{}", pad + 1)
+                } else if self.bank.names[pad].is_empty() {
+                    format!("S{}", pad + 1)
+                } else {
+                    self.bank.names[pad].clone()
+                };
+                let playing = engine.is_some_and(|a| {
+                    a.controls.sample_playing[pad].load(std::sync::atomic::Ordering::Relaxed)
+                });
+                let response = ui.add_sized(
+                    [pad_width, 30.],
+                    egui::Button::new(name)
+                        .truncate()
+                        .selected(playing)
+                        .stroke(egui::Stroke::new(1., egui::Color32::from_rgb(150, 85, 180))),
+                );
+                if response.clicked() {
+                    actions.push(if self.bank.paths[pad].is_none() {
+                        Action::Load(pad)
+                    } else {
+                        Action::Trigger(pad)
+                    });
+                }
+                response.context_menu(|ui| {
+                    ui.label(format!("Bank pad {}", pad + 1));
+                    if !all {
+                        ui.menu_button("Favorite assignment", |ui| {
+                            for candidate in 0..9 {
+                                if ui
+                                    .selectable_value(
+                                        &mut self.bank.favorites[favorite],
+                                        candidate,
+                                        format!(
+                                            "Pad {} · {}",
+                                            candidate + 1,
+                                            self.bank.names[candidate]
+                                        ),
+                                    )
+                                    .changed()
+                                {
+                                    self.save();
+                                }
+                            }
+                        });
+                    }
+                    if ui.text_edit_singleline(&mut self.bank.names[pad]).changed() {
+                        self.save();
+                    }
+                    if ui
+                        .checkbox(&mut self.bank.loops[pad], "Loop sample")
+                        .changed()
+                    {
+                        self.save();
+                    }
+                    if ui
+                        .add(egui::Slider::new(&mut self.bank.gains[pad], 0. ..=1.).text("Volume"))
+                        .changed()
+                    {
+                        self.save();
+                    }
+                    for (label, action) in [
+                        ("Replace", Action::Load(pad)),
+                        ("Stop", Action::Stop(pad)),
+                        ("Remove", Action::Clear(pad)),
+                    ] {
+                        if ui.button(label).clicked() {
+                            actions.push(action);
+                            ui.close();
+                        }
+                    }
+                    ui.label(format!("Companion: side sampler, pad {}", pad + 1));
+                });
+            }
+        });
+        if !self.status.starts_with("Load sound effects") {
+            ui.add(egui::Label::new(&self.status).wrap());
+        }
+        actions
+    }
     pub fn compact(
         &mut self,
         ui: &mut egui::Ui,
@@ -214,6 +328,9 @@ impl Sampler {
         columns: usize,
     ) -> Vec<Action> {
         let mut actions = Vec::new();
+        if ui.button("Sound effects…").clicked() {
+            actions.push(Action::Browse(self.selected_pad));
+        }
         if columns == 3 {
             ui.label("Volume");
         }
@@ -250,7 +367,11 @@ impl Sampler {
                                     .load(std::sync::atomic::Ordering::Relaxed)
                             });
                             let name = if self.bank.names[pad].is_empty() {
-                                format!("PAD {}", pad + 1)
+                                if self.bank.paths[pad].is_none() {
+                                    "+".into()
+                                } else {
+                                    format!("PAD {}", pad + 1)
+                                }
                             } else {
                                 self.bank.names[pad].clone()
                             };
@@ -384,8 +505,24 @@ impl Sampler {
         }
     }
     pub fn request_load(&mut self, pad: usize, path: PathBuf) {
+        if pad >= 9 {
+            self.status = "Choose a sampler pad from 1 to 9.".into();
+            return;
+        }
         self.queue.push_back((pad, path));
         self.status = format!("Loading pad {}…", pad + 1);
+    }
+    fn take_ready_load(&mut self, playing: [bool; 9]) -> Option<(usize, PathBuf)> {
+        if let Some(index) = self.queue.iter().position(|(pad, _)| !playing[*pad]) {
+            return self.queue.remove(index);
+        }
+        if let Some((pad, _)) = self.queue.front() {
+            self.status = format!(
+                "Stop pad {} to apply its replacement. Other pads remain available.",
+                pad + 1
+            );
+        }
+        None
     }
     pub fn poll(&mut self, engine: &mut Engine) {
         engine.sample_maintenance();
@@ -420,13 +557,10 @@ impl Sampler {
                 Err(mpsc::TryRecvError::Empty) => (),
             }
         }
-        if self.queue.front().is_some_and(|(pad, _)| {
-            engine.controls.sample_playing[*pad].load(std::sync::atomic::Ordering::Relaxed)
-        }) {
-            return;
-        }
         if self.job.is_none()
-            && let Some((pad, path)) = self.queue.pop_front()
+            && let Some((pad, path)) = self.take_ready_load(std::array::from_fn(|pad| {
+                engine.controls.sample_playing[pad].load(std::sync::atomic::Ordering::Relaxed)
+            }))
         {
             let rate = engine.sample_rate;
             let (tx, rx) = mpsc::channel();
@@ -455,6 +589,7 @@ impl Sampler {
         egui::CollapsingHeader::new("SAMPLER · 9 SOUND EFFECT PADS").id_salt("sampler-bank").default_open(true).show(ui,|ui|{
             ui.horizontal(|ui|{
                 if ui.add(egui::Slider::new(&mut self.bank.master,0. ..=1.).text("Sampler volume")).changed() {self.save();}
+                if ui.button("Sound effects…").clicked() {actions.push(Action::Browse(self.selected_pad));}
                 if ui.button("Stop all pads").clicked() {actions.push(Action::StopAll);}
                 ui.weak("One-shot · 1–9 · independent of crossfader");
             });
@@ -534,6 +669,27 @@ pub(super) fn shortcut(key: egui::Key) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn looping_pad_replacement_does_not_block_other_pads_or_replace_playing_audio() {
+        let mut sampler = Sampler::default();
+        sampler.request_load(0, "replace-loop.wav".into());
+        sampler.request_load(1, "new-effect.wav".into());
+        let mut playing = [false; 9];
+        playing[0] = true;
+        assert_eq!(
+            sampler.take_ready_load(playing),
+            Some((1, PathBuf::from("new-effect.wav")))
+        );
+        assert!(sampler.take_ready_load(playing).is_none());
+        assert!(sampler.status.contains("Stop pad 1"));
+        playing[0] = false;
+        assert_eq!(
+            sampler.take_ready_load(playing),
+            Some((0, PathBuf::from("replace-loop.wav")))
+        );
+        sampler.request_load(9, "invalid.wav".into());
+        assert!(sampler.queue.is_empty());
+    }
     #[test]
     fn bank_replacement_persists_independent_assignments() {
         let dir = tempfile::tempdir().unwrap();

@@ -333,6 +333,7 @@ mod tests {
         path
     }
     #[test]
+    #[ignore = "requires FFmpeg and ffprobe; explicitly run by codec CI"]
     fn clip_export_preserves_source_and_respects_selection() {
         let root = tempfile::tempdir().unwrap();
         let source = fixture(root.path());

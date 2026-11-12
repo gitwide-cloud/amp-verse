@@ -14,6 +14,7 @@ pub struct Arrangement {
     clips: Vec<Clip>,
     timeline: timeline::Timeline,
     editor: crate::lab_editor::Editor,
+    youtube: crate::lab_youtube::Panel,
     tab: usize,
     demo_loaded: bool,
     status: String,
@@ -38,6 +39,12 @@ impl Arrangement {
             ui.set_min_size(ui.available_size());
             let action = crate::skin::heading(ui, "AMP Lab", true);
             self.editor.poll(ui.ctx());
+            if let Some(path) = self.youtube.poll(ui.ctx()) {
+                self.tab = 0;
+                self.timeline.stop();
+                let loaded = self.editor.load_path(path);
+                self.youtube.opened(loaded);
+            }
             let previous = self.tab;
             ui.horizontal_wrapped(|ui| {
                 ui.selectable_value(&mut self.tab, 0, "Waveform editor");
@@ -57,6 +64,7 @@ impl Arrangement {
                 self.editor.load_path(path);
                 self.demo_loaded = true;
             }
+            self.youtube.show(ui);
             egui::ScrollArea::vertical()
                 .id_salt("lab-workspace")
                 .max_height(ui.available_height())

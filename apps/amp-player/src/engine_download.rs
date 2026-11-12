@@ -54,10 +54,6 @@ pub fn download() -> Result<(), String> {
 }
 
 fn download_to(directory: &Path) -> Result<(), String> {
-    let base = format!(
-        "https://github.com/gitwide-cloud/amp-verse/releases/latest/download/{}",
-        asset()?
-    );
     let agent: ureq::Agent = ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(120)))
         .build()
@@ -65,6 +61,7 @@ fn download_to(directory: &Path) -> Result<(), String> {
     let read = |url: &str, limit| -> Result<Vec<u8>, String> {
         let mut response = agent
             .get(url)
+            .header("User-Agent", "AMP-Verse-addon-installer")
             .call()
             .map_err(|e| format!("GitHub download: {e}. Retry or use manual installation."))?;
         response
@@ -74,6 +71,13 @@ fn download_to(directory: &Path) -> Result<(), String> {
             .read_to_vec()
             .map_err(|e| e.to_string())
     };
+    // Resolve once. Independent /latest redirects could pair different releases
+    // if a new release is published between the checksum and executable requests.
+    let release = read(
+        "https://api.github.com/repos/gitwide-cloud/amp-verse/releases/latest",
+        2 * 1024 * 1024,
+    )?;
+    let base = release_asset(&release, asset()?)?;
     let checksum = read(&format!("{base}.sha256"), 1024)?;
     let bytes = read(&base, 32 * 1024 * 1024)?;
     install(
@@ -83,9 +87,61 @@ fn download_to(directory: &Path) -> Result<(), String> {
     )
 }
 
+fn release_asset(document: &[u8], name: &str) -> Result<String, String> {
+    let release: serde_json::Value = serde_json::from_slice(document)
+        .map_err(|e| format!("Invalid release information: {e}"))?;
+    let tag = release["tag_name"]
+        .as_str()
+        .filter(|s| !s.is_empty() && s.len() <= 128)
+        .ok_or("Release has no valid version tag")?;
+    if release["draft"].as_bool() != Some(false) || release["prerelease"].as_bool() != Some(false) {
+        return Err(
+            "No published stable engine release. Open Releases for preview/manual installation."
+                .into(),
+        );
+    }
+    let assets = release["assets"]
+        .as_array()
+        .ok_or("Release has no download files")?;
+    for required in [name.to_string(), format!("{name}.sha256")] {
+        if !assets.iter().any(|a| {
+            a["name"].as_str() == Some(required.as_str()) && a["state"].as_str() == Some("uploaded")
+        }) {
+            return Err(format!(
+                "Release {tag} is missing {required}. Existing engine was preserved; retry after publishing finishes or use manual installation."
+            ));
+        }
+    }
+    let encoded: String = tag
+        .bytes()
+        .map(|b| {
+            if b.is_ascii_alphanumeric() || b"-_.~".contains(&b) {
+                (b as char).to_string()
+            } else {
+                format!("%{b:02X}")
+            }
+        })
+        .collect();
+    Ok(format!(
+        "https://github.com/gitwide-cloud/amp-verse/releases/download/{encoded}/{name}"
+    ))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn resolves_one_version_and_rejects_incomplete_or_unpublished_releases() {
+        let mut release = serde_json::json!({"tag_name":"v1/test","draft":false,"prerelease":false,"assets":[
+            {"name":"engine","state":"uploaded"},{"name":"engine.sha256","state":"uploaded"}]});
+        assert_eq!(
+            release_asset(&serde_json::to_vec(&release).unwrap(), "engine").unwrap(),
+            "https://github.com/gitwide-cloud/amp-verse/releases/download/v1%2Ftest/engine"
+        );
+        release["assets"][1]["state"] = serde_json::json!("new");
+        assert!(release_asset(&serde_json::to_vec(&release).unwrap(), "engine").is_err());
+        release["draft"] = serde_json::json!(true);
+        assert!(release_asset(&serde_json::to_vec(&release).unwrap(), "engine").is_err());
+    }
     #[test]
     fn checksum_failure_preserves_installed_engine() {
         let directory = tempfile::tempdir().unwrap();

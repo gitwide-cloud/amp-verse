@@ -186,10 +186,15 @@ struct Update {
     control_error: Option<String>,
 }
 pub struct Dashboard {
-    google: crate::google_cast::Output,
+    dlna: crate::dlna::Output,
+    pub normalize: bool,
+    pending_live: Option<std::time::Instant>,
+    attempted_host: bool,
+    pub(super) google: crate::google_cast::Output,
     listen_after_play: bool,
     pub live_action: Option<bool>,
     pub live_active: bool,
+    pub live_player_only: bool,
     pub live_status: String,
     address: String,
     password: String,
@@ -277,10 +282,26 @@ impl Default for Dashboard {
             }
         });
         let mut dashboard = Self {
+            dlna: Default::default(),
+            normalize: !cfg!(test)
+                && crate::theme::settings_path()
+                    .and_then(|p| {
+                        amp_core::catalog_db::local_record(
+                            &p.with_file_name("media.ampdb"),
+                            "normalize-cast",
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            pending_live: None,
+            attempted_host: false,
             google: Default::default(),
             listen_after_play: false,
             live_action: None,
             live_active: false,
+            live_player_only: false,
             live_status: String::new(),
             address: std::env::var("AMP_CAST_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8787".into()),
             password: String::new(),
@@ -312,6 +333,99 @@ impl Default for Dashboard {
     }
 }
 impl Dashboard {
+    fn normalize_control(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        ui.add_enabled_ui(!self.live_active, |ui| {
+            changed = ui
+                .checkbox(
+                    &mut self.normalize,
+                    "Normalize broadcast volume (adds buffering)",
+                )
+                .changed();
+        });
+        if changed
+            && let Some(path) = crate::theme::settings_path()
+            && let Err(e) = amp_core::catalog_db::save_local_record(
+                &path.with_file_name("media.ampdb"),
+                "normalize-cast",
+                &serde_json::json!(self.normalize),
+            )
+        {
+            self.live_status = format!("Could not remember volume setting: {e}");
+        }
+    }
+    pub fn request_live(&mut self, player_only: bool) {
+        if self.live_active || self.pending_live.is_some() {
+            return;
+        }
+        self.live_player_only = player_only;
+        self.pending_live = Some(std::time::Instant::now());
+        self.attempted_host = false;
+        self.live_status = "Connecting to local broadcast service…".into();
+        self.address = "127.0.0.1:8787".into();
+        self.connected_address = self.address.clone();
+        self.snapshot = None;
+        self.send(Command::Connect(
+            self.address.clone(),
+            self.password.clone(),
+        ));
+    }
+    pub fn prepare_live(&mut self, root: &std::path::Path) {
+        let Some(started) = self.pending_live else {
+            return;
+        };
+        if started.elapsed() > Duration::from_secs(30) {
+            self.pending_live = None;
+            self.live_status = format!(
+                "Could not start local broadcast: {}. Check the Cast server and retry.",
+                self.message
+            );
+        } else if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.status.capabilities["live_dj"] == true)
+        {
+            self.pending_live = None;
+            self.live_action = Some(true);
+        } else if !self.busy && !self.attempted_host && self.snapshot.is_none() {
+            self.attempted_host = true;
+            self.host(root, false);
+            self.live_status = self.message.clone();
+        } else if !self.busy && self.snapshot.is_some() {
+            self.pending_live = None;
+            self.live_status =
+                "This Cast server does not support live audio. Update AMP Cast and retry.".into();
+        }
+    }
+    pub fn quick_cast(&mut self, ui: &mut egui::Ui) {
+        ui.label("Cast current audio. Headphone cue stays private.");
+        self.normalize_control(ui);
+        ui.label(&self.live_status);
+        if self.pending_live.is_some() && ui.button("Cancel connection").clicked() {
+            self.pending_live = None;
+            self.live_status = "Broadcast connection cancelled".into();
+        }
+        if !self.live_active
+            && self.pending_live.is_none()
+            && ui.button("Retry broadcast connection").clicked()
+        {
+            self.request_live(self.live_player_only);
+        }
+        self.google.show(
+            ui,
+            &self.connected_address,
+            self.live_active && self.snapshot.as_ref().is_some_and(|s| s.status.running),
+        );
+        self.dlna.show(
+            ui,
+            &self.connected_address,
+            self.live_active && self.snapshot.as_ref().is_some_and(|s| s.status.running),
+        );
+        if self.live_active && ui.button("Stop sending live audio").clicked() {
+            self.live_action = Some(false);
+            let _ = self.google.remote(crate::google_cast::Operation::Stop);
+        }
+    }
     pub fn endpoint(&self) -> (String, String) {
         (
             if self.connected_address.is_empty() {
@@ -335,6 +449,7 @@ impl Dashboard {
         }
     }
     pub fn poll(&mut self) {
+        self.google.poll();
         if let Some(rx) = &self.discovery
             && let Ok(result) = rx.try_recv()
         {
@@ -402,11 +517,14 @@ impl Dashboard {
             command
                 .env(
                     "PATH",
-                    format!(
-                        "{};{}",
-                        binary.parent().unwrap().display(),
-                        std::env::var("PATH").unwrap_or_default()
-                    ),
+                    std::env::join_paths(
+                        std::iter::once(binary.parent().unwrap().to_path_buf()).chain(
+                            std::env::var_os("PATH")
+                                .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+                                .unwrap_or_default(),
+                        ),
+                    )
+                    .map_err(failure)?,
                 )
                 .arg(root)
                 .env("AMP_CAST_BIND", "0.0.0.0:8787")
@@ -614,7 +732,14 @@ impl Dashboard {
                 });
             });
         } else if self.section == 1 {
-            ui.heading("Broadcast my live DJ mix");
+            ui.heading("Broadcast live audio");
+            self.normalize_control(ui);
+            ui.add_enabled_ui(!self.live_active, |ui| {
+                ui.horizontal(|ui| {
+                    ui.selectable_value(&mut self.live_player_only, false, "DJ master mix");
+                    ui.selectable_value(&mut self.live_player_only, true, "Music Player");
+                });
+            });
             ui.label("Send the actual master mix: both decks, crossfader, EQ, stems and sampler. Headphone cue stays private.");
             let supported = self
                 .snapshot
@@ -622,12 +747,16 @@ impl Dashboard {
                 .is_some_and(|s| s.status.capabilities["live_dj"] == true);
             if ui
                 .add_enabled(
-                    supported && !self.live_active,
-                    egui::Button::new("Start live DJ broadcast"),
+                    !self.live_active && self.pending_live.is_none(),
+                    egui::Button::new("Start live broadcast"),
                 )
                 .clicked()
             {
-                self.live_action = Some(true);
+                if supported {
+                    self.live_action = Some(true);
+                } else {
+                    self.request_live(self.live_player_only);
+                }
             }
             if self.live_active && ui.button("Stop my live DJ broadcast").clicked() {
                 self.live_action = Some(false);
@@ -683,7 +812,7 @@ impl Dashboard {
                     self.host(root, self.section == 2);
                 }
                 if !ready {
-                    ui.weak("Choose a music library and let its scan finish first.");
+                    ui.weak("Add a music folder in Library first, then return here.");
                 }
             } else {
                 ui.label(&self.hosting);
@@ -781,6 +910,11 @@ impl Dashboard {
             &self.connected_address,
             self.snapshot.as_ref().is_some_and(|s| s.status.running),
         );
+        self.dlna.show(
+            ui,
+            &self.connected_address,
+            self.snapshot.as_ref().is_some_and(|s| s.status.running),
+        );
         if self.radio.is_some()
             && ui.button("Stop listening").clicked()
             && let Some(mut child) = self.radio.take()
@@ -831,6 +965,32 @@ impl Drop for Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn live_start_waits_for_capability_and_times_out_readably() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut dashboard = Dashboard::default();
+        dashboard.request_live(true);
+        assert!(dashboard.busy);
+        assert!(dashboard.live_player_only);
+        assert_eq!(dashboard.endpoint().0, "127.0.0.1:8787");
+        dashboard.prepare_live(temp.path());
+        assert!(dashboard.live_action.is_none());
+        dashboard.snapshot = Some(Snapshot {
+            status: Status {
+                capabilities: serde_json::json!({"live_dj":true}),
+                ..Default::default()
+            },
+            queue: Queue::default(),
+            manifest: None,
+        });
+        dashboard.prepare_live(temp.path());
+        assert_eq!(dashboard.live_action.take(), Some(true));
+        assert!(dashboard.pending_live.is_none());
+        dashboard.pending_live = Some(std::time::Instant::now() - Duration::from_secs(31));
+        dashboard.prepare_live(temp.path());
+        assert!(dashboard.pending_live.is_none());
+        assert!(dashboard.live_status.contains("retry"));
+    }
     #[test]
     #[ignore = "uses the public Radio Browser directory"]
     fn radio_directory_returns_listenable_results() {

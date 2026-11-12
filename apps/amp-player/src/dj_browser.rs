@@ -16,12 +16,91 @@ pub struct Browser {
     pub(super) playlists: Vec<(PathBuf, Playlist)>,
     playlist: Option<usize>,
     destination: usize,
+    columns: track_columns::Layout,
+    details: Option<amp_core::Track>,
+    stem_status: std::collections::HashMap<PathBuf, (std::time::Instant, bool)>,
+    stem_rx: Option<std::sync::mpsc::Receiver<Vec<(PathBuf, bool)>>>,
+    membership: Membership,
+}
+#[derive(Clone, PartialEq, Eq)]
+struct MatchKey {
+    rules: Vec<u8>,
+    generation: u64,
+}
+struct MatchResult {
+    key: MatchKey,
+    indices: Vec<usize>,
+    at: std::time::Instant,
+}
+#[derive(Default)]
+struct Membership {
+    cached: Option<MatchResult>,
+    job: Option<std::sync::mpsc::Receiver<MatchResult>>,
+}
+impl Membership {
+    fn indices(
+        &mut self,
+        profile: &amp_core::show::SmartPlaylist,
+        library: &Library,
+        generation: u64,
+    ) -> Option<Vec<usize>> {
+        if let Some(rx) = &self.job {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.cached = Some(result);
+                    self.job = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.job = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        let key = MatchKey {
+            rules: serde_json::to_vec(profile).unwrap_or_default(),
+            generation,
+        };
+        let matching = self.cached.as_ref().filter(|result| result.key == key);
+        let ready = matching.map(|result| result.indices.clone());
+        if self.job.is_none()
+            && matching.is_none_or(|result| result.at.elapsed() > Duration::from_secs(2))
+        {
+            let tracks = library.tracks.clone();
+            let profile = profile.clone();
+            let (tx, rx) = mpsc::channel();
+            self.job = Some(rx);
+            std::thread::spawn(move || {
+                let indices = tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, track)| amp_core::show::eligible(&profile, track))
+                    .map(|(index, _)| index)
+                    .collect();
+                let _ = tx.send(MatchResult {
+                    key,
+                    indices,
+                    at: std::time::Instant::now(),
+                });
+            });
+        }
+        ready
+    }
 }
 impl Browser {
+    pub(super) fn selected_smart(&self) -> Option<&str> {
+        (self.source == Source::Smart && !self.smart.is_empty()).then_some(self.smart.as_str())
+    }
     pub(super) fn select_smart(&mut self, id: &str) {
         self.source = Source::Smart;
         self.smart = id.into();
     }
+}
+fn auto_mix_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
+    let label = if *enabled {
+        "Auto Mix: ON"
+    } else {
+        "Auto Mix: OFF"
+    };
+    ui.toggle_value(enabled, label)
+        .on_hover_text("Start or stop automatic mixing from the selected source")
 }
 fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
     playlist
@@ -32,7 +111,89 @@ fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
 }
 impl Player {
     pub(super) fn dj_library_ui(&mut self, ui: &mut egui::Ui) {
-        let height = ui.available_height().max(180.);
+        if let Some(rx) = &self.dj_browser.stem_rx
+            && let Ok(results) = rx.try_recv()
+        {
+            for (path, complete) in results {
+                self.dj_browser
+                    .stem_status
+                    .insert(path, (std::time::Instant::now(), complete));
+            }
+            self.dj_browser.stem_rx = None;
+        }
+        let mut stem_checks = Vec::new();
+        let mut save_columns = false;
+        if let Some(track) = self.dj_browser.details.clone() {
+            let mut open = true;
+            egui::Window::new("Track metadata and analysis")
+                .id(egui::Id::unique("dj-track-details"))
+                .open(&mut open)
+                .resizable(true)
+                .default_width(620.)
+                .show(ui.ctx(), |ui| {
+                    ui.heading(&track.title);
+                    ui.label(
+                        amp_core::music_sources::audio_path(&self.root, &track.path)
+                            .display()
+                            .to_string(),
+                    );
+                    egui::ScrollArea::vertical()
+                        .max_height(600.)
+                        .show(ui, |ui| {
+                            for (key, label, _, _) in track_columns::FIELDS {
+                                if *key != "stems" {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.strong(*label);
+                                        ui.label(track_columns::cell(&track, key));
+                                    });
+                                }
+                            }
+                            let path = amp_core::music_sources::audio_path(&self.root, &track.path);
+                            ui.label(format!(
+                                "Stems: {}",
+                                self.dj_browser.stem_status.get(&path).map_or(
+                                    "Checking…",
+                                    |(_, ready)| if *ready { "Complete" } else { "Not prepared" }
+                                )
+                            ));
+                            if !self.dj_browser.stem_status.contains_key(&path) {
+                                stem_checks.push(path);
+                            }
+                            ui.separator();
+                            ui.strong("All stored tags and analysis fields");
+                            fn fields(ui: &mut egui::Ui, name: &str, value: &serde_json::Value) {
+                                match value {
+                                    serde_json::Value::Object(map) => {
+                                        egui::CollapsingHeader::new(name)
+                                            .id_salt(name)
+                                            .default_open(name == "Metadata")
+                                            .show(ui, |ui| {
+                                                for (key, value) in map {
+                                                    fields(ui, key, value);
+                                                }
+                                            });
+                                    }
+                                    _ => {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.strong(name);
+                                            ui.label(track_columns::display(value));
+                                        });
+                                    }
+                                }
+                            }
+                            if let Ok(value) = serde_json::to_value(&track.preparation) {
+                                fields(ui, "Metadata", &value);
+                            }
+                        });
+                });
+            if !open {
+                self.dj_browser.details = None;
+            }
+        }
+
+        let height = ui
+            .available_height()
+            .max(if self.rack.six { 80. } else { 180. });
         let sidebar_id = egui::Id::unique("dj-source-width");
         let sidebar_max = (ui.available_width() * 0.35).clamp(150., 400.);
         let mut sidebar_width = ui
@@ -40,25 +201,58 @@ impl Player {
             .data_mut(|d| d.get_persisted::<f32>(sidebar_id))
             .unwrap_or(195.)
             .clamp(150., sidebar_max);
-        skin::label(ui, "DJ Library");
+
         let mut auto = self.run.auto;
         let mut toggle = false;
         let mut queue_drop = None;
         let mut open_playlist = false;
         let mut load = None;
         let mut request = None;
-        let requests = ui.add(
-            egui::Label::new(
-                egui::RichText::new(format!(
-                    "Song requests ({}) · click to view",
-                    self.run.requests.len()
-                ))
-                .weak(),
-            )
-            .sense(egui::Sense::click()),
-        );
+        let requests = ui
+            .horizontal(|ui| {
+                skin::label(ui, "DJ Library");
+                self.remote_access_button(ui);
+                ui.menu_button("Columns", |ui| {save_columns |= self.dj_browser.columns.menu(ui);});
+
+                if ui.small_button("Refresh playlists").clicked() {
+                    match amp_core::show::Settings::load(&self.root) {
+                        Ok(settings) => {
+                            self.run.settings = settings;
+                            self.dj_browser.stem_status.clear();
+                            self.status = "Saved Smart Playlists refreshed. Loaded decks keep their current mix.".into();
+                        }
+                        Err(error) => self.status = format!("Could not refresh Smart Playlists: {error}"),
+                    }
+                }
+
+                ui.add(
+                    egui::Label::new(
+                        egui::RichText::new(format!(
+                            "Song requests ({}) · click to view",
+                            self.run.requests.len()
+                        ))
+                        .weak(),
+                    )
+                    .sense(egui::Sense::click()),
+                )
+            })
+            .inner;
         let mut cancel_request = None;
         egui::Popup::menu(&requests).show(|ui| {
+            if let Some(control) = &self.control {
+                let address = control
+                    .address
+                    .replace("0.0.0.0", "127.0.0.1")
+                    .replace("[::]", "127.0.0.1");
+                ui.hyperlink_to(
+                    "Open song-request web page",
+                    format!("http://{address}/requests"),
+                );
+                ui.weak(
+                    "On your phone, use this PC’s LAN address with the same port and /requests.",
+                );
+                ui.separator();
+            }
             if self.run.requests.is_empty() {
                 ui.label("No pending requests. Right-click a song to request it.");
             }
@@ -90,6 +284,7 @@ impl Player {
             self.run.requests.retain(|s| *s != id);
         }
         let mut load_smart = false;
+        let mut matching_smart = false;
         let mut edit_smart = false;
         let mut context_edit = None;
         ui.horizontal_top(|ui| {
@@ -99,12 +294,7 @@ impl Player {
                 |ui| {
                     ui.set_width(sidebar_width);
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                    let label = if auto {
-                        "Auto Mix: ON"
-                    } else {
-                        "Auto Mix: OFF"
-                    };
-                    toggle = ui.toggle_value(&mut auto, label).changed();
+                    toggle = auto_mix_toggle(ui, &mut auto).changed();
                     ui.separator();
                     ui.selectable_value(
                         &mut self.dj_browser.source,
@@ -179,8 +369,17 @@ impl Player {
                         });
                 },
             );
-            window_layout::splitter(ui, "dj-source-divider", &mut sidebar_width, 150. ..=sidebar_max, true, 1., height - 30.);
-            ui.ctx().data_mut(|d| d.insert_persisted(sidebar_id, sidebar_width));
+            window_layout::splitter(
+                ui,
+                "dj-source-divider",
+                &mut sidebar_width,
+                150. ..=sidebar_max,
+                true,
+                1.,
+                height - 30.,
+            );
+            ui.ctx()
+                .data_mut(|d| d.insert_persisted(sidebar_id, sidebar_width));
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
                 ui.add(
@@ -189,7 +388,11 @@ impl Player {
                         .hint_text("Search this source"),
                 );
                 let Some(lib) = &self.library else {
-                    ui.weak(if self.scan.is_some() { "Scanning your music folders. Tracks will appear when the scan finishes." } else { "Add music sources in AMP Library." });
+                    ui.weak(if self.scan.is_some() {
+                        "Scanning your music folders. Tracks will appear when the scan finishes."
+                    } else {
+                        "Add music sources in AMP Library."
+                    });
                     return;
                 };
                 let mut indices: Vec<usize> = match self.dj_browser.source {
@@ -224,17 +427,29 @@ impl Player {
                                 edit_smart = ui.button("Edit sources / rules in Library").clicked();
                             });
                             if self.show_editor.playlist_unsaved(&profile.id) {
-                                ui.colored_label(ORANGE,"Unsaved source changes: DJ uses the saved version.");
-                                if ui.button("Open draft in Library to save").clicked(){edit_smart=true;}
+                                ui.colored_label(
+                                    ORANGE,
+                                    "Unsaved source changes: DJ uses the saved version.",
+                                );
+                                if ui.button("Open draft in Library to save").clicked() {
+                                    edit_smart = true;
+                                }
                             }
-                            let eligible: Vec<_> = lib
-                                .tracks
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, t)| amp_core::show::eligible(profile, t))
-                                .map(|(i, _)| i)
-                                .collect();
-                            eligible
+                            match self.dj_browser.membership.indices(
+                                profile,
+                                lib,
+                                self.library_generation,
+                            ) {
+                                Some(indices) => indices,
+                                None => {
+                                    matching_smart = true;
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label("Matching saved playlist rules…");
+                                    });
+                                    Vec::new()
+                                }
+                            }
                         } else {
                             ui.weak("Choose a saved Smart Playlist on the left.");
                             Vec::new()
@@ -246,59 +461,233 @@ impl Player {
                     lib.tracks.get(i).is_some_and(|t| {
                         t.title.to_lowercase().contains(&query)
                             || t.path.to_string_lossy().to_lowercase().contains(&query)
+                            || ["artist", "album", "genre"].iter().any(|key| {
+                                track_columns::cell(t, key).to_lowercase().contains(&query)
+                            })
                     })
                 });
-                ui.weak(format!("{} tracks", indices.len()));
-                let title_width = (ui.available_width() - 330.).max(120.);
-                ui.horizontal(|ui| {
-                    for (label, width) in [("#", 28.), ("Track", title_width), ("BPM", 56.), ("Key", 40.), ("Length", 54.), ("Load", 68.)] {
-                        ui.add_sized([width, 22.], egui::Label::new(egui::RichText::new(label).strong().size(14.)).halign(egui::Align::Min).truncate());
-                    }
-                });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("dj-source-tracks")
-                    .max_height((height - 155.).max(80.))
-                    .min_scrolled_height((height - 155.).max(80.))
-                    .show_rows(ui, 34., indices.len(), |ui, range| {
-                        for row in range {
-                            let i = indices[row];
-                            let t = &lib.tracks[i];
-                            ui.horizontal(|ui| {
-                                ui.add_sized([28., 30.], egui::Label::new(format!("{}", row + 1)));
-                                let row=ui.add_sized(
-                                        [title_width, 30.],
-                                        egui::Button::selectable(
-                                            self.selected == Some(i),
-                                            egui::RichText::new(&t.title).size(15.),
-                                        )
-                                        .right_text("")
-                                        .truncate().sense(egui::Sense::click_and_drag()),
+                if !matching_smart {
+                    ui.weak(format!("{} tracks", indices.len()));
+                }
+                egui::ScrollArea::horizontal()
+                    .id_salt("dj-columns-horizontal")
+                    .show(ui, |ui| {
+                        let width: f32 = self
+                            .dj_browser
+                            .columns
+                            .columns
+                            .iter()
+                            .filter(|c| c.visible)
+                            .map(|c| c.width + ui.spacing().item_spacing.x)
+                            .sum::<f32>()
+                            + 120.;
+                        ui.set_min_width(width);
+                        ui.horizontal(|ui| {
+                            ui.add_sized([28., 24.], egui::Label::new("#"));
+                            for column in self
+                                .dj_browser
+                                .columns
+                                .columns
+                                .iter_mut()
+                                .filter(|c| c.visible)
+                            {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(column.width, 24.),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter_at(rect).text(
+                                    rect.left_center(),
+                                    egui::Align2::LEFT_CENTER,
+                                    track_columns::label(&column.key),
+                                    egui::FontId::proportional(14.),
+                                    ui.visuals().text_color(),
+                                );
+                                let edge = egui::Rect::from_min_max(
+                                    egui::pos2(rect.right() - 5., rect.top()),
+                                    rect.right_bottom(),
+                                );
+                                let handle = ui
+                                    .interact(
+                                        edge,
+                                        ui.scope_id().with((&column.key, "resize")),
+                                        egui::Sense::drag(),
                                     )
-;
-                                crate::dragdrop::source(&row,self.root.join(&t.path));
-                                if row.clicked() {self.selected=Some(i);}
-                                row.context_menu(|ui| { ui.label("Request in this live Smart Playlist"); for within in 1..=5 { if ui.button(format!("Play within {within} songs")).clicked() { request=Some((amp_core::show::song_id(t),within));ui.close(); } } });
-                                if row.double_clicked() {load=Some((self.dj_browser.destination,i));}
-                                let duration = t.preparation.analysis.as_ref().map(|a| a.duration).or(t.preparation.cue_out);
-                                for (value, width) in [
-                                    (t.preparation.bpm.map_or("--".into(), |b| format!("{b:.1}")), 56.),
-                                    (t.preparation.harmonic_key.clone().unwrap_or_else(|| "--".into()), 40.),
-                                    (duration.map_or("--:--".into(), |s| format!("{:02}:{:02}", s as u64 / 60, s as u64 % 60)), 54.),
-                                ] { ui.add_sized([width, 30.], egui::Label::new(value).truncate()); }
-                                for (deck,label,color) in [(0,"A",ORANGE),(1,"B",CYAN)] {
-                                    if ui.add_sized([30.,24.],egui::Button::new(egui::RichText::new(label).strong().color(color)).selected(self.dj_browser.destination==deck)).on_hover_text(format!("Prepare on Deck {label}; playing decks stage the replacement")).clicked(){self.dj_browser.destination=deck;load=Some((deck,i));}
+                                    .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                                ui.painter().line_segment(
+                                    [edge.center_top(), edge.center_bottom()],
+                                    egui::Stroke::new(1., ui.visuals().weak_text_color()),
+                                );
+                                if handle.dragged() {
+                                    column.width = (column.width
+                                        + ui.input(|i| i.pointer.delta().x))
+                                    .clamp(45., 800.);
+                                }
+                                save_columns |= handle.drag_stopped();
+                            }
+                            ui.label("Load");
+                        });
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .id_salt("dj-source-tracks")
+                            .max_height((height - if self.rack.six { 110. } else { 155. }).max(34.))
+                            .show_rows(ui, 34., indices.len(), |ui, range| {
+                                for row in range {
+                                    let i = indices[row];
+                                    let t = &lib.tracks[i];
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(
+                                            [28., 30.],
+                                            egui::Label::new((row + 1).to_string()),
+                                        );
+                                        for column in self
+                                            .dj_browser
+                                            .columns
+                                            .columns
+                                            .iter()
+                                            .filter(|c| c.visible)
+                                        {
+                                            let value = if column.key == "stems" {
+                                                let path = amp_core::music_sources::audio_path(
+                                                    &self.root, &t.path,
+                                                );
+                                                let cached = self.dj_browser.stem_status.get(&path);
+                                                if cached.is_none_or(|(at, _)| {
+                                                    at.elapsed().as_secs() > 30
+                                                }) {
+                                                    stem_checks.push(path);
+                                                }
+                                                cached
+                                                    .map_or("Checking…", |(_, ready)| {
+                                                        if *ready {
+                                                            "Complete"
+                                                        } else {
+                                                            "Not prepared"
+                                                        }
+                                                    })
+                                                    .into()
+                                            } else {
+                                                track_columns::cell(t, &column.key)
+                                            };
+                                            let response = if column.key == "title" {
+                                                ui.add_sized(
+                                                    [column.width, 30.],
+                                                    egui::Button::selectable(
+                                                        self.selected == Some(i),
+                                                        &value,
+                                                    )
+                                                    .truncate()
+                                                    .sense(egui::Sense::click_and_drag()),
+                                                )
+                                            } else {
+                                                ui.add_sized(
+                                                    [column.width, 30.],
+                                                    egui::Label::new(&value)
+                                                        .truncate()
+                                                        .sense(egui::Sense::click()),
+                                                )
+                                            };
+                                            let response = response.on_hover_text(&value);
+                                            if column.key == "title" {
+                                                crate::dragdrop::source(
+                                                    &response,
+                                                    amp_core::music_sources::audio_path(
+                                                        &self.root, &t.path,
+                                                    ),
+                                                );
+                                            }
+                                            if response.clicked() {
+                                                self.selected = Some(i);
+                                            }
+                                            if response.double_clicked() {
+                                                load = Some((self.dj_browser.destination, i));
+                                            }
+                                            response.context_menu(|ui| {
+                                                if ui
+                                                    .button("Track details / all metadata…")
+                                                    .clicked()
+                                                {
+                                                    self.dj_browser.details = Some(t.clone());
+                                                    ui.close();
+                                                }
+                                                ui.separator();
+                                                ui.label("Request in this live Smart Playlist");
+                                                for within in 1..=5 {
+                                                    if ui
+                                                        .button(format!(
+                                                            "Play within {within} songs"
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        request = Some((
+                                                            amp_core::show::song_id(t),
+                                                            within,
+                                                        ));
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        ui.horizontal(|ui| {
+                                            ui.set_min_width(68.);
+                                            for (deck, label, color) in
+                                                [(0, "A", ORANGE), (1, "B", CYAN)]
+                                            {
+                                                if ui
+                                                    .add_sized(
+                                                        [30., 24.],
+                                                        egui::Button::new(
+                                                            egui::RichText::new(label)
+                                                                .strong()
+                                                                .color(color),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.dj_browser.destination = deck;
+                                                    load = Some((deck, i));
+                                                }
+                                            }
+                                        });
+                                    });
                                 }
                             });
-                        }
                     });
-                let target=ui.add_sized([ui.available_width(),24.],egui::Button::new(if self.run.auto {"Drop music here > Auto Mix candidates"}else{"Drop music here > Playlist queue"}).sense(egui::Sense::hover()));
-                queue_drop=dragdrop::target(&target,GOLD);
-                if indices.is_empty() {
+                let target = ui.add_sized(
+                    [ui.available_width(), 24.],
+                    egui::Button::new(if self.run.auto {
+                        "Drop music here > Auto Mix candidates"
+                    } else {
+                        "Drop music here > Playlist queue"
+                    })
+                    .sense(egui::Sense::hover()),
+                );
+                queue_drop = dragdrop::target(&target, GOLD);
+                if indices.is_empty() && !matching_smart {
                     ui.weak("No tracks in this source. Prepare and edit playlists in AMP Library.");
                 }
             });
         });
+        if save_columns && let Err(error) = self.dj_browser.columns.save() {
+            self.status = format!("Could not save columns: {error}");
+        }
+        if self.dj_browser.stem_rx.is_none() && !stem_checks.is_empty() {
+            stem_checks.sort();
+            stem_checks.dedup();
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.dj_browser.stem_rx = Some(rx);
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let result = stem_checks
+                    .into_iter()
+                    .map(|path| {
+                        let ready = stems::ready(&path).is_some();
+                        (path, ready)
+                    })
+                    .collect();
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            });
+        }
         if let Some(path) = queue_drop {
             self.add_dropped_to_queue(path);
         }
@@ -346,7 +735,7 @@ impl Player {
             }
         }
         if toggle {
-            if auto && self.dj_browser.source != Source::Smart && !self.run.locked {
+            if auto && self.dj_browser.source != Source::Smart {
                 // Snapshot the chosen browser source for this session only. Never
                 // silently fall back to a different Smart Playlist or all folders.
                 if let Some(library) = &self.library {
@@ -405,8 +794,8 @@ impl Player {
                 .as_ref()
                 .and_then(|library| library.tracks.get(index))
             {
-                let path = self.root.join(&track.path);
-                if let Err(error) = self.safe_load_path(deck, path, None) {
+                let path = amp_core::music_sources::audio_path(&self.root, &track.path);
+                if let Err(error) = self.safe_load_path(self.rack.live[deck], path, None) {
                     self.status = error;
                 }
             }
@@ -417,6 +806,118 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn smart_membership_reuses_matches_and_invalidates_rules_and_analysis() {
+        let mut profile = amp_core::show::Settings::default().playlists.remove(0);
+        profile.genres = vec!["Rock".into()];
+        let mut library = Library {
+            tracks: (0..14000)
+                .map(|index| {
+                    let mut preparation = amp_core::Preparation::default();
+                    preparation.extensions.insert(
+                        "genre".into(),
+                        serde_json::json!(if index % 2 == 0 { "Rock" } else { "R&B" }),
+                    );
+                    amp_core::Track {
+                        path: format!("songs/{index}.mp3").into(),
+                        title: format!("Track {index}"),
+                        preparation,
+                    }
+                })
+                .collect(),
+            tree: Folder {
+                name: "Music".into(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        };
+        fn wait(
+            cache: &mut Membership,
+            p: &amp_core::show::SmartPlaylist,
+            l: &Library,
+            g: u64,
+        ) -> Vec<usize> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(indices) = cache.indices(p, l, g) {
+                    return indices;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "membership worker timed out"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let mut cache = Membership::default();
+        assert!(cache.indices(&profile, &library, 1).is_none());
+        let matched = wait(&mut cache, &profile, &library, 1);
+        assert_eq!(matched.len(), 7000);
+        assert!(matched.iter().all(|i| i % 2 == 0));
+        assert!(cache.job.is_none());
+        assert_eq!(cache.indices(&profile, &library, 1), Some(matched));
+        assert!(cache.job.is_none(), "redraw must reuse matching results");
+        profile.genres = vec!["R&B".into()];
+        assert!(
+            cache.indices(&profile, &library, 1).is_none(),
+            "do not show previous rules' rows"
+        );
+        assert!(
+            wait(&mut cache, &profile, &library, 1)
+                .iter()
+                .all(|i| i % 2 == 1)
+        );
+        library.tracks[0]
+            .preparation
+            .extensions
+            .insert("genre".into(), serde_json::json!("R&B"));
+        assert!(cache.indices(&profile, &library, 2).is_none());
+        assert_eq!(wait(&mut cache, &profile, &library, 2).len(), 7001);
+    }
+
+    #[test]
+    fn auto_mix_button_can_be_clicked_on_and_off() {
+        let ctx = egui::Context::default();
+        let mut enabled = false;
+        let mut rect = egui::Rect::NOTHING;
+        let mut changed = false;
+        let mut frame = |events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| {
+                    let response = auto_mix_toggle(ui, &mut enabled);
+                    rect = response.rect;
+                    changed = response.changed();
+                },
+            );
+            output.textures_delta.clear();
+            (rect, enabled, changed)
+        };
+        let (rect, _, _) = frame(vec![]);
+        for expected in [true, false] {
+            let position = rect.center();
+            frame(vec![
+                egui::Event::PointerMoved(position),
+                egui::Event::PointerButton {
+                    pos: position,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ]);
+            let (_, enabled, changed) = frame(vec![egui::Event::PointerButton {
+                pos: position,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }]);
+            assert_eq!(enabled, expected);
+            assert!(changed);
+        }
+    }
     #[test]
     fn saved_playlist_keeps_order_and_duplicates_without_changing_library() {
         let library = Library {
@@ -439,6 +940,7 @@ mod tests {
             },
         };
         let playlist = Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: "Show".into(),

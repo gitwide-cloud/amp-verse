@@ -4,10 +4,13 @@ use std::{
     process::{Child, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU32, Ordering::Relaxed},
     },
 };
 pub struct Broadcast {
+    pub player_only: bool,
+    level: Arc<AtomicU32>,
+    muted: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
     child: Arc<Mutex<Child>>,
     pub status: Arc<Mutex<String>>,
@@ -21,31 +24,55 @@ impl Drop for Broadcast {
     }
 }
 impl Broadcast {
-    pub fn start(
+    pub fn levels(&self) -> (f32, bool) {
+        (
+            f32::from_bits(self.level.load(Relaxed)),
+            self.muted.load(Relaxed),
+        )
+    }
+    #[cfg(test)]
+    pub fn start_source(
         audio: &crate::mixer::Engine,
         aux: &crate::mixer::Engine,
         address: String,
         password: String,
+        player_only: bool,
+    ) -> Result<Self, String> {
+        Self::start_source_normalized(audio, aux, address, password, player_only, false)
+    }
+    pub fn start_source_normalized(
+        audio: &crate::mixer::Engine,
+        aux: &crate::mixer::Engine,
+        address: String,
+        password: String,
+        player_only: bool,
+        normalize: bool,
     ) -> Result<Self, String> {
         if audio.sample_rate != aux.sample_rate {
             return Err(
                 "Sampler and DJ outputs need the same sample rate for live broadcast".into(),
             );
         }
-        let mut main = audio.broadcast_tap()?;
-        let mut samples = aux.broadcast_tap()?;
-        let mut child = amp_core::command("ffmpeg")
+        let mut main = audio.broadcast_source_tap(player_only)?;
+        let mut samples = if player_only {
+            None
+        } else {
+            Some(aux.broadcast_tap()?)
+        };
+        let mut command = amp_core::command("ffmpeg");
+        command
             .args(["-nostdin", "-v", "error", "-f", "f32le", "-ar"])
             .arg(audio.sample_rate.to_string())
+            .args(["-ac", "2", "-i", "pipe:0"]);
+        if normalize {
+            command.args(["-af", "loudnorm=I=-16:TP=-1.5:LRA=11"]);
+        }
+        let mut child = command
             .args([
-                "-ac",
-                "2",
-                "-i",
-                "pipe:0",
                 "-c:a",
                 "libmp3lame",
                 "-b:a",
-                "192k",
+                "256k",
                 "-reservoir",
                 "0",
                 "-f",
@@ -61,6 +88,10 @@ impl Broadcast {
             .map_err(|e| e.to_string())?;
         let mut input = child.stdin.take().ok_or("Encoder input unavailable")?;
         let mut output = child.stdout.take().ok_or("Encoder output unavailable")?;
+        let level = Arc::new(AtomicU32::new(1f32.to_bits()));
+        let writer_level = level.clone();
+        let muted = Arc::new(AtomicBool::new(false));
+        let writer_muted = muted.clone();
         let stop = Arc::new(AtomicBool::new(false));
         let stopped = stop.clone();
         let child = Arc::new(Mutex::new(child));
@@ -94,10 +125,20 @@ impl Broadcast {
                         bytes.clear();
                         for _ in 0..1024 {
                             let Ok(frame) = main.pop() else { break };
-                            let aux = samples.pop().unwrap_or([0.; 2]);
+                            let aux = samples
+                                .as_mut()
+                                .and_then(|s| s.pop().ok())
+                                .unwrap_or([0.; 2]);
                             for ch in 0..2 {
                                 bytes.extend_from_slice(
-                                    &(frame[ch] + aux[ch]).clamp(-0.98, 0.98).to_le_bytes(),
+                                    &((frame[ch] + aux[ch])
+                                        * if writer_muted.load(Relaxed) {
+                                            0.
+                                        } else {
+                                            f32::from_bits(writer_level.load(Relaxed))
+                                        })
+                                    .clamp(-0.98, 0.98)
+                                    .to_le_bytes(),
                                 );
                             }
                         }
@@ -108,8 +149,12 @@ impl Broadcast {
                         }
                     }
                 });
-                *message.lock().unwrap() =
-                    "Broadcasting live DJ mix · decks, mixer, stems and sampler".into();
+                *message.lock().unwrap() = if player_only {
+                    "Broadcasting AMP Player output"
+                } else {
+                    "Broadcasting live DJ mix · decks, mixer, stems and sampler"
+                }
+                .into();
                 let outcome = (|| -> Result<(), String> {
                     let mut bytes = [0; 8192];
                     while !stopped.load(Relaxed) {
@@ -145,10 +190,21 @@ impl Broadcast {
             }
         });
         Ok(Self {
+            player_only,
+            level,
+            muted,
             stop,
             child,
             status,
         })
+    }
+    pub fn set_level(&self, level: f32, muted: bool) -> Result<(), String> {
+        if !level.is_finite() || !(0. ..=1.).contains(&level) {
+            return Err("Broadcast level must be 0–1".into());
+        }
+        self.level.store(level.to_bits(), Relaxed);
+        self.muted.store(muted, Relaxed);
+        Ok(())
     }
     pub fn running(&self) -> bool {
         !self.stop.load(Relaxed)
@@ -160,6 +216,14 @@ mod tests {
     #[test]
     #[ignore = "requires native audio and FFmpeg; output muted"]
     fn master_tap_encodes_and_streams_through_real_cast_server() {
+        check_stream(false);
+    }
+    #[test]
+    #[ignore = "requires native audio and FFmpeg; output muted"]
+    fn normalized_master_tap_encodes_and_streams_through_real_cast_server() {
+        check_stream(true);
+    }
+    fn check_stream(normalize: bool) {
         let root = tempfile::tempdir().unwrap();
         let library = amp_core::Library {
             tracks: vec![],
@@ -183,7 +247,19 @@ mod tests {
         main.set_master(0.);
         let aux = crate::mixer::Engine::new().unwrap();
         aux.set_master(0.);
-        let broadcast = Broadcast::start(&main, &aux, address.clone(), String::new()).unwrap();
+        let broadcast = if normalize {
+            Broadcast::start_source_normalized(
+                &main,
+                &aux,
+                address.clone(),
+                String::new(),
+                false,
+                true,
+            )
+            .unwrap()
+        } else {
+            Broadcast::start_source(&main, &aux, address.clone(), String::new(), false).unwrap()
+        };
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(std::time::Duration::from_secs(5)))
             .proxy(None)

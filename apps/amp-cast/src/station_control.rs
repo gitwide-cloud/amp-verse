@@ -7,9 +7,60 @@ pub fn routes() -> Router<Arc<Cast>> {
         .route("/api/station/playlists", get(playlists))
         .route("/api/station/play/{id}", post(play))
         .route("/api/station/name", post(name))
+        .route("/api/station/mix", post(mix))
         .route("/api/live/launch", post(launch))
         .route("/api/output/start", post(output_start))
         .route("/api/output/stop", post(output_stop))
+}
+#[derive(Clone, Default, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct MixSettings {
+    #[serde(default)]
+    pub revision: u64,
+    pub target: Option<f64>,
+    pub style: Option<amp_core::show::Style>,
+    pub transitions: Option<u32>,
+    #[serde(default = "yes")]
+    pub hold: bool,
+}
+fn yes() -> bool {
+    true
+}
+impl MixSettings {
+    fn validate(&self) -> bool {
+        self.target
+            .is_none_or(|e| e.is_finite() && (1. ..=10.).contains(&e))
+            && self
+                .transitions
+                .is_none_or(|n| (1..=100).contains(&n) && self.target.is_some())
+    }
+}
+async fn mix(
+    State(cast): State<Arc<Cast>>,
+    headers: HeaderMap,
+    Json(mut settings): Json<MixSettings>,
+) -> Response {
+    if !cast.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !settings.validate() {
+        return (
+            StatusCode::BAD_REQUEST,
+            "Choose energy 1–10 and 1–100 transitions",
+        )
+            .into_response();
+    }
+    let mut current = cast.mix.lock().unwrap();
+    if settings.revision != current.revision {
+        return (
+            StatusCode::CONFLICT,
+            "Station mix changed; refresh before updating",
+        )
+            .into_response();
+    }
+    settings.revision = current.revision.saturating_add(1);
+    *current = settings.clone();
+    Json(serde_json::json!({"requested":settings,"applies":"next song selection; current audio is unchanged"})).into_response()
 }
 async fn playlists(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     if !cast.authorized(&headers) {

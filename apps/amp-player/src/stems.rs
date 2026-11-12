@@ -95,6 +95,28 @@ fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 3]> {
 pub fn ready(source: &Path) -> Option<[PathBuf; 3]> {
     ready_in(&cache_root()?, source)
 }
+pub(super) fn relocate_cached(source: &Path, destination: &Path) -> Result<(), String> {
+    let Some(cache) = cache_root() else {
+        return Ok(());
+    };
+    if ready_in(&cache, source).is_none() {
+        return Ok(());
+    }
+    // This branch only archives existing prepared audio; it never starts separation.
+    prepare(
+        &cache,
+        source,
+        Path::new(""),
+        &AtomicBool::new(false),
+        &Arc::new(Mutex::new(None)),
+    )?;
+    if !restore_cached(&cache, destination)? {
+        return Err(
+            "Prepared stems could not be restored at the new location; original retained.".into(),
+        );
+    }
+    Ok(())
+}
 fn restore_cached(cache: &Path, source: &Path) -> Result<bool, String> {
     let archive = cache.join("stems.ampdb");
     if !archive.is_file() {
@@ -312,9 +334,9 @@ pub struct Panel {
     batch_rx: Option<mpsc::Receiver<(usize, usize, String)>>,
     batch_progress: (usize, usize),
     batch_status: String,
-    status: [String; 2],
-    level: [[f32; 3]; 2],
-    generation: [u64; 2],
+    status: [String; 6],
+    level: [[f32; 3]; 6],
+    generation: [u64; 6],
 }
 impl Default for Panel {
     fn default() -> Self {
@@ -326,8 +348,8 @@ impl Default for Panel {
             batch_progress: (0, 0),
             batch_status: String::new(),
             status: Default::default(),
-            level: [[0.; 3]; 2],
-            generation: [0; 2],
+            level: [[0.; 3]; 6],
+            generation: [0; 6],
         }
     }
 }
@@ -410,7 +432,7 @@ impl Panel {
         ui.label(&self.status[0]);
         prepared
     }
-    pub fn library(&mut self, ui: &mut egui::Ui, root: &Path, tracks: &[amp_core::Track]) {
+    pub fn library(&mut self, ui: &mut egui::Ui, root: &Path) {
         if let Some(rx) = &self.batch_rx {
             while let Ok((done, total, title)) = rx.try_recv() {
                 self.batch_progress = (done, total);
@@ -440,17 +462,15 @@ impl Panel {
             ui.ctx().request_repaint_after(Duration::from_millis(150));
         } else if ui
             .add_enabled(
-                !tracks.is_empty() && self.job.is_none() && runtime().is_some(),
+                !root.as_os_str().is_empty() && self.job.is_none() && runtime().is_some(),
                 egui::Button::new("Prepare library stems"),
             )
             .clicked()
             && let (Some(cache), Some(python)) = (cache_root(), runtime())
         {
-            let sources: Vec<_> = tracks
-                .iter()
-                .map(|t| (root.join(&t.path), t.title.clone()))
-                .collect();
-            self.batch_progress = (0, sources.len());
+            let root = root.to_path_buf();
+            self.batch_progress = (0, 0);
+            self.batch_status = "Finding songs in all music sources and subfolders…".into();
             let cancel = Arc::new(AtomicBool::new(false));
             let process = Arc::new(Mutex::new(None));
             let (tx, rx) = mpsc::channel();
@@ -459,7 +479,20 @@ impl Panel {
             let child = process.clone();
             std::thread::spawn(move || {
                 let result = (|| {
+                    let library = amp_core::scan_job_inputs(&root).map_err(|e| e.to_string())?;
+                    let sources: Vec<_> = library
+                        .tracks
+                        .iter()
+                        .map(|track| {
+                            (
+                                amp_core::music_sources::audio_path(&root, &track.path),
+                                track.title.clone(),
+                            )
+                        })
+                        .collect();
                     let total = sources.len();
+                    let mut failed = 0;
+                    let mut last_error = String::new();
                     for (index, (source, title)) in sources.into_iter().enumerate() {
                         if stop.load(Relaxed) {
                             return Err(
@@ -467,8 +500,28 @@ impl Panel {
                             );
                         }
                         let _ = progress.send((index, total, format!("Preparing {title}")));
-                        prepare(&cache, &source, &python, &stop, &child)?;
-                        let _ = progress.send((index + 1, total, format!("Prepared {title}")));
+                        match prepare(&cache, &source, &python, &stop, &child) {
+                            Ok(()) => {
+                                let _ =
+                                    progress.send((index + 1, total, format!("Prepared {title}")));
+                            }
+                            Err(error) if stop.load(Relaxed) => return Err(error),
+                            Err(error) => {
+                                failed += 1;
+                                last_error = format!("{title}: {error}");
+                                let _ = progress.send((
+                                    index + 1,
+                                    total,
+                                    format!("Skipped failed song: {last_error}"),
+                                ));
+                            }
+                        }
+                    }
+                    if failed > 0 {
+                        return Err(format!(
+                            "Stem preparation finished: {} prepared/reused, {failed} failed. Last error: {last_error}",
+                            total - failed
+                        ));
                     }
                     Ok(())
                 })();
@@ -489,6 +542,68 @@ impl Panel {
             );
         }
         ui.label(&self.batch_status);
+    }
+    pub fn live_knobs(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        audio: Option<&crate::mixer::Engine>,
+    ) -> Option<[f32; 3]> {
+        self.live_knobs_layout(ui, deck, audio, false)
+    }
+    pub fn live_knobs_vertical(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        audio: Option<&crate::mixer::Engine>,
+    ) -> Option<[f32; 3]> {
+        self.live_knobs_layout(ui, deck, audio, true)
+    }
+    fn live_knobs_layout(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        audio: Option<&crate::mixer::Engine>,
+        vertical: bool,
+    ) -> Option<[f32; 3]> {
+        let active = audio.is_some_and(|a| a.controls.stems_loaded[deck].load(Relaxed));
+        if let Some(a) = audio {
+            for i in 0..3 {
+                self.level[deck][i] = f32::from_bits(a.controls.stem_knobs[deck][i].load(Relaxed));
+            }
+        }
+        let previous = self.level[deck];
+        ui.add_enabled_ui(active, |ui| {
+            ui.with_layout(
+                if vertical {
+                    egui::Layout::top_down(egui::Align::Center)
+                } else {
+                    egui::Layout::left_to_right(egui::Align::Min)
+                },
+                |ui| {
+                    for (stem, label) in [(0, "VOC"), (2, "BEAT"), (1, "INST")] {
+                        ui.vertical(|ui| {
+                            crate::dj_mixer::dial(
+                                ui,
+                                label,
+                                &mut self.level[deck][stem],
+                                -1. ..=1.,
+                                if deck.is_multiple_of(2) {
+                                    crate::ORANGE
+                                } else {
+                                    crate::CYAN
+                                },
+                            );
+                            ui.small(label);
+                        });
+                    }
+                },
+            );
+        });
+        if !active && !vertical {
+            ui.small("Prepare stems in Library");
+        }
+        (previous != self.level[deck]).then_some(self.level[deck])
     }
     pub fn show(
         &mut self,
@@ -521,12 +636,12 @@ impl Panel {
         let mut reload = false;
         let response = ui.push_id(("deck-stems", deck), |ui| {
             ui.colored_label(
-                if deck == 0 {
+                if deck.is_multiple_of(2) {
                     crate::ORANGE
                 } else {
                     crate::CYAN
                 },
-                if deck == 0 {
+                if deck.is_multiple_of(2) {
                     "A · STEMS"
                 } else {
                     "B · STEMS"
@@ -592,7 +707,7 @@ impl Panel {
                             name,
                             &mut self.level[deck][stem],
                             -1. ..=1.,
-                            if deck == 0 {
+                            if deck.is_multiple_of(2) {
                                 crate::ORANGE
                             } else {
                                 crate::CYAN

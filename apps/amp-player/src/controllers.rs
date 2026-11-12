@@ -1,4 +1,4 @@
-//! Mixxx XML input interoperability. Never evaluates imported scripts or opens HID.
+//! Mixxx and partial VirtualDJ XML input interoperability. Never evaluates scripts or opens HID.
 use crate::Player;
 use eframe::egui;
 use std::{
@@ -8,6 +8,19 @@ use std::{
 };
 
 const MAX_XML: usize = 2 * 1024 * 1024;
+fn read_xml(path: &std::path::Path) -> Result<String, String> {
+    use std::io::Read;
+    let mut xml = String::new();
+    std::fs::File::open(path)
+        .map_err(|e| e.to_string())?
+        .take(MAX_XML as u64 + 1)
+        .read_to_string(&mut xml)
+        .map_err(|e| e.to_string())?;
+    if xml.len() > MAX_XML {
+        return Err("Mapping exceeds 2 MB".into());
+    }
+    Ok(xml)
+}
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Target {
     Play(usize),
@@ -231,6 +244,184 @@ fn parse(xml: &str) -> Result<Mapping, String> {
     }
     Ok(mapping)
 }
+// Translate only literal actions. Imported VDJScript is never executed.
+fn virtualdj_xml(mapper: &str, definition: &str) -> Result<(String, Vec<String>), String> {
+    fn document(xml: &str) -> Result<roxmltree::Document<'_>, String> {
+        if xml.len() > MAX_XML {
+            return Err("Mapping exceeds 2 MB".into());
+        }
+        roxmltree::Document::parse_with_options(
+            xml,
+            roxmltree::ParsingOptions {
+                nodes_limit: 100_000,
+                ..Default::default()
+            },
+        )
+        .map_err(|e| format!("Invalid VirtualDJ XML: {e}"))
+    }
+    let maps = document(mapper)?;
+    let defs = document(definition)?;
+    let m = maps.root_element();
+    let d = defs.root_element();
+    if m.children().count() > 4096 || d.children().count() > 4096 {
+        return Err("Too many mapping controls".into());
+    }
+    if !m.has_tag_name("mapper") || !d.has_tag_name("device") || d.attribute("type") != Some("MIDI")
+    {
+        return Err(
+            "Choose a VirtualDJ mapper XML and its MIDI device-definition XML. HID is unsupported."
+                .into(),
+        );
+    }
+    if m.attribute("device").is_none() || m.attribute("device") != d.attribute("name") {
+        return Err("The mapper and device definition belong to different controllers.".into());
+    }
+    let mut controls = String::new();
+    let mut issues = Vec::new();
+    let mut count = 0;
+    for map in m.children().filter(|n| n.has_tag_name("map")) {
+        if issues.len() >= 4096 {
+            return Err("Too many mapping controls".into());
+        }
+        let name = map.attribute("value").unwrap_or("");
+        let action = map.attribute("action").unwrap_or("").trim();
+        let elements: Vec<_> = d
+            .children()
+            .filter(|n| n.attribute("name") == Some(name))
+            .collect();
+        if elements.is_empty() {
+            issues.push(format!("{name}: no device input definition"));
+        }
+        for input in elements {
+            count += 1;
+            if count > 4096 {
+                return Err("Too many mapping controls".into());
+            }
+            let result = (|| -> Result<String, &'static str> {
+                let mut words = action.split_whitespace();
+                let mut deck = input
+                    .attribute("deck")
+                    .and_then(|v| v.parse::<usize>().ok());
+                let mut verb = words.next().ok_or("Empty action")?;
+                if verb == "deck" {
+                    deck = Some(
+                        words
+                            .next()
+                            .and_then(|v| v.parse().ok())
+                            .ok_or("Only numbered decks are supported")?,
+                    );
+                    verb = words.next().ok_or("Missing action")?;
+                }
+                let key = match verb {
+                    "play_pause" => "play",
+                    "stop" => "stop",
+                    "sync" => "beatsync",
+                    "volume" => "volume",
+                    "eq_low" => "filterLow",
+                    "eq_mid" => "filterMid",
+                    "eq_high" => "filterHigh",
+                    "pitch_slider" => "rate",
+                    "pfl" => "pfl",
+                    "crossfader" => "crossfader",
+                    _ => return Err("Unsupported action or script"),
+                };
+                if words.next().is_some() {
+                    return Err("Action parameters, chains and conditions are unsupported");
+                }
+                let group = if key == "crossfader" {
+                    "[Master]"
+                } else {
+                    match deck {
+                        Some(1) => "[Channel1]",
+                        Some(2) => "[Channel2]",
+                        _ => return Err("Only fixed deck 1/2 assignments are supported"),
+                    }
+                };
+                if input.attributes().any(|a| {
+                    !matches!(
+                        a.name(),
+                        "name"
+                            | "deck"
+                            | "channel"
+                            | "note"
+                            | "cc"
+                            | "pitch"
+                            | "inverted"
+                            | "autoled"
+                            | "ghost"
+                    )
+                }) {
+                    return Err("Special input encoding or deck layers are unsupported");
+                }
+                if input
+                    .attribute("inverted")
+                    .is_some_and(|v| !matches!(v, "true" | "false"))
+                {
+                    return Err("Unknown inversion encoding");
+                }
+                let channel = input
+                    .attribute("channel")
+                    .ok_or("An explicit MIDI channel is required")?
+                    .parse::<u8>()
+                    .map_err(|_| "Invalid MIDI channel")?;
+                if channel > 15 {
+                    return Err("Invalid MIDI channel");
+                }
+                let continuous = target(group, key).unwrap().continuous();
+                let (status, num) = match input.tag_name().name() {
+                    "button"
+                        if !continuous
+                            && input.attribute("inverted").is_none_or(|v| v == "false") =>
+                    {
+                        match (input.attribute("note"), input.attribute("cc")) {
+                            (Some(n), None) => {
+                                (0x90 | channel, number(n).map_err(|_| "Invalid note")?)
+                            }
+                            (None, Some(n)) => {
+                                (0xb0 | channel, number(n).map_err(|_| "Invalid CC")?)
+                            }
+                            _ => return Err("Ambiguous button encoding"),
+                        }
+                    }
+                    "slider" if continuous => {
+                        match (
+                            input.attribute("cc"),
+                            input.attribute("pitch"),
+                            input.attribute("note"),
+                        ) {
+                            (Some(n), None, None) => {
+                                (0xb0 | channel, number(n).map_err(|_| "Invalid CC")?)
+                            }
+                            (None, Some("true"), None) => (0xe0 | channel, 0),
+                            _ => return Err("Only absolute CC or pitch sliders are supported"),
+                        }
+                    }
+                    _ => return Err("Jog, relative, HID, output or mismatched control skipped"),
+                };
+                if num > 127 {
+                    return Err("MIDI number exceeds 127");
+                }
+                let invert = if input.attribute("inverted") == Some("true") {
+                    "<invert/>"
+                } else {
+                    ""
+                };
+                Ok(format!(
+                    "<control><group>{group}</group><key>{key}</key><status>{status}</status><midino>{num}</midino><options>{invert}</options></control>"
+                ))
+            })();
+            match result {
+                Ok(c) => controls.push_str(&c),
+                Err(e) => issues.push(format!("{name}: {e}")),
+            }
+        }
+    }
+    let xml = format!(
+        "<MixxxMIDIPreset><controller id=\"VirtualDJ import\"><controls>{controls}</controls></controller></MixxxMIDIPreset>"
+    );
+    parse(&xml)?;
+    Ok((xml, issues))
+}
 fn message_value(b: &Binding, message: &[u8]) -> Option<f32> {
     if message.len() == 3
         && b.status & 0xf0 == 0x90
@@ -297,26 +488,48 @@ impl Default for Panel {
                     .ok()
                     .flatten()
             })
-            .and_then(|v| v["xml"].as_str().and_then(|s| parse(s).ok()));
-        Self {state: vec![Pickup::default(); mapping.as_ref().map_or(0,|m|m.bindings.len())], mapping,
-            ports: Vec::new(), selected: None, connection: None, receiver: None, status: "Import a Mixxx MIDI mapping, review the supported controls, then choose your device.".into()}
+            .and_then(|v| {
+                let mut mapping = parse(v["xml"].as_str()?).ok()?;
+                if let Some(issues) = v["issues"].as_array() {
+                    mapping
+                        .issues
+                        .extend(issues.iter().filter_map(|v| v.as_str().map(str::to_owned)));
+                }
+                Some(mapping)
+            });
+        Self {
+            state: vec![Pickup::default(); mapping.as_ref().map_or(0, |m| m.bindings.len())],
+            mapping,
+            ports: Vec::new(),
+            selected: None,
+            connection: None,
+            receiver: None,
+            status:
+                "Import a MIDI mapping, review the supported controls, then choose your device."
+                    .into(),
+        }
     }
 }
 impl Panel {
     fn import(&mut self, path: &std::path::Path) -> Result<(), String> {
-        use std::io::Read;
-        let mut xml = String::new();
-        std::fs::File::open(path)
-            .map_err(|e| e.to_string())?
-            .take(MAX_XML as u64 + 1)
-            .read_to_string(&mut xml)
-            .map_err(|e| e.to_string())?;
-        let mapping = parse(&xml)?;
+        self.install_mapping(read_xml(path)?, Vec::new())
+    }
+    fn import_virtualdj(
+        &mut self,
+        mapper: &std::path::Path,
+        definition: &std::path::Path,
+    ) -> Result<(), String> {
+        let (xml, issues) = virtualdj_xml(&read_xml(mapper)?, &read_xml(definition)?)?;
+        self.install_mapping(xml, issues)
+    }
+    fn install_mapping(&mut self, xml: String, issues: Vec<String>) -> Result<(), String> {
+        let mut mapping = parse(&xml)?;
+        mapping.issues.extend(issues.clone());
         let profile = profile_path().ok_or("Settings folder unavailable")?;
         amp_core::catalog_db::save_local_record(
             &profile,
             "mixxx-import",
-            &serde_json::json!({"xml":xml}),
+            &serde_json::json!({"xml":xml,"issues":issues}),
         )?;
         self.disconnect();
         self.state = vec![Pickup::default(); mapping.bindings.len()];
@@ -381,6 +594,19 @@ impl Panel {
             "https://github.com/mixxxdj/mixxx/tree/main/res/controllers",
         );
         ui.horizontal_wrapped(|ui| {
+            if ui.button("Import VirtualDJ mapping…").clicked()
+                && let Some(mapper) = rfd::FileDialog::new()
+                    .set_title("Choose VirtualDJ mapping (Mappers folder)")
+                    .add_filter("VirtualDJ mapper XML", &["xml"])
+                    .pick_file()
+                && let Some(definition) = rfd::FileDialog::new()
+                    .set_title("Choose matching MIDI definition (Devices folder)")
+                    .add_filter("VirtualDJ MIDI definition XML", &["xml"])
+                    .pick_file()
+                && let Err(e) = self.import_virtualdj(&mapper, &definition)
+            {
+                self.status = e;
+            }
             if ui.button("Import Mixxx mapping…").clicked()
                 && let Some(path) = rfd::FileDialog::new()
                     .add_filter("Mixxx MIDI XML", &["xml"])
@@ -425,7 +651,7 @@ impl Panel {
             self.status = e;
         }
         ui.label(&self.status);
-        ui.weak("Partial Mixxx XML support. No JavaScript, HID, jog scripts, shift layers or LED feedback. Connect the MIDI input, not an audio device. Reconnect here after unplugging hardware.");
+        ui.weak("Partial Mixxx / VirtualDJ MIDI XML support. VirtualDJ needs both mapper and matching device-definition files; built-in definitions may not be exportable. No scripts, HID, jog wheels, shift layers or LED feedback. Review skipped controls before connecting.");
         if let Some(mapping) = &self.mapping {
             ui.label(format!(
                 "{} · {} supported inputs",
@@ -503,11 +729,59 @@ impl Player {
         }
     }
     fn controller_input(&mut self, target: Target, value: f32) -> Result<(), String> {
-        if !matches!(target, Target::Phones(_)) {
+        if !value.is_finite() || !(0. ..=1.).contains(&value) {
+            return Err("Invalid controller value".into());
+        }
+        let deck = match target {
+            Target::Crossfader => None,
+            Target::Play(d)
+            | Target::Stop(d)
+            | Target::Sync(d)
+            | Target::Cue(d)
+            | Target::Loop(d)
+            | Target::Volume(d)
+            | Target::Pitch(d)
+            | Target::Eq(d, _)
+            | Target::Phones(d) => Some(d),
+        };
+        if deck.is_some_and(|d| d >= 6) || matches!(target,Target::Eq(_,b) if b>=3) {
+            return Err("Invalid controller target".into());
+        }
+        if let Target::Play(d) | Target::Cue(d) | Target::Loop(d) | Target::Sync(d) = target {
+            let audio = self.audio.as_ref().ok_or("Load a track first")?;
+            if !audio.load_current(d) || !audio.loaded(d) {
+                return Err("Deck is not ready".into());
+            }
+            if matches!(target, Target::Cue(_) | Target::Loop(_)) && self.loaded_track(d).is_none()
+            {
+                return Err("Load a track first".into());
+            }
+            if matches!(target, Target::Loop(_))
+                && self
+                    .loaded_track(d)
+                    .and_then(|t| t.preparation.bpm)
+                    .is_none()
+            {
+                return Err("Prepare BPM before using beat loops".into());
+            }
+            if matches!(target, Target::Sync(_)) {
+                audio.sync(d, !audio.controls.synced[d].load(Relaxed))?;
+            }
+        }
+        if matches!(target, Target::Crossfader) && self.audio.is_none() {
+            return Err("Load a track first".into());
+        }
+        let manual = !matches!(target, Target::Phones(_));
+        if manual
+            && (matches!(target, Target::Crossfader)
+                || deck.is_some_and(|d| self.pair().contains(&d)))
+        {
             if let Some(a) = &self.audio {
                 self.run.cancel_effects(a);
             }
             self.run.cancel_automation();
+        }
+        if manual && (deck == Some(0) || matches!(target, Target::Crossfader)) {
             self.auto = false;
         }
         match target {
@@ -516,12 +790,18 @@ impl Player {
                 if !audio.load_current(d) || !audio.loaded(d) {
                     return Err("Deck is not ready".into());
                 }
-                audio.controls.play[d].store(!audio.playing(d), Relaxed);
+                let play =
+                    !audio.playing(d) || self.playback_owner != crate::playback_owner::Owner::Dj;
+                if play {
+                    self.transport_play(crate::playback_owner::Owner::Dj, d)?;
+                } else {
+                    self.audio.as_ref().unwrap().controls.play[d].store(false, Relaxed);
+                }
             }
             Target::Stop(d) => {
                 self.stop(d);
             }
-            Target::Sync(d) => self.sync_deck(d),
+            Target::Sync(_) => {}
             Target::Cue(d) => {
                 let cue = self
                     .loaded_track(d)
@@ -591,6 +871,81 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejected_controller_commands_and_background_faders_preserve_automation() {
+        let mut p = Player {
+            auto: true,
+            ..Default::default()
+        };
+        p.run.auto = true;
+        p.run.preloaded = Some((1, 0));
+        for target in [
+            Target::Play(1),
+            Target::Cue(1),
+            Target::Loop(1),
+            Target::Sync(1),
+            Target::Crossfader,
+        ] {
+            assert!(p.controller_input(target, 1.).is_err());
+            assert!(p.auto && p.run.auto);
+            assert_eq!(p.run.preloaded, Some((1, 0)));
+        }
+        p.controller_input(Target::Volume(2), 0.7).unwrap();
+        assert!(p.run.auto && p.auto);
+        assert_eq!(p.channel_gain[2], 0.7);
+        assert!(p.controller_input(Target::Eq(0, 7), 0.5).is_err());
+        assert!(p.controller_input(Target::Volume(0), f32::NAN).is_err());
+        assert!(p.auto && p.run.auto);
+    }
+    #[test]
+    fn virtualdj_import_translates_literal_actions_and_reports_scripts() {
+        let mapper = r#"<mapper device="TEST"><map value="PLAY" action="play_pause"/><map value="VOL" action="volume"/><map value="PITCH" action="deck 2 pitch_slider"/><map value="JOG" action="jogwheel"/><map value="SHIFT" action="var 'shift' ? play_pause : sync"/></mapper>"#;
+        let definition = r#"<device name="TEST" type="MIDI"><button name="PLAY" note="0x11" channel="0" deck="1"/><slider name="VOL" cc="7" channel="1" deck="2" inverted="true"/><slider name="PITCH" pitch="true" channel="1"/><jog name="JOG" cc="9" channel="0" deck="1"/><button name="SHIFT" note="3" channel="0" deck="1"/></device>"#;
+        let (xml, issues) = virtualdj_xml(mapper, definition).unwrap();
+        let mapping = parse(&xml).unwrap();
+        assert_eq!(mapping.bindings.len(), 3);
+        assert_eq!(mapping.bindings[0].target, Target::Play(0));
+        assert_eq!(
+            message_value(&mapping.bindings[0], &[0x90, 0x11, 127]),
+            Some(1.)
+        );
+        assert_eq!(
+            message_value(&mapping.bindings[0], &[0x80, 0x11, 0]),
+            Some(0.)
+        );
+        assert_eq!(mapping.bindings[1].target, Target::Volume(1));
+        assert!(mapping.bindings[1].invert);
+        assert_eq!(mapping.bindings[2].status, 0xe1);
+        assert_eq!(issues.len(), 2);
+    }
+    #[test]
+    fn virtualdj_import_rejects_missing_definitions_unsafe_encodings_and_ambiguity() {
+        let mapper = r#"<mapper device="T"><map value="P" action="play_pause"/></mapper>"#;
+        let valid = r#"<device name="T" type="MIDI"><button name="P" note="1" channel="0" deck="1"/></device>"#;
+        assert!(virtualdj_xml(mapper, valid).is_ok());
+        for definition in [
+            valid.replace("name=\"T\"", "name=\"Other\""),
+            valid.replace("type=\"MIDI\"", "type=\"HID\""),
+            valid.replace("channel=\"0\"", "channel=\"16\""),
+            valid.replace("channel=\"0\"", ""),
+            valid.replace("note=\"1\"", "note=\"128\""),
+            valid.replace("note=\"1\"", "note=\"1\" nbdecks=\"2\""),
+            valid.replace(
+                "</device>",
+                "<button name=\"P\" note=\"1\" channel=\"0\" deck=\"2\"/></device>",
+            ),
+        ] {
+            assert!(virtualdj_xml(mapper, &definition).is_err(), "{definition}");
+        }
+        assert!(
+            virtualdj_xml(
+                mapper,
+                "<!DOCTYPE device [<!ENTITY x SYSTEM 'file:///private'>]><device>&x;</device>"
+            )
+            .is_err()
+        );
+        assert!(virtualdj_xml(&" ".repeat(MAX_XML + 1), valid).is_err());
+    }
     #[test]
     #[ignore = "requires a working native MIDI service; no ports are connected"]
     fn native_midi_backend_enumerates_without_taking_control() {

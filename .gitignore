@@ -5,3 +5,7 @@
 /android/**/build/
 /android/local.properties
 __pycache__/
+/integrations/companion/node_modules/
+/integrations/companion/pkg/
+
+/integrations/companion/*.tgz

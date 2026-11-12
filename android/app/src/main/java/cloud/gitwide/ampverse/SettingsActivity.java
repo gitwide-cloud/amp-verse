@@ -7,16 +7,13 @@ import android.net.Uri;
 import android.os.Bundle;
 import android.provider.Settings;
 import android.widget.*;
-import java.util.concurrent.Executors;
 
-/** App-wide settings; updates are checked on demand, installed by the user from Releases. */
+/** App-wide settings and verified in-app update installation. */
 public final class SettingsActivity extends Activity {
     static final String RELEASES = "https://github.com/gitwide-cloud/amp-verse/releases";
     private SharedPreferences prefs;
     private Appearance colors;
     private LinearLayout page;
-    private boolean checking;
-    private String updateStatus = "Installed: " + BuildConfig.VERSION_NAME + " · Check GitHub for a published update.";
     @Override public void onCreate(Bundle state) { super.onCreate(state); prefs=getSharedPreferences("settings",MODE_PRIVATE); draw(); }
     private int dp(int n) { return (int)(n*getResources().getDisplayMetrics().density); }
     private void label(String text, int size, int color) { TextView view=new TextView(this);view.setText(text);view.setTextSize(size);view.setTextColor(color);view.setPadding(0,dp(12),0,dp(8));page.addView(view); }
@@ -36,17 +33,18 @@ public final class SettingsActivity extends Activity {
         label("Sequential playback uses locally saved songs. Changes apply when you return to the player.",14,colors.muted);
         button("Android notification settings",()->startActivity(new Intent(Settings.ACTION_APP_NOTIFICATION_SETTINGS).putExtra(Settings.EXTRA_APP_PACKAGE,getPackageName())));
         label("Local storage",20,colors.text);label("Phone-folder music stays separate from station downloads. In AMP Cast, connect to a Smart Station and save its playlists with cues for offline listening. Offline cue changes stay local.",14,colors.muted);
-        label("App updater",20,colors.text);label(updateStatus,14,colors.muted);
-        button(checking?"Checking…":"Check for updates",()->{if(!checking)checkUpdates();});
-        button("Open GitHub Releases / Download",()->open(RELEASES));
-        label("Downloads open in your browser. Android asks you to approve installation. An update must use the same app signing key. Nothing is downloaded or installed automatically.",14,colors.muted);
+        label("App updater",20,colors.text);label("Installed: "+BuildConfig.VERSION_NAME,14,colors.muted);
+        button(AppUpdate.busy?"Updating…":"Update",()->{if(!AppUpdate.busy){AppUpdate.start(this);draw();}});
+        button("GitHub",()->open(AppUpdate.GITHUB));
+        if(AppUpdate.busy)button("Cancel update",AppUpdate::cancel);
+        if(new java.io.File(getSharedPreferences("updates",0).getString("apk","/missing")).isFile())button("Install downloaded update",()->{AppUpdate.cancelled=false;getSharedPreferences("updates",0).edit().putBoolean("install",true).apply();AppUpdate.installPending(this);});
+        label(AppUpdate.status,14,colors.muted);
+        label("Update downloads the official APK, checks it, then opens Android’s installer. Approve the system installation prompt.",14,colors.muted);
         label("About",20,colors.text);label("AMP Verse "+BuildConfig.VERSION_NAME+" · Integrated Android app · No plugin loader",14,colors.muted);
     }
-    private void checkUpdates(){
-        checking=true;updateStatus="Checking GitHub Releases…";draw();
-        java.util.concurrent.ExecutorService worker=Executors.newSingleThreadExecutor();worker.execute(()->{
-            String result=ReleaseCheck.check(BuildConfig.VERSION_NAME);
-            runOnUiThread(()->{checking=false;updateStatus=result;if(!isFinishing()&&!isDestroyed())draw();});worker.shutdown();
-        });
-    }
+    private final android.os.Handler updateHandler=new android.os.Handler(android.os.Looper.getMainLooper());
+    private String displayed="";
+    private final Runnable updateTick=new Runnable(){public void run(){AppUpdate.installPending(SettingsActivity.this);if(!displayed.equals(AppUpdate.status)){displayed=AppUpdate.status;draw();}updateHandler.postDelayed(this,300);}};
+    @Override protected void onResume(){super.onResume();SharedPreferences u=getSharedPreferences("updates",0);if(u.getBoolean("permission_pending",false)&&getPackageManager().canRequestPackageInstalls())u.edit().putBoolean("permission_pending",false).putBoolean("install",true).apply();updateHandler.post(updateTick);}
+    @Override protected void onPause(){updateHandler.removeCallbacks(updateTick);super.onPause();}
 }
