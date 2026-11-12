@@ -42,3 +42,4 @@ Podcast search calls the public gPodder directory API, https://gpodder.net/searc
 JPEG/PNG artwork decoding uses image 0.25.10 (MIT OR Apache-2.0), https://github.com/image-rs/image, and zune-jpeg 0.5.15 / zune-core 0.5.3 (MIT OR Apache-2.0 OR Zlib), https://github.com/etemesi254/zune-image. Original notices are included under licenses/image-0.25.10, licenses/zune-jpeg-0.5.15 and licenses/zune-core-0.5.3. DLNA output implements SSDP and UPnP AVTransport using the existing HTTP/XML libraries; no MediaMonkey code or artwork is included.
 
 Verified portable updates use zip 4.6.1 (MIT); its license is included in licenses/zip/LICENSE. SHA-256 uses the existing RustCrypto sha2 dependency. Android update installation uses Android PackageManager and FileProvider; no third-party installer is bundled.
+Update ZIP compression dependencies include Zopfli (Apache-2.0) and bumpalo (MIT OR Apache-2.0); license copies are in licenses/zopfli and licenses/bumpalo.
