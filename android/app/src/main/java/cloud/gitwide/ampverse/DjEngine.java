@@ -40,6 +40,12 @@ final class DjEngine {
     boolean auto;
     private final Set<String> requests=new LinkedHashSet<>();
     private int nextAuto;
+    private JSONObject autoRules=new JSONObject();
+    private final List<MediaItem> autoSource=new ArrayList<>();
+    private final Deque<String> recentAuto=new ArrayDeque<>();
+    private void rememberAuto(MediaItem item){if(item==null)return;recentAuto.addLast(item.mediaId);while(recentAuto.size()>Math.max(1,autoRules.optInt("recent_repeat",5)))recentAuto.removeFirst();}
+    private boolean refillAuto(){if(!autoRules.optBoolean("smart")||autoRules.optString("fallback","relax_recent").equals("stop")||autoSource.isEmpty())return false;String current=decks[fader<.5?0:1].getCurrentMediaItem()==null?"":decks[fader<.5?0:1].getCurrentMediaItem().mediaId;List<MediaItem> next=PhoneSmartRules.repeatCandidates(autoSource,recentAuto,current,autoRules.optInt("recent_repeat",5));if(next.isEmpty())return false;autoQueue.clear();autoQueue.addAll(next);nextAuto=0;return true;}
+
     private final Runnable autoTick=this::advanceAuto;
     float fader=0,master=.75f;
     int destination=0;
@@ -104,7 +110,7 @@ final class DjEngine {
         mixOutgoing=fader<.5?0:1;int next=1-mixOutgoing;
         if(decks[next].getCurrentMediaItem()==null){message="Load the other deck before mixing.";return;}
         play(next);if(!active(next))return;mixFrom=fader;mixTo=next;mixStarted=0;mixing=true;
-        if(auto&&nextAuto<autoQueue.size()&&autoQueue.get(nextAuto).mediaId.equals(decks[next].getCurrentMediaItem().mediaId)){requests.remove(autoQueue.get(nextAuto).mediaId);nextAuto++;}
+        if(auto&&nextAuto<autoQueue.size()&&autoQueue.get(nextAuto).mediaId.equals(decks[next].getCurrentMediaItem().mediaId)){requests.remove(autoQueue.get(nextAuto).mediaId);rememberAuto(autoQueue.get(nextAuto));nextAuto++;}
         handler.post(mixTick);
     }
     private void advanceMix(){
@@ -115,22 +121,23 @@ final class DjEngine {
         setFader(mixFrom+(mixTo-mixFrom)*progress);
         if(progress>=1){decks[mixOutgoing].pause();mixing=false;message="Mix complete.";}else handler.postDelayed(mixTick,30);
     }
-    void queue(List<MediaItem> items){auto=false;handler.removeCallbacks(autoTick);autoQueue.clear();requests.clear();autoQueue.addAll(items);nextAuto=0;message="Loaded "+items.size()+" songs for Auto DJ. Press Start Auto DJ.";}
+    void queue(List<MediaItem> items,JSONObject rules){queue(items);try{autoRules=rules==null?new JSONObject():new JSONObject(rules.toString());}catch(JSONException e){autoRules=new JSONObject();}}
+    void queue(List<MediaItem> items){autoRules=new JSONObject();autoSource.clear();autoSource.addAll(items);recentAuto.clear();auto=false;handler.removeCallbacks(autoTick);autoQueue.clear();requests.clear();autoQueue.addAll(items);nextAuto=0;message="Loaded "+items.size()+" songs for Auto DJ. Press Start Auto DJ.";}
     void auto(boolean enabled){
         if(!enabled){auto=false;handler.removeCallbacks(autoTick);message="Auto DJ off; current playback retained.";return;}
         if(autoQueue.isEmpty()){message="Choose a playlist for Auto DJ first.";return;}
         if(active(0)&&active(1)){message="Stop one main deck before starting Auto DJ.";return;}
         decks[0].setRepeatMode(Player.REPEAT_MODE_OFF);decks[1].setRepeatMode(Player.REPEAT_MODE_OFF);
         int current=active(1)?1:0;setFader(current);
-        if(!active(current)){load(current,autoQueue.get(0),0);play(current);nextAuto=1;}else{nextAuto=0;MediaItem loaded=decks[current].getCurrentMediaItem();for(int i=0;i<autoQueue.size();i++)if(loaded!=null&&loaded.mediaId.equals(autoQueue.get(i).mediaId)){nextAuto=i+1;break;}}
+        if(!active(current)){load(current,autoQueue.get(0),PhoneSmartRules.entry(autoQueue.get(0),autoRules));play(current);rememberAuto(autoQueue.get(0));nextAuto=1;}else{nextAuto=0;MediaItem loaded=decks[current].getCurrentMediaItem();for(int i=0;i<autoQueue.size();i++)if(loaded!=null&&loaded.mediaId.equals(autoQueue.get(i).mediaId)){nextAuto=i+1;break;}}
         if(!active(current)){message="Could not start playback; Auto DJ remains off.";return;}
         auto=true;handler.post(autoTick);message="Auto DJ running.";
     }
     private void advanceAuto(){
         if(!auto||closed)return;
         if(!mixing){int current=fader<.5?0:1,other=1-current;
-            if(nextAuto>=autoQueue.size()){if(!active(current)){auto=false;message="Playlist finished.";}else handler.postDelayed(autoTick,200);return;}
-            if(!active(other)){MediaItem next=autoQueue.get(nextAuto);MediaItem loaded=decks[other].getCurrentMediaItem();if(loaded==null||!next.mediaId.equals(loaded.mediaId)){load(other,next,0);}}
+            if(nextAuto>=autoQueue.size()&&!refillAuto()){if(!active(current)){auto=false;message="Playlist finished.";}else handler.postDelayed(autoTick,200);return;}
+            if(!active(other)){MediaItem next=autoQueue.get(nextAuto);MediaItem loaded=decks[other].getCurrentMediaItem();if(loaded==null||!next.mediaId.equals(loaded.mediaId)){load(other,next,PhoneSmartRules.entry(next,autoRules));}}
             long duration=cueOut(decks[current].getCurrentMediaItem(),decks[current].getDuration());if(duration>0&&duration-decks[current].getCurrentPosition()<=fadeSeconds*1000L){mixNext();}
             else if(decks[current].getPlaybackState()==Player.STATE_ENDED){mixNext();}
         }
