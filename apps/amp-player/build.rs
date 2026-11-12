@@ -49,11 +49,13 @@ fn main() {
             command.status().expect("C++ key-lock compiler").success(),
             "Key Lock DLL compilation failed"
         );
+        // Newer Cargo versions add a package directory below `build`.
+        // Locate the profile by the build boundary, not a fixed parent count.
         let profile = out
-            .parent()
-            .and_then(|p| p.parent())
-            .and_then(|p| p.parent())
-            .unwrap();
+            .ancestors()
+            .find(|p| p.file_name() == Some(std::ffi::OsStr::new("build")))
+            .and_then(std::path::Path::parent)
+            .expect("Cargo profile build directory");
         std::fs::copy(&dll, profile.join("amp-keylock.dll")).unwrap();
         std::fs::create_dir_all(profile.join("deps")).unwrap();
         std::fs::copy(&dll, profile.join("deps/amp-keylock.dll")).unwrap();
