@@ -266,8 +266,22 @@ pub fn splitter(
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let response = ui.interact(rect, egui::Id::unique(id), egui::Sense::drag());
     if response.dragged() {
-        let delta = ui.input(|i| i.pointer.delta());
-        *value = (*value + if vertical { delta.x } else { delta.y } * direction)
+        let delta = ui.input(|i| {
+            if response.drag_started() {
+                i.pointer
+                    .interact_pos()
+                    .zip(i.pointer.press_origin())
+                    .map_or(egui::Vec2::ZERO, |(position, origin)| position - origin)
+            } else {
+                i.pointer.delta()
+            }
+        });
+        let scale = ui
+            .ctx()
+            .layer_transform_to_global(ui.layer_id())
+            .map_or(1., |t| t.scaling)
+            .max(0.01);
+        *value = (*value + (if vertical { delta.x } else { delta.y }) / scale * direction)
             .clamp(*range.start(), *range.end());
     }
     response
@@ -302,6 +316,10 @@ pub fn splitter(
             super::skin::foreground(ui),
         );
     } else {
+        if id.starts_with("dj-deck-") {
+            ui.painter()
+                .rect_filled(rect.shrink(1.), 3., ui.visuals().widgets.inactive.bg_fill);
+        }
         ui.painter().line_segment(
             [rect.center() - half, rect.center() + half],
             egui::Stroke::new(3., color),

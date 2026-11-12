@@ -7,6 +7,8 @@ pub struct Rack {
     pub six: bool,
     #[serde(default)]
     pub overlay_waveforms: bool,
+    #[serde(default = "strip_ratios")]
+    pub strip_ratios: [f32; 2],
 }
 impl Default for Rack {
     fn default() -> Self {
@@ -14,11 +16,32 @@ impl Default for Rack {
             live: [0, 1],
             expanded: false,
             six: true,
+            strip_ratios: strip_ratios(),
             overlay_waveforms: !cfg!(test)
                 && waveform_preference()
                     .is_some_and(|p| std::fs::read_to_string(p).is_ok_and(|v| v == "overlay")),
         }
     }
+}
+fn strip_ratios() -> [f32; 2] {
+    if !cfg!(test)
+        && let Some(path) = strip_preference()
+        && let Ok(bytes) = std::fs::read(path)
+        && let Ok(values) = serde_json::from_slice::<[f32; 2]>(&bytes)
+        && values
+            .iter()
+            .all(|v| v.is_finite() && (0.02..=0.45).contains(v))
+    {
+        return values;
+    }
+    [0.14; 2]
+}
+fn strip_preference() -> Option<PathBuf> {
+    Some(
+        theme::settings_path()?
+            .parent()?
+            .join("dj-deck-widths.json"),
+    )
 }
 fn waveform_preference() -> Option<PathBuf> {
     Some(
@@ -334,21 +357,74 @@ impl Player {
         .max(if compact { 290. } else { 320. })
         .min(if self.rack.expanded { 550. } else { 490. });
         let rack_width = ui.available_width();
-        let strips = (rack_width * 0.14).clamp(if compact { 112. } else { 140. }, 280.);
         let mixer = if compact { 126. } else { 146. };
-        let jog_width = ((rack_width - strips * 2. - mixer - 28.) / 2.).max(240.);
+        let half = (rack_width - mixer - 20. - ui.spacing().item_spacing.x * 6.) / 2.;
+        let minimum = if compact { 112. } else { 140. };
+        let min_jog = 280f32.min((half - minimum).max(240.));
+        let maximum = (half - min_jog).clamp(minimum, 400.);
+        let mut strips = self
+            .rack
+            .strip_ratios
+            .map(|ratio| (rack_width * ratio).clamp(minimum, maximum));
+        let saved_id = egui::Id::unique("dj-deck-widths-saved");
+        let saved = ui
+            .ctx()
+            .data_mut(|d| *d.get_temp_mut_or_insert_with(saved_id, || self.rack.strip_ratios));
+        let rendered = strips;
         ui.horizontal_top(|ui| {
-            ui.add_space(((ui.available_width() - rack_width) / 2. - 4.).max(0.));
-            self.deck_strips(ui, 0, strips, height, compact);
+            self.deck_strips(ui, 0, rendered[0], height, compact);
+            window_layout::splitter(
+                ui,
+                "dj-deck-left-divider",
+                &mut strips[0],
+                minimum..=maximum,
+                true,
+                1.,
+                height,
+            );
             ui.push_id(("live-jog", self.rack.live[0]), |ui| {
-                self.jog_section(ui, self.rack.live[0], jog_width, height)
+                self.jog_section(ui, self.rack.live[0], half - rendered[0], height)
             });
             self.rack_mixer(ui, mixer, height);
             ui.push_id(("live-jog", self.rack.live[1]), |ui| {
-                self.jog_section(ui, self.rack.live[1], jog_width, height)
+                self.jog_section(ui, self.rack.live[1], half - rendered[1], height)
             });
-            self.deck_strips(ui, 1, strips, height, compact);
+            window_layout::splitter(
+                ui,
+                "dj-deck-right-divider",
+                &mut strips[1],
+                minimum..=maximum,
+                true,
+                -1.,
+                height,
+            );
+            self.deck_strips(ui, 1, rendered[1], height, compact);
         });
+        // Only deliberate drags change the stored ratios; ordinary window resizing must not clamp them permanently.
+        for (side, width) in strips.into_iter().enumerate() {
+            let old = (rack_width * self.rack.strip_ratios[side]).clamp(minimum, maximum);
+            if (old - width).abs() > 0.01 {
+                self.rack.strip_ratios[side] = width / rack_width;
+            }
+        }
+        if saved != self.rack.strip_ratios
+            && ui.input(|i| i.pointer.any_released())
+            && let Some(path) = strip_preference()
+        {
+            let result = if cfg!(test) {
+                Ok(())
+            } else {
+                amp_core::coordination::atomic_write(&path, &self.rack.strip_ratios)
+            };
+            match result {
+                Ok(()) => {
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(saved_id, self.rack.strip_ratios);
+                    });
+                }
+                Err(error) => self.status = format!("Could not remember deck widths: {error}"),
+            }
+        }
         ui.horizontal_wrapped(|ui| {
             if ui
                 .button(if self.dj_library_hidden {
@@ -945,6 +1021,57 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn deck_strip_grabbers_resize_each_side_independently() {
+        for (id, delta, side) in [
+            ("dj-deck-left-divider", 45., 0usize),
+            ("dj-deck-right-divider", -45., 1usize),
+        ] {
+            let ctx = egui::Context::default();
+            let mut player = Player::default();
+            let mut point = egui::Pos2::ZERO;
+            for frame in 0..5 {
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1570., 1000.),
+                    )),
+                    ..Default::default()
+                };
+                if frame == 3 {
+                    point.x += delta;
+                }
+                raw.events.push(egui::Event::PointerMoved(point));
+                if frame == 2 || frame == 4 {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: frame == 2,
+                        modifiers: Default::default(),
+                    });
+                }
+                let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 2));
+                output.textures_delta.clear();
+                if frame == 1 {
+                    let (rect, layer) = ctx
+                        .data(|d| {
+                            d.get_temp::<(egui::Rect, egui::LayerId)>(
+                                egui::Id::unique(id).with("bounds"),
+                            )
+                        })
+                        .unwrap();
+                    point =
+                        ctx.layer_transform_to_global(layer).unwrap_or_default() * rect.center();
+                }
+            }
+            assert!(
+                player.rack.strip_ratios[side] > 0.15,
+                "Grabber did not widen its deck strip: {:?}",
+                player.rack.strip_ratios
+            );
+            assert_eq!(player.rack.strip_ratios[1 - side], 0.14);
+        }
+    }
     #[test]
     fn overlay_waveforms_share_the_same_full_width_rectangle() {
         let ctx = egui::Context::default();
