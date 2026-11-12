@@ -61,3 +61,10 @@ Reviewed the import → browse → prepare → playlist → DJ path, plus sample
 Verification: 98 core, 178 Player and 9 Cast automated tests; strict workspace Clippy; three web request tests; isolated installed-engine protocol round trip, muted native Auto DJ handoff, real Demucs separation/reconstruction, muted nine-pad sampler playback, Lab MP3 open/waveform/source preservation and repeated encoded radio handoffs. Native screenshots cover Library at 800×460, Analysis and Playlists at 800×600; the preparation screen check exposed and prompted the path-selection fix. New tests cover preparation on additional sources, revision ordering, fresh-index publication, invalid-root retention, named playlist persistence/collision handling, sampler queue blocking and short-window first-run import/status access. In short Library windows, preparation starts collapsed so the song list is visible; its header exposes editing on demand, and taller windows start expanded.
 
 This pass does not claim new Android device acceptance, physical receiver/controller coverage, an overnight radio soak or Linux hardware execution. Existing DSP listening-quality and cross-device/offline-sync roadmap work remains separate. Current user playback was not stopped and no user audio was moved or rewritten.
+
+## Auxiliary deck loading — November 12
+
+The file/drop loading path now accepts A1–A3 and B1–B3, uses the correct deck name, and does not pause regular Player automation when preparing a background deck. An active crossfade only reserves its assigned pair, allowing idle auxiliary decks to load independently. Playing-deck replacement still stages safely.
+
+Verification: 179 Player tests and strict Player Clippy passed. A muted native test loaded all four auxiliary decks while A1 played, preserved Auto DJ and the mix pair, and checked stable layout bounds for 30 frames. Live user-reported flashing was not reproduced or established as fixed; user playback was left running.
+

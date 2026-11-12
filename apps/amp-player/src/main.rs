@@ -2633,23 +2633,21 @@ impl Player {
         path: PathBuf,
         cue: Option<f64>,
     ) -> Result<(), String> {
-        if deck > 1 {
-            return Err("Deck must be A or B".into());
+        if deck >= deck_rack::NAMES.len() {
+            return Err("Choose a deck from A1–A3 or B1–B3".into());
         }
-        if self
-            .audio
-            .as_ref()
-            .is_some_and(|audio| audio.playing(deck) || audio.fading())
-            || (self.run.auto
-                && self
-                    .run
-                    .preloaded
-                    .is_some_and(|(reserved, _)| reserved == deck))
+        if self.audio.as_ref().is_some_and(|audio| {
+            audio.playing(deck) || (self.pair().contains(&deck) && audio.fading())
+        }) || (self.run.auto
+            && self
+                .run
+                .preloaded
+                .is_some_and(|(reserved, _)| reserved == deck))
         {
             self.pending_load[deck] = Some((path, cue));
             self.status = format!(
                 "Deck {} replacement staged. Stop it, then Apply staged track.",
-                if deck == 0 { "A" } else { "B" }
+                deck_rack::NAMES[deck]
             );
             return Ok(());
         }
@@ -2687,7 +2685,9 @@ impl Player {
             .unwrap()
             .load(deck, &root, &track, false)?;
         self.cancel_deck_automation(deck);
-        self.auto = false;
+        if deck == 0 {
+            self.auto = false;
+        }
         self.loaded[deck] = amp_core::relative_folder(&path, &self.root).and_then(|relative| {
             self.library
                 .as_ref()?
@@ -2700,7 +2700,7 @@ impl Player {
         self.pending_load[deck] = None;
         self.status = format!(
             "Deck {} prepared; playback unchanged",
-            if deck == 0 { "A" } else { "B" }
+            deck_rack::NAMES[deck]
         );
         Ok(())
     }

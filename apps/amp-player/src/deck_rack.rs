@@ -957,6 +957,73 @@ impl Player {
 mod tests {
     use super::*;
     #[test]
+    fn invalid_deck_load_is_rejected_without_changing_playback() {
+        let mut player = Player::default();
+        player.run.auto = true;
+        assert!(
+            player
+                .safe_load_path(6, "missing.wav".into(), None)
+                .is_err()
+        );
+        assert!(player.run.auto);
+        assert!(player.pending_load.iter().all(Option::is_none));
+    }
+
+    #[test]
+    #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; muted"]
+    fn native_background_deck_loading_preserves_playback_and_layout() {
+        let path = PathBuf::from(std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap())
+            .canonicalize()
+            .unwrap();
+        let mut player = Player {
+            volume: 0,
+            channel_gain: [0.; 6],
+            ..Default::default()
+        };
+        player.safe_load_path(0, path.clone(), None).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(200));
+        player.audio.as_ref().unwrap().toggle(0);
+        player.auto = true;
+        player.run.auto = true;
+        for (deck, name) in NAMES.iter().enumerate().skip(2) {
+            player.safe_load_path(deck, path.clone(), None).unwrap();
+            assert!(player.pending_load[deck].is_none());
+            assert!(player.loaded_snapshot[deck].is_some());
+            assert!(player.status.contains(name));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        let audio = player.audio.as_ref().unwrap();
+        assert!(audio.playing(0));
+        for deck in 2..6 {
+            assert!(audio.load_current(deck));
+            assert!(!audio.playing(deck));
+        }
+        assert!(player.auto && player.run.auto);
+        assert_eq!(player.pair(), [0, 1]);
+        let ctx = egui::Context::default();
+        let mut previous = None;
+        for frame in 0..30 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1570., 1000.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    player.group_ui(ui, 2);
+                    let bounds = ui.min_rect();
+                    if frame > 3 {
+                        assert_eq!(Some(bounds), previous);
+                    }
+                    previous = Some(bounds);
+                },
+            );
+            output.textures_delta.clear();
+        }
+    }
+    #[test]
     fn deck_strip_grabbers_resize_each_side_independently() {
         for (id, delta, side) in [
             ("dj-deck-left-divider", 45., 0usize),
