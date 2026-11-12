@@ -648,6 +648,7 @@ if ui.button("Stop control").clicked(){self.control=None;self.control_restart=No
                             self.queue_library_folder();
                         }
                     });
+                    ui.add(egui::Label::new(&self.status).truncate()).on_hover_text(&self.status);
                     if let Some(i) = play {
                         self.play(0, i);
                         if let Some(a) = &self.audio {
