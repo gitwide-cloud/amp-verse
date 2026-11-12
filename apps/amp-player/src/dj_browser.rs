@@ -16,6 +16,10 @@ pub struct Browser {
     pub(super) playlists: Vec<(PathBuf, Playlist)>,
     playlist: Option<usize>,
     destination: usize,
+    columns: track_columns::Layout,
+    details: Option<amp_core::Track>,
+    stem_status: std::collections::HashMap<PathBuf, (std::time::Instant, bool)>,
+    stem_rx: Option<std::sync::mpsc::Receiver<Vec<(PathBuf, bool)>>>,
 }
 impl Browser {
     pub(super) fn select_smart(&mut self, id: &str) {
@@ -41,6 +45,86 @@ fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
 }
 impl Player {
     pub(super) fn dj_library_ui(&mut self, ui: &mut egui::Ui) {
+        if let Some(rx) = &self.dj_browser.stem_rx
+            && let Ok(results) = rx.try_recv()
+        {
+            for (path, complete) in results {
+                self.dj_browser
+                    .stem_status
+                    .insert(path, (std::time::Instant::now(), complete));
+            }
+            self.dj_browser.stem_rx = None;
+        }
+        let mut stem_checks = Vec::new();
+        let mut save_columns = false;
+        if let Some(track) = self.dj_browser.details.clone() {
+            let mut open = true;
+            egui::Window::new("Track metadata and analysis")
+                .id(egui::Id::unique("dj-track-details"))
+                .open(&mut open)
+                .resizable(true)
+                .default_width(620.)
+                .show(ui.ctx(), |ui| {
+                    ui.heading(&track.title);
+                    ui.label(
+                        amp_core::music_sources::audio_path(&self.root, &track.path)
+                            .display()
+                            .to_string(),
+                    );
+                    egui::ScrollArea::vertical()
+                        .max_height(600.)
+                        .show(ui, |ui| {
+                            for (key, label, _, _) in track_columns::FIELDS {
+                                if *key != "stems" {
+                                    ui.horizontal_wrapped(|ui| {
+                                        ui.strong(*label);
+                                        ui.label(track_columns::cell(&track, key));
+                                    });
+                                }
+                            }
+                            let path = amp_core::music_sources::audio_path(&self.root, &track.path);
+                            ui.label(format!(
+                                "Stems: {}",
+                                self.dj_browser.stem_status.get(&path).map_or(
+                                    "Checking…",
+                                    |(_, ready)| if *ready { "Complete" } else { "Not prepared" }
+                                )
+                            ));
+                            if !self.dj_browser.stem_status.contains_key(&path) {
+                                stem_checks.push(path);
+                            }
+                            ui.separator();
+                            ui.strong("All stored tags and analysis fields");
+                            fn fields(ui: &mut egui::Ui, name: &str, value: &serde_json::Value) {
+                                match value {
+                                    serde_json::Value::Object(map) => {
+                                        egui::CollapsingHeader::new(name)
+                                            .id_salt(name)
+                                            .default_open(name == "Metadata")
+                                            .show(ui, |ui| {
+                                                for (key, value) in map {
+                                                    fields(ui, key, value);
+                                                }
+                                            });
+                                    }
+                                    _ => {
+                                        ui.horizontal_wrapped(|ui| {
+                                            ui.strong(name);
+                                            ui.label(track_columns::display(value));
+                                        });
+                                    }
+                                }
+                            }
+                            if let Ok(value) = serde_json::to_value(&track.preparation) {
+                                fields(ui, "Metadata", &value);
+                            }
+                        });
+                });
+            if !open {
+                self.dj_browser.details = None;
+            }
+        }
+
         let height = ui
             .available_height()
             .max(if self.rack.six { 80. } else { 180. });
@@ -61,10 +145,13 @@ impl Player {
         let requests = ui
             .horizontal(|ui| {
                 skin::label(ui, "DJ Library");
+                ui.menu_button("Columns", |ui| {save_columns |= self.dj_browser.columns.menu(ui);});
+
                 if ui.small_button("Refresh playlists").clicked() {
                     match amp_core::show::Settings::load(&self.root) {
                         Ok(settings) => {
                             self.run.settings = settings;
+                            self.dj_browser.stem_status.clear();
                             self.status = "Saved Smart Playlists refreshed. Loaded decks keep their current mix.".into();
                         }
                         Err(error) => self.status = format!("Could not refresh Smart Playlists: {error}"),
@@ -200,8 +287,17 @@ impl Player {
                         });
                 },
             );
-            window_layout::splitter(ui, "dj-source-divider", &mut sidebar_width, 150. ..=sidebar_max, true, 1., height - 30.);
-            ui.ctx().data_mut(|d| d.insert_persisted(sidebar_id, sidebar_width));
+            window_layout::splitter(
+                ui,
+                "dj-source-divider",
+                &mut sidebar_width,
+                150. ..=sidebar_max,
+                true,
+                1.,
+                height - 30.,
+            );
+            ui.ctx()
+                .data_mut(|d| d.insert_persisted(sidebar_id, sidebar_width));
             ui.vertical(|ui| {
                 ui.set_width(ui.available_width());
                 ui.add(
@@ -210,7 +306,11 @@ impl Player {
                         .hint_text("Search this source"),
                 );
                 let Some(lib) = &self.library else {
-                    ui.weak(if self.scan.is_some() { "Scanning your music folders. Tracks will appear when the scan finishes." } else { "Add music sources in AMP Library." });
+                    ui.weak(if self.scan.is_some() {
+                        "Scanning your music folders. Tracks will appear when the scan finishes."
+                    } else {
+                        "Add music sources in AMP Library."
+                    });
                     return;
                 };
                 let mut indices: Vec<usize> = match self.dj_browser.source {
@@ -245,8 +345,13 @@ impl Player {
                                 edit_smart = ui.button("Edit sources / rules in Library").clicked();
                             });
                             if self.show_editor.playlist_unsaved(&profile.id) {
-                                ui.colored_label(ORANGE,"Unsaved source changes: DJ uses the saved version.");
-                                if ui.button("Open draft in Library to save").clicked(){edit_smart=true;}
+                                ui.colored_label(
+                                    ORANGE,
+                                    "Unsaved source changes: DJ uses the saved version.",
+                                );
+                                if ui.button("Open draft in Library to save").clicked() {
+                                    edit_smart = true;
+                                }
                             }
                             let eligible: Vec<_> = lib
                                 .tracks
@@ -267,59 +372,231 @@ impl Player {
                     lib.tracks.get(i).is_some_and(|t| {
                         t.title.to_lowercase().contains(&query)
                             || t.path.to_string_lossy().to_lowercase().contains(&query)
+                            || ["artist", "album", "genre"].iter().any(|key| {
+                                track_columns::cell(t, key).to_lowercase().contains(&query)
+                            })
                     })
                 });
                 ui.weak(format!("{} tracks", indices.len()));
-                let title_width = (ui.available_width() - 330.).max(120.);
-                ui.horizontal(|ui| {
-                    for (label, width) in [("#", 28.), ("Track", title_width), ("BPM", 56.), ("Key", 40.), ("Length", 54.), ("Load", 68.)] {
-                        ui.add_sized([width, 22.], egui::Label::new(egui::RichText::new(label).strong().size(14.)).halign(egui::Align::Min).truncate());
-                    }
-                });
-                ui.separator();
-                egui::ScrollArea::vertical()
-                    .id_salt("dj-source-tracks")
-                    .max_height((height - if self.rack.six {110.} else {155.}).max(if self.rack.six {34.}else{80.}))
-                    .min_scrolled_height((height - if self.rack.six {110.} else {155.}).max(if self.rack.six {34.}else{80.}))
-                    .show_rows(ui, 34., indices.len(), |ui, range| {
-                        for row in range {
-                            let i = indices[row];
-                            let t = &lib.tracks[i];
-                            ui.horizontal(|ui| {
-                                ui.add_sized([28., 30.], egui::Label::new(format!("{}", row + 1)));
-                                let row=ui.add_sized(
-                                        [title_width, 30.],
-                                        egui::Button::selectable(
-                                            self.selected == Some(i),
-                                            egui::RichText::new(&t.title).size(15.),
-                                        )
-                                        .right_text("")
-                                        .truncate().sense(egui::Sense::click_and_drag()),
+                egui::ScrollArea::horizontal()
+                    .id_salt("dj-columns-horizontal")
+                    .show(ui, |ui| {
+                        let width: f32 = self
+                            .dj_browser
+                            .columns
+                            .columns
+                            .iter()
+                            .filter(|c| c.visible)
+                            .map(|c| c.width + ui.spacing().item_spacing.x)
+                            .sum::<f32>()
+                            + 120.;
+                        ui.set_min_width(width);
+                        ui.horizontal(|ui| {
+                            ui.add_sized([28., 24.], egui::Label::new("#"));
+                            for column in self
+                                .dj_browser
+                                .columns
+                                .columns
+                                .iter_mut()
+                                .filter(|c| c.visible)
+                            {
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(column.width, 24.),
+                                    egui::Sense::hover(),
+                                );
+                                ui.painter_at(rect).text(
+                                    rect.left_center(),
+                                    egui::Align2::LEFT_CENTER,
+                                    track_columns::label(&column.key),
+                                    egui::FontId::proportional(14.),
+                                    ui.visuals().text_color(),
+                                );
+                                let edge = egui::Rect::from_min_max(
+                                    egui::pos2(rect.right() - 5., rect.top()),
+                                    rect.right_bottom(),
+                                );
+                                let handle = ui
+                                    .interact(
+                                        edge,
+                                        ui.scope_id().with((&column.key, "resize")),
+                                        egui::Sense::drag(),
                                     )
-;
-                                crate::dragdrop::source(&row,amp_core::music_sources::audio_path(&self.root, &t.path));
-                                if row.clicked() {self.selected=Some(i);}
-                                row.context_menu(|ui| { ui.label("Request in this live Smart Playlist"); for within in 1..=5 { if ui.button(format!("Play within {within} songs")).clicked() { request=Some((amp_core::show::song_id(t),within));ui.close(); } } });
-                                if row.double_clicked() {load=Some((self.dj_browser.destination,i));}
-                                let duration = t.preparation.analysis.as_ref().map(|a| a.duration).or(t.preparation.cue_out);
-                                for (value, width) in [
-                                    (t.preparation.bpm.map_or("--".into(), |b| format!("{b:.1}")), 56.),
-                                    (t.preparation.harmonic_key.clone().unwrap_or_else(|| "--".into()), 40.),
-                                    (duration.map_or("--:--".into(), |s| format!("{:02}:{:02}", s as u64 / 60, s as u64 % 60)), 54.),
-                                ] { ui.add_sized([width, 30.], egui::Label::new(value).truncate()); }
-                                for (deck,label,color) in [(0,"A",ORANGE),(1,"B",CYAN)] {
-                                    if ui.add_sized([30.,24.],egui::Button::new(egui::RichText::new(label).strong().color(color)).selected(self.dj_browser.destination==deck)).on_hover_text(format!("Prepare on Deck {label}; playing decks stage the replacement")).clicked(){self.dj_browser.destination=deck;load=Some((deck,i));}
+                                    .on_hover_cursor(egui::CursorIcon::ResizeHorizontal);
+                                ui.painter().line_segment(
+                                    [edge.center_top(), edge.center_bottom()],
+                                    egui::Stroke::new(1., ui.visuals().weak_text_color()),
+                                );
+                                if handle.dragged() {
+                                    column.width = (column.width
+                                        + ui.input(|i| i.pointer.delta().x))
+                                    .clamp(45., 800.);
+                                }
+                                save_columns |= handle.drag_stopped();
+                            }
+                            ui.label("Load");
+                        });
+                        ui.separator();
+                        egui::ScrollArea::vertical()
+                            .id_salt("dj-source-tracks")
+                            .max_height((height - if self.rack.six { 110. } else { 155. }).max(34.))
+                            .show_rows(ui, 34., indices.len(), |ui, range| {
+                                for row in range {
+                                    let i = indices[row];
+                                    let t = &lib.tracks[i];
+                                    ui.horizontal(|ui| {
+                                        ui.add_sized(
+                                            [28., 30.],
+                                            egui::Label::new((row + 1).to_string()),
+                                        );
+                                        for column in self
+                                            .dj_browser
+                                            .columns
+                                            .columns
+                                            .iter()
+                                            .filter(|c| c.visible)
+                                        {
+                                            let value = if column.key == "stems" {
+                                                let path = amp_core::music_sources::audio_path(
+                                                    &self.root, &t.path,
+                                                );
+                                                let cached = self.dj_browser.stem_status.get(&path);
+                                                if cached.is_none_or(|(at, _)| {
+                                                    at.elapsed().as_secs() > 30
+                                                }) {
+                                                    stem_checks.push(path);
+                                                }
+                                                cached
+                                                    .map_or("Checking…", |(_, ready)| {
+                                                        if *ready {
+                                                            "Complete"
+                                                        } else {
+                                                            "Not prepared"
+                                                        }
+                                                    })
+                                                    .into()
+                                            } else {
+                                                track_columns::cell(t, &column.key)
+                                            };
+                                            let response = if column.key == "title" {
+                                                ui.add_sized(
+                                                    [column.width, 30.],
+                                                    egui::Button::selectable(
+                                                        self.selected == Some(i),
+                                                        &value,
+                                                    )
+                                                    .truncate()
+                                                    .sense(egui::Sense::click_and_drag()),
+                                                )
+                                            } else {
+                                                ui.add_sized(
+                                                    [column.width, 30.],
+                                                    egui::Label::new(&value)
+                                                        .truncate()
+                                                        .sense(egui::Sense::click()),
+                                                )
+                                            };
+                                            let response = response.on_hover_text(&value);
+                                            if column.key == "title" {
+                                                crate::dragdrop::source(
+                                                    &response,
+                                                    amp_core::music_sources::audio_path(
+                                                        &self.root, &t.path,
+                                                    ),
+                                                );
+                                            }
+                                            if response.clicked() {
+                                                self.selected = Some(i);
+                                            }
+                                            if response.double_clicked() {
+                                                load = Some((self.dj_browser.destination, i));
+                                            }
+                                            response.context_menu(|ui| {
+                                                if ui
+                                                    .button("Track details / all metadata…")
+                                                    .clicked()
+                                                {
+                                                    self.dj_browser.details = Some(t.clone());
+                                                    ui.close();
+                                                }
+                                                ui.separator();
+                                                ui.label("Request in this live Smart Playlist");
+                                                for within in 1..=5 {
+                                                    if ui
+                                                        .button(format!(
+                                                            "Play within {within} songs"
+                                                        ))
+                                                        .clicked()
+                                                    {
+                                                        request = Some((
+                                                            amp_core::show::song_id(t),
+                                                            within,
+                                                        ));
+                                                        ui.close();
+                                                    }
+                                                }
+                                            });
+                                        }
+                                        ui.horizontal(|ui| {
+                                            ui.set_min_width(68.);
+                                            for (deck, label, color) in
+                                                [(0, "A", ORANGE), (1, "B", CYAN)]
+                                            {
+                                                if ui
+                                                    .add_sized(
+                                                        [30., 24.],
+                                                        egui::Button::new(
+                                                            egui::RichText::new(label)
+                                                                .strong()
+                                                                .color(color),
+                                                        ),
+                                                    )
+                                                    .clicked()
+                                                {
+                                                    self.dj_browser.destination = deck;
+                                                    load = Some((deck, i));
+                                                }
+                                            }
+                                        });
+                                    });
                                 }
                             });
-                        }
                     });
-                let target=ui.add_sized([ui.available_width(),24.],egui::Button::new(if self.run.auto {"Drop music here > Auto Mix candidates"}else{"Drop music here > Playlist queue"}).sense(egui::Sense::hover()));
-                queue_drop=dragdrop::target(&target,GOLD);
+                let target = ui.add_sized(
+                    [ui.available_width(), 24.],
+                    egui::Button::new(if self.run.auto {
+                        "Drop music here > Auto Mix candidates"
+                    } else {
+                        "Drop music here > Playlist queue"
+                    })
+                    .sense(egui::Sense::hover()),
+                );
+                queue_drop = dragdrop::target(&target, GOLD);
                 if indices.is_empty() {
                     ui.weak("No tracks in this source. Prepare and edit playlists in AMP Library.");
                 }
             });
         });
+        if save_columns && let Err(error) = self.dj_browser.columns.save() {
+            self.status = format!("Could not save columns: {error}");
+        }
+        if self.dj_browser.stem_rx.is_none() && !stem_checks.is_empty() {
+            stem_checks.sort();
+            stem_checks.dedup();
+            let (tx, rx) = std::sync::mpsc::channel();
+            self.dj_browser.stem_rx = Some(rx);
+            let ctx = ui.ctx().clone();
+            std::thread::spawn(move || {
+                let result = stem_checks
+                    .into_iter()
+                    .map(|path| {
+                        let ready = stems::ready(&path).is_some();
+                        (path, ready)
+                    })
+                    .collect();
+                let _ = tx.send(result);
+                ctx.request_repaint();
+            });
+        }
         if let Some(path) = queue_drop {
             self.add_dropped_to_queue(path);
         }

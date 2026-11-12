@@ -1,6 +1,9 @@
 //! Genre tags are read without decoding audio or changing the source file.
 use crate::Preparation;
-use lofty::{file::TaggedFileExt, tag::ItemKey};
+use lofty::{
+    file::{AudioFile, TaggedFileExt},
+    tag::ItemKey,
+};
 
 pub fn canonical(value: &str) -> String {
     let value = value.trim();
@@ -50,18 +53,42 @@ pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparatio
     // Derived tags never replace a user-saved genre. Refresh them on each background
     // scan so edits made in another tag editor become visible without reanalysis.
     preparation.extensions.remove("embedded_genres");
-    if preparation.extensions.contains_key("genre") {
-        return;
-    }
     let Ok(probe) = lofty::probe::Probe::open(path) else {
         return;
     };
     let options = lofty::config::ParseOptions::new()
-        .read_properties(false)
+        .read_properties(true)
         .read_cover_art(false);
     let Ok(file) = probe.options(options).read() else {
         return;
     };
+    let mut tags = std::collections::BTreeMap::<String, Vec<String>>::new();
+    for tag in file.tags() {
+        for item in tag.items() {
+            let value = match item.value() {
+                lofty::tag::ItemValue::Text(text) | lofty::tag::ItemValue::Locator(text) => {
+                    text.clone()
+                }
+                lofty::tag::ItemValue::Binary(bytes) => {
+                    format!("[{} bytes of binary metadata]", bytes.len())
+                }
+            };
+            tags.entry(format!("{:?}", item.key()))
+                .or_default()
+                .push(value);
+        }
+    }
+    preparation
+        .extensions
+        .insert("embedded_tags".into(), serde_json::json!(tags));
+    let properties = file.properties();
+    preparation.extensions.insert(
+        "audio_properties".into(),
+        serde_json::json!({
+            "duration": properties.duration().as_secs_f64(), "bitrate": properties.audio_bitrate(),
+            "sample_rate": properties.sample_rate(), "channels": properties.channels(),
+        }),
+    );
     let genres: Vec<_> = file
         .tags()
         .iter()
@@ -104,6 +131,18 @@ mod tests {
         std::fs::write(&path, &wav).unwrap();
         let library = crate::scan(root.path()).unwrap();
         assert_eq!(values(&library.tracks[0].preparation), vec!["Rock"]);
+        let prep = &library.tracks[0].preparation;
+        assert_eq!(prep.extensions["audio_properties"]["sample_rate"], 8000);
+        assert_eq!(prep.extensions["audio_properties"]["channels"], 1);
+        assert_eq!(prep.extensions["embedded_tags"]["Genre"][0], "Rock");
+        let mut manual = Preparation::default();
+        manual
+            .extensions
+            .insert("genre".into(), serde_json::json!("Jazz"));
+        read_embedded(&path, &mut manual);
+        assert_eq!(values(&manual), vec!["jazz"]);
+        assert!(manual.extensions.contains_key("audio_properties"));
+
         assert_eq!(std::fs::read(&path).unwrap(), wav);
         let mut settings = crate::show::Settings::default();
         settings.playlists[0].genres = vec!["Rock".into()];

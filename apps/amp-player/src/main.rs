@@ -48,6 +48,7 @@ mod smart_preview;
 mod station_download;
 mod stems;
 mod theme;
+mod track_columns;
 mod transition_controls;
 mod transition_styles;
 mod waveform;
