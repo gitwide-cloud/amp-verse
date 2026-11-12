@@ -41,6 +41,9 @@ public class PlaybackDeviceTest {
                 dj.load(1,LibraryStore.item(second,"Second"),0);
                 assertEquals("player",PlaybackService.owner());
                 PlaybackService.claimDj();dj.pauseAll();
+                dj.queue(Collections.emptyList());for(int i=0;i<4;i++)dj.decks[i].clearMediaItems();
+                PlaybackService.claimDj();PlaybackService.switchToPlayer();
+                assertEquals("player",PlaybackService.owner());
             });
         }finally{main(()->{control.stop();control.release();});
             android.content.SharedPreferences.Editor edit=djPrefs.edit().clear();

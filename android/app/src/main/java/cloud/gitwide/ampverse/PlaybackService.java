@@ -25,7 +25,7 @@ public final class PlaybackService extends MediaSessionService {
         if(!djOwner||dj==null||session==null)return;
         java.util.List<androidx.media3.common.MediaItem> queue=dj.playerQueue();
         long position=dj.playerPosition();
-        if(queue.isEmpty())return;
+        if(queue.isEmpty()){claimPlayer();return;}
         boolean repeat=dj.playerRepeats();claimPlayer();
         Player player=session.getPlayer();player.setRepeatMode(repeat?Player.REPEAT_MODE_ALL:Player.REPEAT_MODE_OFF);player.setShuffleModeEnabled(false);player.setMediaItems(queue,0,position);player.prepare();player.play();
     }
