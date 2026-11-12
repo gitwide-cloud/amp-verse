@@ -77,6 +77,7 @@ pub struct Controls {
     pub looping: [AtomicBool; 6],
     pub crossfader: AtomicU32,
     pub master: AtomicU32,
+    player_envelope: AtomicU32,
     pub fading: AtomicBool,
     pub mashup_active: AtomicBool,
     pub underruns: [AtomicU64; 6],
@@ -160,6 +161,7 @@ impl Default for Controls {
             looping: std::array::from_fn(|_| AtomicBool::new(false)),
             crossfader: atom(0.),
             master: atom(0.75),
+            player_envelope: atom(1.),
             fading: AtomicBool::new(false),
             mashup_active: AtomicBool::new(false),
             underruns: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -310,6 +312,7 @@ struct SectionChange {
     old: Option<Source>,
 }
 struct Mixer {
+    player_envelope: f32,
     launches: [Option<u64>; 6],
     sections: [Option<SectionChange>; 6],
     voices: [Voice; 6],
@@ -325,6 +328,7 @@ struct Mixer {
 impl Mixer {
     fn new(rate: u32, commands: mpsc::Receiver<Command>, controls: Arc<Controls>) -> Self {
         Self {
+            player_envelope: 1.,
             launches: Default::default(),
             sections: Default::default(),
             voices: Default::default(),
@@ -703,6 +707,8 @@ impl Mixer {
             }
         }
         for i in 0..frames {
+            self.player_envelope += (get(&c.player_envelope).clamp(0., 1.) - self.player_envelope)
+                * (1. / (self.rate as f32 * 0.01)).min(1.);
             let clock = c.rendered.load(Relaxed) + i as u64;
             for d in 0..DECKS {
                 if let Some(at) = self.launches[d] {
@@ -1054,6 +1060,9 @@ impl Mixer {
                         cue_mix[ch] += frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
                     }
                     frame[ch] *= v.gain;
+                    if d == 0 {
+                        frame[ch] *= self.player_envelope;
+                    }
                     if d == 0 {
                         player_mix[ch] = frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
                     }
@@ -1794,6 +1803,16 @@ impl Engine {
     }
     pub fn set_gain(&self, deck: usize, value: f32) {
         let _ = self.send(Command::LevelSet(deck, value.clamp(0., 1.)));
+    }
+    pub fn set_player_envelope(&self, value: f32) {
+        set(
+            &self.controls.player_envelope,
+            if value.is_finite() {
+                value.clamp(0., 1.)
+            } else {
+                1.
+            },
+        );
     }
     pub fn scratch(&self, deck: usize, active: bool, rate: f32) {
         self.controls.vinyl_follow[deck].store(false, Relaxed);
@@ -3315,6 +3334,24 @@ mod tests {
         m.render(100, |_, _| {});
         assert!(c.play[4].load(Relaxed));
         assert!(c.position[4].load(Relaxed) > before);
+    }
+    #[test]
+    fn player_envelope_attenuates_audio_without_rewriting_mixer_gain() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.1, 10000), true, 1))
+            .unwrap();
+        let gain = get(&c.gain[0]);
+        set(&c.player_envelope, 0.);
+        let mut quiet = 1.;
+        m.render(300, |_, frame| quiet = frame[0].abs());
+        assert!(quiet < 0.00001);
+        set(&c.player_envelope, 1.);
+        let mut loud = 0.;
+        m.render(300, |_, frame| loud = frame[0].abs());
+        assert!(loud > 0.001);
+        assert_eq!(get(&c.gain[0]), gain);
     }
     #[test]
     fn synced_loop_capture_waits_for_master_grid_without_stopping_other_voice() {

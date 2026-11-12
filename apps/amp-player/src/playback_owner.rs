@@ -14,11 +14,18 @@ impl Player {
     pub(super) fn claim_playback(&mut self, owner: Owner, starting: usize, transition: bool) {
         if owner == Owner::Dj {
             self.auto = false;
+            if let Some(audio) = &self.audio {
+                audio.set_player_envelope(1.);
+            }
         } else if let Some(audio) = &self.audio {
             audio.set_fader(0.);
             audio.scratch(0, false, 0.);
         }
         if self.playback_owner == owner {
+            if owner == Owner::Player && self.player_sequence.explicit_regular {
+                self.player_sequence.smart = None;
+                self.player_sequence.explicit_regular = false;
+            }
             return;
         }
         if let Some(audio) = &mut self.audio {
@@ -40,6 +47,7 @@ impl Player {
             }
         }
         if owner == Owner::Player {
+            self.inherit_player_sequence();
             self.jog_resume = [None; 6];
             self.jog_auto = [false; 6];
             self.run.cancel_automation();
@@ -87,12 +95,14 @@ impl Player {
                     .unwrap()
                     .load(deck, &root, &track, true)?;
                 self.claim_playback(owner, deck, false);
+                self.resume_player_sequence();
                 return Ok(());
             }
             return Err("Deck is not ready".into());
         }
         self.claim_playback(owner, deck, false);
         self.audio.as_ref().unwrap().play(deck)?;
+        self.resume_player_sequence();
         Ok(())
     }
     pub(super) fn pause_playback(&mut self) {
@@ -109,14 +119,30 @@ impl Player {
             self.run.paused = was_auto;
         } else if let Some(audio) = &mut self.audio {
             audio.pause(0);
+            self.player_sequence.resume_auto = self.auto;
             self.auto = false;
         }
     }
     pub(super) fn toggle_player(&mut self) {
+        if self.playback_owner == Owner::Dj {
+            if let Err(error) = self.switch_dj_song_to_player() {
+                self.status = error;
+            }
+            return;
+        }
+        let was_playing = self.audio.as_ref().is_some_and(|a| a.playing(0));
+        if was_playing {
+            self.player_sequence.resume_auto = self.auto;
+            self.auto = false;
+        }
         self.toggle_owned_deck(Owner::Player, 0);
+        if !was_playing && self.audio.as_ref().is_some_and(|a| a.playing(0)) {
+            self.resume_player_sequence();
+        }
     }
     pub(super) fn stop_player(&mut self) {
         if self.playback_owner == Owner::Player {
+            self.player_sequence.resume_auto = self.auto;
             self.stop(0);
         }
     }

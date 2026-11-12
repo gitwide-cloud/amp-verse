@@ -1,5 +1,15 @@
 # AMP Cast and Android Remote — implementation and acceptance
 
+## Player playlist continuation and song fades — November 12
+
+Switching from DJ with the Player Play button adopts the currently active DJ song, including a B-side song, and carries the selected Smart Playlist profile into normal Player continuation. Regular playlists keep queue order; Smart Playlists reuse their source, genre/analysis filters, energy preferences and repeat policy to choose songs. DJ phrase scheduling, scratch transitions and Auto DJ transport stay off while Player owns playback. Selecting a regular playlist explicitly replaces the Player Smart source. Play playlist consumes the first queue entry so it does not accidentally repeat once before advancing.
+
+Normal Player starts use complete songs instead of automatic DJ cue-in/out bounds; approved manual cue boundaries are retained. Player playback copies do not write these changes into shared analysis. Each song fades in at its start and fades out at its end. The next file then starts and fades in; this is sequential song fading, not an overlapping two-deck crossfade or a gapless guarantee. Decode/network preparation can add a pause between files. Fade time is saved and adjustable with the stepper under Player view, sharing the existing duration preference. A separate smoothed DSP envelope leaves channel gain and the volume setting unchanged and resets to unity in DJ mode.
+
+Player's Smart source/recent history and continuation preference are included in paused recovery. Pause/resume preserves playlist advancement. Failed Smart candidates are excluded for the run; decoder failures advance safely when queue playback is enabled. Source metadata and manual cues remain unchanged.
+
+Verification: 98 Core + 191 Player + 9 Cast = **298 passing workspace tests**, strict workspace Clippy, six web checks, and four muted native tests. The new real-decoder check runs a short regular playlist through completion, pauses/resumes it, switches a B1 Smart song into Player, advances to another eligible song and stops according to the repeat policy without enabling Auto DJ. Unit/DSP checks cover filter retention, replacing Smart with regular sources, manual cue protection, fade endpoints and attenuation without gain rewrites. Physical-phone and listening-quality acceptance were not repeated.
+
 ## Single desktop playback owner — November 12
 
 Player and DJ use one existing desktop mixer engine. `playback_owner.rs` now owns the Player/DJ handoff policy; there is no remote-owned player or new playback engine. GUI transport, MIDI Play, explicit remote deck starts, Smart Playlist starts and scratch starts call this policy. Player starts pause DJ voices, clear pending DJ automation/scratch restoration and stop DJ sampler/Cue Deck output. DJ starts stop Player queue advancement and pause Player's A1 when launching a different deck; an intentional scheduled DJ blend may adopt that already-playing track as DJ's outgoing voice. Paused preparation on A2/A3/B2/B3 does not switch owners. Starting another DJ deck keeps the current DJ session and mix pair.

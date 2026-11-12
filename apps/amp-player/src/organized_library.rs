@@ -420,6 +420,8 @@ impl Player {
                         .collect();
                     if let Some(indices) = indices {
                         self.queue = indices;
+                        self.player_sequence.smart=None;
+                        self.player_sequence.explicit_regular=true;
                         self.queue_selected = None;
                         self.playlist_snapshot = Some((path, list));
                     } else {
@@ -448,6 +450,9 @@ impl Player {
                     {
                         self.selected = self.queue.first().copied();
                         if let Some(index) = self.selected {
+                            self.queue.remove(0);
+                            self.player_sequence.smart=None;
+                            self.player_sequence.explicit_regular=true;
                             self.play(0, index);
                             self.auto = true;
                             if let Some(a) = &self.audio {

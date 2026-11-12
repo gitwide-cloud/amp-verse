@@ -70,6 +70,8 @@ pub struct Snapshot {
     #[serde(default)]
     playback_owner: crate::playback_owner::Owner,
     #[serde(default)]
+    player_sequence: crate::player_sequence::Sequence,
+    #[serde(default)]
     side_decks: Option<[SideSnapshot; 2]>,
     #[serde(default)]
     deck_settings: Option<[DeckSettings; 6]>,
@@ -377,6 +379,13 @@ impl Player {
             }),
             rack: self.rack.clone(),
             playback_owner: self.playback_owner,
+            player_sequence: {
+                let mut sequence = self.player_sequence.clone();
+                if self.playback_owner == crate::playback_owner::Owner::Player {
+                    sequence.resume_auto |= self.auto;
+                }
+                sequence
+            },
             pair: self.pair(),
             sizes: self.recovery.sizes,
             splits: self.recovery.splits,
@@ -588,6 +597,7 @@ impl Player {
         self.run.auto = false;
         self.auto = false;
         self.playback_owner = snapshot.playback_owner;
+        self.player_sequence = snapshot.player_sequence.clone();
         self.run.preloaded = None;
         self.library_open = snapshot.panels[1];
         self.dj_open = snapshot.panels[2];

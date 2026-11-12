@@ -131,6 +131,9 @@ impl Default for Run {
     }
 }
 impl Run {
+    pub(super) fn recent_songs(&self) -> Vec<String> {
+        self.recent.iter().cloned().collect()
+    }
     fn tick_effect(&mut self, audio: &crate::mixer::Engine) -> Option<String> {
         let mut effect = self.effect_bridge.take()?;
         if !audio.fading() || !audio.playing(audio.controls.other(effect.deck)) {
@@ -332,7 +335,7 @@ struct EffectBridge {
     halves: u8,
 }
 impl Player {
-    fn active_deck(&self) -> usize {
+    pub(super) fn active_deck(&self) -> usize {
         let pair = self.pair();
         if let Some(a) = &self.audio {
             match [a.playing(pair[0]), a.playing(pair[1])] {
@@ -785,6 +788,17 @@ impl Player {
         }
     }
     pub(super) fn recover_failed_song(&mut self, deck: usize, error: &str) {
+        if self.playback_owner == crate::playback_owner::Owner::Player && deck == 0 {
+            if let Some(track) = self.loaded_track(0) {
+                self.player_sequence.failed.push(show::song_id(track));
+            }
+            if let Some(audio) = &mut self.audio {
+                audio.stop(0);
+            }
+            self.player_sequence.advance = true;
+            self.status = format!("Skipping unavailable Player song: {error}");
+            return;
+        }
         if !self.pair().contains(&deck) {
             if let Some(a) = &mut self.audio {
                 a.stop(deck);
@@ -1092,6 +1106,8 @@ impl Player {
                 self.run.playlist = Some(list.name.clone());
                 self.run.cancel_automation();
                 self.queue = indices;
+                self.player_sequence.smart = None;
+                self.player_sequence.explicit_regular = true;
                 self.queue_selected = None;
                 self.playlist_snapshot = Some((path, list));
                 self.load_deck(0, first, false);

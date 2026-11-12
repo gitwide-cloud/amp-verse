@@ -40,6 +40,7 @@ mod music_scenes;
 mod organized_library;
 mod performance;
 mod playback_owner;
+mod player_sequence;
 mod podcast_cache;
 mod podcasts;
 mod preparer;
@@ -130,6 +131,7 @@ fn capture(ctx: &egui::Context, path: PathBuf) {
 
 struct Player {
     playback_owner: playback_owner::Owner,
+    player_sequence: player_sequence::Sequence,
     rack: deck_rack::Rack,
     recovery: session::Recovery,
     root: PathBuf,
@@ -225,6 +227,7 @@ impl Default for Player {
     fn default() -> Self {
         Self {
             playback_owner: Default::default(),
+            player_sequence: Default::default(),
             rack: Default::default(),
             recovery: Default::default(),
             root: std::env::args_os()
@@ -794,9 +797,11 @@ impl Player {
         for (deck, error) in decode_errors {
             self.recover_failed_song(deck, &error);
         }
+        self.player_sequence_tick();
         if self.playback_owner == playback_owner::Owner::Player
             && self.auto
             && (self.loaded[0].is_none()
+                || self.player_sequence.advance
                 || self.audio.as_ref().is_some_and(|a| {
                     a.controls.finished[0].load(std::sync::atomic::Ordering::Relaxed)
                 }))
@@ -844,13 +849,16 @@ impl Player {
             .and_then(|l| l.tracks.get(index))
             .cloned()
         {
-            let track = match self.fresh_track(index) {
+            let mut track = match self.fresh_track(index) {
                 Ok(track) => track,
                 Err(e) => {
                     self.status = e;
                     return;
                 }
             };
+            if owner == playback_owner::Owner::Player {
+                player_sequence::normal_track(&mut track);
+            }
             let result = self.ensure_audio().and_then(|_| {
                 self.audio
                     .as_mut()
@@ -868,6 +876,13 @@ impl Player {
                     self.cancel_deck_automation(deck);
                     if deck == 0 && !play {
                         self.auto = false;
+                    }
+                    if owner == playback_owner::Owner::Player {
+                        self.pitch[deck] = 0.;
+                        if let Some(audio) = &self.audio {
+                            let _ = audio.sync(deck, false);
+                            audio.set_rate(deck, 1.);
+                        }
                     }
                     if let Some(rate) = track
                         .preparation
@@ -893,6 +908,9 @@ impl Player {
                     self.loaded_origin[deck] = Some(self.root.clone());
                     self.loaded[deck] = Some(index);
                     self.playing[deck] = play;
+                    if play && owner == playback_owner::Owner::Player {
+                        self.player_song_started();
+                    }
                     self.status = format!("Deck {} / {}", deck + 1, track.title);
                 }
                 Err(e) => self.status = e,
@@ -1005,10 +1023,28 @@ impl Player {
         }
     }
     fn next(&mut self) {
+        self.player_sequence.advance = false;
         if self.repeat_one
             && let Some(i) = self.loaded[0]
         {
             self.play(0, i);
+            return;
+        }
+        if self.player_sequence.smart.is_some() {
+            if let Some(index) = self.next_player_smart() {
+                self.play(0, index);
+                if self.loaded[0] != Some(index) {
+                    if let Some(track) = self.library.as_ref().and_then(|l| l.tracks.get(index)) {
+                        self.player_sequence
+                            .failed
+                            .push(amp_core::show::song_id(track));
+                    }
+                    self.player_sequence.advance = true;
+                }
+            } else {
+                self.auto = false;
+                self.status = "No more matching Smart Playlist songs".into();
+            }
             return;
         }
         if !self.queue.is_empty() {
@@ -1078,6 +1114,7 @@ impl Player {
         self.auto = false;
         self.loaded = [None; 6];
         self.loaded_snapshot = Default::default();
+        self.player_sequence = Default::default();
         self.waveforms = Default::default();
         self.preview_wave = Default::default();
         self.run.cancel_automation();
@@ -1247,6 +1284,8 @@ impl Player {
                             .collect();
                         if let Some(indices) = indices {
                             self.queue = indices;
+                            self.player_sequence.smart = None;
+                            self.player_sequence.explicit_regular = true;
                             self.queue_selected = None;
                             self.status = "Playlist loaded".into();
                             self.playlist_snapshot = Some((path.clone(), list.clone()));
@@ -1646,9 +1685,7 @@ impl Player {
                         self.resize_player(ui.ctx(), true);
                     }
                 }
-                if ui.checkbox(&mut self.auto, "Play queue").changed() && self.auto {
-                    self.run.cancel_automation();
-                }
+                ui.checkbox(&mut self.auto, "Play queue");
                 ui.toggle_value(&mut self.shuffle, "Shuffle");
                 ui.toggle_value(&mut self.repeat_one, "Repeat one");
                 if ui
@@ -1738,6 +1775,7 @@ impl Player {
                             }),
                         );
                     }
+                    self.player_fade_controls(ui);
                 });
         });
     }
