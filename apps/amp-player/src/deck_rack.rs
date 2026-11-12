@@ -223,11 +223,14 @@ impl Player {
             } else {
                 library_height + 52.
             })
-        .max(if compact { 290. } else { 320. });
+        .max(if compact { 290. } else { 320. })
+        .min(if self.rack.expanded { 550. } else { 490. });
+        let rack_width = ui.available_width().min(1640.);
         let strips = if compact { 132. } else { 170. };
         let mixer = if compact { 126. } else { 146. };
-        let jog_width = ((ui.available_width() - strips * 2. - mixer - 28.) / 2.).max(240.);
+        let jog_width = ((rack_width - strips * 2. - mixer - 28.) / 2.).max(240.);
         ui.horizontal_top(|ui| {
+            ui.add_space(((ui.available_width() - rack_width) / 2. - 4.).max(0.));
             self.deck_strips(ui, 0, strips, height, compact);
             ui.push_id(("live-jog", self.rack.live[0]), |ui| {
                 self.jog_section(ui, self.rack.live[0], jog_width, height)
@@ -471,6 +474,79 @@ impl Player {
             self.status = e;
         }
     }
+    fn rack_platter(&mut self, ui: &mut egui::Ui, d: usize, size: f32) {
+        let wheel = skin::vinyl_platter(
+            ui,
+            size,
+            accent(d),
+            self.playing[d],
+            self.audio.as_ref().map_or(0., |a| a.source_position(d)) as f32,
+        );
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::unique(("rack-wheel", d)), wheel.rect));
+        self.jog_wheel(ui, d, &wheel);
+    }
+    fn rack_pitch(&mut self, ui: &mut egui::Ui, d: usize, size: f32) {
+        ui.allocate_ui_with_layout(
+            egui::vec2(34., size),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.small("PITCH");
+                ui.spacing_mut().slider_width = (size - 42.).max(70.);
+                if ui
+                    .add(
+                        egui::Slider::new(&mut self.pitch[d], -16. ..=16.)
+                            .vertical()
+                            .show_value(false),
+                    )
+                    .changed()
+                    && let Some(a) = &self.audio
+                {
+                    let _ = a.sync(d, false);
+                    a.set_rate(d, 1. + self.pitch[d] / 100.);
+                }
+                ui.small(format!("{:+.1}%", self.pitch[d]));
+            },
+        );
+    }
+    fn rack_knob_bank(&mut self, ui: &mut egui::Ui, d: usize, width: f32) {
+        let response = ui.allocate_ui_with_layout(
+            egui::vec2(width, 1.),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_width(width);
+                ui.spacing_mut().interact_size.y = ((width - 28.) / 3.).clamp(32., 56.);
+                self.rack_stem_knobs(ui, d);
+                ui.separator();
+                ui.horizontal(|ui| {
+                    for (band, name) in [(0, "LOW"), (1, "MID"), (2, "HIGH")] {
+                        ui.vertical(|ui| {
+                            if dj_mixer::dial(
+                                ui,
+                                name,
+                                &mut self.eq[d][band],
+                                -24. ..=12.,
+                                accent(d),
+                            )
+                            .changed()
+                                && let Some(a) = &self.audio
+                            {
+                                a.set_eq(d, band, self.eq[d][band]);
+                            }
+                            ui.small(name);
+                        });
+                    }
+                });
+            },
+        );
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::unique(("rack-knobs", d)), response.response.rect)
+        });
+        #[cfg(not(test))]
+        let _ = response;
+    }
     fn jog_section(&mut self, ui: &mut egui::Ui, d: usize, width: f32, height: f32) {
         let expanded_cues = (self.rack.expanded || self.dj_cues[d]) && height >= 440.;
         let full_bank = self.rack.expanded && width >= 380.;
@@ -480,61 +556,31 @@ impl Player {
             |ui| {
                 skin::rack_panel(ui, None, |ui| {
                     ui.set_width(width - 18.);
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.small("PITCH");
-                            ui.spacing_mut().slider_width =
-                                (height - if expanded_cues { 290. } else { 210. }).clamp(80., 300.);
-                            if ui
-                                .add(
-                                    egui::Slider::new(&mut self.pitch[d], -16. ..=16.)
-                                        .vertical()
-                                        .show_value(false),
-                                )
-                                .changed()
-                                && let Some(a) = &self.audio
-                            {
-                                let _ = a.sync(d, false);
-                                a.set_rate(d, 1. + self.pitch[d] / 100.);
-                            }
-                            ui.small(format!("{:+.1}%", self.pitch[d]));
-                        });
-                        let wheel_size = (width - if width > 335. { 180. } else { 55. })
-                            .max(110.)
+                    let room = width - 18.;
+                    let bank_width = if width > 335. {
+                        (room * 0.31).clamp(130., 190.)
+                    } else {
+                        0.
+                    };
+                    let wheel_size =
+                        (room - bank_width - 42. - if bank_width > 0. { 24. } else { 8. })
                             .min((height - if expanded_cues { 290. } else { 210. }).max(110.))
-                            .min(340.);
-                        let wheel = skin::vinyl_platter(
-                            ui,
-                            wheel_size,
-                            accent(d),
-                            self.playing[d],
-                            self.audio.as_ref().map_or(0., |a| a.source_position(d)) as f32,
-                        );
-                        self.jog_wheel(ui, d, &wheel);
-                        if width > 335. {
-                            ui.vertical(|ui| {
-                                self.rack_stem_knobs(ui, d);
-                                ui.separator();
-                                ui.horizontal(|ui| {
-                                    for (band, name) in [(0, "LOW"), (1, "MID"), (2, "HIGH")] {
-                                        ui.vertical(|ui| {
-                                            if dj_mixer::dial(
-                                                ui,
-                                                name,
-                                                &mut self.eq[d][band],
-                                                -24. ..=12.,
-                                                accent(d),
-                                            )
-                                            .changed()
-                                                && let Some(a) = &self.audio
-                                            {
-                                                a.set_eq(d, band, self.eq[d][band]);
-                                            }
-                                            ui.small(name);
-                                        });
-                                    }
-                                });
-                            });
+                            .clamp(110., 340.);
+                    ui.horizontal_top(|ui| {
+                        if d.is_multiple_of(2) {
+                            if bank_width > 0. {
+                                self.rack_knob_bank(ui, d, bank_width);
+                            }
+                            self.rack_pitch(ui, d, wheel_size);
+                            ui.add_space((ui.available_width() - wheel_size - 8.).max(0.));
+                            self.rack_platter(ui, d, wheel_size);
+                        } else {
+                            self.rack_platter(ui, d, wheel_size);
+                            ui.add_space((ui.available_width() - bank_width - 42. - 24.).max(0.));
+                            self.rack_pitch(ui, d, wheel_size);
+                            if bank_width > 0. {
+                                self.rack_knob_bank(ui, d, bank_width);
+                            }
                         }
                     });
                     ui.horizontal(|ui| {
@@ -775,6 +821,37 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn wide_rack_keeps_wheels_by_mixer_and_knobs_on_outer_sides() {
+        for size in [egui::vec2(1600., 1000.), egui::vec2(2560., 1440.)] {
+            let ctx = egui::Context::default();
+            let mut player = Player::default();
+            for _ in 0..3 {
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                        ..Default::default()
+                    },
+                    |ui| player.group_ui(ui, 2),
+                );
+                output.textures_delta.clear();
+            }
+            let rect = |kind: &str, d: usize| {
+                ctx.data(|data| data.get_temp::<egui::Rect>(egui::Id::unique((kind, d))))
+                    .unwrap()
+            };
+            let a = rect("rack-wheel", 0);
+            let b = rect("rack-wheel", 1);
+            assert!(rect("rack-knobs", 0).right() <= a.left());
+            assert!(rect("rack-knobs", 1).left() >= b.right());
+            assert!(
+                b.left() - a.right() < 250.,
+                "Wheels drifted away from mixer: {a:?} {b:?}"
+            );
+            assert!(a.width() <= 340. && b.width() <= 340.);
+            assert!(a.right() < size.x && b.right() < size.x);
+        }
+    }
     #[test]
     fn remote_background_stop_leaves_auto_dj_enabled() {
         let mut player = Player::default();

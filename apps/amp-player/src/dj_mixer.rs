@@ -82,7 +82,7 @@ pub(super) fn dial(
     range: std::ops::RangeInclusive<f32>,
     accent: egui::Color32,
 ) -> egui::Response {
-    let dial_size = ui.spacing().interact_size.y.clamp(32., 44.);
+    let dial_size = ui.spacing().interact_size.y.clamp(32., 64.);
     let (rect, mut response) = ui.allocate_exact_size(
         egui::vec2(dial_size + 4., dial_size),
         egui::Sense::click_and_drag(),
