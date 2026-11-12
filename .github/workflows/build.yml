@@ -221,6 +221,9 @@ jobs:
           path: packages
       - run: |
           cd packages
+          # Artifact storage strips executable bits. Restore them before making
+          # Linux ZIPs so the updater can restart the newly installed binaries.
+          find . -type f \( -name amp-player -o -name amp-update -o -name amp-cast -o -name amp-prepare -o -name amp-engine -o -name amp-engine-linux-x86_64 -o -name deno -o -name yt-dlp \) -exec chmod +x {} +
           for dir in amp-verse-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
           for dir in amp-analysis-engine-*; do (cd "$dir" && zip -r "../$dir-${GITHUB_REF_NAME}.zip" .); done
           cp amp-analysis-engine-Windows/amp-engine-windows-x86_64.exe* .
