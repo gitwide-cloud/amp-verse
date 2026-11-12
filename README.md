@@ -1,186 +1,105 @@
 # AMP⚡VERSE
 
-Shared-library/server milestone: coordinated per-track analysis leases, persistent library/device IDs, conflict-aware metadata revisions and protected playlist saves now live in AMP Library Core. Cast can run the same incremental analyzer headlessly. See [coordination](docs/SHARED_LIBRARY_COORDINATION.md) and [server deployment/status](docs/SERVER_DEPLOYMENT.md). ARM32 binaries/images are candidates pending actual LAG validation; AUHUBNAS production remains gated. Google Cast and Android offline-sync UI are not implemented by this milestone.
+**Your music. Your playground.**
 
-An independent, modular audio project for Windows/Linux, with an integrated Android app planned. Inspired by compact classic players; not affiliated with Winamp. This repository is separate from MP3 Lab.
+AMP⚡VERSE is an open-source music player and DJ playground built for music hobbyists, home labs, and anyone who loves having their own music collection.
 
-The supplied AMP Verse references now guide the drawn desktop chrome and embedded Cast UI: purple/silver Player and orange/cyan DJ decks, black/gold folder Library and Cast console. See [visual direction](docs/DESIGN.md). The Library uses folders and playlists; the player expands into an attached Library, with explicit magnetic merge and detach controls. Crates are excluded.
+Maybe you just want a simple player for the music on your computer. Maybe you want to build playlists, mix tracks like a DJ, or run your own little radio station from a home server. AMP⚡VERSE brings those possibilities together without making you subscribe to a music service or give up control of your files.
 
-**Themes:** Classic, Modern Light and Modern Dark are selectable in the desktop top-bar dropdown (Appearance), and in Cast's navigation bar. Choices persist locally. See [theme settings](docs/THEMES.md).
+It takes inspiration from the music players many of us grew up with: **a classic, Winamp-inspired interface when you want the nostalgia, and clean modern light and dark themes when you don't.** It's a separate, independent project and isn't affiliated with Winamp.
 
-## Companion and protected preparation
+> **Play your music. Mix your music. Take it with you.**
 
-The desktop now exposes HTTP commands and passive WebSocket feedback for show control, with safe Load Only defaults, saved cue calls, preloading, fades, Duck/Restore, Manual DJ Lock and bounded retry deduplication. Library configures Smart Playlist rules; DJ performs a runtime copy, including prepared energy selection and progression. See [Companion setup and API](docs/COMPANION.md) and the [revised spec status](docs/SPEC_STATUS.md).
+## What can you do with it?
 
-New preparation saves use a `.ampverse/tracks/` directory in the audio file's containing folder. Existing `song.ext.amp.json` records remain readable and unchanged; the portable record takes precedence. Reanalysis of approved/manual data stores a recommendation while preserving the existing values. Library shows exact before/after data, individual/bulk field decisions and audition, followed by explicit Save. Runtime DJ decisions do not save cues or rules.
+| | |
+| --- | --- |
+| **🎵 AMP Player** | Just press Play. Listen to your collection, manage a queue, adjust the EQ, and enjoy a proper spectrum visualizer. Keep it compact or open the Library alongside it. |
+| **📁 AMP Library** | Point the app at your music folders, browse your real folder tree, make playlists, and prepare tracks with BPM, key, energy, cues, and beatgrids. Your approved edits stay yours. |
+| **🎚️ AMP DJ** | Mix on two full decks with jog wheels, hot cues, loops, EQ, effects, stems, samplers, and Auto DJ. Build a Smart Playlist and let the software help choose and blend tracks. |
+| **✂️ AMP Lab** | Trim a track, make a sampler clip, edit fades and levels, or assemble a longer layered mix for MP3 export. |
+| **📻 AMP Cast** | Share what you're playing live, host a playlist-based radio station on your network, and listen from another computer, browser, or supported Cast device. |
+| **📱 AMP Verse for Android** | Take selected music and prepared playlist information offline, listen and mix on your phone, or use it as a remote for your desktop music setup. |
 
-## Library and Smart Lists
+### Made for your home lab — but you don't need one
 
-Expand Library below the compact player, or detach it into a native window. Move an AMP window against another window: the magnet button lights up and merges the sections when pressed. Each attached section has a Detach button. This works between the Rust Player, Library, DJ, Lab arrangement, Cast and Plugin Manager windows; the separately launched MP3 Lab editor stays independent. Merged groups scroll when needed, and layout currently resets on restart.
+Start with one Windows or Linux computer and a folder of songs. That is enough to enjoy AMP Player.
 
-Library edits cue points, BPM/grid, key labels, ratings, energy, saved playback rate and portable text tags through **Edit cues / BPM / key / rating / energy**. Save writes `.ampverse/tracks/song.ext.json` beside the original audio; original audio and embedded tags are unchanged. Playback rate applies when the song is loaded and changes pitch; key edits correct metadata and do not transpose audio.
+If you've got a NAS, another computer, or a home server, you can take it further: keep music in one place, reuse preparation information, tune in to your own stations, and control supported players across the LAN. Your playlists can travel with you, and Android can save selected station playlists and their music for offline listening.
 
-Build a playlist with the Mix checkboxes or **Add folder to playlist**. **Smart List · order for mixing** keeps the first song as anchor and orders the selected songs using prepared harmonic codes, tempo and energy. **Find similar songs** adds up to 20 analyzed library neighbors within ±6% BPM and ±0.2 energy, favoring compatible harmonic steps. Review, reorder and Save as a regular playlist. Missing metadata is reported; unknown candidates are excluded from expansion. Energy is a relative audio-level estimate or manual value, not a calibrated perceptual measurement. Recommendations do not guarantee a seamless mix. See [Library and Smart Lists](docs/LIBRARY.md).
+**No cloud account is required for ordinary local playback.** Your library is yours.
 
-## Runnable milestone 0.1
+## Simple when you want it. More powerful when you need it.
 
-- **AMP Player:** native Rust/egui compact player, play/pause, stop/next, live master volume, an attached or detached folder Library, Shuffle, Repeat One, EQ and JSON playlists. Desktop playback uses the shared CPAL mixer with background FFmpeg decoding.
-- **AMP Library:** shared Rust folder scanner, deterministic file tree, supported audio extensions, playlist persistence, validated prepared cue/BPM/beatgrid/stem-reference sidecars, root-confined file resolution. No crates.
-- **AMP DJ:** shared-stream two-deck mixer, prepared cues, play/pause, pitch/speed, channel faders, manual and one-touch equal-power crossfade, live meters and scrolling source waveforms with cue markers, a saved nine-pad sound-effect sampler, captured loops, three-band EQ and low-pass FX. SYNC matches prepared BPM within the pitch range; beat-phase sync, key lock, live stems and broader effects remain unbuilt.
-- **AMP Cast:** independent headless Rust server, embedded web UI, station launch/stop, sequential looping Auto DJ, one real-time MP3 encoder shared by browser listeners, optional simple admin password. Plays while the desktop app is closed.
-- **Plugin Manager:** searchable offline component catalog, real included build versions, companion-binary detection and module launch actions. Open it from the top-bar dropdown.
-- **AMP Lab:** manual links to MP3 Lab Releases and an explicit connection to a separately installed editor. Pick its executable in Plugin Manager, or set `AMP_LAB_EXE` to its full path before launch. Picker connections last for the session. **Open editor** launches it separately, without file handoff or modifying MP3 Lab. No editor code copied, automatic downloader, installer or native plugin loader yet.
+- **Classic or modern:** Choose Classic, Modern Dark, or Modern Light. The desktop also supports compact and movable/attached windows.
+- **Your folders, your playlists:** No crate system to learn. Browse folders, build regular playlists, or create Smart Playlists.
+- **Auto DJ:** Choose a playlist and a style—**Hype**, **Steady**, or **Chill**—and let the engine use available music analysis to guide selection and transitions.
+- **Hands-on DJing:** Use cues, loops, a crossfader, sampler pads, and prepared stem controls. You can work manually or let Auto DJ keep music flowing.
+- **Music on the network:** AMP Cast supports live master-audio broadcasts and playlist-based listening. Use supported remote controls and Google Cast where available.
+- **Keep your preparation:** Analyzed metadata and manual corrections are reusable; automatic analysis suggests improvements rather than silently overwriting approved edits.
 
-**Not built yet:** Android prepared cues/stems, folder-tree import and LAN remote control; desktop/Cast LAN discovery and Android remote-control client; metadata tag extraction; persisted queues/session recovery; Cast local soundcard output, scheduling and station playlist selection; advanced DJ effects/routing; automatic updates or add-on installation. See [architecture](docs/ARCHITECTURE.md) and [roadmap](docs/ROADMAP.md). The UI reports prototype status; it does not display fictitious waveforms, meters or listener counts.
+## Windows, Linux, and Android
 
-## Run from source
+**Windows & Linux** are the most feature-complete editions. AMP Player is the home base; DJ, Lab, Cast, and optional analysis/stem capabilities expand what it can do. Some add-on packaging and automatic installation workflows are still being refined.
 
-Requires stable Rust (edition 2024), FFmpeg with `ffmpeg` and `ffplay` on PATH, and a desktop OpenGL session for Player. These initial binaries **do not bundle audio tools**. Install FFmpeg separately. Linux build: `sudo apt install build-essential pkg-config libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev ffmpeg`.
+**Android** is intentionally lighter. It includes a local player, playlists, prepared cue-aware Auto DJ, offline playlist downloads, an integrated audio editor, radio listening, Cast support, and network remote capabilities. It reads prepared metadata rather than running heavyweight music analysis or stem separation on the phone.
 
-```sh
+The desktop and Android editions do not yet have identical features. See [Android documentation](docs/ANDROID.md) for current capabilities and limitations.
+
+## Get AMP⚡VERSE
+
+**[Browse releases](https://github.com/gitwide-cloud/amp-verse/releases)** · **[Builds and tests](https://github.com/gitwide-cloud/amp-verse/actions)**
+
+Download an available build for your platform from Releases. This is an actively developed project: check the release notes and workflow results before treating a preview as production-ready.
+
+If you'd rather build from source, you'll need the Rust toolchain and the audio/runtime dependencies described in the project documentation.
+
+```bash
+cargo build --workspace --release --locked
+cargo test --workspace --locked
+```
+
+On systems with the required audio tools and a working sound output, run the desktop player with a music directory:
+
+```bash
 cargo run -p amp-player -- /path/to/music
+```
+
+For the independent Cast service:
+
+```bash
 cargo run -p amp-cast -- /path/to/music
 ```
 
-Windows PowerShell example:
+See [architecture](docs/ARCHITECTURE.md), [server setup](docs/SERVER_DEPLOYMENT.md), and [Android build notes](docs/ANDROID.md) for platform-specific setup details.
 
-```powershell
-cargo run -p amp-player -- 'D:\Music'
-$env:AMP_CAST_BIND = '0.0.0.0:8787' # opt in to LAN access
-$env:AMP_CAST_PASSWORD = 'your-local-password' # optional, never stored in source
-cargo run -p amp-cast -- 'D:\Music'
-```
+## What's still being built?
 
-Open [Cast on this computer](http://127.0.0.1:8787). On another LAN device, use the server's IP and port 8787. Start the station, then click **Listen here**. The browser's audio controls manage listener volume. Cast scans its root at startup and loops all indexed tracks in folder order; restart after adding files. No internet is required after dependencies and audio tools are installed.
+AMP⚡VERSE has real playback, editing, DJ, and networking code, but it is **not yet a finished professional DJ product**. Current work includes:
 
-Cast defaults to loopback. A LAN bind exposes public listening and status; the optional password protects start/stop only. HTTP is for a trusted LAN: passwords are sent in a header over HTTP. For untrusted networks use a TLS reverse proxy and access controls; do not expose the bare server to the internet. No CORS is enabled, and browser cross-site control requests are rejected. Public status exposes track titles, never absolute paths. FFmpeg errors are shown in station status. Stop kills the encoder; slow listeners are disconnected rather than buffered indefinitely. Browser buffering can make stop audible later.
+- Improving musical analysis, downbeat/phrase accuracy, and pitch-preserving tempo changes.
+- Refining the DJ interface, session recovery, controller support, and responsive layouts.
+- Hardening Android remote operation and cross-device offline-edit synchronization.
+- Improving headless Smart Radio mixing, receiver compatibility, and long-running server operation.
+- Polishing optional add-on downloads, updates, packaging, and releases.
 
-## Preparation and playlists
+Some features require specific audio hardware or have not yet been fully verified across devices. The current implementation and known limitations are described in the linked documents and release notes.
 
-Alongside `song.flac`, optionally save `song.flac.amp.json`:
+## Go deeper
 
-```json
-{"cue_in": 2.0, "cue_out": 45.5, "bpm": 120.0, "beat_offset": 0.25, "stems": []}
-```
+- [AMP Library and music preparation](docs/LIBRARY.md)
+- [Smart Playlists and preparation](docs/PORTABLE_SMART_PLAYLISTS.md)
+- [DJ mixer and controls](docs/DJ_MIXER.md)
+- [Companion and remote API](docs/COMPANION.md)
+- [Shared library coordination](docs/SHARED_LIBRARY_COORDINATION.md)
+- [Themes and visual design](docs/THEMES.md)
+- [Current development status](docs/NOVEMBER_ROADMAP_STATUS.md)
+- [Project architecture](docs/ARCHITECTURE.md)
 
-Times are seconds. Only cues affect playback in this milestone; other fields are storage contracts. Malformed sidecars cause a visible scan error instead of silently losing preparation data. Cues are not yet checked against decoded track duration.
+## Open source and credits
 
-Playlist files use relative paths inside the configured music root:
+AMP⚡VERSE is an independent, hobbyist-focused, open-source project. The project's code is MIT licensed; bundled tools, codecs, and other dependencies retain their own licenses. See [third-party notices](THIRD_PARTY_NOTICES.md).
 
-```json
-{"version":1,"name":"Evening","tracks":["Albums/song.flac"]}
-```
+AMP Lab builds on ideas and technology from the separate [MP3 Lab project](https://github.com/gitwide-cloud/mp3-lab). MP3 Lab remains its own project.
 
-Use the library window to add selected songs, save or load a playlist. Enable Auto DJ in AMP DJ to consume that queue on deck 1. Desktop decks use separate FFplay processes and the system default output; volume applies on the next play. Stop does not pause/resume. Queue edits are in memory until explicitly saved.
-
-## Verify and build
-
-```sh
-cargo fmt --all --check
-cargo test --workspace --locked
-cargo clippy --workspace --all-targets --locked -- -D warnings
-cargo build --workspace --release --locked
-python tools/smoke_cast.py target/release/amp-cast
-```
-
-On Windows use `target/release/amp-cast.exe`. The smoke test requires FFmpeg and creates its own temporary audio. CI runs unit/API tests and release builds on Windows/Linux, real streaming/decode tests on Linux, and captures the actual Player window under Xvfb. Workflow artifacts contain both binaries and documentation. Tagging `v*` publishes a prerelease only after both platform jobs pass, with ZIPs and SHA-256 checksums. No release is implied by an untagged push. Linux artifact executables may need `chmod +x` after extraction.
-
-GitHub Releases are the intended distribution channel for updates and optional add-ons. Downloads and installation remain manual in 0.1. Existing MP3 Lab releases remain independent.
-
-## Licensing and provenance
-
-MIT for AMP Verse code. MP3 Lab was inspected read-only for editor architecture, asynchronous jobs, subprocess cleanup and visual direction; see [reuse review](docs/MP3_LAB_REVIEW.md). No existing repositories are changed or runtime-coupled. Dependencies and external audio tools retain their own licenses; see [notices](THIRD_PARTY_NOTICES.md).
-
-
-### Native AMP Cast dashboard
-
-In AMP Verse, open the top-bar dropdown and choose **AMP Cast**. This opens a separate native window inside the desktop software, with Dashboard, Queue, Streaming and Settings sections. Enter the running server's `host:port` (default `127.0.0.1:8787`) and optional admin password, then **Connect / apply**. Start/Stop controls the independent server broadcast; the dashboard displays real track, cue, listener and station status. Closing the window does not stop the server. Passwords are kept in memory only. Start the `amp-cast` companion separately using the instructions above. Native soundcard listening and queue editing remain planned; the browser listener remains separately available.
-
-The **web UI stays simple**: listen, see current status, start/stop broadcasting, and view the read-only queue. Real editing and advanced control belong to AMP Verse desktop and the Android app (Android remains in development).
-
-
-### Android preview
-
-`android/` now builds a compact integrated app (`cloud.gitwide.ampverse`) with Player/Library, three saved themes, file-picker imports copied to private local storage, a saved queue, seek/pause/previous/next, sequential queue playback/repeat and a Media3 foreground media service. See [Android build and device verification](docs/ANDROID.md). This is a first preview, not the complete Android milestone. No desktop plugins are loaded on Android.
-
-
-Android **AMP Lab** is now the integrated MP3 Lab editor foundation: open audio, waveform/trim/fades/gain/normalize, original/edited preview, 256 kbps MP3 export and session restore. Open it from the top module dropdown. [Integration and source provenance](third-party/mp3-lab/PROVENANCE.md) includes upstream licensing and the corresponding codec source bundle. Desktop still uses the separately installed editor connection.
-
-
-### Desktop DJ and Lab arrangement
-
-AMP DJ has two deck platters and an embedded searchable library. Choose a music folder (including a mounted NAS folder), select Load A or Load B, then Play / Cue. Each deck uses the track's prepared cue IN/OUT. Live manual/auto crossfade, pitch, prepared-BPM tempo matching, EQ and low-pass FX are now implemented; see [DJ mixer](docs/DJ_MIXER.md). The chosen library folder is remembered for the next launch.
-
-AMP Lab opens a mix arrangement with one lane per song. Add tracks from the scanned library, set timeline starts, cue IN/OUT and gain, then export one combined 320 kbps MP3 or individual trimmed MP3 files. Overlapping lanes mix together with a final limiter. Save/load arrangements as JSON. The existing installed MP3 Lab opens separately for waveform editing; arrangement bars indicate clip positions rather than audio waveforms. Arrangement fades, audition transport and automatic beat alignment are not implemented yet.
-
-Cue metadata is read from adjacent AMP preparation files, such as `song.mp3.amp.json`:
-
-```json
-{"cue_in": 8.0, "cue_out": 188.0, "bpm": 128.0, "beat_offset": 0.0, "stems": []}
-```
-
-Times are seconds in the original file. This is AMP sidecar metadata; arbitrary DJ vendor cue tags embedded in ID3 are not imported yet. Without cue OUT, DJ plays to the end; Lab probes duration when adding a track.
-
-Windows local installation after a release build: `./tools/install-desktop.ps1`. Optional `-AudioTools` points to an existing audio runtime directory containing ffmpeg/ffplay/ffprobe and its notices. Installation uses LocalAppData/Programs/AMP Verse and creates Desktop and Start menu shortcuts, without changing other applications. Installed audio tools are resolved beside AMP Verse; development can use PATH.
-
-
-Desktop magnetic windows: drag the title rail beside the AMP VERSE dropdown to dock nearby native AMP windows. Attached windows move as a group; hold Shift while starting a drag to pull one free. Windows and X11 provide the required absolute positions; Wayland uses its compositor drag. The external MP3 Lab editor runs separately.
-
-
-Desktop preparation is now an implemented first milestone: select a track in Library and choose **Prepare selected / cues...**, or use **Analyze library and save metadata**. The engine writes versioned key/BPM/grid/cue metadata beside the audio, preserves manual edits and provides DJ cue buttons. See [portable preparation](docs/PREPARATION.md) for the schema and accuracy/platform limits. Android sidecar consumption is still pending.
-
-Desktop analysis is now an optional executable add-on. Build `amp-engine` separately and install it through Plugin Manager; prepared playback and manual edits remain available without it. See [optional analysis architecture](docs/OPTIONAL_ANALYSIS.md) for packaging, limitations and the cancelled QNAP deployment scope.
-
-Android 0.1.10 adds an integrated AMP Cast client: selected-server connection, station start/stop, actual status/read-only queue and independent phone listening through the media service. See [Android Cast usage and limits](docs/ANDROID.md#integrated-amp-cast-client-0110). Google Cast receivers and offline downloads remain pending.
-
-Search is available for phone music and the Cast station queue. **Find servers** locates compatible Cast servers on the local IPv4 network; manual address/password settings remain available. Desktop DJ separates Mixer, Music library and Sampler tools so playback controls stay reachable in smaller windows.
-
-Desktop **Player view** offers Full, Compact, and Taskbar mini views. The mini view is a narrow floating player you can position above the taskbar; it is not an embedded Windows taskbar toolbar. Small views include playback and volume, minimize, restore, and optional always-on-top. Switching views preserves playback, queue and magnetic attachments; attached panels return with Full player.
-
-The desktop Library now uses a shared sidebar for Library, Smart Playlists, Playlists, Devices, session History, Sources and Analyze Music. Navigation and transport icons are native vector geometry. Modern Dark is the default for new preferences; Classic and Modern Light remain available. The normal desktop view opens Player with Library attached; compact and mini views remain in Player view. Right-click a track or use Edit song for cue/key/BPM/rating edits; analysis lives in Analyze Music and still requires the optional engine add-on.
-
-Analysis engine revision 2 adds estimated sustained high-energy opening/drop candidates and a preferred Mix in marker while retaining audio boundaries and grid markers. Analyze Music upgrades existing automatic results on request; approved/manual values are preserved and new suggestions require review. These are energy-based estimates to audition, not semantic or beat-phase guarantees.
-
-DJ keeps its music browser below the mixer. Selecting a different Smart Playlist in the top selector also selects that source in the lower browser. Right-click a Smart Playlist in Library, the DJ sidebar or selector for Edit, Duplicate, Resync, or Delete. Resync reloads saved rules and scans source folders; it does not rerun analysis or restart active decks.
-
-Smart Playlist editing stays inside the Library page: select a playlist in the left shelf and edit its sources and mix settings in the right panel. Save rules applies the draft; the editor no longer opens as a floating window.
-
-
-Desktop AMP Lab now includes the MP3 Lab desktop editor foundation inside the app: Open audio or From Library, drag waveform IN/OUT handles or type trim times, set fades/gain/normalization, preview Original/Processed, and export a new MP3 selection. The Mix timeline tab keeps arrangement editing and combined/individual export. Full multitrack waveform editing, fades/beat sync between tracks, stems and autosave remain unfinished.
-
-## Explicit analysis add-on download
-
-Plugin Manager now offers Download & install analysis engine. It retrieves the platform-specific executable and SHA-256 file from the public AMP Verse latest release over HTTPS, verifies the checksum, and replaces the engine through a temporary file in the add-on directory. Failed downloads or checksum failures preserve the installed engine. Downloading does not start analysis. Manual installation remains available. Browser links are enabled in the desktop build.
-
-Player view > Always on top keeps the full, compact or taskbar mini player above other windows. The choice is remembered after restart and when switching player modes. Attached panes follow the player window; detached windows retain their normal behavior.
-
-EQ and Filter FX open in independent resizable desktop windows, so full, compact and mini player heights do not clip their controls. Each has its own minimum size and vertical scrolling, and follows the player's Always on top preference.
-
-The full player includes compact Low/Mid/High EQ sliders in its spare right-hand space when there is room. The player's EQ button opens the expanded Equalizer page inside Library, with shared live controls for Player/Deck A and Deck B. Narrow player sizes retain access through the EQ button.
-
-DJ jog wheels: drag clockwise/counterclockwise to scratch buffered PCM in either direction (up to eight seconds of recent audio, at up to 4x speed). Holding still holds the playhead; releasing restores the deck's prior play/pause state and normal pitch. The wheel marker follows source position. Seek -/+ moves one second; Shift moves five seconds. Scrolling over the wheel also seeks. Manual wheel/seek interaction cancels Auto Mix. Seeking uses a temporary playback offset without saving changes to prepared cues or source files.
-
-Regular playlists: Library > Playlists > New playlist opens an inline name field. Create playlist saves an empty playlist (default location: music-root/.ampverse/playlists), then Add songs from Library opens the song browser. Check songs or use Add folder, then Save. Saving an opened playlist updates that file with revision checking. Playlists in the dedicated portable folder are rediscovered after a library scan/restart.
-
-## Simplified Smart Playlist editor
-
-Library > Smart Playlists now uses My Smart Playlists / + New Playlist on the left and a simple editable form on the right: Music source, Hype/Steady/Chill, Auto/Manual energy, Advanced Options, Save Playlist and Preview Mix. Folder sources include subfolders without individual Allow selections. Import accepts UTF-8 M3U/M3U8 and AMP playlists, resolves relative paths, keeps valid indexed entries and reports missing entries. Existing Library playlists can supply a source snapshot without copying music. New playlists start with no source, rather than the whole library. Existing saved rules/IDs remain intact.
-
-Advanced controls are retained; searchable song exceptions and recognition assignments open only when requested. Drafts are stored in the local app settings directory, not published on reconnect. Explicit saves back up the existing show.json, retain revision checks and leave loaded performance snapshots alone. Preview Mix plays up to three short excerpts using a separate instance of the existing two-deck mixer, with a suggested order and style-dependent fades. Preview is blocked during active player/DJ/sampler/Auto Mix playback and stops if live playback takes over.
-
-Current source boundary: folders and playlist entries must belong to the current indexed music root. Selecting an outside folder reports this clearly and preserves existing rules; this UI change does not introduce a multi-root library or change path-confinement behavior. Imported membership/order is a snapshot; the mixing engine chooses the playback sequence.
-
-
-## DJ side decks
-
-DJ now has independent collapsible left/right panels. Choose Sampler or Cue Deck on each side; switching or collapsing preserves playback. Each sampler has nine square pads, its own volume, file drops and a right-click menu for replace, rename, loop, level, stop and clear. Assignments and panel preferences persist locally. Keys 1–9 trigger the left bank; Shift+1–9 triggers the right bank when DJ is focused.
-
-Cue Deck is an auxiliary playback deck using the same mixer/decoder implementation, with load, play/pause/stop, seek, saved cue recall and independent volume. Send its prepared position to amber A or cyan B without autoplay. Select a separate output device for headphones; the default output is shared speakers and is labelled accordingly. This supports separate audio devices, not ASIO or arbitrary multichannel output-pair mapping.
-
-Drag songs from DJ Library, Library, regular playlists, Smart Playlist previews or Explorer onto a main deck, cue deck or sampler pad. Playing main/cue decks stage replacements for explicit application after stopping; dropping never starts a main deck. The compact Load → A/B control chooses the destination for double-click loading. Queue drops require an indexed Library song; Auto Mix candidates also have to satisfy the active rules. This does not change source files or publish cue edits.
-
-
-Android 0.1.12 adds native A/B mixing, auxiliary Cue Decks, dual nine-pad samplers, local regular/Smart Playlists, BPM/key/energy/rating overrides and desktop Remote controls. Existing Player, Cast and integrated AMP Lab remain available. See [Android capabilities and remaining parity limits](docs/ANDROID.md#android-0112--dj-playlists-and-desktop-remote) before assuming every desktop feature runs on the phone.
-
-
-Smart Playlist saving now rebases local edits against the latest shared revision. Independent playlist/field edits merge; concurrent source edits show saved/proposed source details and require explicit review. A reviewed save still uses the captured shared revision, so a newer update cannot be overwritten. The editor keeps drafts on conflict, places Save/status at the top, and warns that DJ uses saved rules. Loading an empty or unsaved Smart Playlist reports the required source/save action before altering the active performance.
+This is a project for people who miss the personality of classic music software and still enjoy discovering what they can build with their own music. **Listen casually, DJ a party, or turn your home lab into a radio station—it's your call.**
