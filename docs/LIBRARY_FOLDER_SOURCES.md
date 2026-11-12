@@ -23,3 +23,9 @@ The source configuration lives inside ampdj (in catalog.ampdb when compacted). S
 DJ computes saved Smart Playlist membership in a background worker, reusing the completed result across redraws. New/edited rules and replacement library scans invalidate the result; analysis progress also invalidates it. Other metadata edits are picked up by a background refresh after roughly two seconds while that list is visible. Loading a new match shows a progress message rather than a false empty-source message. Old results are never reused for different rules or a different library generation.
 
 This cache is for the visible DJ song table. Auto DJ still performs its existing current-rule eligibility and next-song selection checks. It does not rescan music or reanalyze tracks just to display a saved list. Validation includes a 14,000-track matching/reuse/rule-change/analysis-change test and the existing Player UI checks. Slow NAS access while discovering new files or preparing a loaded deck remains separate work.
+
+## All music as a Smart Playlist source
+
+New Smart Playlists start with all indexed music as their source. Genre and analysis filters then narrow that pool. The source editor has a visible **Use all indexed music** button, which preserves those filters and existing song exclusions. Selecting folders or importing playlists still creates a narrower source explicitly. Existing saved source restrictions are retained on upgrade.
+
+An empty selected-folder source deliberately matches no songs. The editor now explains this beside the source controls and offers the all-music choice; it does not treat the indexed-library count as a selected source. Save Playlist publishes the chosen source and filters to DJ. Refresh playlists reads the saved rules without reanalyzing audio.

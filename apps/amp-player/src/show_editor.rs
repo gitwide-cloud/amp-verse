@@ -168,7 +168,7 @@ impl Editor {
                 .as_nanos()
         );
         playlist.name = "New Smart Playlist".into();
-        set_source_mode(&mut playlist, SourceMode::Folders);
+        set_source_mode(&mut playlist, SourceMode::All);
         settings.playlists.push(playlist);
         self.selected = settings.playlists.len() - 1;
     }
@@ -311,6 +311,13 @@ impl Editor {
                 let source = source_summary(p);
                 ui.add(egui::Label::new(format!("{} — {}", source, count.map_or("waiting for library scan".into(), |count|format!("{count} songs")))).wrap());
                 ui.add_enabled_ui(!p.source_unavailable, |ui| {
+                if ui.button("Use all indexed music").on_hover_text("Use all connected music sources; keep genre and analysis filters").clicked() && confirm_source_change(p) {
+                    set_source_mode(p,SourceMode::All);
+                    self.status="All indexed music selected. Genre and analysis filters kept. Save Playlist to apply.".into();
+                }
+                if p.restrict_folders && p.folders.is_empty() && p.playlist_sources.is_empty() {
+                    ui.colored_label(crate::ORANGE,"Choose all indexed music or add a folder below. Genre filters cannot match without a source.");
+                }
                 if let Some(lib)=library {
                     ui.label(format!("Indexed library: {} · {} songs",root.display(),lib.tracks.len()));
                     if let Some(relative)=library_folder_picker(ui,&lib.tree,p.folders.first()){
@@ -1495,14 +1502,40 @@ mod tests {
         assert_eq!(serde_json::to_value(&profile).unwrap(), before);
     }
     #[test]
+    fn all_indexed_music_keeps_genre_filters_and_matches_without_folder_selection() {
+        let mut profile = Settings::default().playlists.remove(0);
+        set_source_mode(&mut profile, SourceMode::Folders);
+        profile.genres = vec!["Electronic".into()];
+        profile.excluded = vec!["keep-excluded".into()];
+        let mut track = amp_core::Track {
+            path: "__amp_sources/extra/song.mp3".into(),
+            title: "Track".into(),
+            preparation: Default::default(),
+        };
+        track
+            .preparation
+            .extensions
+            .insert("genre".into(), serde_json::json!("Electronic"));
+        assert!(!amp_core::show::eligible(&profile, &track));
+        set_source_mode(&mut profile, SourceMode::All);
+        assert_eq!(profile.genres, vec!["Electronic"]);
+        assert_eq!(profile.excluded, vec!["keep-excluded"]);
+        assert!(amp_core::show::eligible(&profile, &track));
+        track
+            .preparation
+            .extensions
+            .insert("genre".into(), serde_json::json!("Rock"));
+        assert!(!amp_core::show::eligible(&profile, &track));
+    }
+    #[test]
     fn local_draft_persistence_and_new_playlist_keep_ids_and_saved_rules() {
         let dir = tempfile::tempdir().unwrap();
         let saved = test_settings();
         let mut editor = Editor::default();
         editor.new_playlist(dir.path(), &saved);
         let new = editor.draft.as_ref().unwrap().playlists.last().unwrap();
-        assert!(new.restrict_folders && new.folders.is_empty());
-        assert!(new.restrict_allowed);
+        assert!(!new.restrict_folders && new.folders.is_empty());
+        assert!(!new.restrict_allowed);
         assert_eq!(saved.playlists.len(), 2);
         let mut draft = saved.clone();
         draft.playlists[0].name = "Local name".into();
