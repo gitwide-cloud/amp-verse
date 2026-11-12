@@ -187,6 +187,7 @@ pub struct Magnet {
 }
 
 pub enum Module {
+    Workspace,
     Verse,
     Library,
     Dj,
@@ -196,6 +197,13 @@ pub enum Module {
 }
 
 pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
+    if ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(egui::Id::unique("v1-workspace-content")))
+        .unwrap_or(false)
+    {
+        return None;
+    }
     heading_mode(ui, title, purple, !crate::window_layout::embedded(ui.ctx()))
 }
 pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool) -> Option<Module> {
@@ -331,6 +339,7 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
             .max_height(height)
             .show(ui, |ui| {
                 for (label, module) in [
+                    ("Version 1 workspace", Module::Workspace),
                     ("AMP Player", Module::Verse),
                     ("AMP Library", Module::Library),
                     ("AMP DJ", Module::Dj),

@@ -248,11 +248,15 @@ fn render(
         vec![clip]
     };
     let directory = if root.as_os_str().is_empty() {
-        std::env::var_os("USERPROFILE")
-            .or_else(|| std::env::var_os("HOME"))
+        std::env::var_os("AMP_DOCUMENTS_DIR")
             .map(PathBuf::from)
+            .or_else(|| {
+                std::env::var_os("USERPROFILE")
+                    .or_else(|| std::env::var_os("HOME"))
+                    .map(|home| PathBuf::from(home).join("Documents"))
+            })
             .ok_or("Choose a music library first")?
-            .join("Documents/ampdj/samples")
+            .join("ampdj/samples")
     } else {
         root.join("ampdj/samples")
     };

@@ -37,27 +37,48 @@ impl Player {
             theme::current(ui.ctx()).palette().background,
         );
         self.header(ui, "AMP Library", false);
-        self.remote_access_button(ui);
-        let add_music = ui.button("Add music folder…");
-        #[cfg(test)]
-        ui.ctx().data_mut(|data| {
-            data.insert_temp(
-                egui::Id::unique("library-add-music"),
-                (add_music.rect, add_music.enabled()),
-            )
-        });
-        if add_music.clicked()
-            && let Some(folder) = rfd::FileDialog::new()
-                .set_title("Add music to Library (includes subfolders)")
-                .pick_folder()
-        {
-            self.add_music_source(folder);
-        }
-        if ui
-            .button("Find duplicates / Consolidate library…")
-            .clicked()
-        {
-            self.library_page = 8;
+        if self.workspace.enabled {
+            ui.horizontal_wrapped(|ui| {
+                if ui
+                    .add_sized([145., 32.], egui::Button::new("Add music folder…"))
+                    .clicked()
+                    && let Some(folder) = rfd::FileDialog::new()
+                        .set_title("Add music (including subfolders)")
+                        .pick_folder()
+                {
+                    self.add_music_source(folder);
+                }
+                if ui
+                    .add_sized([145., 32.], egui::Button::new("Organise library"))
+                    .clicked()
+                {
+                    self.library_page = 8;
+                }
+                self.remote_access_button(ui);
+            });
+        } else {
+            self.remote_access_button(ui);
+            let add_music = ui.button("Add music folder…");
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::unique("library-add-music"),
+                    (add_music.rect, add_music.enabled()),
+                )
+            });
+            if add_music.clicked()
+                && let Some(folder) = rfd::FileDialog::new()
+                    .set_title("Add music to Library (includes subfolders)")
+                    .pick_folder()
+            {
+                self.add_music_source(folder);
+            }
+            if ui
+                .button("Find duplicates / Consolidate library…")
+                .clicked()
+            {
+                self.library_page = 8;
+            }
         }
 
         let height = (ui.available_height() - 64.).max(260.);
@@ -571,7 +592,7 @@ impl Player {
         let prepare_height = (height * 0.4).clamp(150., 300.);
         let preparation = egui::CollapsingHeader::new("Prepare selected song")
             .id_salt("library-selected-preparation")
-            .default_open(height >= 400.)
+            .default_open(!self.workspace.enabled && height >= 400.)
             .show(ui, |ui| {
                 skin::panel(ui, false, |ui| {
                     egui::ScrollArea::vertical()

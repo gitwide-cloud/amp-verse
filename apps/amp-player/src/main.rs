@@ -66,8 +66,10 @@ mod transition_controls;
 mod transition_styles;
 #[allow(dead_code)] // Shared implementation also used by the standalone installer binary.
 mod update_package;
+mod v1_profile;
 mod waveform;
 mod window_layout;
+mod workspace;
 use skin::{CYAN, GOLD, ORANGE};
 
 fn player_on_top_path() -> Option<PathBuf> {
@@ -133,6 +135,7 @@ fn capture(ctx: &egui::Context, path: PathBuf) {
 }
 
 struct Player {
+    workspace: workspace::Workspace,
     playback_owner: playback_owner::Owner,
     player_sequence: player_sequence::Sequence,
     rack: deck_rack::Rack,
@@ -229,6 +232,7 @@ struct Player {
 impl Default for Player {
     fn default() -> Self {
         Self {
+            workspace: Default::default(),
             playback_owner: Default::default(),
             player_sequence: Default::default(),
             rack: Default::default(),
@@ -353,6 +357,9 @@ fn player_window_size(current: Option<egui::Vec2>, expanded: bool) -> egui::Vec2
 }
 impl Player {
     fn header(&mut self, ui: &mut egui::Ui, title: &str, purple: bool) {
+        if self.workspace.rendering {
+            return;
+        }
         let action = skin::heading(ui, title, purple);
         self.activate(ui, action);
         self.remote_access_window(ui.ctx());
@@ -361,19 +368,52 @@ impl Player {
             .data_mut(|d| d.remove_temp::<bool>(egui::Id::unique("quick-cast-click")))
             .unwrap_or(false)
         {
-            self.cast.request_live(title == "PLAYER");
+            self.cast.request_live(if self.workspace.enabled {
+                self.playback_owner == playback_owner::Owner::Player
+            } else {
+                title == "PLAYER"
+            });
             let _ = self.cast.google.remote(google_cast::Operation::Discover);
             ui.ctx()
                 .data_mut(|d| d.insert_temp(egui::Id::unique("quick-cast-open"), true));
             ui.ctx().data_mut(|d| {
                 d.insert_temp(
                     egui::Id::unique("quick-cast-pane"),
-                    if title == "PLAYER" { 0usize } else { 2usize },
+                    if title == "PLAYER"
+                        || (self.workspace.enabled
+                            && self.playback_owner == playback_owner::Owner::Player)
+                    {
+                        0usize
+                    } else {
+                        2usize
+                    },
                 )
             });
         }
     }
     fn activate(&mut self, ui: &mut egui::Ui, module: Option<skin::Module>) {
+        if matches!(module, Some(skin::Module::Workspace)) {
+            self.workspace.enabled = true;
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(760., 540.)));
+            self.player_mode = 0;
+            return;
+        }
+        if self.workspace.enabled {
+            if let Some(module) = module {
+                self.workspace.pane = match module {
+                    skin::Module::Verse => 0,
+                    skin::Module::Library => 1,
+                    skin::Module::Dj => 2,
+                    skin::Module::LabSetup => 3,
+                    skin::Module::Cast => 4,
+                    skin::Module::Addons => 5,
+                    skin::Module::Workspace => 1,
+                };
+                self.lab_open = self.workspace.pane == 3;
+            }
+            return;
+        }
         let pane = match &module {
             Some(skin::Module::Library) => Some(1),
             Some(skin::Module::Dj) => Some(2),
@@ -438,7 +478,7 @@ impl Player {
             Some(skin::Module::LabSetup) => {
                 self.lab_open = true;
             }
-            None => (),
+            Some(skin::Module::Workspace) | None => (),
         }
         if pane.is_some() && self.player_mode != 0 {
             self.set_player_mode(ui.ctx(), 0);
@@ -1355,6 +1395,7 @@ impl Player {
         let id = egui::Id::unique("quick-cast-open");
         let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
         if open
+            && !self.workspace.enabled
             && ui
                 .ctx()
                 .data(|d| d.get_temp::<usize>(egui::Id::unique("quick-cast-pane")))
@@ -1679,7 +1720,9 @@ impl Player {
                     })
                     .clicked()
                 {
-                    if self.library_open && self.layout.parent[1] == Some(0) {
+                    if self.workspace.enabled {
+                        self.workspace.pane = 1;
+                    } else if self.library_open && self.layout.parent[1] == Some(0) {
                         self.library_open = false;
                         self.resize_player(ui.ctx(), false);
                     } else {
@@ -1697,6 +1740,9 @@ impl Player {
                     .clicked()
                 {
                     self.library_page = 7;
+                    if self.workspace.enabled {
+                        self.workspace.pane = 1;
+                    }
                     self.library_open = true;
                     self.layout.parent[1] = Some(0);
                     self.resize_player(ui.ctx(), true);
@@ -1707,6 +1753,9 @@ impl Player {
         });
     }
     fn set_player_mode(&mut self, ctx: &egui::Context, mode: u8) {
+        if mode != 0 {
+            self.workspace.enabled = false;
+        }
         self.player_mode = mode;
         if mode == 0 {
             ctx.send_viewport_cmd_to(
@@ -1901,6 +1950,9 @@ impl Player {
         });
     }
     fn resize_player(&self, ctx: &egui::Context, expanded: bool) {
+        if self.workspace.enabled {
+            return;
+        }
         ctx.send_viewport_cmd_to(
             egui::ViewportId::ROOT,
             egui::ViewportCommand::MinInnerSize(if expanded {
@@ -3563,80 +3615,84 @@ impl eframe::App for Player {
             }
         }
         docking::retain(&ctx, &active);
-        match self.screenshot_view.as_str() {
-            "library" | "preparation" => self.library_ui(ui),
-            "playlists" => {
-                self.library_page = 2;
-                self.library_ui(ui);
+        if self.workspace.enabled {
+            self.workspace_ui(ui);
+        } else {
+            match self.screenshot_view.as_str() {
+                "library" | "preparation" => self.library_ui(ui),
+                "playlists" => {
+                    self.library_page = 2;
+                    self.library_ui(ui);
+                }
+                "organizer" => {
+                    self.library_page = 8;
+                    self.library_ui(ui);
+                }
+                "sources" => {
+                    self.library_page = 5;
+                    self.library_ui(ui);
+                }
+                "tags-artwork" => {
+                    self.library_page = 9;
+                    self.library_ui(ui);
+                }
+                "podcasts" => {
+                    self.library_page = 10;
+                    self.library_ui(ui);
+                }
+                "analysis" => {
+                    self.library_page = 6;
+                    self.library_ui(ui);
+                }
+                "devices" => {
+                    self.library_page = 3;
+                    self.library_ui(ui);
+                }
+                "rules" => {
+                    self.show_editor.open = true;
+                    self.library_page = 1;
+                    self.library_ui(ui);
+                }
+                "dj" => self.dj_ui(ui),
+                "dj-window" => self.group_ui(ui, 2),
+                "dj-settings" => {
+                    self.auto_dj_controls = true;
+                    self.open_dj_settings(ui.ctx());
+                    self.group_ui(ui, 2);
+                }
+                "dj-transitions" => {
+                    self.auto_dj_controls = true;
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(egui::Id::unique("transitions-window-open"), true);
+                    });
+                    self.group_ui(ui, 2);
+                }
+                "dj-auto-setup" => {
+                    self.auto_dj_controls = true;
+                    self.group_ui(ui, 2);
+                }
+                "compact" => {
+                    self.player_mode = 1;
+                    self.group_ui(ui, 0);
+                }
+                "mini" => {
+                    self.player_mode = 2;
+                    self.group_ui(ui, 0);
+                }
+                "dj-library" => self.dj_library_ui(ui),
+                "sampler" => self.sampler_ui(ui),
+                "addons" => self.addons_ui(ui),
+                "cast" => self.cast_ui(ui),
+                "lab" => {
+                    let action = self.lab.show(ui, &self.root, self.library.as_ref());
+                    self.activate(ui, action);
+                }
+                _ => self.group_ui(ui, 0),
             }
-            "organizer" => {
-                self.library_page = 8;
-                self.library_ui(ui);
-            }
-            "sources" => {
-                self.library_page = 5;
-                self.library_ui(ui);
-            }
-            "tags-artwork" => {
-                self.library_page = 9;
-                self.library_ui(ui);
-            }
-            "podcasts" => {
-                self.library_page = 10;
-                self.library_ui(ui);
-            }
-            "analysis" => {
-                self.library_page = 6;
-                self.library_ui(ui);
-            }
-            "devices" => {
-                self.library_page = 3;
-                self.library_ui(ui);
-            }
-            "rules" => {
-                self.show_editor.open = true;
-                self.library_page = 1;
-                self.library_ui(ui);
-            }
-            "dj" => self.dj_ui(ui),
-            "dj-window" => self.group_ui(ui, 2),
-            "dj-settings" => {
-                self.auto_dj_controls = true;
-                self.open_dj_settings(ui.ctx());
-                self.group_ui(ui, 2);
-            }
-            "dj-transitions" => {
-                self.auto_dj_controls = true;
-                ui.ctx().data_mut(|d| {
-                    d.insert_temp(egui::Id::unique("transitions-window-open"), true);
-                });
-                self.group_ui(ui, 2);
-            }
-            "dj-auto-setup" => {
-                self.auto_dj_controls = true;
-                self.group_ui(ui, 2);
-            }
-            "compact" => {
-                self.player_mode = 1;
-                self.group_ui(ui, 0);
-            }
-            "mini" => {
-                self.player_mode = 2;
-                self.group_ui(ui, 0);
-            }
-            "dj-library" => self.dj_library_ui(ui),
-            "sampler" => self.sampler_ui(ui),
-            "addons" => self.addons_ui(ui),
-            "cast" => self.cast_ui(ui),
-            "lab" => {
-                let action = self.lab.show(ui, &self.root, self.library.as_ref());
-                self.activate(ui, action);
-            }
-            _ => self.group_ui(ui, 0),
         }
         let open = self.open_panes();
         for (pane, is_open) in open.iter().enumerate().skip(1) {
-            if !is_open || self.layout.parent[pane].is_some() {
+            if self.workspace.enabled || !is_open || self.layout.parent[pane].is_some() {
                 continue;
             }
             let size = self.recovered_window_size(pane, ctx.input(|i| i.viewport().monitor_size));
@@ -3721,6 +3777,10 @@ impl eframe::App for Player {
     }
 }
 fn main() -> eframe::Result {
+    if let Err(error) = v1_profile::initialize() {
+        eprintln!("Could not initialize isolated V1 preview profile: {error}");
+        return Ok(());
+    }
     let mut player = Player::default();
     if player.screenshot_view.is_empty() {
         player.recovery = session::Recovery::open(&player.root);
@@ -3767,7 +3827,11 @@ fn main() -> eframe::Result {
                 })
                 .with_icon(app_icon())
                 .with_inner_size(size)
-                .with_min_inner_size([size[0].min(400.), size[1].min(150.)])
+                .with_min_inner_size(if player.workspace.enabled {
+                    [760., 540.]
+                } else {
+                    [size[0].min(400.), size[1].min(150.)]
+                })
                 .with_resizable(true)
                 .with_clamp_size_to_monitor_size(true),
             ..Default::default()
