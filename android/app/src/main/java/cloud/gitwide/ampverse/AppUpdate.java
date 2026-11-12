@@ -69,6 +69,7 @@ final class AppUpdate {
     }
     static void installPending(Activity activity){
         if(busy)return;SharedPreferences prefs=activity.getSharedPreferences("updates",0);if(!prefs.getBoolean("install",false))return;
+        if(cancelled){prefs.edit().putBoolean("install",false).apply();return;}
         try{File apk=new File(prefs.getString("apk",""));File directory=new File(activity.getFilesDir(),"updates");if(!apk.getCanonicalPath().startsWith(directory.getCanonicalPath()+File.separator)||!apk.isFile())throw new IOException("Downloaded update is missing; tap Update to retry");
             PackageInfo cached=activity.getPackageManager().getPackageArchiveInfo(apk.getAbsolutePath(),PackageManager.GET_SIGNING_CERTIFICATES);
             if(cached==null)throw new IOException("Downloaded APK is invalid; tap Update to retry");

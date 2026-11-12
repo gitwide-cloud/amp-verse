@@ -37,7 +37,7 @@ public final class SettingsActivity extends Activity {
         button(AppUpdate.busy?"Updating…":"Update",()->{if(!AppUpdate.busy){AppUpdate.start(this);draw();}});
         button("GitHub",()->open(AppUpdate.GITHUB));
         if(AppUpdate.busy)button("Cancel update",AppUpdate::cancel);
-        if(new java.io.File(getSharedPreferences("updates",0).getString("apk","/missing")).isFile())button("Install downloaded update",()->{getSharedPreferences("updates",0).edit().putBoolean("install",true).apply();AppUpdate.installPending(this);});
+        if(new java.io.File(getSharedPreferences("updates",0).getString("apk","/missing")).isFile())button("Install downloaded update",()->{AppUpdate.cancelled=false;getSharedPreferences("updates",0).edit().putBoolean("install",true).apply();AppUpdate.installPending(this);});
         label(AppUpdate.status,14,colors.muted);
         label("Update downloads the official APK, checks it, then opens Android’s installer. Approve the system installation prompt.",14,colors.muted);
         label("About",20,colors.text);label("AMP Verse "+BuildConfig.VERSION_NAME+" · Integrated Android app · No plugin loader",14,colors.muted);
