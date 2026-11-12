@@ -501,6 +501,23 @@ impl Panel {
         deck: usize,
         audio: Option<&crate::mixer::Engine>,
     ) -> Option<[f32; 3]> {
+        self.live_knobs_layout(ui, deck, audio, false)
+    }
+    pub fn live_knobs_vertical(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        audio: Option<&crate::mixer::Engine>,
+    ) -> Option<[f32; 3]> {
+        self.live_knobs_layout(ui, deck, audio, true)
+    }
+    fn live_knobs_layout(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        audio: Option<&crate::mixer::Engine>,
+        vertical: bool,
+    ) -> Option<[f32; 3]> {
         let active = audio.is_some_and(|a| a.controls.stems_loaded[deck].load(Relaxed));
         if let Some(a) = audio {
             for i in 0..3 {
@@ -509,26 +526,33 @@ impl Panel {
         }
         let previous = self.level[deck];
         ui.add_enabled_ui(active, |ui| {
-            ui.horizontal(|ui| {
-                for (stem, label) in [(0, "VOC"), (2, "BEAT"), (1, "INST")] {
-                    ui.vertical(|ui| {
-                        crate::dj_mixer::dial(
-                            ui,
-                            label,
-                            &mut self.level[deck][stem],
-                            -1. ..=1.,
-                            if deck.is_multiple_of(2) {
-                                crate::ORANGE
-                            } else {
-                                crate::CYAN
-                            },
-                        );
-                        ui.small(label);
-                    });
-                }
-            });
+            ui.with_layout(
+                if vertical {
+                    egui::Layout::top_down(egui::Align::Center)
+                } else {
+                    egui::Layout::left_to_right(egui::Align::Min)
+                },
+                |ui| {
+                    for (stem, label) in [(0, "VOC"), (2, "BEAT"), (1, "INST")] {
+                        ui.vertical(|ui| {
+                            crate::dj_mixer::dial(
+                                ui,
+                                label,
+                                &mut self.level[deck][stem],
+                                -1. ..=1.,
+                                if deck.is_multiple_of(2) {
+                                    crate::ORANGE
+                                } else {
+                                    crate::CYAN
+                                },
+                            );
+                            ui.small(label);
+                        });
+                    }
+                },
+            );
         });
-        if !active {
+        if !active && !vertical {
             ui.small("Prepare stems in Library");
         }
         (previous != self.level[deck]).then_some(self.level[deck])

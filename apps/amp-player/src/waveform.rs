@@ -181,10 +181,14 @@ impl Lane {
         track: Option<&amp_core::Track>,
         position: f64,
         accent: egui::Color32,
+        height: f32,
     ) {
         self.prepare(ui, root, track);
-        let (rect, _) =
-            ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.), egui::Sense::hover());
+        let (rect, _) = ui.allocate_exact_size(
+            egui::vec2(ui.available_width().max(1.), height.max(1.)),
+            egui::Sense::hover(),
+        );
+        let painter = ui.painter_at(rect);
         let n = self.peaks.len();
         if n > 0 {
             let count = (rect.width().max(1.) as usize).min(n);
@@ -192,7 +196,7 @@ impl Lane {
                 let index = x * n / count;
                 let peak = self.peaks[index];
                 let px = rect.left() + x as f32 * rect.width() / count as f32;
-                ui.painter().line_segment(
+                painter.line_segment(
                     [
                         egui::pos2(px, rect.center().y + -peak[0] * rect.height() * 0.45),
                         egui::pos2(px, rect.center().y - peak[1] * rect.height() * 0.45),
@@ -202,7 +206,7 @@ impl Lane {
             }
             let duration = n as f64 / 50.;
             let x = rect.left() + (position / duration).clamp(0., 1.) as f32 * rect.width();
-            ui.painter().line_segment(
+            painter.line_segment(
                 [egui::pos2(x, rect.top()), egui::pos2(x, rect.bottom())],
                 egui::Stroke::new(1., egui::Color32::WHITE),
             );

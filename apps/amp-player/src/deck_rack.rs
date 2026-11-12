@@ -225,8 +225,8 @@ impl Player {
             })
         .max(if compact { 290. } else { 320. })
         .min(if self.rack.expanded { 550. } else { 490. });
-        let rack_width = ui.available_width().min(1640.);
-        let strips = if compact { 132. } else { 170. };
+        let rack_width = ui.available_width();
+        let strips = (rack_width * 0.14).clamp(if compact { 112. } else { 140. }, 280.);
         let mixer = if compact { 126. } else { 146. };
         let jog_width = ((rack_width - strips * 2. - mixer - 28.) / 2.).max(240.);
         ui.horizontal_top(|ui| {
@@ -371,6 +371,7 @@ impl Player {
                     let selected = self.rack.live[side] == d;
                     let frame = skin::rack_panel(ui, selected.then_some(accent(d)), |ui| {
                         ui.set_width(width - 18.);
+                        ui.set_min_height((height - 24.) / 3. - 18.);
                         ui.horizontal(|ui| {
                             ui.label(egui::RichText::new(NAMES[d]).strong().color(accent(d)));
                             if ui.add(egui::Button::new(egui::RichText::new("LIVE").size(11.).color(if selected {egui::Color32::BLACK} else {accent(d)}))
@@ -380,7 +381,7 @@ impl Player {
                         });
                         ui.add(egui::Label::new(self.title(d)).truncate());
                         let track=self.loaded_snapshot[d].as_ref().or_else(||self.loaded[d].and_then(|i|self.library.as_ref()?.tracks.get(i)));
-                        self.waveforms[d].thumbnail(ui,self.loaded_origin[d].as_deref().unwrap_or(&self.root),track,self.audio.as_ref().map_or(0.,|a|a.source_position(d)),accent(d));
+                        self.waveforms[d].thumbnail(ui,self.loaded_origin[d].as_deref().unwrap_or(&self.root),track,self.audio.as_ref().map_or(0.,|a|a.source_position(d)),accent(d), ((height - 16.) / 3. - if compact { 68. } else { 130. }).clamp(26., 140.));
                         if !compact {
                         ui.horizontal(|ui| {
                             if ui.small_button("LOOP").on_hover_text("Toggle a four-beat loop on this deck").clicked() { self.rack_loop(d); }
@@ -516,12 +517,23 @@ impl Player {
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 ui.set_width(width);
-                ui.spacing_mut().interact_size.y = ((width - 28.) / 3.).clamp(32., 56.);
-                self.rack_stem_knobs(ui, d);
-                ui.separator();
-                ui.horizontal(|ui| {
+                ui.spacing_mut().interact_size.y = ((width - 20.) / 2.).clamp(32., 56.);
+                ui.columns(2, |columns| {
+                    if let Some(knobs) =
+                        self.stem_panel
+                            .live_knobs_vertical(&mut columns[0], d, self.audio.as_ref())
+                        && let Some(audio) = &self.audio
+                    {
+                        if audio.controls.pair_indices().contains(&d) {
+                            self.run.cancel_effects(audio);
+                        }
+                        for (i, gain) in amp_core::stem_mix::gains(knobs).into_iter().enumerate() {
+                            audio.controls.stem_knobs[d][i].store(knobs[i].to_bits(), Relaxed);
+                            audio.controls.stem_level[d][i].store(gain.to_bits(), Relaxed);
+                        }
+                    }
                     for (band, name) in [(0, "LOW"), (1, "MID"), (2, "HIGH")] {
-                        ui.vertical(|ui| {
+                        columns[1].vertical_centered(|ui| {
                             if dj_mixer::dial(
                                 ui,
                                 name,
