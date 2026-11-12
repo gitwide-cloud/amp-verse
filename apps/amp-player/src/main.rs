@@ -131,6 +131,7 @@ struct Player {
     recovery: session::Recovery,
     root: PathBuf,
     library: Option<Library>,
+    library_generation: u64,
     source_roots: Vec<amp_core::music_sources::Source>,
     organizer: library_organizer::Organizer,
     outputs: audio_output::Panel,
@@ -232,6 +233,7 @@ impl Default for Player {
                 })
                 .unwrap_or_default(),
             library: None,
+            library_generation: 0,
             source_roots: Vec::new(),
             organizer: Default::default(),
             outputs: Default::default(),
@@ -527,6 +529,7 @@ impl Player {
         }
     }
     fn accept_library_scan(&mut self, lib: Library) {
+        self.library_generation = self.library_generation.wrapping_add(1);
         let lookup: std::collections::HashMap<_, _> = lib
             .tracks
             .iter()
@@ -651,7 +654,11 @@ impl Player {
         if let Some(engine) = &mut self.audio {
             self.sampler.poll(engine);
         }
+        let analysis_progress = self.preparer.progress();
         self.preparer.poll(&self.root, self.library.as_mut());
+        if self.preparer.progress() != analysis_progress {
+            self.library_generation = self.library_generation.wrapping_add(1);
+        }
         self.poll_analysis_scan();
         if let Some(rx) = &self.scan {
             match rx.try_recv() {
@@ -1021,6 +1028,7 @@ impl Player {
         self.queue.clear();
         self.queue_selected = None;
         self.library = None;
+        self.library_generation = self.library_generation.wrapping_add(1);
         self.source_roots.clear();
         self.show_editor.open = false;
         self.scan = None; // Discard any previous root's in-flight result.

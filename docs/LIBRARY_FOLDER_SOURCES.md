@@ -17,3 +17,9 @@ Library > Sources > Add music folder adds another root without replacing the mai
 Additional roots retain their own library identity, preparation, protected edits and analysis leases. The combined catalog uses stable source-prefixed paths and resolves playback and edits back to the original folder. Overlapping physical files are deduplicated. Missing sources remain configured and can be reconnected by adding their new location; device-specific locations preserve the shared default mapping.
 
 The source configuration lives inside ampdj (in catalog.ampdb when compacted). Smart and regular playlists can include tracks from added roots; folder navigation shows them under Additional music sources. Each computer must have filesystem access to its configured source locations.
+
+## DJ Smart Playlist browsing
+
+DJ computes saved Smart Playlist membership in a background worker, reusing the completed result across redraws. New/edited rules and replacement library scans invalidate the result; analysis progress also invalidates it. Other metadata edits are picked up by a background refresh after roughly two seconds while that list is visible. Loading a new match shows a progress message rather than a false empty-source message. Old results are never reused for different rules or a different library generation.
+
+This cache is for the visible DJ song table. Auto DJ still performs its existing current-rule eligibility and next-song selection checks. It does not rescan music or reanalyze tracks just to display a saved list. Validation includes a 14,000-track matching/reuse/rule-change/analysis-change test and the existing Player UI checks. Slow NAS access while discovering new files or preparing a loaded deck remains separate work.

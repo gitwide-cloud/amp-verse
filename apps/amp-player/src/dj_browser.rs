@@ -20,6 +20,69 @@ pub struct Browser {
     details: Option<amp_core::Track>,
     stem_status: std::collections::HashMap<PathBuf, (std::time::Instant, bool)>,
     stem_rx: Option<std::sync::mpsc::Receiver<Vec<(PathBuf, bool)>>>,
+    membership: Membership,
+}
+#[derive(Clone, PartialEq, Eq)]
+struct MatchKey {
+    rules: Vec<u8>,
+    generation: u64,
+}
+struct MatchResult {
+    key: MatchKey,
+    indices: Vec<usize>,
+    at: std::time::Instant,
+}
+#[derive(Default)]
+struct Membership {
+    cached: Option<MatchResult>,
+    job: Option<std::sync::mpsc::Receiver<MatchResult>>,
+}
+impl Membership {
+    fn indices(
+        &mut self,
+        profile: &amp_core::show::SmartPlaylist,
+        library: &Library,
+        generation: u64,
+    ) -> Option<Vec<usize>> {
+        if let Some(rx) = &self.job {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.cached = Some(result);
+                    self.job = None;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => self.job = None,
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        let key = MatchKey {
+            rules: serde_json::to_vec(profile).unwrap_or_default(),
+            generation,
+        };
+        let matching = self.cached.as_ref().filter(|result| result.key == key);
+        let ready = matching.map(|result| result.indices.clone());
+        if self.job.is_none()
+            && matching.is_none_or(|result| result.at.elapsed() > Duration::from_secs(2))
+        {
+            let tracks = library.tracks.clone();
+            let profile = profile.clone();
+            let (tx, rx) = mpsc::channel();
+            self.job = Some(rx);
+            std::thread::spawn(move || {
+                let indices = tracks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, track)| amp_core::show::eligible(&profile, track))
+                    .map(|(index, _)| index)
+                    .collect();
+                let _ = tx.send(MatchResult {
+                    key,
+                    indices,
+                    at: std::time::Instant::now(),
+                });
+            });
+        }
+        ready
+    }
 }
 impl Browser {
     pub(super) fn selected_smart(&self) -> Option<&str> {
@@ -206,6 +269,7 @@ impl Player {
             self.run.requests.retain(|s| *s != id);
         }
         let mut load_smart = false;
+        let mut matching_smart = false;
         let mut edit_smart = false;
         let mut context_edit = None;
         ui.horizontal_top(|ui| {
@@ -356,14 +420,21 @@ impl Player {
                                     edit_smart = true;
                                 }
                             }
-                            let eligible: Vec<_> = lib
-                                .tracks
-                                .iter()
-                                .enumerate()
-                                .filter(|(_, t)| amp_core::show::eligible(profile, t))
-                                .map(|(i, _)| i)
-                                .collect();
-                            eligible
+                            match self.dj_browser.membership.indices(
+                                profile,
+                                lib,
+                                self.library_generation,
+                            ) {
+                                Some(indices) => indices,
+                                None => {
+                                    matching_smart = true;
+                                    ui.horizontal(|ui| {
+                                        ui.spinner();
+                                        ui.label("Matching saved playlist rules…");
+                                    });
+                                    Vec::new()
+                                }
+                            }
                         } else {
                             ui.weak("Choose a saved Smart Playlist on the left.");
                             Vec::new()
@@ -380,7 +451,9 @@ impl Player {
                             })
                     })
                 });
-                ui.weak(format!("{} tracks", indices.len()));
+                if !matching_smart {
+                    ui.weak(format!("{} tracks", indices.len()));
+                }
                 egui::ScrollArea::horizontal()
                     .id_salt("dj-columns-horizontal")
                     .show(ui, |ui| {
@@ -574,7 +647,7 @@ impl Player {
                     .sense(egui::Sense::hover()),
                 );
                 queue_drop = dragdrop::target(&target, GOLD);
-                if indices.is_empty() {
+                if indices.is_empty() && !matching_smart {
                     ui.weak("No tracks in this source. Prepare and edit playlists in AMP Library.");
                 }
             });
@@ -718,6 +791,75 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn smart_membership_reuses_matches_and_invalidates_rules_and_analysis() {
+        let mut profile = amp_core::show::Settings::default().playlists.remove(0);
+        profile.genres = vec!["Rock".into()];
+        let mut library = Library {
+            tracks: (0..14000)
+                .map(|index| {
+                    let mut preparation = amp_core::Preparation::default();
+                    preparation.extensions.insert(
+                        "genre".into(),
+                        serde_json::json!(if index % 2 == 0 { "Rock" } else { "R&B" }),
+                    );
+                    amp_core::Track {
+                        path: format!("songs/{index}.mp3").into(),
+                        title: format!("Track {index}"),
+                        preparation,
+                    }
+                })
+                .collect(),
+            tree: Folder {
+                name: "Music".into(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        };
+        fn wait(
+            cache: &mut Membership,
+            p: &amp_core::show::SmartPlaylist,
+            l: &Library,
+            g: u64,
+        ) -> Vec<usize> {
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            loop {
+                if let Some(indices) = cache.indices(p, l, g) {
+                    return indices;
+                }
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "membership worker timed out"
+                );
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        }
+        let mut cache = Membership::default();
+        assert!(cache.indices(&profile, &library, 1).is_none());
+        let matched = wait(&mut cache, &profile, &library, 1);
+        assert_eq!(matched.len(), 7000);
+        assert!(matched.iter().all(|i| i % 2 == 0));
+        assert!(cache.job.is_none());
+        assert_eq!(cache.indices(&profile, &library, 1), Some(matched));
+        assert!(cache.job.is_none(), "redraw must reuse matching results");
+        profile.genres = vec!["R&B".into()];
+        assert!(
+            cache.indices(&profile, &library, 1).is_none(),
+            "do not show previous rules' rows"
+        );
+        assert!(
+            wait(&mut cache, &profile, &library, 1)
+                .iter()
+                .all(|i| i % 2 == 1)
+        );
+        library.tracks[0]
+            .preparation
+            .extensions
+            .insert("genre".into(), serde_json::json!("R&B"));
+        assert!(cache.indices(&profile, &library, 2).is_none());
+        assert_eq!(wait(&mut cache, &profile, &library, 2).len(), 7001);
+    }
+
     #[test]
     fn auto_mix_button_can_be_clicked_on_and_off() {
         let ctx = egui::Context::default();
