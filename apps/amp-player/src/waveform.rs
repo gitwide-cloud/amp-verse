@@ -16,6 +16,9 @@ const BIN: usize = 160; // 20 ms, independent of device sample rate.
 pub struct Lane {
     pub height: Option<f32>,
     pub overview: bool,
+    pub overlay: bool,
+    pub ignore_seek: bool,
+    pub tint: Option<Color32>,
     pub hide_caption: bool,
     pub seek: Option<f64>,
     path: Option<PathBuf>,
@@ -222,24 +225,31 @@ impl Lane {
         deck: usize,
     ) {
         self.prepare(ui, root, track);
-        let color = if deck.is_multiple_of(2) {
+        let color = self.tint.unwrap_or(if deck.is_multiple_of(2) {
             super::skin::ORANGE
         } else {
             super::skin::CYAN
-        };
+        });
         let (rect, response) = ui.allocate_exact_size(
             egui::vec2(ui.available_width(), self.height.unwrap_or(80.)),
-            egui::Sense::click(),
+            if self.ignore_seek {
+                egui::Sense::hover()
+            } else {
+                egui::Sense::click()
+            },
         );
         #[cfg(test)]
         ui.ctx()
             .data_mut(|data| data.insert_temp(egui::Id::unique(("waveform-lane", deck)), rect));
         let painter = ui.painter_at(rect);
-        painter.rect_filled(rect, 3., Color32::from_rgb(5, 7, 10));
+        if !self.overlay {
+            painter.rect_filled(rect, 3., Color32::from_rgb(5, 7, 10));
+        }
         let graph = graph_rect(rect);
         let camera = if self.overview { span * 0.3 } else { position };
         let start = camera - span * 0.3;
-        if response.clicked()
+        if !self.ignore_seek
+            && response.clicked()
             && let Some(at) = response.interact_pointer_pos()
         {
             self.seek =

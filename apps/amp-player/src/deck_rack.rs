@@ -5,6 +5,8 @@ pub struct Rack {
     pub live: [usize; 2],
     pub expanded: bool,
     pub six: bool,
+    #[serde(default)]
+    pub overlay_waveforms: bool,
 }
 impl Default for Rack {
     fn default() -> Self {
@@ -12,8 +14,18 @@ impl Default for Rack {
             live: [0, 1],
             expanded: false,
             six: true,
+            overlay_waveforms: !cfg!(test)
+                && waveform_preference()
+                    .is_some_and(|p| std::fs::read_to_string(p).is_ok_and(|v| v == "overlay")),
         }
     }
+}
+fn waveform_preference() -> Option<PathBuf> {
+    Some(
+        theme::settings_path()?
+            .parent()?
+            .join("dj-waveform-view.txt"),
+    )
 }
 pub const NAMES: [&str; 6] = ["A1", "B1", "A2", "B2", "A3", "B3"];
 impl Player {
@@ -99,6 +111,33 @@ impl Player {
         self.header(ui, "AMP DJ", true);
         ui.horizontal_wrapped(|ui| {
             self.performance_controls(ui);
+            ui.menu_button("Waveforms", |ui| {
+                let old = self.rack.overlay_waveforms;
+                ui.selectable_value(&mut self.rack.overlay_waveforms, false, "Stacked A / B");
+                ui.selectable_value(
+                    &mut self.rack.overlay_waveforms,
+                    true,
+                    "Overlay · blue / red",
+                );
+                if old != self.rack.overlay_waveforms
+                    && let Some(path) = waveform_preference()
+                {
+                    let result = std::fs::create_dir_all(path.parent().unwrap()).and_then(|()| {
+                        std::fs::write(
+                            path,
+                            if self.rack.overlay_waveforms {
+                                "overlay"
+                            } else {
+                                "stacked"
+                            },
+                        )
+                    });
+                    if let Err(error) = result {
+                        self.status = format!("Could not remember waveform view: {error}");
+                    }
+                }
+            });
+
             if compact {
                 let bpm = self.audio.as_ref().map_or(120., |a| {
                     f32::from_bits(a.controls.master_bpm.load(Relaxed))
@@ -182,6 +221,12 @@ impl Player {
                     ui.label(format!("−{:.0}s", a.remaining(d).unwrap_or(0.)));
                 }
             });
+            if self.rack.overlay_waveforms {
+                continue;
+            }
+            self.waveforms[d].overlay = false;
+            self.waveforms[d].ignore_seek = false;
+            self.waveforms[d].tint = None;
             let t = self.loaded_snapshot[d]
                 .as_ref()
                 .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
@@ -205,6 +250,68 @@ impl Player {
             if let Some(at) = self.waveforms[d].seek.take() {
                 let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
                 self.seek_deck_relative(d, at - position);
+            }
+        }
+        if self.rack.overlay_waveforms {
+            let height = if compact {
+                48.
+            } else if self.rack.expanded {
+                76.
+            } else {
+                60.
+            };
+            let (rect, response) = ui.allocate_exact_size(
+                egui::vec2(ui.available_width(), height),
+                egui::Sense::click(),
+            );
+            let response = response.on_hover_text(
+                "Click to seek live B; Shift-click to seek live A. Jog wheels remain independent.",
+            );
+            if response.clicked()
+                && let Some(pointer) = response.interact_pointer_pos()
+            {
+                let d = self.rack.live[if ui.input(|i| i.modifiers.shift) {
+                    0
+                } else {
+                    1
+                }];
+                let delta = ((pointer.x - rect.left()) / rect.width()) as f64 * self.wave_span
+                    - self.wave_span * 0.3;
+                self.seek_deck_relative(d, delta);
+            }
+            for side in 0..2 {
+                let d = self.rack.live[side];
+                let mut lane = ui.new_child(
+                    egui::UiBuilder::new()
+                        .id_salt(("overlay-waveform", d))
+                        .max_rect(rect)
+                        .layout(egui::Layout::top_down(egui::Align::Min)),
+                );
+                let track = self.loaded_snapshot[d]
+                    .as_ref()
+                    .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
+                self.waveforms[d].overlay = side == 1;
+                self.waveforms[d].ignore_seek = true;
+                self.waveforms[d].tint = Some(if side == 0 {
+                    egui::Color32::from_rgba_unmultiplied(60, 170, 255, 200)
+                } else {
+                    egui::Color32::from_rgba_unmultiplied(255, 75, 80, 170)
+                });
+                self.waveforms[d].overview = false;
+                self.waveforms[d].hide_caption = true;
+                self.waveforms[d].height = Some(height);
+                self.waveforms[d].show(
+                    &mut lane,
+                    self.loaded_origin[d].as_deref().unwrap_or(&self.root),
+                    track,
+                    self.audio.as_ref().map_or(0., |a| a.source_position(d)),
+                    self.wave_span,
+                    d,
+                );
+                if let Some(at) = self.waveforms[d].seek.take() {
+                    let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
+                    self.seek_deck_relative(d, at - position);
+                }
             }
         }
         ui.add_space(6.);
@@ -832,6 +939,41 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn overlay_waveforms_share_the_same_full_width_rectangle() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            rack: Rack {
+                overlay_waveforms: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1570., 1000.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| player.group_ui(ui, 2),
+            );
+            output.textures_delta.clear();
+        }
+        let rect = |d| {
+            ctx.data(|data| data.get_temp::<egui::Rect>(egui::Id::unique(("waveform-lane", d))))
+                .unwrap()
+        };
+        let a = rect(0usize);
+        let b = rect(1usize);
+        assert_eq!(a, b);
+        assert!(a.width() > 1500.);
+        let legacy: Rack =
+            serde_json::from_str(r#"{"live":[0,1],"expanded":false,"six":true}"#).unwrap();
+        assert!(!legacy.overlay_waveforms);
+    }
     #[test]
     fn wide_rack_keeps_wheels_by_mixer_and_knobs_on_outer_sides() {
         for size in [egui::vec2(1600., 1000.), egui::vec2(2560., 1440.)] {
