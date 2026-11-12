@@ -227,10 +227,10 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     ui.painter().text(
         rect.min + Vec2::new(38., 21.),
         egui::Align2::LEFT_CENTER,
-        if title == "AMP DJ" {
-            "AMP DJ"
+        if title == "AMP VERSE" {
+            "AMP Player"
         } else {
-            "AMP VERSE"
+            title
         },
         FontId::proportional(21.),
         p.text,
