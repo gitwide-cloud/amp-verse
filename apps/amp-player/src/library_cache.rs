@@ -16,6 +16,19 @@ pub struct Snapshot {
     pub settings: Option<amp_core::show::Settings>,
     pub playlists: Vec<(PathBuf, Playlist)>,
 }
+/// A scan may finish after the user saves newer rules. Never roll those back.
+pub fn accept_settings(
+    current: &amp_core::show::Settings,
+    incoming: &amp_core::show::Settings,
+) -> bool {
+    match (&current.sync, &incoming.sync) {
+        (Some(current), Some(incoming)) if current.library_id == incoming.library_id => {
+            incoming.revision >= current.revision
+        }
+        (Some(_), None) => false,
+        _ => true,
+    }
+}
 fn path(root: &Path) -> Option<PathBuf> {
     // No canonicalize/stat here: startup must not wait for a sleeping NAS.
     let key = Sha256::digest(root.to_string_lossy().as_bytes());
@@ -108,6 +121,25 @@ pub fn save(root: &Path, snapshot: &Snapshot) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delayed_scan_cannot_hide_a_newly_saved_smart_playlist() {
+        let mut old = amp_core::show::Settings::default();
+        old.sync = Some(amp_core::coordination::Revision {
+            library_id: "library".into(),
+            revision: 8,
+            ..Default::default()
+        });
+        let mut saved = old.clone();
+        saved.sync.as_mut().unwrap().revision = 9;
+        saved.playlists[0].name = "R&B".into();
+        assert!(!accept_settings(&saved, &old));
+        assert!(!accept_settings(
+            &saved,
+            &amp_core::show::Settings::default()
+        ));
+        assert!(accept_settings(&old, &saved));
+        assert!(accept_settings(&saved, &saved));
+    }
     #[test]
     fn saved_catalog_survives_offline_share_and_additions_refresh_atomically() {
         let dir = tempfile::tempdir().unwrap();

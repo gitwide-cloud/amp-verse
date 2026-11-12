@@ -422,7 +422,9 @@ impl Player {
     fn accept_scan(&mut self, snapshot: library_cache::Snapshot) {
         self.source_roots = snapshot.sources;
         self.accept_library_scan(snapshot.library);
-        if let Some(settings) = snapshot.settings {
+        if let Some(settings) = snapshot.settings
+            && library_cache::accept_settings(&self.run.settings, &settings)
+        {
             self.run.settings = settings;
         }
         for (path, playlist) in snapshot.playlists {

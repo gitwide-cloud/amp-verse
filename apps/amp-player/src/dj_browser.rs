@@ -52,6 +52,16 @@ impl Player {
         let requests = ui
             .horizontal(|ui| {
                 skin::label(ui, "DJ Library");
+                if ui.small_button("Refresh playlists").clicked() {
+                    match amp_core::show::Settings::load(&self.root) {
+                        Ok(settings) => {
+                            self.run.settings = settings;
+                            self.status = "Saved Smart Playlists refreshed. Loaded decks keep their current mix.".into();
+                        }
+                        Err(error) => self.status = format!("Could not refresh Smart Playlists: {error}"),
+                    }
+                }
+
                 ui.add(
                     egui::Label::new(
                         egui::RichText::new(format!(
