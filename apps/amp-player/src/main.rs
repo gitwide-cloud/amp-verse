@@ -300,6 +300,18 @@ impl Default for Player {
         }
     }
 }
+fn player_window_size(current: Option<egui::Vec2>, expanded: bool) -> egui::Vec2 {
+    let current = current.unwrap_or(egui::vec2(1100., 170.));
+    if expanded {
+        if current.y >= 300. {
+            current.max(egui::vec2(400., 300.))
+        } else {
+            egui::vec2(current.x.max(400.), 900.)
+        }
+    } else {
+        egui::vec2(current.x.max(400.), 170.)
+    }
+}
 impl Player {
     fn header(&mut self, ui: &mut egui::Ui, title: &str, purple: bool) {
         let action = skin::heading(ui, title, purple);
@@ -338,14 +350,7 @@ impl Player {
             Some(skin::Module::Library) => {
                 self.library_open = true;
                 if self.layout.parent[1] == Some(0) {
-                    ui.ctx().send_viewport_cmd_to(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportCommand::MinInnerSize(egui::vec2(740., 480.)),
-                    );
-                    ui.ctx().send_viewport_cmd_to(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportCommand::InnerSize(egui::vec2(1100., 900.)),
-                    );
+                    self.resize_player(ui.ctx(), true);
                 } else {
                     ui.ctx().send_viewport_cmd_to(
                         egui::ViewportId::from_hash_of("amp-library"),
@@ -1643,18 +1648,17 @@ impl Player {
         ctx.send_viewport_cmd_to(
             egui::ViewportId::ROOT,
             egui::ViewportCommand::MinInnerSize(if expanded {
-                egui::vec2(740., 480.)
+                egui::vec2(400., 300.)
             } else {
-                egui::vec2(740., 160.)
+                egui::vec2(400., 150.)
             }),
         );
         ctx.send_viewport_cmd_to(
             egui::ViewportId::ROOT,
-            egui::ViewportCommand::InnerSize(if expanded {
-                egui::vec2(1100., 900.)
-            } else {
-                egui::vec2(1100., 170.)
-            }),
+            egui::ViewportCommand::InnerSize(player_window_size(
+                ctx.input(|i| i.viewport().inner_rect.map(|r| r.size())),
+                expanded,
+            )),
         );
     }
     fn expand_smart_list(&mut self) {
@@ -3334,7 +3338,7 @@ fn main() -> eframe::Result {
                 })
                 .with_icon(app_icon())
                 .with_inner_size(size)
-                .with_min_inner_size([size[0].min(740.), size[1].min(160.)])
+                .with_min_inner_size([size[0].min(400.), size[1].min(150.)])
                 .with_resizable(true)
                 .with_clamp_size_to_monitor_size(true),
             ..Default::default()
@@ -3355,6 +3359,24 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod window_tests {
     use super::*;
+    #[test]
+    fn expanding_library_keeps_a_manually_resized_player() {
+        for size in [
+            egui::vec2(500., 350.),
+            egui::vec2(1400., 950.),
+            egui::vec2(2000., 1200.),
+        ] {
+            assert_eq!(player_window_size(Some(size), true), size);
+        }
+        assert_eq!(
+            player_window_size(Some(egui::vec2(1250., 170.)), true),
+            egui::vec2(1250., 900.)
+        );
+        assert_eq!(
+            player_window_size(Some(egui::vec2(1250., 900.)), false),
+            egui::vec2(1250., 170.)
+        );
+    }
     #[test]
     fn appearance_choices_are_visible_and_clickable_inside_module_menu() {
         for selected in theme::Theme::ALL {
@@ -3690,7 +3712,7 @@ mod window_tests {
         for size in [
             egui::vec2(2560., 1550.),
             egui::vec2(1200., 900.),
-            egui::vec2(740., 480.),
+            egui::vec2(400., 300.),
             egui::vec2(540., 360.),
             egui::vec2(1000., 760.),
         ] {
@@ -3774,7 +3796,7 @@ mod window_tests {
             for size in [
                 egui::vec2(900., 600.),
                 egui::vec2(1000., 760.),
-                egui::vec2(740., 480.),
+                egui::vec2(400., 300.),
             ] {
                 for _ in 0..2 {
                     let mut output = ctx.run_ui(
@@ -3892,7 +3914,7 @@ mod window_tests {
             d.insert_persisted(egui::Id::unique("dj-library-height"), 600_f32);
             d.insert_persisted(egui::Id::unique("dj-source-width"), 400_f32);
         });
-        for size in [egui::vec2(740., 480.), egui::vec2(1920., 1080.)] {
+        for size in [egui::vec2(400., 300.), egui::vec2(1920., 1080.)] {
             for _ in 0..2 {
                 let mut output = ctx.run_ui(
                     egui::RawInput {

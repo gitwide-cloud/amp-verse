@@ -103,6 +103,8 @@ pub struct Recovery {
     initial_sizes: [Option<[f32; 2]>; 6],
     automatic_restore: bool,
     attempted: bool,
+    startup_size: Option<egui::Vec2>,
+    manually_resized: bool,
     sizes: [Option<[f32; 2]>; 6],
     splits: [Option<f32>; 3],
     pub pending: Option<Snapshot>,
@@ -235,6 +237,27 @@ impl Snapshot {
 }
 impl Player {
     pub(super) fn try_automatic_recovery(&mut self, ctx: &egui::Context) {
+        if self.recovery.pending.is_some() && !self.recovery.attempted {
+            let (size, maximized) = ctx.input(|i| {
+                (
+                    i.viewport().inner_rect.map(|r| r.size()),
+                    i.viewport().maximized == Some(true) || i.viewport().fullscreen == Some(true),
+                )
+            });
+            if maximized {
+                self.recovery.manually_resized = true;
+            }
+            if let Some(size) = size {
+                if let Some(initial) = self.recovery.startup_size {
+                    if (initial - size).length() > 2. {
+                        self.recovery.manually_resized = true;
+                    }
+                } else {
+                    self.recovery.startup_size = Some(size);
+                }
+            }
+        }
+
         if self.library.is_some()
             && self.recovery.pending.is_some()
             && self.recovery.automatic_restore
@@ -535,7 +558,7 @@ impl Player {
                 ctx.data_mut(|d| d.insert_persisted(egui::Id::unique(key), value));
             }
         }
-        if snapshot.sizes[0].is_some() {
+        if snapshot.sizes[0].is_some() && !self.recovery.manually_resized {
             let size = self.recovered_window_size(0, ctx.input(|i| i.viewport().monitor_size));
             ctx.send_viewport_cmd_to(
                 egui::ViewportId::ROOT,
@@ -570,6 +593,49 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn delayed_recovery_does_not_reapply_window_size_after_manual_resize() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut player = Player {
+            root: dir.path().into(),
+            ..Default::default()
+        };
+        let mut snapshot = player.session_snapshot();
+        snapshot.sizes[0] = Some([1100., 900.]);
+        player.recovery.pending = Some(snapshot);
+        player.recovery.automatic_restore = true;
+        let ctx = egui::Context::default();
+        for size in [egui::vec2(1100., 900.), egui::vec2(850., 650.)] {
+            let mut raw = egui::RawInput::default();
+            raw.viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
+            let mut output = ctx.run_ui(raw, |ui| player.try_automatic_recovery(ui.ctx()));
+            output.textures_delta.clear();
+        }
+        assert!(player.recovery.manually_resized);
+        player.library = Some(Library {
+            tracks: vec![],
+            tree: Folder {
+                name: "music".into(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        });
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            player.try_automatic_recovery(ui.ctx())
+        });
+        assert!(player.recovery.attempted);
+        assert!(
+            !output
+                .viewport_output
+                .values()
+                .flat_map(|v| &v.commands)
+                .any(|c| matches!(c, egui::ViewportCommand::InnerSize(_)))
+        );
+        output.textures_delta.clear();
+    }
     #[test]
     fn rejects_cycles_wrong_library_and_nonfinite_positions() {
         let player = Player {
