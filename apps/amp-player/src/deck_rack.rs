@@ -43,7 +43,7 @@ fn strip_preference() -> Option<PathBuf> {
             .join("dj-deck-widths.json"),
     )
 }
-fn waveform_preference() -> Option<PathBuf> {
+pub(super) fn waveform_preference() -> Option<PathBuf> {
     Some(
         theme::settings_path()?
             .parent()?
@@ -134,43 +134,13 @@ impl Player {
         self.header(ui, "AMP DJ", true);
         ui.horizontal_wrapped(|ui| {
             self.performance_controls(ui);
-            ui.menu_button("Waveforms", |ui| {
-                let old = self.rack.overlay_waveforms;
-                ui.selectable_value(&mut self.rack.overlay_waveforms, false, "Stacked A / B");
-                ui.selectable_value(
-                    &mut self.rack.overlay_waveforms,
-                    true,
-                    "Overlay · blue / red",
-                );
-                if old != self.rack.overlay_waveforms
-                    && let Some(path) = waveform_preference()
-                {
-                    let result = std::fs::create_dir_all(path.parent().unwrap()).and_then(|()| {
-                        std::fs::write(
-                            path,
-                            if self.rack.overlay_waveforms {
-                                "overlay"
-                            } else {
-                                "stacked"
-                            },
-                        )
-                    });
-                    if let Err(error) = result {
-                        self.status = format!("Could not remember waveform view: {error}");
-                    }
-                }
-            });
+            if ui.button("Waveforms").clicked() {
+                self.open_dj_settings(ui.ctx());
+            }
 
             if self.auto_dj_controls || self.run.auto {
-                if compact {
-                    let bpm = self.audio.as_ref().map_or(120., |a| {
-                        f32::from_bits(a.controls.master_bpm.load(Relaxed))
-                    });
-                    ui.menu_button(format!("{bpm:.1} BPM"), |ui| self.clock_controls(ui))
-                        .response
-                        .on_hover_text("Master tempo, quantization and Sync All");
-                } else {
-                    self.clock_controls(ui);
+                if ui.button("Tempo / Sync").clicked() {
+                    self.open_dj_settings(ui.ctx());
                 }
                 let previous = self.run.transitions;
                 if transition_controls::show(
@@ -190,16 +160,8 @@ impl Player {
                 }
                 self.run.scratch_assist = self.run.transitions.enabled;
             }
-            if compact {
-                ui.menu_button("View", |ui| self.rack_view_options(ui, true));
-            } else {
-                if ui
-                    .selectable_label(self.rack.expanded, "Expanded")
-                    .clicked()
-                {
-                    self.rack.expanded = !self.rack.expanded;
-                }
-                ui.menu_button("Setup", |ui| self.rack_view_options(ui, false));
+            if ui.button("DJ settings").clicked() {
+                self.open_dj_settings(ui.ctx());
             }
         });
         ui.separator();
@@ -474,25 +436,7 @@ impl Player {
             self.dj_library_ui(ui);
         }
     }
-    fn rack_view_options(&mut self, ui: &mut egui::Ui, include_expand: bool) {
-        if !self.auto_dj_controls && !self.run.auto {
-            ui.menu_button("Manual tempo / Sync All", |ui| self.clock_controls(ui));
-        }
-
-        if include_expand {
-            ui.toggle_value(&mut self.rack.expanded, "Expanded controls");
-        }
-        if ui.button("Use original two-deck layout").clicked() {
-            self.rack.six = false;
-            ui.close();
-        }
-        if ui.button("Assign crossfader to LIVE pair").on_hover_text("Pause both the current and requested pair first; stop Auto DJ. Background layers keep playing.").clicked() {
-            self.status=if self.run.auto {"Stop Auto DJ before assigning a different pair".into()}
-            else if let Err(e)=self.ensure_audio().and_then(|_|self.audio.as_ref().unwrap().assign_pair(self.rack.live)) {e}
-            else {"Crossfade assignment queued; applies only if both pairs remain paused".into()};
-        }
-    }
-    fn clock_controls(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn clock_settings(&mut self, ui: &mut egui::Ui) {
         let mut bpm = self.audio.as_ref().map_or(120., |a| {
             f32::from_bits(a.controls.master_bpm.load(Relaxed))
         });
@@ -504,28 +448,19 @@ impl Player {
         let mut changed = ui
             .add(egui::DragValue::new(&mut bpm).range(40. ..=240.).speed(0.1))
             .changed();
-        egui::ComboBox::from_id_salt("rack-quantization")
-            .width(86.)
-            .selected_text(match q {
-                0 => "Q Off",
-                1 => "Q Beat",
-                4 => "Q 1 Bar",
-                8 => "Q 2 Bars",
-                16 => "Q 4 Bars",
-                _ => "Q 8 Bars",
-            })
-            .show_ui(ui, |ui| {
-                for (beats, label) in [
-                    (0, "Off"),
-                    (1, "Beat"),
-                    (4, "1 Bar"),
-                    (8, "2 Bars"),
-                    (16, "4 Bars"),
-                    (32, "8 Bars"),
-                ] {
-                    changed |= ui.selectable_value(&mut q, beats, label).changed();
-                }
-            });
+        ui.label("Quantize controls to");
+        ui.horizontal_wrapped(|ui| {
+            for (beats, label) in [
+                (0, "Off"),
+                (1, "Beat"),
+                (4, "1 bar"),
+                (8, "2 bars"),
+                (16, "4 bars"),
+                (32, "8 bars"),
+            ] {
+                changed |= ui.selectable_value(&mut q, beats, label).changed();
+            }
+        });
         if changed
             && let Err(error) = self
                 .ensure_audio()

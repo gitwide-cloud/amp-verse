@@ -14,6 +14,7 @@ mod crossfade_settings;
 mod deck_rack;
 mod dj_browser;
 mod dj_mixer;
+mod dj_settings;
 mod docking;
 mod dragdrop;
 mod engine;
@@ -1124,7 +1125,10 @@ impl Player {
         match pane {
             0 => self.player_ui(ui),
             1 => self.library_ui(ui),
-            2 => self.dj_ui(ui),
+            2 => {
+                self.dj_ui(ui);
+                self.dj_settings_window(ui.ctx());
+            }
             3 => {
                 let action = self.lab.show(ui, &self.root, self.library.as_ref());
                 self.activate(ui, action);
@@ -1844,30 +1848,22 @@ impl Player {
             egui::vec2(12., 10.)
         };
 
-        let mut selected = self.run.choice.clone();
+        let selected = self.run.choice.clone();
         let mut context_edit = None;
         ui.horizontal_wrapped(|ui| {
-            let selector = egui::ComboBox::from_id_salt("performance-playlist")
-                .width(if self.rack.six { 145. } else { 180. })
-                .truncate()
-                .selected_text(
-                    self.run
-                        .settings
-                        .playlists
-                        .iter()
-                        .find(|p| p.id == selected)
-                        .map_or("Select Smart Playlist", |p| p.name.as_str()),
-                )
-                .show_ui(ui, |ui| {
-                    for p in &self.run.settings.playlists {
-                        let row = ui.selectable_value(&mut selected, p.id.clone(), &p.name);
-                        if let Some(action) = show_editor::playlist_menu(&row) {
-                            context_edit = Some((p.id.clone(), action));
-                        }
-                    }
-                });
+            let name = self
+                .run
+                .settings
+                .playlists
+                .iter()
+                .find(|p| p.id == selected)
+                .map_or("Choose Smart Playlist", |p| p.name.as_str());
+            let selector = ui.button(name);
+            if selector.clicked() {
+                self.open_dj_settings(ui.ctx());
+            }
             if !selected.is_empty()
-                && let Some(action) = show_editor::playlist_menu(&selector.response)
+                && let Some(action) = show_editor::playlist_menu(&selector)
             {
                 context_edit = Some((selected.clone(), action));
             }
@@ -1891,37 +1887,14 @@ impl Player {
                 self.status = e;
             }
             skin::switch(ui, &mut self.run.crossfade, "Auto Crossfade");
-            let old_pace = self.run.transitions.pace;
-            egui::ComboBox::from_id_salt("auto-dj-pace")
-                .selected_text(self.run.transitions.pace.label())
-                .show_ui(ui, |ui| {
-                    for pace in [
-                        amp_core::dj_phrasing::Pace::Quick,
-                        amp_core::dj_phrasing::Pace::Balanced,
-                        amp_core::dj_phrasing::Pace::Full,
-                    ] {
-                        ui.selectable_value(&mut self.run.transitions.pace, pace, pace.label());
-                    }
-                });
-            if old_pace != self.run.transitions.pace
-                && let Err(error) = transition_styles::save(self.run.transitions)
-            {
-                self.status = error;
+            if ui.button(self.run.transitions.pace.label()).clicked() {
+                self.open_dj_settings(ui.ctx());
             }
-
-            if self.rack.six {
-                ui.menu_button(
-                    format!(
-                        "{:?}{}",
-                        self.run.style,
-                        if self.run.locked { " | LOCK" } else { "" }
-                    ),
-                    |ui| self.performance_mix_options(ui),
-                )
-                .response
-                .on_hover_text("Mixing style and Manual DJ Lock");
-            } else {
-                self.performance_mix_options(ui);
+            if ui
+                .button(format!("{:?} · settings", self.run.style))
+                .clicked()
+            {
+                self.open_dj_settings(ui.ctx());
             }
         });
         ui.set_style(original_style);
@@ -1934,29 +1907,23 @@ impl Player {
         }
     }
     fn performance_mix_options(&mut self, ui: &mut egui::Ui) {
-        if ui
-            .checkbox(&mut self.run.locked, "Manual DJ Lock")
-            .changed()
-            && self.run.locked
-        {
+        let old_lock = self.run.locked;
+        skin::switch(ui, &mut self.run.locked, "Manual DJ Lock");
+        if !old_lock && self.run.locked {
             self.run.cancel_automation();
         }
-        if self.run.locked {
-            ui.weak("Unlock Manual DJ Lock to enable Auto Mix");
-        }
+        ui.weak("Lock pauses automation so you can mix manually.");
         let mut style = self.run.style;
-        egui::ComboBox::from_id_salt("dj-mixing-style")
-            .width(if self.rack.six { 145. } else { 180. })
-            .selected_text(format!("{:?}", style))
-            .show_ui(ui, |ui| {
-                for value in [
-                    amp_core::show::Style::Hype,
-                    amp_core::show::Style::Steady,
-                    amp_core::show::Style::Chill,
-                ] {
-                    ui.selectable_value(&mut style, value, format!("{:?}", value));
-                }
-            });
+        ui.horizontal_wrapped(|ui| {
+            for value in [
+                amp_core::show::Style::Hype,
+                amp_core::show::Style::Steady,
+                amp_core::show::Style::Chill,
+            ] {
+                ui.selectable_value(&mut style, value, format!("{value:?}"));
+            }
+        });
+        ui.weak("Hype favours more active mixes; Steady keeps energy similar; Chill favours calmer choices.");
         if style != self.run.style
             && let Err(error) = self.execute_control(control::Action::SetStyle { style })
         {
@@ -3268,6 +3235,11 @@ impl eframe::App for Player {
             }
             "dj" => self.dj_ui(ui),
             "dj-window" => self.group_ui(ui, 2),
+            "dj-settings" => {
+                self.auto_dj_controls = true;
+                self.open_dj_settings(ui.ctx());
+                self.group_ui(ui, 2);
+            }
             "dj-transitions" => {
                 self.auto_dj_controls = true;
                 ui.ctx().data_mut(|d| {
