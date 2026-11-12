@@ -123,12 +123,14 @@ mod tests {
     use super::*;
     #[test]
     fn delayed_scan_cannot_hide_a_newly_saved_smart_playlist() {
-        let mut old = amp_core::show::Settings::default();
-        old.sync = Some(amp_core::coordination::Revision {
-            library_id: "library".into(),
-            revision: 8,
+        let old = amp_core::show::Settings {
+            sync: Some(amp_core::coordination::Revision {
+                library_id: "library".into(),
+                revision: 8,
+                ..Default::default()
+            }),
             ..Default::default()
-        });
+        };
         let mut saved = old.clone();
         saved.sync.as_mut().unwrap().revision = 9;
         saved.playlists[0].name = "R&B".into();
