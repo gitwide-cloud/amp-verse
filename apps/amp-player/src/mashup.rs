@@ -1,7 +1,18 @@
 //! Phrase mashup policy and envelopes; operates on loaded snapshots, never saved stem defaults.
 use amp_core::Preparation;
 /// Conservative pairing: same/relative key, close effective tuning, and phase-capable tempo grids.
+#[cfg(test)]
 pub fn compatible(out: &Preparation, incoming: &Preparation, out_rate: f64, in_rate: f64) -> bool {
+    compatible_with_keylock(out, incoming, out_rate, in_rate, [false, false])
+}
+/// Compare effective pitch after the real loaded Key Lock processors, not varispeed alone.
+pub fn compatible_with_keylock(
+    out: &Preparation,
+    incoming: &Preparation,
+    out_rate: f64,
+    in_rate: f64,
+    key_lock: [bool; 2],
+) -> bool {
     let (Some(a), Some(b)) = (out.bpm, incoming.bpm) else {
         return false;
     };
@@ -11,17 +22,22 @@ pub fn compatible(out: &Preparation, incoming: &Preparation, out_rate: f64, in_r
     if !out_rate.is_finite() || !in_rate.is_finite() || out_rate <= 0. || in_rate <= 0. {
         return false;
     }
+    let pitch_out = if key_lock[0] { 1. } else { out_rate };
+    let pitch_in = if key_lock[1] { 1. } else { in_rate };
     if (a * out_rate / (b * in_rate) - 1.).abs() > 0.005
-        || (12. * (out_rate / in_rate).log2()).abs() > 0.2
+        || (12. * (pitch_out / pitch_in).log2()).abs() > 0.2
     {
         return false;
     }
     let key = |p: &Preparation| {
-        p.harmonic_key.as_ref().and_then(|k| {
-            let n = k.get(..k.len().checked_sub(1)?)?.parse::<u8>().ok()?;
-            let mode = k.chars().last()?;
-            (n > 0 && n <= 12 && matches!(mode, 'A' | 'B')).then_some(n)
-        })
+        p.harmonic_key
+            .as_ref()
+            .map(|k| k.trim().to_ascii_uppercase())
+            .and_then(|k| {
+                let n = k.get(..k.len().checked_sub(1)?)?.parse::<u8>().ok()?;
+                let mode = k.chars().last()?;
+                (n > 0 && n <= 12 && matches!(mode, 'A' | 'B')).then_some(n)
+            })
     };
     key(out).zip(key(incoming)).is_some_and(|(a, b)| a == b)
 }
@@ -50,6 +66,35 @@ pub fn envelope(elapsed: u64, fade: u64, hold: u64, incoming: usize) -> ([f32; 2
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn actual_key_lock_allows_tempo_matched_mashups_without_varispeed_detuning() {
+        let a = Preparation {
+            bpm: Some(120.),
+            harmonic_key: Some("8A".into()),
+            ..Default::default()
+        };
+        let b = Preparation {
+            bpm: Some(110.),
+            harmonic_key: Some("8b".into()),
+            ..Default::default()
+        };
+        assert!(!compatible(&a, &b, 1., 120. / 110.));
+        assert!(compatible_with_keylock(
+            &a,
+            &b,
+            1.,
+            120. / 110.,
+            [true, true]
+        ));
+        assert!(!compatible_with_keylock(
+            &a,
+            &b,
+            1.,
+            120. / 110.,
+            [true, false]
+        ));
+        assert!(!compatible_with_keylock(&a, &b, 1., 1., [true, true]));
+    }
     #[test]
     fn hold_has_one_vocal_and_restores_the_incoming_mix() {
         let (w, m) = envelope(150, 100, 200, 1);

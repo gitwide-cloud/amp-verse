@@ -23,6 +23,7 @@ pub mod smart_filters;
 pub mod stem_archive;
 pub mod stem_mix;
 pub mod storage;
+pub mod transition_plan;
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,

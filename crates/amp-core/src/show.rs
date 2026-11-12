@@ -452,7 +452,9 @@ pub fn ranked_with_snapshot(
         let tempo = playing
             .and_then(|p| p.bpm)
             .zip(t.preparation.bpm)
-            .map_or(1., |(a, b)| (a / b).ln().abs() * 5.);
+            .map_or(1., |(a, b)| {
+                crate::transition_plan::tempo_distance(a, b) * 5.
+            });
         e + tempo
             + playing.map_or(1., |p| {
                 crate::smart::cost(p, &prepared, wanted.map(|e| (e - 1.) / 9.))

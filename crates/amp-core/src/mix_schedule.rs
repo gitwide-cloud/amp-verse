@@ -115,9 +115,65 @@ pub fn grid(
         anchor: anchor - origin + phase * beat * multiple,
     })
 }
+/// Account for actual playback rates and half/double-time pulse interpretations.
+/// Ambiguous half-time pairs may align beats, but do not claim matching musical bars/phrases.
+#[allow(clippy::too_many_arguments)]
+pub fn grid_at_rates(
+    out: &Preparation,
+    incoming: &Preparation,
+    entry: f64,
+    origin: f64,
+    timing: Timing,
+    out_rate: f64,
+    in_rate: f64,
+) -> Option<Grid> {
+    if ![out_rate, in_rate].iter().all(|r| r.is_finite() && *r > 0.) {
+        return None;
+    }
+    let ratio = out.bpm? * out_rate / (incoming.bpm? * in_rate);
+    let factor = [1., 0.5, 2.]
+        .into_iter()
+        .find(|factor| (ratio / factor - 1.).abs() <= 0.005)?;
+    if factor != 1. && timing.phrase_beats().is_some() {
+        return None;
+    }
+    let mut pulse = incoming.clone();
+    pulse.bpm = pulse.bpm.map(|b| b * factor);
+    grid(
+        out,
+        &pulse,
+        entry,
+        origin,
+        if factor != 1. && timing == Timing::Bar {
+            Timing::Beat
+        } else {
+            timing
+        },
+    )
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn preroll_and_exact_fade_land_on_reviewed_phrase_boundary() {
+        let a = Preparation {
+            bpm: Some(120.),
+            beat_offset: Some(0.),
+            ..Default::default()
+        };
+        let mut b = a.clone();
+        b.extensions
+            .insert("mix_phrase_anchor".into(), serde_json::json!(20.));
+        let grid = grid_at_rates(&a, &b, 17., 0., Timing::Phrase16, 1., 1.).unwrap();
+        let start = grid.next(0.1);
+        assert!((start - 5.).abs() < 1e-9);
+        assert!(((start + 3.) / grid.period).fract().abs() < 1e-9);
+        let mut half = b.clone();
+        half.bpm = Some(60.);
+        assert!(grid_at_rates(&a, &half, 17., 0., Timing::Beat, 1., 1.).is_some());
+        assert!(grid_at_rates(&a, &half, 17., 0., Timing::Phrase16, 1., 1.).is_none());
+        assert!(grid_at_rates(&a, &b, 17., 0., Timing::Beat, 1., 1.1).is_none());
+    }
     #[test]
     fn drifting_automatic_grids_fall_back_until_reviewed() {
         let mut p = Preparation {

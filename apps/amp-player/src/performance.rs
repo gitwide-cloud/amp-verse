@@ -446,7 +446,17 @@ impl Player {
         let next = &self.loaded_track(incoming)?.preparation;
         let out_rate = self.deck_rate(outgoing);
         let in_rate = self.deck_rate(incoming);
-        if !crate::mashup::compatible(out, next, out_rate, in_rate) {
+        let locked = |deck: usize| {
+            audio.controls.key_lock[deck].load(Relaxed)
+                && audio.controls.key_lock_available[deck].load(Relaxed)
+        };
+        if !crate::mashup::compatible_with_keylock(
+            out,
+            next,
+            out_rate,
+            in_rate,
+            [locked(outgoing), locked(incoming)],
+        ) {
             return None;
         }
         let timing = if self.run.transitions.timing.phrase_beats().is_some() {
@@ -489,6 +499,7 @@ impl Player {
             return Err("Auto Fade requires the opposite deck".into());
         }
         let mut track = self.fresh_track(index)?;
+        let mut automatic_section = false;
         if let Some(cue) = cue {
             track.preparation.cue_in = self.cue_seconds(index, cue)?;
         } else if paired
@@ -522,6 +533,7 @@ impl Player {
             )
         {
             track.preparation.cue_in = section.start;
+            automatic_section = true;
         }
         track.preparation.validate()?;
         self.ensure_audio()?;
@@ -545,12 +557,37 @@ impl Player {
                 })
                 .and_then(|t| t.preparation.bpm)
                 .zip(track.preparation.bpm)
-                .map(|(outgoing, incoming)| outgoing * (self.deck_rate(active)) / incoming)
-                .filter(|ratio| ratio.is_finite() && (0.84..=1.16).contains(ratio))
+                .and_then(|(outgoing, incoming)| {
+                    amp_core::transition_plan::tempo_match(
+                        outgoing,
+                        self.deck_rate(active),
+                        incoming,
+                        0.16,
+                    )
+                    .map(|m| m.rate)
+                })
         } else {
             None
         };
         let rate = matched_rate.unwrap_or(saved_rate) as f32;
+        if automatic_section
+            && cue.is_none()
+            && paired
+            && d != active
+            && (self.run.auto || execution == Execution::AutoFade)
+            && let Some(plan) = amp_core::transition_plan::landing(
+                &track.preparation,
+                track.preparation.cue_in,
+                rate as f64,
+                self.fade_seconds as f64,
+            )
+        {
+            track.preparation.cue_in = plan.entry;
+            track.preparation.extensions.insert(
+                "runtime_mix_landing".into(),
+                serde_json::json!(plan.landing),
+            );
+        }
         self.pitch[d] = (rate - 1.) * 100.;
         let engine = self.audio.as_mut().unwrap();
         engine.set_rate(d, rate);
@@ -685,16 +722,32 @@ impl Player {
                 // do not change eligibility, requests, or force a distant-energy song.
                 if let Some(best) = ranked.iter().take(12).copied().find(|i| {
                     let next = &tracks[*i];
-                    let in_rate = out
-                        .preparation
-                        .bpm
-                        .zip(next.preparation.bpm)
-                        .map_or(1., |(a, b)| a * rate / b);
-                    crate::mashup::compatible(&out.preparation, &next.preparation, rate, in_rate)
-                        && crate::stems::ready(&amp_core::music_sources::audio_path(
-                            &self.root, &next.path,
-                        ))
-                        .is_some()
+                    let in_rate =
+                        out.preparation
+                            .bpm
+                            .zip(next.preparation.bpm)
+                            .map_or(1., |(a, b)| {
+                                amp_core::transition_plan::tempo_match(a, rate, b, 0.16)
+                                    .map_or(1., |m| m.rate)
+                            });
+                    crate::mashup::compatible_with_keylock(
+                        &out.preparation,
+                        &next.preparation,
+                        rate,
+                        in_rate,
+                        self.audio.as_ref().map_or([false, false], |audio| {
+                            [
+                                audio.controls.key_lock[self.active_deck()].load(Relaxed)
+                                    && audio.controls.key_lock_available[self.active_deck()]
+                                        .load(Relaxed),
+                                audio.controls.key_lock[self.other_deck(self.active_deck())]
+                                    .load(Relaxed),
+                            ]
+                        }),
+                    ) && crate::stems::ready(&amp_core::music_sources::audio_path(
+                        &self.root, &next.path,
+                    ))
+                    .is_some()
                 }) {
                     index = best;
                 }
@@ -1818,12 +1871,14 @@ impl Player {
                                 )
                         })
                         .and_then(|(out, next)| {
-                            crate::mix_schedule::grid(
+                            crate::mix_schedule::grid_at_rates(
                                 &out.preparation,
                                 &next.preparation,
                                 a.source_position(incoming),
                                 a.source_position(outgoing) - a.position(outgoing),
                                 self.run.transitions.timing,
+                                self.deck_rate(outgoing),
+                                self.deck_rate(incoming),
                             )
                         });
                     let mashup_plan = if chosen == Some(crate::transition_styles::Style::Mashup) {
@@ -2111,6 +2166,94 @@ mod tests {
             .unwrap();
     }
     #[test]
+    #[ignore = "native audio, muted; requires AMP_WAVEFORM_FIXTURE"]
+    fn native_drop_preroll_preserves_saved_cues_and_three_second_fade() {
+        let root = tempfile::tempdir().unwrap();
+        for name in ["a.wav", "b.wav"] {
+            std::fs::copy(
+                std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap(),
+                root.path().join(name),
+            )
+            .unwrap();
+            let mut prep = amp_core::Preparation {
+                bpm: Some(120.),
+                beat_offset: Some(0.),
+                cue_out: Some(16.),
+                ..Default::default()
+            };
+            prep.cues.push(amp_core::preparation::Cue {
+                id: "auto-in".into(),
+                seconds: 0.,
+                ..Default::default()
+            });
+            prep.extensions.insert("energy_profile".into(), serde_json::json!({
+                "version":1,"duration":16.,"step":1.,"curve":[0.2,0.8],
+                "sections":[{"id":"drop","name":"High energy","start":8.,"end":16.,"energy":0.8}]
+            }));
+            amp_core::preparation::save(root.path(), std::path::Path::new(name), &prep).unwrap();
+        }
+        let library = amp_core::scan(root.path()).unwrap();
+        let saved: Vec<_> = library
+            .tracks
+            .iter()
+            .map(|t| amp_core::preparation::load(&root.path().join(&t.path)).unwrap())
+            .collect();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(library),
+            channel_gain: [0.; 6],
+            fade_seconds: 3.,
+            ..Default::default()
+        };
+        player.run.profile = Some(player.run.settings.playlists[0].clone());
+        player.run.target = Some(8.2);
+        player.run.transitions.enabled = false;
+        player.run.transitions.timing = crate::mix_schedule::Timing::Immediate;
+        let songs: Vec<_> = player
+            .library
+            .as_ref()
+            .unwrap()
+            .tracks
+            .iter()
+            .map(show::song_id)
+            .collect();
+        player
+            .execute_control(Action::CallSong {
+                song: songs[0].clone(),
+                cue: None,
+                deck: Deck::A,
+                execution: Execution::PlayNow,
+            })
+            .unwrap();
+        wait(&mut player, |p| {
+            p.audio.as_ref().is_some_and(|a| a.position(0) > 0.1)
+        });
+        player.run.auto = true;
+        player
+            .execute_control(Action::CallSong {
+                song: songs[1].clone(),
+                cue: None,
+                deck: Deck::B,
+                execution: Execution::AutoFade,
+            })
+            .unwrap();
+        let prepared = &player.loaded_track(1).unwrap().preparation;
+        assert_eq!(prepared.cue_in, 5.);
+        assert_eq!(prepared.extensions["runtime_mix_landing"], 8.);
+        wait(&mut player, |p| p.run.completed_handoffs == 1);
+        assert!(player.run.auto);
+        assert_eq!(player.fade_seconds, 3.);
+        for (track, expected) in player.library.as_ref().unwrap().tracks.iter().zip(saved) {
+            assert_eq!(
+                amp_core::preparation::load(&root.path().join(&track.path)).unwrap(),
+                expected
+            );
+        }
+        player
+            .execute_control(Action::AutoDj { enabled: false })
+            .unwrap();
+    }
+    #[test]
     #[ignore = "uses AMP_ENERGY_FIXTURE_ROOT and native audio; both channels muted"]
     fn real_energy_profile_two_deck_handoff_preserves_preparation_and_keeps_auto_running() {
         let root = std::path::PathBuf::from(std::env::var_os("AMP_ENERGY_FIXTURE_ROOT").unwrap());
@@ -2165,7 +2308,11 @@ mod tests {
             )
             .unwrap()
             .start;
-        assert!((player.loaded_track(1).unwrap().preparation.cue_in - expected).abs() < 0.001);
+        let loaded = &player.loaded_track(1).unwrap().preparation;
+        let rate = 1. + player.pitch[1] as f64 / 100.;
+        let entry = amp_core::transition_plan::landing(&t.preparation, expected, rate, 0.75)
+            .map_or(expected, |plan| plan.entry);
+        assert!((loaded.cue_in - entry).abs() < 0.001);
         let outgoing = player.loaded_track(0).unwrap().preparation.bpm.unwrap();
         let incoming = player.loaded_track(1).unwrap().preparation.bpm.unwrap();
         assert!((incoming * (1. + player.pitch[1] as f64 / 100.) - outgoing).abs() < 0.01);

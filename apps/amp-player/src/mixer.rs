@@ -2353,6 +2353,61 @@ mod tests {
         assert_eq!(get(&controls.crossfader), 1.);
         assert!(!controls.play[0].load(Relaxed));
     }
+    #[test]
+    fn rendered_preroll_drop_lands_after_exact_three_second_phrase_blend() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(32);
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        let mut incoming = source(0.02, 10000);
+        let (mut producer, consumer) = RingBuffer::new(10001);
+        for frame in 0..10000 {
+            let value = if frame < 3000 { 0.02 } else { 0.2 };
+            let value = value * (frame as f32 * std::f32::consts::TAU / 10.).sin();
+            producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+        }
+        incoming.ring = consumer;
+        let mut outgoing = source(0.2, 12000);
+        let (mut producer, consumer) = RingBuffer::new(12001);
+        for frame in 0..12000 {
+            let value = 0.2 * (frame as f32 * std::f32::consts::TAU / 10.).sin();
+            producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+        }
+        outgoing.ring = consumer;
+        tx.send(Command::Load(0, outgoing, true, 1)).unwrap();
+        tx.send(Command::Load(1, incoming, false, 1)).unwrap();
+        // The selected section at source second 20 is prepared from second 17.
+        // Launch at outgoing second 5; its drop lands on the phrase at second 8.
+        tx.send(Command::ScheduledFade {
+            to: 1.,
+            seconds: 3.,
+            grid: crate::mix_schedule::Grid {
+                period: 8.,
+                anchor: 5.,
+            },
+        })
+        .unwrap();
+        let mut rendered = Vec::new();
+        mixer.render(5000, |_, frame| rendered.push(frame[0]));
+        assert!(!controls.play[1].load(Relaxed));
+        mixer.render(3000, |_, frame| rendered.push(frame[0]));
+        assert!(controls.position[1].load(Relaxed) >= 2999);
+        mixer.render(200, |_, frame| rendered.push(frame[0]));
+        assert!(!controls.fading.load(Relaxed));
+        assert_eq!(get(&controls.crossfader), 1.);
+        assert!(!controls.play[0].load(Relaxed));
+        assert!(rendered.iter().all(|sample| sample.is_finite()));
+        let rms = |samples: &[f32]| {
+            (samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32).sqrt()
+        };
+        assert!(
+            rendered
+                .as_chunks::<100>()
+                .0
+                .iter()
+                .all(|chunk| rms(chunk) > 0.001)
+        );
+        assert!(rms(&rendered[8100..8200]) > rms(&rendered[7800..7900]) * 2.);
+    }
     fn section(source: Source, expected: u64) -> SectionChange {
         SectionChange {
             source: Some(source),

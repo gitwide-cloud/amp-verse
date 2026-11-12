@@ -20,6 +20,14 @@ impl<T> Drop for AbortTask<T> {
         self.0.abort();
     }
 }
+fn fade_seconds() -> f64 {
+    std::env::var("AMP_CAST_FADE_SECONDS")
+        .ok()
+        .and_then(|v| v.parse::<f64>().ok())
+        .filter(|v| v.is_finite())
+        .unwrap_or(3.)
+        .clamp(0.1, 30.)
+}
 fn entry(p: &Preparation, profile: Option<&SmartPlaylist>, target: Option<f64>) -> f64 {
     if profile.is_some_and(|r| r.style == Style::Hype && r.use_manual_cues)
         && let Some(c) = p.manual_cues.iter().find(|c| {
@@ -58,10 +66,20 @@ async fn decode(
         .filter(|_| amp_core::mix_schedule::timing_reliable(&preparation))
         .zip(preparation.bpm)
         .and_then(|(out, next)| {
-            let ratio = out / next;
-            (ratio.is_finite() && (0.92..=1.08).contains(&ratio)).then_some(ratio)
+            amp_core::transition_plan::tempo_match(out, 1., next, 0.08).map(|m| m.rate)
         })
         .unwrap_or(1.);
+    if profile.is_some()
+        && out_bpm.is_some()
+        && let Some(plan) = amp_core::transition_plan::landing(
+            &preparation,
+            preparation.cue_in,
+            rate,
+            fade_seconds(),
+        )
+    {
+        preparation.cue_in = plan.entry;
+    }
     let temp = tempfile::NamedTempFile::new()
         .map_err(|e| e.to_string())?
         .into_temp_path();
@@ -450,23 +468,31 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             target,
             bpm,
         )));
-        let fade_seconds = std::env::var("AMP_CAST_FADE_SECONDS")
-            .ok()
-            .and_then(|v| v.parse::<f64>().ok())
-            .filter(|v| v.is_finite())
-            .unwrap_or(3.)
-            .clamp(0.1, 30.);
+        let fade_seconds = fade_seconds();
         let fade = (fade_seconds * RATE as f64) as u64;
         let tail = fade.min(current.frames.saturating_sub(consumed) / 2);
         let mut before = current.frames.saturating_sub(consumed + tail);
         let incoming = &cast.tracks[next_index].preparation;
-        let next_entry = entry(incoming, profile.as_ref(), target);
-        if let Some(grid) = amp_core::mix_schedule::grid(
+        let mut next_entry = entry(incoming, profile.as_ref(), target);
+        let in_rate = bpm
+            .zip(incoming.bpm)
+            .filter(|_| amp_core::mix_schedule::timing_reliable(incoming))
+            .and_then(|(out, next)| amp_core::transition_plan::tempo_match(out, 1., next, 0.08))
+            .map_or(1., |m| m.rate);
+        if profile.is_some()
+            && let Some(plan) =
+                amp_core::transition_plan::landing(incoming, next_entry, in_rate, fade_seconds)
+        {
+            next_entry = plan.entry;
+        }
+        if let Some(grid) = amp_core::mix_schedule::grid_at_rates(
             &current.preparation,
             incoming,
             next_entry,
             0.,
             amp_core::mix_schedule::Timing::Beat,
+            current.rate,
+            in_rate,
         ) {
             let desired = current.preparation.cue_in
                 + (consumed + before) as f64 / RATE as f64 * current.rate;
