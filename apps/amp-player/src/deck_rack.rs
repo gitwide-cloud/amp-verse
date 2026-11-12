@@ -138,33 +138,35 @@ impl Player {
                 }
             });
 
-            if compact {
-                let bpm = self.audio.as_ref().map_or(120., |a| {
-                    f32::from_bits(a.controls.master_bpm.load(Relaxed))
-                });
-                ui.menu_button(format!("{bpm:.1} BPM"), |ui| self.clock_controls(ui))
-                    .response
-                    .on_hover_text("Master tempo, quantization and Sync All");
-            } else {
-                self.clock_controls(ui);
-            }
-            let previous = self.run.transitions;
-            if transition_controls::show(
-                ui,
-                &mut self.run.transitions,
-                &mut self.wave_span,
-                self.run.pending.is_none() && !self.audio.as_ref().is_some_and(|a| a.fading()),
-            ) {
-                self.run.force_mashup = true;
-                if let Err(error) = self.execute_control(control::Action::AutoFade) {
-                    self.run.force_mashup = false;
-                    self.status = error;
+            if self.auto_dj_controls || self.run.auto {
+                if compact {
+                    let bpm = self.audio.as_ref().map_or(120., |a| {
+                        f32::from_bits(a.controls.master_bpm.load(Relaxed))
+                    });
+                    ui.menu_button(format!("{bpm:.1} BPM"), |ui| self.clock_controls(ui))
+                        .response
+                        .on_hover_text("Master tempo, quantization and Sync All");
+                } else {
+                    self.clock_controls(ui);
                 }
+                let previous = self.run.transitions;
+                if transition_controls::show(
+                    ui,
+                    &mut self.run.transitions,
+                    &mut self.wave_span,
+                    self.run.pending.is_none() && !self.audio.as_ref().is_some_and(|a| a.fading()),
+                ) {
+                    self.run.force_mashup = true;
+                    if let Err(error) = self.execute_control(control::Action::AutoFade) {
+                        self.run.force_mashup = false;
+                        self.status = error;
+                    }
+                }
+                if previous != self.run.transitions {
+                    let _ = transition_styles::save(self.run.transitions);
+                }
+                self.run.scratch_assist = self.run.transitions.enabled;
             }
-            if previous != self.run.transitions {
-                let _ = transition_styles::save(self.run.transitions);
-            }
-            self.run.scratch_assist = self.run.transitions.enabled;
             if compact {
                 ui.menu_button("View", |ui| self.rack_view_options(ui, true));
             } else {
@@ -397,6 +399,10 @@ impl Player {
         }
     }
     fn rack_view_options(&mut self, ui: &mut egui::Ui, include_expand: bool) {
+        if !self.auto_dj_controls && !self.run.auto {
+            ui.menu_button("Manual tempo / Sync All", |ui| self.clock_controls(ui));
+        }
+
         if include_expand {
             ui.toggle_value(&mut self.rack.expanded, "Expanded controls");
         }

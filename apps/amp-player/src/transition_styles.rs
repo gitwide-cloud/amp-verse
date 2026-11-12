@@ -36,6 +36,7 @@ impl Style {
 #[serde(default)]
 pub struct Settings {
     pub enabled: bool,
+    pub pace: amp_core::dj_phrasing::Pace,
     pub timing: crate::mix_schedule::Timing,
     pub style: Style,
     pub every: u32,
@@ -49,6 +50,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: true,
+            pace: Default::default(),
             timing: Default::default(),
             style: Style::Variety,
             every: 4,
@@ -126,6 +128,24 @@ pub fn save(settings: Settings) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn pace_is_remembered_and_older_settings_default_to_balanced() {
+        let settings = Settings {
+            pace: amp_core::dj_phrasing::Pace::Quick,
+            ..Default::default()
+        };
+        let bytes = serde_json::to_vec(&settings).unwrap();
+        assert_eq!(
+            serde_json::from_slice::<Settings>(&bytes).unwrap().pace,
+            amp_core::dj_phrasing::Pace::Quick
+        );
+        let mut value = serde_json::to_value(settings).unwrap();
+        value.as_object_mut().unwrap().remove("pace");
+        assert_eq!(
+            serde_json::from_value::<Settings>(value).unwrap().pace,
+            amp_core::dj_phrasing::Pace::Balanced
+        );
+    }
     #[test]
     fn mashups_are_opt_in_and_use_saved_frequency_and_hold() {
         let s = Settings {

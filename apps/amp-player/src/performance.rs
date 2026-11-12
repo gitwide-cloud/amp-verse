@@ -1056,6 +1056,7 @@ impl Player {
                 }
                 let settings = crate::transition_styles::Settings {
                     enabled,
+                    pace: self.run.transitions.pace,
                     timing: self.run.transitions.timing,
                     techniques,
                     every,
@@ -1290,6 +1291,7 @@ impl Player {
                         self.run.pending = Some((d, Instant::now()));
                     }
                     self.run.auto = true;
+                    self.auto_dj_controls = true;
                 }
             }
             Action::Recognition {
@@ -1469,6 +1471,9 @@ impl Player {
                 self.run.paused = paused;
             }
             Action::AutoDj { enabled } => {
+                if !enabled {
+                    self.auto_dj_controls = false;
+                }
                 self.run.paused = false;
                 if enabled && self.run.playlist.is_none() {
                     return Err("Load a Smart Playlist first".into());
@@ -1555,11 +1560,38 @@ impl Player {
         }
         Ok(())
     }
+    fn automatic_exit(&self, deck: usize) -> Option<f64> {
+        if !self.run.auto {
+            return None;
+        }
+        let track = self.loaded_track(deck)?;
+        let duration = track
+            .preparation
+            .analysis
+            .as_ref()
+            .map(|a| a.duration)
+            .or_else(|| {
+                let audio = self.audio.as_ref()?;
+                Some(
+                    audio.source_position(deck)
+                        + audio.remaining(deck)? as f64 * self.deck_rate(deck),
+                )
+            })?;
+        Some(amp_core::dj_phrasing::exit(
+            &track.preparation,
+            self.run.style,
+            self.run.transitions.pace,
+            duration,
+            self.fade_seconds as f64 * self.deck_rate(deck),
+        ))
+    }
     fn exit_energy(&self) -> Option<f64> {
         let active = self.active_deck();
         let t = self.loaded_track(active)?;
         let profile = amp_core::energy_profile::read(&t.preparation)?;
-        let end = t.preparation.cue_out.unwrap_or(profile.duration);
+        let end = self
+            .automatic_exit(active)
+            .unwrap_or_else(|| t.preparation.cue_out.unwrap_or(profile.duration));
         profile
             .at((end - self.fade_seconds as f64 * (self.deck_rate(active)))
                 .max(t.preparation.cue_in))
@@ -1895,7 +1927,20 @@ impl Player {
             && self.run.transition.is_none()
         {
             let active = self.active_deck();
-            let remaining = self.audio.as_ref().and_then(|a| a.remaining(active));
+            let remaining = self
+                .audio
+                .as_ref()
+                .and_then(|a| a.remaining(active))
+                .map(|tail| {
+                    self.automatic_exit(active)
+                        .zip(self.audio.as_ref())
+                        .map_or(tail, |(end, a)| {
+                            tail.min(
+                                ((end - a.source_position(active)) / self.deck_rate(active)).max(0.)
+                                    as f32,
+                            )
+                        })
+                });
             let next_mashup = self.run.transitions.pick(self.run.completed_handoffs)
                 == Some(crate::transition_styles::Style::Mashup);
             let auto_mashup_plan = if next_mashup {
@@ -2002,6 +2047,68 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "native audio, muted; simulated playhead; requires AMP_WAVEFORM_FIXTURE"]
+    fn auto_dj_hands_off_early_while_the_audio_tail_is_still_long() {
+        let dir = tempfile::tempdir().unwrap();
+        let fixture = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
+        for name in ["a.wav", "b.wav"] {
+            std::fs::copy(&fixture, dir.path().join(name)).unwrap();
+            amp_core::preparation::save(
+                dir.path(),
+                std::path::Path::new(name),
+                &amp_core::Preparation {
+                    bpm: Some(120.),
+                    beat_offset: Some(0.),
+                    cue_out: Some(300.),
+                    analysis: Some(amp_core::preparation::AnalysisInfo {
+                        engine: "fixture".into(),
+                        duration: 300.,
+                        tempo_confidence: 0.9,
+                        key_confidence: 0.9,
+                        reviewed: false,
+                    }),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        }
+        let mut player = Player {
+            root: dir.path().into(),
+            library: Some(amp_core::scan(dir.path()).unwrap()),
+            channel_gain: [0.; 6],
+            fade_seconds: 0.2,
+            ..Default::default()
+        };
+        player.run.transitions.enabled = false;
+        player.run.scratch_assist = false;
+        player.run.transitions.timing = crate::mix_schedule::Timing::Immediate;
+        player
+            .execute_control(Action::LoadSmartPlaylist {
+                playlist: "demo".into(),
+                execution: Execution::PlayNow,
+                style: None,
+                energy: None,
+            })
+            .unwrap();
+        wait(&mut player, |p| {
+            p.run.preloaded.is_some()
+                && p.audio.as_ref().is_some_and(|a| {
+                    a.playing(p.active_deck()) && a.source_position(p.active_deck()) > 0.1
+                })
+        });
+        let active = player.active_deck();
+        let audio = player.audio.as_ref().unwrap();
+        assert!(audio.remaining(active).unwrap() > 10.);
+        // Simulate reaching the planned song section without a two-minute test wait.
+        audio.simulate_source_origin(active, 130.);
+        wait(&mut player, |p| p.run.completed_handoffs == 1);
+        assert!(player.run.auto);
+        assert_ne!(player.active_deck(), active);
+        player
+            .execute_control(Action::AutoDj { enabled: false })
+            .unwrap();
+    }
     #[test]
     #[ignore = "uses AMP_ENERGY_FIXTURE_ROOT and native audio; both channels muted"]
     fn real_energy_profile_two_deck_handoff_preserves_preparation_and_keeps_auto_running() {

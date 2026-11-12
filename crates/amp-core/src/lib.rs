@@ -7,6 +7,7 @@ pub mod catalog_db;
 pub mod consolidate;
 pub mod coordination;
 pub mod discovery;
+pub mod dj_phrasing;
 pub mod energy_profile;
 pub mod engine_api;
 pub mod genres;

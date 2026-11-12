@@ -1651,6 +1651,10 @@ impl Engine {
         let c = &self.controls.play[deck];
         c.store(!c.load(Relaxed), Relaxed);
     }
+    #[cfg(test)]
+    pub(super) fn simulate_source_origin(&self, deck: usize, seconds: f64) {
+        self.controls.source_origin[deck].store(seconds.to_bits(), Relaxed);
+    }
     pub fn source_position(&self, deck: usize) -> f64 {
         f64::from_bits(self.controls.source_origin[deck].load(Relaxed)) + self.position(deck)
     }

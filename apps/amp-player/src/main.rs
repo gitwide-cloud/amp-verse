@@ -125,6 +125,7 @@ struct Player {
     library: Option<Library>,
     source_roots: Vec<amp_core::music_sources::Source>,
     organizer: library_organizer::Organizer,
+    auto_dj_controls: bool,
     scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
     last_scan: std::time::Instant,
     selected: Option<usize>,
@@ -218,6 +219,7 @@ impl Default for Player {
             library: None,
             source_roots: Vec::new(),
             organizer: Default::default(),
+            auto_dj_controls: false,
             scan: None,
             last_scan: std::time::Instant::now(),
             selected: None,
@@ -1782,6 +1784,50 @@ impl Player {
         }
     }
     fn performance_controls(&mut self, ui: &mut egui::Ui) {
+        let mut enabled = self.auto_dj_controls || self.run.auto;
+        let old = enabled;
+        let label = if self.run.auto {
+            "Auto DJ · ON"
+        } else if enabled {
+            "Auto DJ · setup"
+        } else {
+            "Auto DJ · OFF"
+        };
+        skin::switch(ui, &mut enabled, label);
+        if enabled != old {
+            self.auto_dj_controls = enabled;
+            if !enabled {
+                if let Err(error) = self.execute_control(control::Action::AutoDj { enabled: false })
+                {
+                    self.status = error;
+                }
+            } else {
+                let choice = self
+                    .dj_browser
+                    .selected_smart()
+                    .map(str::to_owned)
+                    .unwrap_or_else(|| self.run.choice.clone());
+                if !choice.is_empty() {
+                    if let Err(error) = self.execute_control(control::Action::LoadSmartPlaylist {
+                        playlist: choice,
+                        execution: control::Execution::PlayNow,
+                        style: None,
+                        energy: None,
+                    }) {
+                        self.status = error;
+                    }
+                } else {
+                    self.status =
+                        "Auto DJ setup: choose a Smart Playlist and press Load to begin.".into();
+                }
+            }
+        }
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::unique("auto-dj-menu-visible"), enabled));
+        if !enabled {
+            return;
+        }
         let original_style = ui.style().clone();
         ui.style_mut().text_styles.insert(
             egui::TextStyle::Button,
@@ -1827,41 +1873,16 @@ impl Player {
             if ui.button("Load").clicked()
                 && let Err(e) = self.execute_control(control::Action::LoadSmartPlaylist {
                     playlist: selected.clone(),
-                    execution: control::Execution::LoadOnly,
+                    execution: if self.run.auto {
+                        control::Execution::LoadOnly
+                    } else {
+                        control::Execution::PlayNow
+                    },
                     style: None,
                     energy: None,
                 })
             {
                 self.status = e;
-            }
-            if ui
-                .add(
-                    egui::Button::selectable(
-                        self.run.auto,
-                        if self.run.auto {
-                            "Stop Auto DJ"
-                        } else {
-                            "Start Auto DJ"
-                        },
-                    )
-                    .frame(true),
-                )
-                .clicked()
-            {
-                let result = if self.run.auto {
-                    self.execute_control(control::Action::AutoDj { enabled: false })
-                } else {
-                    self.execute_control(control::Action::LoadSmartPlaylist {
-                        playlist: selected.clone(),
-                        execution: control::Execution::LoadOnly,
-                        style: None,
-                        energy: None,
-                    })
-                    .and_then(|()| self.execute_control(control::Action::AutoDj { enabled: true }))
-                };
-                if let Err(e) = result {
-                    self.status = e;
-                }
             }
             if ui.button("Mix Next").clicked()
                 && let Err(e) = self.execute_control(control::Action::MixNext { immediate: true })
@@ -1869,6 +1890,24 @@ impl Player {
                 self.status = e;
             }
             skin::switch(ui, &mut self.run.crossfade, "Auto Crossfade");
+            let old_pace = self.run.transitions.pace;
+            egui::ComboBox::from_id_salt("auto-dj-pace")
+                .selected_text(self.run.transitions.pace.label())
+                .show_ui(ui, |ui| {
+                    for pace in [
+                        amp_core::dj_phrasing::Pace::Quick,
+                        amp_core::dj_phrasing::Pace::Balanced,
+                        amp_core::dj_phrasing::Pace::Full,
+                    ] {
+                        ui.selectable_value(&mut self.run.transitions.pace, pace, pace.label());
+                    }
+                });
+            if old_pace != self.run.transitions.pace
+                && let Err(error) = transition_styles::save(self.run.transitions)
+            {
+                self.status = error;
+            }
+
             if self.rack.six {
                 ui.menu_button(
                     format!(
@@ -3228,6 +3267,10 @@ impl eframe::App for Player {
             }
             "dj" => self.dj_ui(ui),
             "dj-window" => self.group_ui(ui, 2),
+            "dj-auto-setup" => {
+                self.auto_dj_controls = true;
+                self.group_ui(ui, 2);
+            }
             "compact" => {
                 self.player_mode = 1;
                 self.group_ui(ui, 0);
@@ -3373,6 +3416,51 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod window_tests {
     use super::*;
+    #[test]
+    fn auto_dj_switch_reveals_setup_and_hides_the_menu_when_off() {
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        let mut frame = |events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| player.performance_controls(ui),
+            );
+            output.textures_delta.clear();
+            ctx.data(|data| {
+                (
+                    data.get_temp::<egui::Rect>(egui::Id::unique("auto-dj-switch"))
+                        .unwrap(),
+                    data.get_temp::<bool>(egui::Id::unique("auto-dj-menu-visible"))
+                        .unwrap(),
+                )
+            })
+        };
+        let (rect, visible) = frame(vec![]);
+        assert!(!visible);
+        for expected in [true, false] {
+            let pos = rect.center();
+            frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ]);
+            let (_, visible) = frame(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }]);
+            assert_eq!(visible, expected);
+        }
+        assert!(!player.run.auto);
+    }
     #[test]
     fn expanding_library_keeps_a_manually_resized_player() {
         for size in [

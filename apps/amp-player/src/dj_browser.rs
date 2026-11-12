@@ -22,6 +22,9 @@ pub struct Browser {
     stem_rx: Option<std::sync::mpsc::Receiver<Vec<(PathBuf, bool)>>>,
 }
 impl Browser {
+    pub(super) fn selected_smart(&self) -> Option<&str> {
+        (self.source == Source::Smart && !self.smart.is_empty()).then_some(self.smart.as_str())
+    }
     pub(super) fn select_smart(&mut self, id: &str) {
         self.source = Source::Smart;
         self.smart = id.into();
