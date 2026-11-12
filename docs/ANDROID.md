@@ -99,3 +99,10 @@ Phone Smart Playlist ordering is a lightweight heuristic over saved BPM, energy 
 Reverse-audio scratching, scrolling DJ waveforms/beatgrids, full analysis/cue detection, separate hardware headphone routing, desktop-only window docking/add-ons, multitrack editing, shared-library metadata editing/sync review, and individual desktop-song downloads/offline Cast collections are not implemented by this update. Jogging seeks; it does not pretend to scratch. Android cue/sampler audio uses the current system output and does not promise a separate headphone bus. The full desktop engine remains on the computer, accessible through its supported Remote commands. AMP Lab retains its existing single-track trim/fades/gain/normalize/MP3 export foundation.
 
 Build: `:app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug`. The installed preview uses the same local debug signing key as 0.1.11, allowing an in-place update without clearing imports/settings. CI preview APKs use the CI debug key and are not guaranteed compatible with that installation.
+
+
+## Android 0.2.1 preview — Remote discovery
+
+AMP Remote opens with a prominent Discover devices button and automatically searches the current LAN. Player/DJ and Cast discovery run concurrently, independently of the command queue, with nearby hosts listed directly on screen. Tap a Player/DJ host to connect; password-protected hosts first select the address and request its control password. Tap a Cast host to open AMP Cast with that server selected. Manual address entry remains available. Refresh disables only during the bounded scan, and leaving Remote discards late discovery callbacks. Discovery never starts playback or sends control commands.
+
+Device verification: debug APK and instrumentation APK built and installed in place on Pixel 7. Three discovery tests passed, covering malformed replies, deduplication, sender-derived host addresses, password flags and the actual Remote screen’s automatic discovery/password flow. Tests use an isolated UDP responder and do not play audio.

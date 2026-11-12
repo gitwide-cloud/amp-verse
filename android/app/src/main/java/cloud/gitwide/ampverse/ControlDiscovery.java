@@ -9,13 +9,14 @@ final class ControlDiscovery {
     static final byte[] QUERY="AMPVERSE_CONTROL_DISCOVER_V1".getBytes(StandardCharsets.UTF_8);
     static final class Server {
         final String name,url,id;
-        Server(String name,String url,String id){this.name=name;this.url=url;this.id=id;}
+        final boolean passwordRequired;
+        Server(String name,String url,String id,boolean passwordRequired){this.name=name;this.url=url;this.id=id;this.passwordRequired=passwordRequired;}
     }
     static Server parse(byte[] data,int size,InetAddress peer)throws Exception {
         JSONObject json=new JSONObject(new String(data,0,size,StandardCharsets.UTF_8));
         int port=json.optInt("port");String id=json.optString("session"),session=json.optString("session"),name=json.optString("name","AMP Verse");
         if(json.optInt("protocol")!=1||!json.optString("service").equals("amp-control")||id.isEmpty()||session.isEmpty()||port<1||port>65535||name.length()>256)throw new java.io.IOException("Unsupported server reply");
-        return new Server(name,"http://"+peer.getHostAddress()+":"+port,id);
+        return new Server(name,"http://"+peer.getHostAddress()+":"+port,id,json.optBoolean("password_required"));
     }
     static List<Server> find()throws Exception {
         Map<String,Server> found=new LinkedHashMap<>();Set<InetAddress> destinations=new HashSet<>();
