@@ -790,7 +790,13 @@ impl Player {
                 if !audio.load_current(d) || !audio.loaded(d) {
                     return Err("Deck is not ready".into());
                 }
-                audio.controls.play[d].store(!audio.playing(d), Relaxed);
+                let play =
+                    !audio.playing(d) || self.playback_owner != crate::playback_owner::Owner::Dj;
+                if play {
+                    self.transport_play(crate::playback_owner::Owner::Dj, d)?;
+                } else {
+                    self.audio.as_ref().unwrap().controls.play[d].store(false, Relaxed);
+                }
             }
             Target::Stop(d) => {
                 self.stop(d);

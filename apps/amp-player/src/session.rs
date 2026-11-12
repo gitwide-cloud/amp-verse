@@ -68,6 +68,8 @@ impl SideSnapshot {
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
     #[serde(default)]
+    playback_owner: crate::playback_owner::Owner,
+    #[serde(default)]
     side_decks: Option<[SideSnapshot; 2]>,
     #[serde(default)]
     deck_settings: Option<[DeckSettings; 6]>,
@@ -374,6 +376,7 @@ impl Player {
                 )
             }),
             rack: self.rack.clone(),
+            playback_owner: self.playback_owner,
             pair: self.pair(),
             sizes: self.recovery.sizes,
             splits: self.recovery.splits,
@@ -584,6 +587,7 @@ impl Player {
         self.run.crossfade = snapshot.crossfade;
         self.run.auto = false;
         self.auto = false;
+        self.playback_owner = snapshot.playback_owner;
         self.run.preloaded = None;
         self.library_open = snapshot.panels[1];
         self.dj_open = snapshot.panels[2];
@@ -753,6 +757,7 @@ mod tests {
         };
         let mut s = player.session_snapshot();
         s.requests = vec!["requested-song".into()];
+        s.playback_owner = crate::playback_owner::Owner::Dj;
         s.side_decks.as_mut().unwrap()[1].deck = Some(Deck {
             path: dir.path().join("cue.wav"),
             position: 23.5,
@@ -772,6 +777,7 @@ mod tests {
             .unwrap();
         let loaded: Snapshot = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.requests, s.requests);
+        assert_eq!(loaded.playback_owner, crate::playback_owner::Owner::Dj);
         assert_eq!(loaded.queue, s.queue);
         assert_eq!(
             loaded.side_decks.as_ref().unwrap()[1]

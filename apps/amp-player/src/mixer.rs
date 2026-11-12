@@ -274,6 +274,8 @@ enum Command {
     Level(usize, f32, f32, bool),
     LevelSet(usize, f32),
     Stop(usize),
+    Pause(usize),
+    Play(usize),
     Fader(f32),
     Fade {
         to: f32,
@@ -508,6 +510,22 @@ impl Mixer {
                         self.fade = None;
                         self.controls.mashup_active.store(false, Relaxed);
                         self.controls.fading.store(false, Relaxed);
+                    }
+                }
+                Command::Play(d) => {
+                    self.controls.play[d].store(true, Relaxed);
+                }
+                Command::Pause(d) => {
+                    self.launches[d] = None;
+                    self.sections[d] = None;
+                    self.levels[d] = None;
+                    self.controls.section_state[d].store(0, Relaxed);
+                    self.controls.play[d].store(false, Relaxed);
+                    self.controls.scratching[d].store(false, Relaxed);
+                    if self.controls.pair_indices().contains(&d) {
+                        self.fade = None;
+                        self.controls.fading.store(false, Relaxed);
+                        self.controls.mashup_active.store(false, Relaxed);
                     }
                 }
                 Command::Stop(d) => {
@@ -1647,6 +1665,7 @@ impl Engine {
     pub fn loaded(&self, deck: usize) -> bool {
         self.controls.loaded[deck].load(Relaxed)
     }
+    #[cfg(test)]
     pub fn toggle(&self, deck: usize) {
         let c = &self.controls.play[deck];
         c.store(!c.load(Relaxed), Relaxed);
@@ -1666,6 +1685,22 @@ impl Engine {
     }
     pub fn set_fader(&self, x: f32) {
         let _ = self.send(Command::Fader(x));
+    }
+    pub fn pause(&mut self, deck: usize) {
+        if deck >= 6 {
+            return;
+        }
+        self.cancel_section(deck);
+        self.controls.play[deck].store(false, Relaxed);
+        let _ = self.send(Command::Pause(deck));
+    }
+    pub fn play(&self, deck: usize) -> Result<(), String> {
+        if deck >= 6 {
+            return Err("Choose a valid deck".into());
+        }
+        self.send(Command::Play(deck))?;
+        self.controls.play[deck].store(true, Relaxed);
+        Ok(())
     }
     pub fn fading(&self) -> bool {
         self.controls.fading.load(Relaxed)
@@ -3255,6 +3290,31 @@ mod tests {
         m.render(1, |_, _| {});
         assert!(c.play[4].load(Relaxed));
         assert_eq!(c.position[4].load(Relaxed), 1);
+    }
+    #[test]
+    fn ownership_pause_cancels_future_launch_and_retains_loaded_position() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(4, source(0.03, 10000), false, 1))
+            .unwrap();
+        tx.send(Command::Launch(4)).unwrap();
+        tx.send(Command::Pause(4)).unwrap();
+        m.render(3000, |_, _| {});
+        assert!(!c.play[4].load(Relaxed));
+        assert!(c.loaded[4].load(Relaxed));
+        assert_eq!(c.position[4].load(Relaxed), 0);
+        c.play[4].store(true, Relaxed);
+        m.render(100, |_, _| {});
+        let before = c.position[4].load(Relaxed);
+        tx.send(Command::Pause(4)).unwrap();
+        m.render(3000, |_, _| {});
+        assert_eq!(c.position[4].load(Relaxed), before);
+        assert!(before > 0);
+        tx.send(Command::Play(4)).unwrap();
+        m.render(100, |_, _| {});
+        assert!(c.play[4].load(Relaxed));
+        assert!(c.position[4].load(Relaxed) > before);
     }
     #[test]
     fn synced_loop_capture_waits_for_master_grid_without_stopping_other_voice() {

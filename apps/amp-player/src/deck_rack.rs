@@ -974,6 +974,7 @@ mod tests {
             auto: true,
             ..Default::default()
         };
+        player.playback_owner = crate::playback_owner::Owner::Dj;
         player.run.auto = true;
         player.run.preloaded = Some((1, 0));
         for deck in 0..6 {
@@ -1011,8 +1012,9 @@ mod tests {
             assert!(std::time::Instant::now() < deadline);
             std::thread::sleep(std::time::Duration::from_millis(10));
         }
+        player.playback_owner = crate::playback_owner::Owner::Dj;
         player.run.auto = true;
-        player.auto = true;
+        player.auto = false;
         player.run.preloaded = Some((1, 0));
         let ctx = egui::Context::default();
         for deck in 2..6 {
@@ -1026,7 +1028,7 @@ mod tests {
             player.begin_jog(deck, 0., egui::ViewportId::ROOT);
             assert!(!player.jog_auto[deck]);
             player.release_jog_wheels(&ctx);
-            assert!(player.run.auto && player.auto);
+            assert!(player.run.auto && !player.auto);
             assert_eq!(player.run.preloaded, Some((1, 0)));
             assert!(player.audio.as_ref().unwrap().fading());
         }
@@ -1056,7 +1058,10 @@ mod tests {
     }
     #[test]
     fn invalid_deck_load_is_rejected_without_changing_playback() {
-        let mut player = Player::default();
+        let mut player = Player {
+            playback_owner: crate::playback_owner::Owner::Dj,
+            ..Default::default()
+        };
         player.run.auto = true;
         assert!(
             player
@@ -1081,7 +1086,8 @@ mod tests {
         player.safe_load_path(0, path.clone(), None).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(200));
         player.audio.as_ref().unwrap().toggle(0);
-        player.auto = true;
+        player.auto = false;
+        player.playback_owner = crate::playback_owner::Owner::Dj;
         player.run.auto = true;
         for (deck, name) in NAMES.iter().enumerate().skip(2) {
             player.safe_load_path(deck, path.clone(), None).unwrap();
@@ -1096,7 +1102,7 @@ mod tests {
             assert!(audio.load_current(deck));
             assert!(!audio.playing(deck));
         }
-        assert!(player.auto && player.run.auto);
+        assert!(!player.auto && player.run.auto);
         assert_eq!(player.pair(), [0, 1]);
         for deck in 2..6 {
             player.select_deck_section(deck, 8.);
@@ -1105,7 +1111,7 @@ mod tests {
                 "{}",
                 player.status
             );
-            assert!(player.auto && player.run.auto);
+            assert!(!player.auto && player.run.auto);
             assert!(player.run.preloaded.is_none());
             assert_eq!(
                 player.loaded_snapshot[deck]
@@ -1140,7 +1146,7 @@ mod tests {
         }
         assert!(player.audio.as_ref().unwrap().source_position(2) >= 12.);
         assert!(player.audio.as_ref().unwrap().playing(0));
-        assert!(player.run.auto && player.auto);
+        assert!(player.run.auto && !player.auto);
         assert_eq!(player.pair(), [0, 1]);
         let ctx = egui::Context::default();
         let mut previous = None;
@@ -1290,7 +1296,10 @@ mod tests {
     }
     #[test]
     fn remote_background_stop_leaves_auto_dj_enabled() {
-        let mut player = Player::default();
+        let mut player = Player {
+            playback_owner: crate::playback_owner::Owner::Dj,
+            ..Default::default()
+        };
         player.run.auto = true;
         player
             .execute_control(control::Action::Stop {

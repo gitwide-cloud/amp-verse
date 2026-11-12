@@ -39,6 +39,7 @@ mod monitor;
 mod music_scenes;
 mod organized_library;
 mod performance;
+mod playback_owner;
 mod podcast_cache;
 mod podcasts;
 mod preparer;
@@ -128,6 +129,7 @@ fn capture(ctx: &egui::Context, path: PathBuf) {
 }
 
 struct Player {
+    playback_owner: playback_owner::Owner,
     rack: deck_rack::Rack,
     recovery: session::Recovery,
     root: PathBuf,
@@ -222,6 +224,7 @@ struct Player {
 impl Default for Player {
     fn default() -> Self {
         Self {
+            playback_owner: Default::default(),
             rack: Default::default(),
             recovery: Default::default(),
             root: std::env::args_os()
@@ -791,7 +794,8 @@ impl Player {
         for (deck, error) in decode_errors {
             self.recover_failed_song(deck, &error);
         }
-        if self.auto
+        if self.playback_owner == playback_owner::Owner::Player
+            && self.auto
             && (self.loaded[0].is_none()
                 || self.audio.as_ref().is_some_and(|a| {
                     a.controls.finished[0].load(std::sync::atomic::Ordering::Relaxed)
@@ -821,6 +825,15 @@ impl Player {
         Ok(())
     }
     fn load_deck(&mut self, deck: usize, index: usize, play: bool) {
+        self.load_deck_owned(deck, index, play, playback_owner::Owner::Dj);
+    }
+    fn load_deck_owned(
+        &mut self,
+        deck: usize,
+        index: usize,
+        play: bool,
+        owner: playback_owner::Owner,
+    ) {
         if deck >= 6 {
             self.status = "Choose a valid deck".into();
             return;
@@ -849,6 +862,9 @@ impl Player {
             }
             match result {
                 Ok(()) => {
+                    if play {
+                        self.claim_playback(owner, deck, false);
+                    }
                     self.cancel_deck_automation(deck);
                     if deck == 0 && !play {
                         self.auto = false;
@@ -884,7 +900,7 @@ impl Player {
         }
     }
     fn play(&mut self, deck: usize, index: usize) {
-        self.load_deck(deck, index, true);
+        self.load_deck_owned(deck, index, true, playback_owner::Owner::Player);
     }
     fn play_cue(&mut self, deck: usize, index: usize, seconds: f64) {
         if deck >= 6 || !seconds.is_finite() || seconds < 0. {
@@ -921,6 +937,7 @@ impl Player {
                     self.loaded_origin[deck] = Some(self.root.clone());
                     self.loaded[deck] = Some(index);
                     self.status = format!("Deck {} cue {:.2}s", deck + 1, seconds);
+                    self.claim_playback(playback_owner::Owner::Player, deck, false);
                 }
                 Err(e) => self.status = e,
             }
@@ -943,30 +960,7 @@ impl Player {
         self.status = format!("Deck {} stopped", deck + 1);
     }
     fn toggle_deck(&mut self, deck: usize) {
-        self.cancel_deck_automation(deck);
-        if let Some(audio) = &self.audio
-            && audio.loaded(deck)
-            && !audio.controls.finished[deck].load(std::sync::atomic::Ordering::Relaxed)
-        {
-            if !audio.playing(deck)
-                && audio.controls.synced[deck].load(std::sync::atomic::Ordering::Relaxed)
-            {
-                if let Err(e) = audio.launch(deck) {
-                    self.status = e;
-                }
-            } else {
-                audio.toggle(deck);
-            }
-        } else if let Some(track) = self.loaded_snapshot[deck].clone() {
-            let root = self.loaded_origin[deck].as_deref().unwrap_or(&self.root);
-            if let Some(audio) = &mut self.audio
-                && let Err(error) = audio.load(deck, root, &track, true)
-            {
-                self.status = error;
-            }
-        } else if let Some(i) = self.loaded[deck].or(self.selected) {
-            self.play(deck, i);
-        }
+        self.toggle_owned_deck(playback_owner::Owner::Dj, deck);
     }
     fn sync_deck(&mut self, deck: usize) {
         if let Some(a) = &self.audio {
@@ -1491,13 +1485,24 @@ impl Player {
             ui.horizontal(|ui| {
                 for (caption, action) in [
                     ("|<", 0),
-                    (if self.playing[0] { "PAUSE" } else { "PLAY" }, 1),
+                    (
+                        if self.playback_owner == playback_owner::Owner::Player && self.playing[0] {
+                            "PAUSE"
+                        } else {
+                            "PLAY"
+                        },
+                        1,
+                    ),
                     ("STOP", 2),
                     (">|", 3),
                 ] {
                     let icon = match action {
                         0 => icons::Icon::Previous,
-                        1 if self.playing[0] => icons::Icon::Pause,
+                        1 if self.playback_owner == playback_owner::Owner::Player
+                            && self.playing[0] =>
+                        {
+                            icons::Icon::Pause
+                        }
                         1 => icons::Icon::Play,
                         2 => icons::Icon::Stop,
                         _ => icons::Icon::Next,
@@ -1518,13 +1523,10 @@ impl Player {
                                 {
                                     self.play(0, i);
                                 } else {
-                                    self.toggle_deck(0);
-                                }
-                                if let Some(a) = &self.audio {
-                                    a.set_fader(0.);
+                                    self.toggle_player();
                                 }
                             }
-                            2 => self.stop(0),
+                            2 => self.stop_player(),
                             _ => self.next(),
                         }
                     }
@@ -1802,7 +1804,16 @@ impl Player {
                 ui.horizontal(|ui| {
                     for (label, action) in [
                         ("|<", 0),
-                        (if self.playing[0] { "Pause" } else { "Play" }, 1),
+                        (
+                            if self.playback_owner == playback_owner::Owner::Player
+                                && self.playing[0]
+                            {
+                                "Pause"
+                            } else {
+                                "Play"
+                            },
+                            1,
+                        ),
                         ("Stop", 2),
                         (">|", 3),
                     ] {
@@ -1821,13 +1832,10 @@ impl Player {
                                             self.play(0, i);
                                         }
                                     } else {
-                                        self.toggle_deck(0);
-                                    }
-                                    if let Some(a) = &self.audio {
-                                        a.set_fader(0.);
+                                        self.toggle_player();
                                     }
                                 }
-                                2 => self.stop(0),
+                                2 => self.stop_player(),
                                 _ => self.next(),
                             }
                         }
@@ -2147,6 +2155,7 @@ impl Player {
                 self.sampler.status = e;
                 continue;
             }
+            let triggered = matches!(&action, sampler::Action::Trigger(_));
             let engine = self.audio.as_mut().unwrap();
             let result = match action {
                 sampler::Action::Browse(_) => Ok(()),
@@ -2169,6 +2178,8 @@ impl Player {
             };
             if let Err(e) = result {
                 self.sampler.status = e;
+            } else if triggered {
+                self.claim_playback(playback_owner::Owner::Dj, usize::MAX, false);
             }
         }
     }
@@ -2611,7 +2622,10 @@ impl Player {
                 self.sides[side]
                     .load(amp_core::music_sources::audio_path(&self.root, &track.path))?;
             }
-            side_deck::Operation::Play => self.sides[side].play()?,
+            side_deck::Operation::Play => {
+                self.sides[side].play()?;
+                self.claim_playback(playback_owner::Owner::Dj, usize::MAX, false);
+            }
             side_deck::Operation::Pause => self.sides[side].pause(),
             side_deck::Operation::Stop => self.sides[side].stop(),
             side_deck::Operation::Seek { seconds } => self.sides[side].seek(seconds)?,
@@ -2769,6 +2783,13 @@ impl Player {
                                     {
                                         self.status = error;
                                     }
+                                    if self.sides[side].playing() {
+                                        self.claim_playback(
+                                            playback_owner::Owner::Dj,
+                                            usize::MAX,
+                                            false,
+                                        );
+                                    }
                                 } else {
                                     if side == 0 {
                                         if !self.sampler.started {
@@ -2847,6 +2868,7 @@ impl Player {
             self.sample_library.pad = pad;
             return;
         }
+        let triggered = matches!(&action, sampler::Action::Trigger(_));
         let (sampler, audio) = if side == 0 {
             (&mut self.sampler, self.audio.as_mut())
         } else {
@@ -2876,6 +2898,8 @@ impl Player {
         };
         if let Err(error) = result {
             sampler.status = error;
+        } else if triggered {
+            self.claim_playback(playback_owner::Owner::Dj, usize::MAX, false);
         }
     }
     fn deck_ui(&mut self, ui: &mut egui::Ui, deck: usize, width: f32, height: f32) {
@@ -3099,6 +3123,9 @@ impl Player {
         }
     }
     fn begin_jog(&mut self, deck: usize, angle: f32, viewport: egui::ViewportId) {
+        if deck < 6 && self.audio.as_ref().is_some_and(|a| a.loaded(deck)) {
+            self.claim_playback(playback_owner::Owner::Dj, deck, false);
+        }
         let Some(audio) = &self.audio else {
             return;
         };
@@ -3122,7 +3149,9 @@ impl Player {
             let _ = audio.loop_toggle(deck, 2.);
         }
         audio.vinyl_target(deck, self.jog_target[deck]);
-        audio.controls.play[deck].store(true, std::sync::atomic::Ordering::Relaxed);
+        if let Err(error) = audio.play(deck) {
+            self.status = error;
+        }
     }
     fn release_jog_wheels(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.pointer.primary_down() && i.viewport().focused.unwrap_or(true)) {

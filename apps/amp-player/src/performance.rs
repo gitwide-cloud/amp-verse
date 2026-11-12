@@ -362,6 +362,9 @@ impl Player {
             Deck::A3 => 4,
             Deck::B3 => 5,
             Deck::Auto => {
+                if self.playback_owner == crate::playback_owner::Owner::Player {
+                    return 0;
+                }
                 let a = self.active_deck();
                 if incoming && self.audio.as_ref().is_some_and(|e| e.playing(a)) {
                     self.other_deck(a)
@@ -483,7 +486,16 @@ impl Player {
         deck: Deck,
         execution: Execution,
     ) -> Result<(), String> {
-        let d = self.requested_deck(deck, true);
+        let d = if deck == Deck::Auto {
+            let active = self.active_deck();
+            if self.audio.as_ref().is_some_and(|a| a.playing(active)) {
+                self.other_deck(active)
+            } else {
+                active
+            }
+        } else {
+            self.requested_deck(deck, true)
+        };
         let active = self.active_deck();
         let paired = self.pair().contains(&d);
         if !paired && execution == Execution::AutoFade {
@@ -591,6 +603,14 @@ impl Player {
         let engine = self.audio.as_mut().unwrap();
         engine.load(d, &self.root, &track, execution == Execution::PlayNow)?;
         engine.set_rate(d, rate);
+        if execution != Execution::LoadOnly {
+            self.claim_playback(
+                crate::playback_owner::Owner::Dj,
+                d,
+                execution == Execution::AutoFade,
+            );
+        }
+        let engine = self.audio.as_mut().unwrap();
         self.pitch[d] = (rate - 1.) * 100.;
         self.loaded_snapshot[d] = Some(track.clone());
         self.loaded_origin[d] = Some(self.root.clone());
@@ -879,6 +899,7 @@ impl Player {
             Action::QuantizedLaunch { deck } => {
                 let d = self.requested_deck(deck, false);
                 self.audio.as_ref().ok_or("Load a deck first")?.launch(d)?;
+                self.claim_playback(self.remote_owner(deck), d, false);
             }
             Action::DeckLoop {
                 deck,
@@ -941,8 +962,7 @@ impl Player {
                 self.fade_seconds = seconds;
             }
             Action::StopPlayer => {
-                self.stop(0);
-                self.auto = false;
+                self.stop_player();
             }
             Action::StopAllDecks => {
                 self.run.auto = false;
@@ -1158,6 +1178,10 @@ impl Player {
             }
             Action::PreloadNext => self.preload_smart()?,
             Action::NextSong { immediate } => {
+                if self.playback_owner == crate::playback_owner::Owner::Player {
+                    self.next();
+                    return Ok(());
+                }
                 if self.run.profile.is_some() {
                     self.execute_control(Action::MixNext { immediate })?;
                 } else {
@@ -1171,20 +1195,37 @@ impl Player {
                 self.preload_variant(1)?;
             }
             Action::Play { deck } => {
-                let d = self.requested_deck(deck, false);
-                let a = self.audio.as_ref().ok_or("Load a song first")?;
-                if !a.load_current(d) || !a.loaded(d) {
-                    return Err("Deck is not loaded yet".into());
+                if deck == Deck::Auto
+                    && self.playback_owner == crate::playback_owner::Owner::Dj
+                    && self.run.paused
+                {
+                    return self.execute_control(Action::AutoDjPause { paused: false });
                 }
-                a.controls.play[d].store(true, Relaxed);
+                let d = self.requested_deck(deck, false);
+                self.transport_play(self.remote_owner(deck), d)?;
             }
             Action::Pause { deck } => {
+                if deck == Deck::Auto {
+                    self.pause_playback();
+                    return Ok(());
+                }
                 let d = self.requested_deck(deck, false);
-                if let Some(a) = &self.audio {
-                    a.controls.play[d].store(false, Relaxed);
+                if self.remote_owner(deck) != self.playback_owner {
+                    return Err("DJ is not the active playback owner".into());
+                }
+                self.cancel_deck_automation(d);
+                if let Some(a) = &mut self.audio {
+                    a.pause(d);
                 }
             }
             Action::Stop { deck } => {
+                if deck == Deck::Auto {
+                    self.stop_playback();
+                    return Ok(());
+                }
+                if self.playback_owner != crate::playback_owner::Owner::Dj {
+                    return Err("DJ is not the active playback owner".into());
+                }
                 let d = self.requested_deck(deck, false);
                 self.stop(d);
             }
@@ -1242,6 +1283,7 @@ impl Player {
                 self.preload_smart()?;
                 let d = self.run.preloaded.unwrap().0;
                 let active = self.active_deck();
+                self.claim_playback(crate::playback_owner::Owner::Dj, d, true);
                 self.run.pending_at = if immediate {
                     None
                 } else {
@@ -1323,6 +1365,7 @@ impl Player {
                     if execution == Execution::PlayNow {
                         self.call_track(i, None, Deck::PHYSICAL[d], execution)?;
                     } else {
+                        self.claim_playback(crate::playback_owner::Owner::Dj, d, true);
                         self.run.pending = Some((d, Instant::now()));
                     }
                     self.run.auto = true;
@@ -1494,16 +1537,24 @@ impl Player {
                     );
                 }
                 let active = self.active_deck();
-                let audio = self.audio.as_ref().ok_or("Audio engine is not running")?;
+                let pair = self.pair();
+                let audio = self.audio.as_mut().ok_or("Audio engine is not running")?;
                 if !audio.loaded(active) {
                     return Err("The active deck is not loaded".into());
                 }
                 self.run.cancel_effects(audio);
-                for d in self.pair() {
-                    audio.controls.play[d].store(!paused && d == active, Relaxed);
+                for d in pair {
+                    if !paused && d == active {
+                        audio.play(d)?;
+                    } else {
+                        audio.pause(d);
+                    }
                 }
                 self.run.auto = !paused;
                 self.run.paused = paused;
+                if !paused {
+                    self.claim_playback(crate::playback_owner::Owner::Dj, active, false);
+                }
             }
             Action::AutoDj { enabled } => {
                 if !enabled {
@@ -1522,10 +1573,11 @@ impl Player {
                 // Do not claim ON until loading/starting the first song succeeds.
                 self.run.auto = false;
                 if enabled
-                    && !self
-                        .audio
-                        .as_ref()
-                        .is_some_and(|a| a.playing(self.active_deck()))
+                    && !(self.playback_owner == crate::playback_owner::Owner::Dj
+                        && self
+                            .audio
+                            .as_ref()
+                            .is_some_and(|a| a.playing(self.active_deck())))
                 {
                     self.preload_smart()?;
                     let (d, i) = self.run.preloaded.unwrap();
@@ -1533,6 +1585,7 @@ impl Player {
                 }
                 self.run.auto = enabled;
                 if enabled {
+                    self.claim_playback(crate::playback_owner::Owner::Dj, self.active_deck(), true);
                     let active = self.active_deck();
                     let other = self.other_deck(active);
                     if let Some(audio) = &self.audio
@@ -1589,6 +1642,7 @@ impl Player {
                         .ok_or("Load the right sampler first")?
                         .sample_trigger(pad - 1)?;
                 }
+                self.claim_playback(crate::playback_owner::Owner::Dj, usize::MAX, false);
             }
             Action::Sampler { pad } => {
                 if !(1..=9).contains(&pad) {
@@ -1598,6 +1652,7 @@ impl Player {
                     .as_ref()
                     .ok_or("Load sampler effects in DJ first")?
                     .sample_trigger(pad - 1)?;
+                self.claim_playback(crate::playback_owner::Owner::Dj, usize::MAX, false);
             }
         }
         Ok(())
@@ -1659,6 +1714,7 @@ impl Player {
         })
     }
     pub(super) fn performance_tick(&mut self) {
+        self.enforce_playback_owner();
         // Every temporary effect must release its transport when automation stops.
         if ((self.run.pending.is_none() && self.run.transition.is_none())
             || !self.run.scratch_assist)
@@ -2089,7 +2145,11 @@ impl Player {
         json!({"scenes":self.scene_resources()["scenes"],"songs":self.library.as_ref().map(|l|l.tracks.iter().map(|t|json!({"id":show::song_id(t),"title":t.title,"path":t.path,"resource_id":crate::resources::stable_song_id(t),"available":true,"analyzed":t.preparation.analysis.is_some(),"artist":t.preparation.extensions.get("artist"),"cues":t.preparation.manual_cues.iter().chain(&t.preparation.cues).map(|c|json!({"number":c.number,"id":c.id,"name":c.label,"seconds":c.seconds})).collect::<Vec<_>>()})).collect::<Vec<_>>()).unwrap_or_default(),"playlists":self.run.settings.playlists,"regular_playlists":self.dj_browser.playlists.iter().map(|(path,p)|json!({"id":regular_playlist_id(path),"name":p.name})).collect::<Vec<_>>(),"resource_playlists":self.companion_playlists(),"version":1})
     }
     pub(super) fn control_snapshot(&self) -> Value {
-        let active = self.active_deck();
+        let active = if self.playback_owner == crate::playback_owner::Owner::Player {
+            0
+        } else {
+            self.active_deck()
+        };
         let a = self.audio.as_ref();
         let tracks:Vec<_>=(0..6).map(|d|{
             let engine_loaded=a.is_some_and(|a|a.load_current(d)&&a.loaded(d));let t=self.loaded_track(d);
@@ -2097,7 +2157,7 @@ impl Player {
             json!({"deck":crate::deck_rack::NAMES[d],"key_lock":a.is_some_and(|a|a.controls.key_lock[d].load(Relaxed)),"key_lock_available":a.is_some_and(|a|a.controls.key_lock_available[d].load(Relaxed)),"stem_levels":std::array::from_fn::<_,3,_>(|i|a.map_or(1.,|a|f32::from_bits(a.controls.stem_level[d][i].load(Relaxed)))),"stems_ready":a.is_some_and(|a|a.controls.stems_loaded[d].load(Relaxed)),"sync":a.is_some_and(|a|a.controls.synced[d].load(Relaxed)),"looping":a.is_some_and(|a|a.controls.looping[d].load(Relaxed)),"gain":a.map_or(0.,|a|a.channel_level(d)),"underruns":a.map_or(0,|a|a.controls.underruns[d].load(Relaxed)),"loaded":engine_loaded,"ready":engine_loaded&&a.is_some_and(|a|a.controls.ready[d].load(Relaxed)),"playing":playing,"state":if playing{"playing"}else if engine_loaded{"paused"}else{"stopped"},"song_id":if engine_loaded{t.map(show::song_id)}else{None},"title":if engine_loaded{t.map(|t|t.title.as_str())}else{None},"artist":if engine_loaded{t.and_then(|t|t.preparation.extensions.get("artist")).cloned()}else{None},"position":if engine_loaded{a.map(|a|a.source_position(d))}else{None},"remaining":if engine_loaded{a.and_then(|a|a.remaining(d))}else{None}})
         }).collect();
         let fading = a.is_some_and(|a| a.fading() || a.controls.level_fading.load(Relaxed));
-        json!({"version":1,"amp":{"connected":true,"status":self.status,"playback_state":tracks[active]["state"],"recognition_context":self.run.recognition_context,"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active.is_multiple_of(2){"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_dj_paused":self.run.paused,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"position":tracks[active]["position"],"crossfader":a.map_or(0.5,|a|a.fader()),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"shuffle":self.shuffle,"repeat":self.repeat_one,"manual_dj_locked":false},"samplers":[self.sampler.snapshot(a),self.right_sampler.snapshot(self.right_sample_audio.as_ref())],"google_cast":self.cast.google.snapshot(),"live_broadcast":self.live_mix.as_ref().map(|b|json!({"running":b.running(),"source":if b.player_only{"player"}else{"dj"},"levels":b.levels(),"status":b.status.lock().ok().map(|s|s.clone())})),"deck_layers":tracks,"selected_decks":self.rack.live.map(|d|crate::deck_rack::NAMES[d]),"crossfade_pair":self.pair().map(|d|crate::deck_rack::NAMES[d]),"clock":{"bpm":a.map_or(120.,|a|f32::from_bits(a.controls.master_bpm.load(Relaxed))),"quantization":a.map_or(4,|a|a.controls.quantization.load(Relaxed)),"sample_frames":a.map_or(0,|a|a.controls.rendered.load(Relaxed)),"sample_rate":a.map_or(48000,|a|a.sample_rate),"beat":a.map_or(0.,|a|a.controls.beat_at(a.controls.rendered.load(Relaxed),a.sample_rate))},"decks":self.rack.live.map(|d|{let mut v=tracks[d].clone();v["deck"]=json!(if d%2==0{"A"}else{"B"});v}),"cue_decks":self.sides.iter().map(|side|side.snapshot()).collect::<Vec<_>>()})
+        json!({"version":1,"amp":{"playback_owner":self.playback_owner,"connected":true,"status":self.status,"playback_state":tracks[active]["state"],"recognition_context":self.run.recognition_context,"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active.is_multiple_of(2){"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_dj_paused":self.run.paused,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"position":tracks[active]["position"],"crossfader":a.map_or(0.5,|a|a.fader()),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"shuffle":self.shuffle,"repeat":self.repeat_one,"manual_dj_locked":false},"samplers":[self.sampler.snapshot(a),self.right_sampler.snapshot(self.right_sample_audio.as_ref())],"google_cast":self.cast.google.snapshot(),"live_broadcast":self.live_mix.as_ref().map(|b|json!({"running":b.running(),"source":if b.player_only{"player"}else{"dj"},"levels":b.levels(),"status":b.status.lock().ok().map(|s|s.clone())})),"deck_layers":tracks,"selected_decks":self.rack.live.map(|d|crate::deck_rack::NAMES[d]),"crossfade_pair":self.pair().map(|d|crate::deck_rack::NAMES[d]),"clock":{"bpm":a.map_or(120.,|a|f32::from_bits(a.controls.master_bpm.load(Relaxed))),"quantization":a.map_or(4,|a|a.controls.quantization.load(Relaxed)),"sample_frames":a.map_or(0,|a|a.controls.rendered.load(Relaxed)),"sample_rate":a.map_or(48000,|a|a.sample_rate),"beat":a.map_or(0.,|a|a.controls.beat_at(a.controls.rendered.load(Relaxed),a.sample_rate))},"decks":self.rack.live.map(|d|{let mut v=tracks[d].clone();v["deck"]=json!(if d%2==0{"A"}else{"B"});v}),"cue_decks":self.sides.iter().map(|side|side.snapshot()).collect::<Vec<_>>()})
     }
 }
 
@@ -2228,6 +2288,7 @@ mod tests {
         wait(&mut player, |p| {
             p.audio.as_ref().is_some_and(|a| a.position(0) > 0.1)
         });
+        player.playback_owner = crate::playback_owner::Owner::Dj;
         player.run.auto = true;
         player
             .execute_control(Action::CallSong {
@@ -2287,6 +2348,7 @@ mod tests {
         wait(&mut player, |p| {
             p.audio.as_ref().is_some_and(|a| a.position(0) > 0.1)
         });
+        player.playback_owner = crate::playback_owner::Owner::Dj;
         player.run.auto = true;
         player
             .execute_control(Action::CallSong {
@@ -2605,6 +2667,7 @@ mod tests {
         };
         player.run.profile = Some(player.run.settings.playlists[0].clone());
         player.run.playlist = Some("walk-in".into());
+        player.playback_owner = crate::playback_owner::Owner::Dj;
         player.run.auto = true;
         let result = player.execute_control(Action::LoadSmartPlaylist {
             playlist: "demo".into(),
@@ -2673,6 +2736,7 @@ mod tests {
                 .is_err()
         );
         assert!(!player.run.auto);
+        player.playback_owner = crate::playback_owner::Owner::Dj;
         player.run.auto = true;
         player
             .execute_control(Action::AutoDj { enabled: false })

@@ -10,6 +10,7 @@ async function read(path,body){
 }
 function render(state){
  const amp=state.amp||{};current=amp;
+ $('connection').textContent='Connected to '+location.host+' · '+(amp.playback_owner==='dj'?'DJ':'Player');
  $('song').textContent=amp.current_song||'No track loaded';$('playing').textContent=amp.playback_state||'Stopped';
  $('auto').textContent=amp.auto_dj_enabled?'Auto DJ: ON':'Auto DJ: OFF';$('auto').setAttribute('aria-pressed',String(!!amp.auto_dj_enabled));
  if(document.activeElement!==$('crossfader'))$('crossfader').value=Number.isFinite(amp.crossfader)?amp.crossfader:0.5;
@@ -38,7 +39,7 @@ async function send(action){
 $('connect').onclick=connect;
 $('play').onclick=()=>send({action:'play',deck:'auto'});
 $('pause').onclick=()=>send({action:'pause',deck:'auto'});
-$('next').onclick=()=>send(current?.auto_dj_enabled?{action:'mix_next'}:{action:'player_next'});
+$('next').onclick=()=>send(current?.playback_owner==='dj'||current?.auto_dj_enabled?{action:'mix_next'}:{action:'player_next'});
 $('auto').onclick=()=>send({action:'auto_dj',enabled:!current?.auto_dj_enabled});
 $('crossfader').onchange=()=>send({action:'set_crossfader',value:Number($('crossfader').value)});
 $('quieter').onclick=()=>send({action:'adjust_volume',delta:-0.05});

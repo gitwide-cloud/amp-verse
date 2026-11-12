@@ -1,5 +1,15 @@
 # AMP Cast and Android Remote — implementation and acceptance
 
+## Single desktop playback owner — November 12
+
+Player and DJ use one existing desktop mixer engine. `playback_owner.rs` now owns the Player/DJ handoff policy; there is no remote-owned player or new playback engine. GUI transport, MIDI Play, explicit remote deck starts, Smart Playlist starts and scratch starts call this policy. Player starts pause DJ voices, clear pending DJ automation/scratch restoration and stop DJ sampler/Cue Deck output. DJ starts stop Player queue advancement and pause Player's A1 when launching a different deck; an intentional scheduled DJ blend may adopt that already-playing track as DJ's outgoing voice. Paused preparation on A2/A3/B2/B3 does not switch owners. Starting another DJ deck keeps the current DJ session and mix pair.
+
+Remote `deck:auto` Play/Pause/Stop routes to the current owner. Explicit deck starts target DJ. Player Next/Previous use Player; generic Next follows the owner rather than a stale retained Smart Playlist. The browser shows the current owner and uses DJ Mix Next even when Auto DJ is off. A stopped/finished loaded track can be restarted through the same transport entry point. Stopping the inactive Player view does not stop DJ's A1. Android's existing commands use this backend routing; no APK change is needed for this policy, and no new Android device acceptance is claimed.
+
+Owner choice is included in remote state and local recovery snapshots; old snapshots default to Player. Recovery still restores paused without starting audio. Mixer Pause retains the source/position while cancelling queued launches and sections. Ordered Play/Pause messages prevent an earlier pause from undoing a rapid mode switch. A callback-level test checks cancellation beyond the quantized launch boundary and retained position.
+
+Validation: 98 Core + 187 Player + 9 Cast = **294 passing workspace tests**, strict workspace Clippy, six Node web checks, and three explicit muted native checks (Player/DJ and remote handoff, auxiliary controls during a crossfade, and auxiliary loading/sections/layout). Hardware/phone and long-duration acceptance are separate. The Windows update is staged; current user playback was not stopped.
+
 ## Desktop access shortcuts — November 12
 
 Use **Remote / Web UI** above the Library content, at the top of Devices, or beside DJ Library. A resizable window provides direct links to browser remote, song requests and the separate AMP Cast Web UI; it also shows a copyable LAN URL and Android Remote → Discover instructions. Connection settings moved out of the Sources form into Advanced in this window. Start/restart/stop affects only the control service, preserving audio. Existing LAN binding/password policy is unchanged. The suggested LAN link uses the local default-route address (no UDP packet is sent to select the route), falling back to the computer name; multiple adapters/VPNs may require the PC's alternative LAN address.
