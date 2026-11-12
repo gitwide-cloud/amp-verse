@@ -236,27 +236,41 @@ pub fn audio_path(root: &Path, path: &Path) -> PathBuf {
     }
     root.join(path)
 }
-pub(crate) fn append(root: &Path, library: &mut Library) -> io::Result<()> {
+pub(crate) fn append(root: &Path, library: &mut Library, metadata: bool) -> io::Result<()> {
     let mut group = Folder {
         name: PREFIX.into(),
         folders: vec![],
         tracks: vec![],
     };
-    let mut seen: std::collections::HashSet<_> = library
-        .tracks
-        .iter()
-        .filter_map(|t| root.join(&t.path).canonicalize().ok())
-        .collect();
+    // scan_single enumerates real entries and rejects symlinks. Canonicalize the
+    // roots once, not every song: per-song NAS round trips can stall preparation.
+    let base = root.canonicalize()?;
+    let mut seen: std::collections::HashSet<_> =
+        library.tracks.iter().map(|t| base.join(&t.path)).collect();
     for source in list(root).map_err(io::Error::other)? {
         if !identity_matches(&source.root, &source.library_id) {
+            if !metadata {
+                return Err(io::Error::other(format!(
+                    "Music source unavailable or identity changed: {}. Reconnect it in Library > Sources.",
+                    source.root.display()
+                )));
+            }
             continue;
         }
-        let Ok(mut extra) = crate::scan_single(&source.root) else {
-            continue;
+        let mut extra = match crate::scan_single(&source.root, metadata) {
+            Ok(extra) => extra,
+            Err(error) if !metadata => {
+                return Err(io::Error::other(format!(
+                    "Cannot scan music source {}: {error}",
+                    source.root.display()
+                )));
+            }
+            Err(_) => continue,
         };
+        let source_base = source.root.canonicalize()?;
         let mut indexes = std::collections::HashMap::new();
         for (old, mut track) in extra.tracks.into_iter().enumerate() {
-            let absolute = source.root.join(&track.path).canonicalize()?;
+            let absolute = source_base.join(&track.path);
             if !seen.insert(absolute) {
                 continue;
             }
@@ -288,6 +302,34 @@ pub(crate) fn append(root: &Path, library: &mut Library) -> io::Result<()> {
 mod tests {
     use super::*;
     #[test]
+    fn job_enumeration_does_not_parse_metadata_and_reports_disconnected_sources() {
+        let main = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        fs::create_dir_all(extra.path().join("Artist/Album")).unwrap();
+        fs::write(extra.path().join("Artist/Album/song.mp3"), b"audio").unwrap();
+        fs::write(
+            extra.path().join("Artist/Album/song.mp3.amp.json"),
+            b"broken preparation",
+        )
+        .unwrap();
+        add(main.path(), extra.path()).unwrap();
+        let jobs = crate::scan_job_inputs(main.path()).unwrap();
+        assert_eq!(jobs.tracks.len(), 1);
+        assert_eq!(jobs.tracks[0].preparation, crate::Preparation::default());
+        assert!(crate::scan(extra.path()).is_err());
+        fs::rename(
+            extra.path().join("ampdj/library.json"),
+            extra.path().join("ampdj/library.offline"),
+        )
+        .unwrap();
+        assert!(
+            crate::scan_job_inputs(main.path())
+                .unwrap_err()
+                .to_string()
+                .contains("Music source unavailable")
+        );
+    }
+    #[test]
     fn added_roots_persist_combine_and_keep_their_metadata_and_ids() {
         let main = tempfile::tempdir().unwrap();
         let extra = tempfile::tempdir().unwrap();
@@ -298,6 +340,15 @@ mod tests {
         assert_eq!(list(main.path()).unwrap().len(), 1);
         let lib = crate::scan(main.path()).unwrap();
         assert_eq!(lib.tracks.len(), 2);
+        assert_eq!(
+            crate::scan_job_inputs(main.path())
+                .unwrap()
+                .tracks
+                .iter()
+                .map(|t| &t.path)
+                .collect::<Vec<_>>(),
+            lib.tracks.iter().map(|t| &t.path).collect::<Vec<_>>()
+        );
         let b = lib.tracks.iter().find(|t| t.title == "b").unwrap();
         let id = crate::show::song_id(b);
         assert_eq!(

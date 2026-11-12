@@ -140,6 +140,7 @@ struct Player {
     scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
     last_scan: std::time::Instant,
     analyze_after_scan: bool,
+    analysis_scan: Option<mpsc::Receiver<Result<Library, String>>>,
     selected: Option<usize>,
     folder: PathBuf,
     search: String,
@@ -239,6 +240,7 @@ impl Default for Player {
             scan: None,
             last_scan: std::time::Instant::now(),
             analyze_after_scan: false,
+            analysis_scan: None,
             selected: None,
             folder: PathBuf::new(),
             search: String::new(),
@@ -468,20 +470,36 @@ impl Player {
             return;
         }
         self.analyze_after_scan = true;
-        self.scan();
+        let root = self.root.clone();
+        let (tx, rx) = mpsc::channel();
+        self.analysis_scan = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(amp_core::scan_job_inputs(&root).map_err(|e| e.to_string()));
+        });
         self.preparer.status = "Checking all music sources for new songs before analysis…".into();
     }
-    fn finish_analysis_scan(&mut self, error: Option<&str>) {
-        if !std::mem::take(&mut self.analyze_after_scan) {
-            return;
-        }
-        if let Some(error) = error {
-            self.preparer.status = format!(
-                "Could not refresh music sources: {error}. Analysis was not started; retry when the folders are available."
-            );
-        } else if let Some(library) = &self.library {
-            self.preparer
-                .batch(self.root.clone(), library.tracks.clone());
+    fn poll_analysis_scan(&mut self) {
+        let result = self
+            .analysis_scan
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Music source scan interrupted".into()))
+                }
+                Err(mpsc::TryRecvError::Empty) => None,
+            });
+        if let Some(result) = result {
+            self.analysis_scan = None;
+            self.analyze_after_scan = false;
+            match result {
+                Ok(library) => self.preparer.batch(self.root.clone(), library.tracks),
+                Err(error) => {
+                    self.preparer.status = format!(
+                        "Could not refresh music sources: {error}. Analysis was not started; retry when the folders are available."
+                    )
+                }
+            }
         }
     }
     fn accept_scan(&mut self, snapshot: library_cache::Snapshot) {
@@ -631,13 +649,13 @@ impl Player {
             self.sampler.poll(engine);
         }
         self.preparer.poll(&self.root, self.library.as_mut());
+        self.poll_analysis_scan();
         if let Some(rx) = &self.scan {
             match rx.try_recv() {
                 Ok(result) => {
                     match result {
                         Ok(lib) => {
                             self.accept_scan(lib);
-                            self.finish_analysis_scan(None);
                             self.catalog_updated =
                                 std::time::Instant::now() - std::time::Duration::from_secs(3);
 
@@ -672,7 +690,6 @@ impl Player {
                             }
                         }
                         Err(e) => {
-                            self.finish_analysis_scan(Some(&e));
                             self.status = e;
                         }
                     }
@@ -683,7 +700,6 @@ impl Player {
                     self.scan = None;
                     self.last_scan = std::time::Instant::now();
                     self.status = "Background scan interrupted; saved library retained".into();
-                    self.finish_analysis_scan(Some("Background scan interrupted"));
                 }
                 Err(mpsc::TryRecvError::Empty) => (),
             }
@@ -1006,6 +1022,7 @@ impl Player {
         self.show_editor.open = false;
         self.scan = None; // Discard any previous root's in-flight result.
         self.analyze_after_scan = false;
+        self.analysis_scan = None;
         self.root = root;
         if recover {
             self.recovery = session::Recovery::open(&self.root);
@@ -3548,7 +3565,7 @@ fn main() -> eframe::Result {
 mod window_tests {
     use super::*;
     #[test]
-    fn analysis_waits_for_added_source_and_recursive_scan_before_queuing() {
+    fn analysis_job_inputs_include_added_subfolders_without_replacing_loaded_library() {
         let main = tempfile::tempdir().unwrap();
         let extra = tempfile::tempdir().unwrap();
         std::fs::write(main.path().join("old.mp3"), b"fixture").unwrap();
@@ -3556,32 +3573,25 @@ mod window_tests {
         std::fs::create_dir_all(extra.path().join("Artist/Album")).unwrap();
         std::fs::write(extra.path().join("Artist/Album/new.mp3"), b"fixture").unwrap();
         amp_core::music_sources::add(main.path(), extra.path()).unwrap();
-        let (tx, rx) = mpsc::channel();
         let mut player = Player {
             root: main.path().into(),
             library: Some(old),
-            scan: Some(rx),
+            analyze_after_scan: true,
             ..Default::default()
         };
-        player.request_library_analysis();
-        assert!(player.analyze_after_scan);
-        assert_eq!(player.preparer.progress(), (0, 0));
-        tx.send(library_cache::scan(main.path())).unwrap();
-        player.poll();
-        assert!(!player.analyze_after_scan);
-        assert_eq!(player.library.as_ref().unwrap().tracks.len(), 2);
-        assert_eq!(player.preparer.progress().1, 2);
-        let added = player
-            .library
-            .as_ref()
-            .unwrap()
-            .tracks
-            .iter()
-            .find(|t| t.title == "new")
-            .unwrap();
-        let (owner, relative) = amp_core::music_sources::owner(main.path(), &added.path).unwrap();
+        let (tx, rx) = mpsc::channel();
+        player.analysis_scan = Some(rx);
+        let jobs = amp_core::scan_job_inputs(main.path()).unwrap();
+        assert_eq!(jobs.tracks.len(), 2);
+        let new = jobs.tracks.iter().find(|t| t.title == "new").unwrap();
+        let (owner, relative) = amp_core::music_sources::owner(main.path(), &new.path).unwrap();
         assert_eq!(owner, extra.path().canonicalize().unwrap());
         assert_eq!(relative, PathBuf::from("Artist/Album/new.mp3"));
+        tx.send(Ok(jobs)).unwrap();
+        player.poll_analysis_scan();
+        assert!(!player.analyze_after_scan);
+        assert_eq!(player.preparer.progress().1, 2);
+        assert_eq!(player.library.as_ref().unwrap().tracks.len(), 1);
     }
     #[test]
     fn failed_refresh_does_not_analyze_an_outdated_song_list() {
@@ -3589,17 +3599,16 @@ mod window_tests {
         let (tx, rx) = mpsc::channel();
         let mut player = Player {
             root: root.path().into(),
-            scan: Some(rx),
+            analysis_scan: Some(rx),
+            analyze_after_scan: true,
             ..Default::default()
         };
-        player.request_library_analysis();
         tx.send(Err("Music folder unavailable".into())).unwrap();
-        player.poll();
+        player.poll_analysis_scan();
         assert!(!player.analyze_after_scan);
         assert_eq!(player.preparer.progress(), (0, 0));
         assert!(player.preparer.status.contains("Analysis was not started"));
     }
-
     #[test]
     fn auto_mix_switch_never_claims_on_when_no_source_can_start() {
         let ctx = egui::Context::default();

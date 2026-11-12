@@ -25,3 +25,11 @@ Primary upstream documentation: https://github.com/facebookresearch/demucs .
 Select a song in Library / Edit song / Default stem mix for this song. Prepare its stems, adjust Vocals / Instruments / Beat, and use Preview stem mix to listen. Left removes that part; right isolates it. Original mix resets all three. Press Save approved metadata to publish the default.
 
 Defaults use the existing revision and conflict checks and travel in the song's ampdj metadata. DJ applies them on the next load, including Auto DJ; playing decks keep their loaded snapshot. Songs without defaults load the original mix. Prepared audio is currently a local cache: another computer must prepare stems before playing a custom mix. Missing stems produce a preparation error instead of silently playing the original. Source audio is unchanged.
+
+## Preparation jobs and added sources
+
+Analyze library and Prepare library stems enumerate all configured roots and subfolders independently from the slower tag/preparation refresh. Job inputs contain paths, not replacement playback metadata. Analysis workers reload preparation in the owning library under the existing shared coordination rules. A disconnected source produces a visible error instead of silently excluding that source. Ordinary browsing retains its existing offline behavior.
+
+Library stem preparation continues past individual failed files and reports the failure count and last error. Stop retains completed stems. Initial file enumeration on a large NAS may still take time; the interface shows that it is finding songs before the per-song counter begins.
+
+If a stem environment is damaged, rerun the existing installation script with a working Python 3.12 interpreter. It repairs the environment in place while retaining installed packages and models. Verification on November 12 used the installed engine protocol round trip and a real Demucs separation/reconstruction test on isolated audio; user music was not changed.

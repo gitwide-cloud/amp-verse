@@ -468,16 +468,9 @@ impl Panel {
             .clicked()
             && let (Some(cache), Some(python)) = (cache_root(), runtime())
         {
-            let sources: Vec<_> = tracks
-                .iter()
-                .map(|t| {
-                    (
-                        amp_core::music_sources::audio_path(root, &t.path),
-                        t.title.clone(),
-                    )
-                })
-                .collect();
-            self.batch_progress = (0, sources.len());
+            let root = root.to_path_buf();
+            self.batch_progress = (0, 0);
+            self.batch_status = "Finding songs in all music sources and subfolders…".into();
             let cancel = Arc::new(AtomicBool::new(false));
             let process = Arc::new(Mutex::new(None));
             let (tx, rx) = mpsc::channel();
@@ -486,7 +479,20 @@ impl Panel {
             let child = process.clone();
             std::thread::spawn(move || {
                 let result = (|| {
+                    let library = amp_core::scan_job_inputs(&root).map_err(|e| e.to_string())?;
+                    let sources: Vec<_> = library
+                        .tracks
+                        .iter()
+                        .map(|track| {
+                            (
+                                amp_core::music_sources::audio_path(&root, &track.path),
+                                track.title.clone(),
+                            )
+                        })
+                        .collect();
                     let total = sources.len();
+                    let mut failed = 0;
+                    let mut last_error = String::new();
                     for (index, (source, title)) in sources.into_iter().enumerate() {
                         if stop.load(Relaxed) {
                             return Err(
@@ -494,8 +500,28 @@ impl Panel {
                             );
                         }
                         let _ = progress.send((index, total, format!("Preparing {title}")));
-                        prepare(&cache, &source, &python, &stop, &child)?;
-                        let _ = progress.send((index + 1, total, format!("Prepared {title}")));
+                        match prepare(&cache, &source, &python, &stop, &child) {
+                            Ok(()) => {
+                                let _ =
+                                    progress.send((index + 1, total, format!("Prepared {title}")));
+                            }
+                            Err(error) if stop.load(Relaxed) => return Err(error),
+                            Err(error) => {
+                                failed += 1;
+                                last_error = format!("{title}: {error}");
+                                let _ = progress.send((
+                                    index + 1,
+                                    total,
+                                    format!("Skipped failed song: {last_error}"),
+                                ));
+                            }
+                        }
+                    }
+                    if failed > 0 {
+                        return Err(format!(
+                            "Stem preparation finished: {} prepared/reused, {failed} failed. Last error: {last_error}",
+                            total - failed
+                        ));
                     }
                     Ok(())
                 })();
