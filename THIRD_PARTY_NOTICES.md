@@ -26,3 +26,9 @@ Android Remote uses OkHttp 4.12.0 (Apache-2.0, Square and contributors) for auth
 The optional pitch-preserving playback backend uses Signalsmith Stretch and Signalsmith Linear (MIT), through the pinned signalsmith-stretch-rs 0.1.3 wrapper (MIT). Sources, provenance and original licenses are in `apps/amp-player/vendor/signalsmith` and are included in desktop distributions. Windows requires the accompanying `amp-keylock.dll`; if absent, Key Lock is unavailable and ordinary playback remains supported.
 
 Genre-tag reading uses Lofty 0.25.5 (MIT OR Apache-2.0), https://github.com/Serial-ATA/lofty-rs. Its licenses are retained in licenses/lofty. Genre reading disables cover-art and audio-property parsing and does not modify source audio.
+
+## AMP Lab YouTube import
+
+Lab launches yt-dlp, Deno and FFmpeg as separate processes. The pinned official yt-dlp standalone (2026.10.26) includes matching yt-dlp-ejs components, Python and its own third-party dependencies; the full upstream THIRD_PARTY_LICENSES.txt, license and project source archive accompany the tools. yt-dlp original code is Unlicense; bundled executable dependencies retain their upstream terms, including copyleft components described in that inventory. Deno 2.9.8 (MIT) ships with its project source archive, MIT notice and V8/TypeScript license notices under tools/lab-youtube/licenses. Preserve those materials when redistributing the package. FFmpeg remains the separately supplied existing audio dependency; its build-specific codec licenses and source/rebuild materials remain applicable. The optional external-tools directory is not linked into or an add-on to AMP's playback engine.
+
+Process-tree management uses process-wrap 10.0.1 (MIT OR Apache-2.0), with original license texts in licenses/process-wrap. On Windows it creates a Job Object before the process runs; on Unix it owns a process group. URL parsing uses the existing url 2.x dependency (MIT OR Apache-2.0).

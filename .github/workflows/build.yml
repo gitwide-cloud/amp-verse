@@ -31,6 +31,10 @@ jobs:
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev ffmpeg xvfb
+      - name: Prepare verified official Lab URL-import dependencies
+        run: |
+          python tools/test_setup_lab_youtube.py
+          python tools/setup_lab_youtube.py --dest test-output/lab-tools
       - run: cargo fmt --all --check
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -45,6 +49,15 @@ jobs:
       - name: Verify sampler clip export with real codecs
         if: runner.os == 'Linux'
         run: cargo test -p amp-player --bin amp-player sample_editor::tests::clip_export_preserves_source_and_respects_selection -- --ignored
+      - name: Verify Lab URL import with local downloader and real codecs
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p test-output/lab-import
+          rustc tools/lab_youtube_fixture.rs -o test-output/lab-import/yt-dlp-fixture
+          ffmpeg -n -hide_banner -loglevel error -f lavfi -i sine=frequency=440:duration=2 test-output/lab-import/fixture.wav
+          ffmpeg -n -hide_banner -loglevel error -i test-output/lab-import/fixture.wav -c:a libmp3lame -b:a 256k test-output/lab-import/loaded.mp3
+          AMP_LAB_TOOLS="$PWD/test-output/lab-tools" AMP_LAB_YOUTUBE_FIXTURE="$PWD/test-output/lab-import/yt-dlp-fixture" cargo test -p amp-player --bin amp-player lab_youtube::tests::local_pipeline -- --ignored --test-threads=1
+          AMP_LAB_LOADED_MP3="$PWD/test-output/lab-import/loaded.mp3" cargo test -p amp-player --bin amp-player lab_editor::tests::downloaded_mp3 -- --ignored
       - run: cargo build --workspace --release --locked
       - name: Build base player without analysis implementation
         run: cargo build -p amp-player --release --locked
@@ -99,6 +112,16 @@ jobs:
           cp -r licenses dist/
           mkdir -p dist/licenses/mp3-lab
           cp third-party/mp3-lab/LICENSE third-party/mp3-lab/PROVENANCE.md dist/licenses/mp3-lab/
+      - name: Package official AMP Lab YouTube tools
+        shell: bash
+        run: |
+          mkdir -p dist/tools
+          cp -r test-output/lab-tools dist/tools/lab-youtube
+      - name: Include Lab tool recovery setup
+        shell: bash
+        run: |
+          mkdir -p dist/setup
+          cp tools/setup_lab_youtube.py dist/setup/
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}

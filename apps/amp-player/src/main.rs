@@ -24,6 +24,7 @@ mod icons;
 mod key_lock;
 mod lab;
 mod lab_editor;
+mod lab_youtube;
 mod library_cache;
 mod live_mix;
 mod mashup;
