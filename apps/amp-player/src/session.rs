@@ -296,7 +296,7 @@ impl Player {
         if self.recovery.pending.is_some() {
             return;
         }
-        for pane in 0..6 {
+        for (pane, size) in self.recovery.sizes.iter_mut().enumerate() {
             if let Some(rect) = ctx.input(|i| {
                 i.raw
                     .viewports
@@ -308,7 +308,7 @@ impl Player {
                     })
                     .and_then(|v| v.inner_rect)
             }) {
-                self.recovery.sizes[pane] = Some([rect.width(), rect.height()]);
+                *size = Some([rect.width(), rect.height()]);
             }
         }
         for (index, key) in ["dj-wave-height", "dj-library-height", "dj-source-width"]

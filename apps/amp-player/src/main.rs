@@ -822,8 +822,8 @@ impl Player {
             for d in 0..6 {
                 audio.set_gain(d, self.channel_gain[d]);
                 audio.set_rate(d, 1. + self.pitch[d] / 100.);
-                for b in 0..3 {
-                    audio.set_eq(d, b, self.eq[d][b]);
+                for (band, value) in self.eq[d].iter().copied().enumerate() {
+                    audio.set_eq(d, band, value);
                 }
                 audio.set_filter(d, self.filter[d]);
             }
