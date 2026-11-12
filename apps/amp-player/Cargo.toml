@@ -5,8 +5,13 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "amp-update"
+path = "src/update_helper.rs"
+
 [dependencies]
 url = "2"
+zip = { version = "4", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }
 process-wrap = { version = "10.0.1", default-features = false, features = ["std", "process-group", "job-object", "creation-flags"] }
 amp-core.workspace = true

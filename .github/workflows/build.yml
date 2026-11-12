@@ -110,7 +110,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} target/release/amp-prepare${{ matrix.suffix }} dist/
+          cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} target/release/amp-prepare${{ matrix.suffix }} target/release/amp-update${{ matrix.suffix }} dist/
           if [ "${{ runner.os }}" = "Windows" ]; then cp target/release/amp-keylock.dll dist/; fi
           mkdir -p dist/licenses/signalsmith
           cp -r apps/amp-player/vendor/signalsmith/* dist/licenses/signalsmith/
@@ -167,9 +167,44 @@ jobs:
           name: ampverse-companion
           path: integrations/companion/*.tgz
 
+  android-release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.9'
+      - name: Build with the persistent Android signing identity
+        env:
+          KEYSTORE_BASE64: ${{ secrets.AMP_ANDROID_KEYSTORE_BASE64 }}
+          AMP_ANDROID_KEYSTORE: ${{ runner.temp }}/amp-release.keystore
+          AMP_ANDROID_STORE_PASSWORD: ${{ secrets.AMP_ANDROID_STORE_PASSWORD }}
+          AMP_ANDROID_KEY_ALIAS: ${{ secrets.AMP_ANDROID_KEY_ALIAS }}
+          AMP_ANDROID_KEY_PASSWORD: ${{ secrets.AMP_ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" || { echo 'Configure the persistent AMP Android signing secrets before publishing an update.'; exit 1; }
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$AMP_ANDROID_KEYSTORE"
+          trap 'rm -f "$AMP_ANDROID_KEYSTORE"' EXIT
+          gradle -p android :app:assembleRelease :app:lintRelease
+          python tools/package_downloads.py android --source android/app/build/outputs/apk/release --destination android-dist
+          python -c 'import json,pathlib; m=json.loads(pathlib.Path("android/app/build/outputs/apk/release/output-metadata.json").read_text()); pathlib.Path("android-dist/version-code.txt").write_text(str(m["elements"][0]["versionCode"]))'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-published
+          path: android-dist/
+
   release:
     if: startsWith(github.ref, 'refs/tags/v')
-    needs: desktop
+    needs: [desktop, android-release]
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -189,11 +224,20 @@ jobs:
           cp amp-analysis-engine-Windows/amp-engine-windows-x86_64.exe* .
           cp amp-analysis-engine-Linux/amp-engine-linux-x86_64* .
           sha256sum *.zip > SHA256SUMS.txt
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: android-published
+          path: packages
+      - name: Generate verified cross-platform update manifest
+        run: python tools/update_manifest.py --version "${GITHUB_REF_NAME#v}" --directory packages --apk "$(find packages -maxdepth 1 -name '*.apk' -print -quit)" --version-code "$(cat packages/version-code.txt)"
       - uses: softprops/action-gh-release@v2
         with:
           prerelease: false
           generate_release_notes: true
           files: |
             packages/*.zip
+            packages/*.apk
             packages/SHA256SUMS.txt
+            packages/amp-update.json
             packages/amp-engine-*

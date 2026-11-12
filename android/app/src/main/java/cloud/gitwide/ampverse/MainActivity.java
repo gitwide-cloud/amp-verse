@@ -72,8 +72,6 @@ public final class MainActivity extends Activity {
             try {
                 player = pending.get();
                 syncSavedLibrary();
-                player.setRepeatMode(prefs.getBoolean("repeat",false)?Player.REPEAT_MODE_ALL:Player.REPEAT_MODE_OFF);
-                player.setShuffleModeEnabled(prefs.getBoolean("shuffle",false));
                 player.addListener(new Player.Listener() {
                     @Override public void onPlayerError(PlaybackException error) { message = "Cannot play this file: " + error.getErrorCodeName(); refresh(); }
                     @Override public void onMediaItemTransition(MediaItem item, int reason) { refresh(); }
@@ -106,7 +104,7 @@ public final class MainActivity extends Activity {
         view.setTextColor(Chrome.ink(appearance,false));view.setBackgroundTintList(null);view.setBackground(Chrome.button(appearance,false));view.setOnClickListener(v->action.run());return view;
     }
     private void rowButton(LinearLayout row,String caption,Runnable action) { LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,dp(46),1);params.setMargins(dp(1),dp(2),dp(1),dp(2));row.addView(button(caption,action),params); }
-    private void selectModule(String name) { if(name.equals("AMP Lab")){if(player!=null)player.pause();startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;library=name.equals("AMP Library");draw(); }
+    private void selectModule(String name) { if(name.equals("AMP Player"))PlaybackService.switchToPlayer();if(name.equals("AMP Lab")){if(player!=null)player.pause();startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;library=name.equals("AMP Library");draw(); }
     private void openSettings(){startActivity(new Intent(this,SettingsActivity.class));}
     private void draw() {
         djPanel=null;

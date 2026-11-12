@@ -20,6 +20,33 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class PlaybackDeviceTest {
+    @Test public void djToPlayerKeepsQueueAndOnlyOneOwner() throws Exception {
+        Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
+        File first=wave(context,"handoff-first.wav"),second=wave(context,"handoff-second.wav");
+        android.content.SharedPreferences djPrefs=context.getSharedPreferences("dj",0);
+        Map<String,?> savedDj=new HashMap<>(djPrefs.getAll());
+        com.google.common.util.concurrent.ListenableFuture<MediaController>[] pending=new com.google.common.util.concurrent.ListenableFuture[1];
+        main(()->pending[0]=new MediaController.Builder(context,new SessionToken(context,new ComponentName(context,PlaybackService.class))).buildAsync());
+        MediaController control=pending[0].get(10,TimeUnit.SECONDS);
+        try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(MainActivity.class)) {
+            main(()->{
+                DjEngine dj=PlaybackService.dj();assertNotNull(dj);
+                dj.queue(Arrays.asList(LibraryStore.item(first,"First"),LibraryStore.item(second,"Second")));
+                dj.load(0,LibraryStore.item(first,"First"),1200);
+                PlaybackService.claimDj();assertEquals("dj",PlaybackService.owner());
+                assertEquals(2,dj.playerQueue().size());
+                PlaybackService.switchToPlayer();assertEquals("player",PlaybackService.owner());
+                for(int i=0;i<4;i++)assertFalse(dj.active(i));
+                // Loading a background deck must not steal normal Player playback.
+                dj.load(1,LibraryStore.item(second,"Second"),0);
+                assertEquals("player",PlaybackService.owner());
+                PlaybackService.claimDj();dj.pauseAll();
+            });
+        }finally{main(()->{control.stop();control.release();});
+            android.content.SharedPreferences.Editor edit=djPrefs.edit().clear();
+            for(Map.Entry<String,?> item:savedDj.entrySet()){Object v=item.getValue();String k=item.getKey();if(v instanceof String)edit.putString(k,(String)v);else if(v instanceof Boolean)edit.putBoolean(k,(Boolean)v);else if(v instanceof Integer)edit.putInt(k,(Integer)v);else if(v instanceof Long)edit.putLong(k,(Long)v);else if(v instanceof Float)edit.putFloat(k,(Float)v);}
+            edit.commit();first.delete();second.delete();}
+    }
     private void main(Runnable action) { InstrumentationRegistry.getInstrumentation().runOnMainSync(action); }
     private File wave(Context context, String name) throws Exception {
         File directory = new File(context.getFilesDir(), "audio"); directory.mkdirs();

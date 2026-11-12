@@ -59,7 +59,7 @@ final class DjEngine {
             decks[i].setAudioAttributes(new androidx.media3.common.AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(),false);
             decks[i].setHandleAudioBecomingNoisy(true);decks[i].setWakeMode(C.WAKE_MODE_LOCAL);
             final int deck=i;
-            decks[i].addListener(new Player.Listener(){@Override public void onPlayerError(PlaybackException error){message=title(deck)+": "+error.getErrorCodeName();}});
+            decks[i].addListener(new Player.Listener(){@Override public void onPlayWhenReadyChanged(boolean ready,int reason){if(ready)PlaybackService.claimDj();}@Override public void onPlayerError(PlaybackException error){message=title(deck)+": "+error.getErrorCodeName();}});
             MediaSession session=new MediaSession.Builder(service,decks[i]).setId("dj-"+i).build();sessions.add(session);service.addSession(session);
         }
         pool=new SoundPool.Builder().setMaxStreams(18).setAudioAttributes(new android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA).setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC).build()).build();
@@ -158,7 +158,16 @@ final class DjEngine {
         samples[side][pad]=path;names[side][pad]=name;sampleIds[side][pad]=pool.load(path,1);
         prefs.edit().putString("sample-"+side+"-"+pad,path).putString("name-"+side+"-"+pad,name).apply();message="Effect assigned. Tap its pad to play.";
     }
-    void trigger(int side,int pad){int id=sampleIds[side][pad];if(!ready.contains(id)){message="Load a short effect first, or wait for decoding.";return;}stopPad(side,pad);streams[side][pad]=pool.play(id,samplerVolume[side],samplerVolume[side],1,loops[side][pad]?-1:0,1);}
+    void trigger(int side,int pad){int id=sampleIds[side][pad];if(!ready.contains(id)){message="Load a short effect first, or wait for decoding.";return;}PlaybackService.claimDj();stopPad(side,pad);streams[side][pad]=pool.play(id,samplerVolume[side],samplerVolume[side],1,loops[side][pad]?-1:0,1);}
+    boolean playerRepeats(){return autoRules.optBoolean("smart")&&!autoRules.optString("fallback","relax_recent").equals("stop");}
+    long playerPosition(){return decks[fader<.5?0:1].getCurrentPosition();}
+    List<MediaItem> playerQueue(){
+        List<MediaItem> result=new ArrayList<>();MediaItem current=decks[fader<.5?0:1].getCurrentMediaItem();
+        if(current!=null)result.add(current);
+        for(int i=nextAuto;i<autoQueue.size();i++){MediaItem item=autoQueue.get(i);if(current==null||!item.mediaId.equals(current.mediaId))result.add(item);}
+        return result;
+    }
+    void pauseForPlayer(){auto(false);for(ExoPlayer deck:decks)deck.pause();for(int side=0;side<2;side++)for(int pad=0;pad<9;pad++)stopPad(side,pad);}
     void stopPad(int side,int pad){if(streams[side][pad]!=0)pool.stop(streams[side][pad]);streams[side][pad]=0;}
     void clearPad(int side,int pad){stopPad(side,pad);pool.unload(sampleIds[side][pad]);ready.remove(sampleIds[side][pad]);sampleIds[side][pad]=0;samples[side][pad]="";names[side][pad]="PAD "+(pad+1);prefs.edit().remove("sample-"+side+"-"+pad).remove("name-"+side+"-"+pad).apply();}
     void loop(int side,int pad,boolean value){loops[side][pad]=value;prefs.edit().putBoolean("loop-"+side+"-"+pad,value).apply();if(streams[side][pad]!=0)pool.setLoop(streams[side][pad],value?-1:0);}

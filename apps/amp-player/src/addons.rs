@@ -91,6 +91,7 @@ const ENTRIES: [Entry; 7] = [
 ];
 
 pub struct Manager {
+    updater: crate::app_update::Updater,
     pub selected: usize,
     download: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     search: String,
@@ -102,6 +103,7 @@ pub struct Manager {
 impl Default for Manager {
     fn default() -> Self {
         Self {
+            updater: Default::default(),
             selected: 5,
             download: None,
             search: String::new(),
@@ -109,7 +111,7 @@ impl Default for Manager {
             lab: std::env::var_os("AMP_LAB_EXE")
                 .map(PathBuf::from)
                 .filter(|p| p.is_file()),
-            status: "Downloads are manual. No automatic installation or update checks.".into(),
+            status: "Choose a component, or use Update for the installed app.".into(),
             icon: None,
         }
     }
@@ -129,6 +131,7 @@ impl Manager {
         };
     }
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<Module> {
+        self.updater.show(ui);
         if let Some(receiver) = &self.download {
             match receiver.try_recv() {
                 Ok(result) => {

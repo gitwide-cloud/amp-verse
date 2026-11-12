@@ -10,7 +10,7 @@ $repo = Split-Path $PSScriptRoot -Parent
 $binary = Join-Path $repo 'target/release/amp-player.exe'
 if (!(Test-Path -LiteralPath $binary)) { throw 'Build the release desktop binaries first.' }
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-$binaries=if($WithCast -and !$PlayerOnly){@('amp-player.exe','amp-cast.exe','amp-prepare.exe')}else{@('amp-player.exe')}
+$binaries=if($WithCast -and !$PlayerOnly){@('amp-player.exe','amp-cast.exe','amp-prepare.exe','amp-update.exe')}else{@('amp-player.exe','amp-update.exe')}
 foreach ($name in $binaries) {
     Copy-Item -LiteralPath (Join-Path $repo "target/release/$name") -Destination $Destination -Force
 }

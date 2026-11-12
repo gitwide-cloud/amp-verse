@@ -7,6 +7,7 @@ use std::{
     time::Duration,
 };
 mod addons;
+mod app_update;
 mod audio_output;
 mod cast;
 mod control;
@@ -63,6 +64,8 @@ mod theme;
 mod track_columns;
 mod transition_controls;
 mod transition_styles;
+#[allow(dead_code)] // Shared implementation also used by the standalone installer binary.
+mod update_package;
 mod waveform;
 mod window_layout;
 use skin::{CYAN, GOLD, ORANGE};

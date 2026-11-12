@@ -143,3 +143,16 @@ No analysis engine or background NAS editing was added. These screens use synced
 
 
 0.2.4 verification: build and lint pass; 22 Pixel 7 checks cover the new navigation/portrait-landscape bounds, advanced-control access, Smart Playlist data and filters, Remote reconnect/session safety and discovery, real silent DJ handoffs/staging/recreation, square pads in all three themes, authenticated playlist selection, and Google Cast picker initialization. Additional final-device checks verify screen-off Media3 playback with notification permission denied and recheck the primary layouts. Physical speaker playback was not repeated by this UI pass. APK names retain version/build/commit, and installation is in place without uninstall cleanup.
+
+
+## 0.2.5: playback ownership and Update
+
+Android's service owns the Player/DJ handoff. Starting a DJ deck or sampler pauses normal Player playback. Selecting Player carries the active main song, position, and remaining playlist into normal sequential playback and pauses all DJ decks and samples. Smart Playlist repeat policy is retained; normal Player uses full-song playback and short fades rather than DJ transitions. The fade envelope runs in PCM processing separately from the volume control. Synced analysis remains read-only playback preparation; no analysis engine is installed on Android.
+
+**Settings → App updater → Update** checks the stable GitHub release, downloads its versioned APK, verifies its size/SHA-256, package identity, increasing version code and matching signing certificate, then opens Android's installer. The **GitHub** link sits immediately underneath Update. Cancel removes partial downloads. Completed APKs can be installed again after cancelling the OS prompt. Android may first ask to allow installation from AMP Verse; return to Settings after granting it.
+
+Windows/Linux expose **Update** and **GitHub** in Plugin Manager. The external helper waits for Player to close, installs a verified portable package with rollback and restarts Player. Configuration, music and prepared metadata remain outside the package. System-owned application folders must be writable by the user; otherwise the updater reports the permission problem. Other AMP processes holding package files open cause rollback and an instruction to close them and retry.
+
+Release contract: `amp-update.json`, schema 1, stable version and `windows-x86_64`, `linux-x86_64`, `android-arm64` entries contain versioned asset name, exact byte size and SHA-256; Android additionally requires `version_code`. `tools/update_manifest.py` creates it from completed packages. The tagged release workflow requires persistent Android signing secrets (`AMP_ANDROID_KEYSTORE_BASE64`, `AMP_ANDROID_STORE_PASSWORD`, `AMP_ANDROID_KEY_ALIAS`, `AMP_ANDROID_KEY_PASSWORD`) and publishes all three platforms together. Signing keys are never committed. Preview CI debug keys are not stable update identities. A local APK must continue using its existing key to update without losing app data.
+
+Earlier sections describe older milestones; this section replaces the old browser-only updater behavior. Local tests do not by themselves prove public release download/installation; that requires published matching assets and a newer installed version.
