@@ -1,5 +1,13 @@
 # AMP Cast and Android Remote — implementation and acceptance
 
+## Desktop access shortcuts — November 12
+
+Use **Remote / Web UI** above the Library content, at the top of Devices, or beside DJ Library. A resizable window provides direct links to browser remote, song requests and the separate AMP Cast Web UI; it also shows a copyable LAN URL and Android Remote → Discover instructions. Connection settings moved out of the Sources form into Advanced in this window. Start/restart/stop affects only the control service, preserving audio. Existing LAN binding/password policy is unchanged. The suggested LAN link uses the local default-route address (no UDP packet is sent to select the route), falling back to the computer name; multiple adapters/VPNs may require the PC's alternative LAN address.
+
+Browser remote: `http://PC-LAN-IP:8790/remote`. Song requests: `/requests`. Cast station Web UI: the selected Cast server, normally port 8787. Remote sends commands to Player/DJ on the PC; it does not stream audio to the browser. The browser offers active-deck Play/Pause, Player Next or Auto DJ Mix Next, Auto DJ on/off, volume steps and crossfader. It polls live state, uses the same password/session validation as Android, and disables commands on connection loss without stopping playback. Auto DJ still requires a valid configured playlist. Passwords are not placed in URLs or stored by the page. The root request-page URL remains compatible.
+
+Verification: 182 Player tests and strict Player Clippy passed; HTTP route/authentication coverage includes the new page/script. Five Node checks cover remote connection/state, authenticated command dispatch, crossfader values, disconnect/reconnect and existing song-request selection/filtering. This addition has no new physical-phone or receiver acceptance claim.
+
 Date: 2026-11-11. Status: core network/audio workflows and the Remote foreground/background lifecycle are verified on Windows and a real Pixel 7. Platform/output limitations remain listed below.
 
 ## Root causes

@@ -42,6 +42,7 @@ mod performance;
 mod podcast_cache;
 mod podcasts;
 mod preparer;
+mod remote_access;
 mod resources;
 mod sample_editor;
 mod sample_library;
@@ -345,6 +346,7 @@ impl Player {
     fn header(&mut self, ui: &mut egui::Ui, title: &str, purple: bool) {
         let action = skin::heading(ui, title, purple);
         self.activate(ui, action);
+        self.remote_access_window(ui.ctx());
         if ui
             .ctx()
             .data_mut(|d| d.remove_temp::<bool>(egui::Id::unique("quick-cast-click")))

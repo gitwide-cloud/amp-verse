@@ -211,6 +211,7 @@ impl Player {
         let requests = ui
             .horizontal(|ui| {
                 skin::label(ui, "DJ Library");
+                self.remote_access_button(ui);
                 ui.menu_button("Columns", |ui| {save_columns |= self.dj_browser.columns.menu(ui);});
 
                 if ui.small_button("Refresh playlists").clicked() {

@@ -42,6 +42,7 @@ impl Player {
             theme::current(ui.ctx()).palette().background,
         );
         self.header(ui, "AMP Library", false);
+        self.remote_access_button(ui);
         let add_music = ui.button("Add music folder…");
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
@@ -84,7 +85,7 @@ impl Player {
                     0 => self.organized_music(ui,height),
                     1 => self.organized_smart(ui,height),
                     2 => self.organized_playlists(ui,height),
-                    3 => {egui::ScrollArea::vertical().max_height(height-50.).show(ui,|ui| {if self.outputs.show(ui,blocked) {
+                    3 => {egui::ScrollArea::vertical().max_height(height-50.).show(ui,|ui| {self.remote_access_button(ui);ui.weak("Control Player / DJ from Android or a web browser; open Cast and song requests.");ui.separator();if self.outputs.show(ui,blocked) {
                         let prepared=self.loaded;
                         self.audio=None;self.right_sample_audio=None;
                         self.loaded=[None;6];self.playing=[false;6];
@@ -92,8 +93,7 @@ impl Player {
                     }
                     ui.separator();self.controllers.show(ui);ui.separator();ui.heading("AMP Cast devices");self.cast.show(ui, &self.root, self.library.is_some());});},
                     4 => {ui.heading("Playback history");ui.weak("Tracks started by this desktop session. A start does not mean the full track was played.");egui::ScrollArea::vertical().max_height(height-80.).show(ui,|ui|{for (deck,title) in self.playback_history.iter().rev(){ui.label(format!("Deck {}    {title}",deck+1));}if self.playback_history.is_empty(){ui.weak("Play a song to begin your session history.");}});},
-                    5 => {ui.heading("Music sources");ui.label("Local folders and mounted network libraries");self.music_source_controls(ui);ui.separator();ui.heading("Remote control");ui.label(&self.control_status);ui.label("Listen address");ui.text_edit_singleline(&mut self.control_bind);ui.label("Optional password");ui.add(egui::TextEdit::singleline(&mut self.control_password).password(true));ui.horizontal(|ui|{if ui.button("Start / restart control").clicked(){self.start_control(ui.ctx());}
-if ui.button("Stop control").clicked(){self.control=None;self.control_restart=None;self.control_status="Control stopped".into();}});theme::selector(ui);},
+                    5 => {ui.heading("Music sources");ui.label("Local folders and mounted network libraries");self.music_source_controls(ui);ui.separator();self.remote_access_button(ui);theme::selector(ui);},
                     7 => self.library_equalizer(ui),
                     9 => {if self.selected.is_none() && self.library.as_ref().is_some_and(|l|!l.tracks.is_empty()){self.selected=Some(0);}egui::ScrollArea::vertical().id_salt("tags-artwork-page").max_height((height-60.).max(180.)).show(ui,|ui|{
                         self.lookup.batch_controls(ui,&self.root,self.library.as_ref());

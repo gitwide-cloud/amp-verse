@@ -436,6 +436,8 @@ impl Control {
             runtime.block_on(async move {
                 let router = Router::new()
                     .route("/", get(request_page))
+                    .route("/remote", get(remote_page))
+                    .route("/remote.js", get(remote_script))
                     .route("/requests", get(request_page))
                     .route("/requests.js", get(request_script))
                     .route("/api/v1/request-songs", get(request_songs))
@@ -513,6 +515,15 @@ fn authorized(s: &Shared, h: &HeaderMap) -> bool {
 }
 async fn request_page() -> axum::response::Html<&'static str> {
     axum::response::Html(include_str!("../web/requests.html"))
+}
+async fn remote_page() -> axum::response::Html<&'static str> {
+    axum::response::Html(include_str!("../web/remote.html"))
+}
+async fn remote_script() -> impl IntoResponse {
+    (
+        [("content-type", "text/javascript; charset=utf-8")],
+        include_str!("../web/remote.js"),
+    )
 }
 async fn request_script() -> impl IntoResponse {
     (
@@ -797,6 +808,21 @@ mod tests {
             .read_to_string()
             .unwrap();
         assert!(html.contains("id=\"search\""));
+        let remote = ureq::get(&format!("{base}/remote"))
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_to_string()
+            .unwrap();
+        assert!(remote.contains("/remote.js") && remote.contains("id=\"auto\""));
+        let script = ureq::get(&format!("{base}/remote.js"))
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_to_string()
+            .unwrap();
+        assert!(script.contains("x-amp-session"));
+        assert!(ureq::get(&format!("{base}/api/v1/state")).call().is_err());
         assert!(
             ureq::get(&format!("{base}/api/v1/request-songs"))
                 .call()
