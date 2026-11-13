@@ -62,13 +62,13 @@ pub fn show(
         switch(ui,&mut settings.enabled,"Use effects","Master switch for occasional effects. Timing and your crossfade duration stay unchanged.");
         ui.separator();let previous=*settings;
         for (index,label,help) in [
-            (0,"Scratch","A short back-and-forward flourish."),(1,"Stutter","A brief rhythmic repeat."),
+            (0,"Scratch","One bar of incoming drum scratches, beat-locked before the blend; needs prepared drums."),(1,"Stutter","A brief rhythmic repeat."),
             (2,"Tape brake","Slow the outgoing deck briefly."),(3,"Filter sweep","Sweep tone during the blend."),
             (4,"Bass swap","Trade the low frequencies between decks."),(5,"Beatmatch tempo","Match prepared tempos within the supported range."),
         ] {switch(ui,&mut settings.techniques[index],label,help);}
         switch(ui,&mut settings.loop_build,"Loop buildup","Shorten a beat loop before the handoff; requires BPM and enough mix time.");
         switch(ui,&mut settings.stem_swap,"Stem handoff","Requires prepared stems on both decks.");
-        switch(ui,&mut settings.mashup,"Vocal / backing","A vocal/instrumental mashup for compatible prepared pairs.");
+        switch(ui,&mut settings.mashup,"Vocal / backing","Incoming vocals over outgoing backing, then the full incoming song at its prepared landing.");
         if *settings!=previous {settings.style=Style::Variety;}
         ui.separator();
         ui.horizontal_wrapped(|ui|{ui.label("Use an effect every");ui.add(egui::DragValue::new(&mut settings.every).range(2..=12));ui.label("mixes");});

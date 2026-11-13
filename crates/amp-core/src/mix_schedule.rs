@@ -133,7 +133,7 @@ pub fn grid_at_rates(
     let ratio = out.bpm? * out_rate / (incoming.bpm? * in_rate);
     let factor = [1., 0.5, 2.]
         .into_iter()
-        .find(|factor| (ratio / factor - 1.).abs() <= 0.005)?;
+        .find(|factor| (ratio / factor - 1.).abs() <= 0.0005)?;
     if factor != 1. && timing.phrase_beats().is_some() {
         return None;
     }
@@ -151,9 +151,60 @@ pub fn grid_at_rates(
         },
     )
 }
+/// When musical phrases are ambiguous (half/double time), retain beat alignment.
+#[allow(clippy::too_many_arguments)]
+pub fn safe_grid_at_rates(
+    out: &Preparation,
+    incoming: &Preparation,
+    entry: f64,
+    origin: f64,
+    timing: Timing,
+    out_rate: f64,
+    in_rate: f64,
+) -> Option<Grid> {
+    grid_at_rates(out, incoming, entry, origin, timing, out_rate, in_rate).or_else(|| {
+        timing.phrase_beats().and_then(|_| {
+            grid_at_rates(
+                out,
+                incoming,
+                entry,
+                origin,
+                Timing::Beat,
+                out_rate,
+                in_rate,
+            )
+        })
+    })
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn matched_grids_keep_phase_for_a_thousand_beats_and_reject_drift() {
+        let a = Preparation {
+            bpm: Some(128.),
+            beat_offset: Some(0.13),
+            ..Default::default()
+        };
+        let b = Preparation {
+            bpm: Some(125.),
+            beat_offset: Some(0.27),
+            ..Default::default()
+        };
+        let rate = 128. / 125.;
+        let entry = 10.321;
+        let origin = 0.4;
+        let g = grid_at_rates(&a, &b, entry, origin, Timing::Phrase16, 1., rate).unwrap();
+        let launch = g.next(3.);
+        for n in 0..1000 {
+            let time = n as f64 * 60. / 128.;
+            let phase_out = (launch + origin + time - 0.13) / (60. / 128.);
+            let phase_in = (entry + time * rate - 0.27) / (60. / 125.);
+            let error = (phase_out - phase_in + 0.5).rem_euclid(1.) - 0.5;
+            assert!(error.abs() < 1e-9);
+        }
+        assert!(grid_at_rates(&a, &b, entry, origin, Timing::Beat, 1., rate * 1.001).is_none());
+    }
     #[test]
     fn preroll_and_exact_fade_land_on_reviewed_phrase_boundary() {
         let a = Preparation {

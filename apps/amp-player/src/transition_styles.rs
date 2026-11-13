@@ -72,7 +72,10 @@ impl Settings {
         incoming: &amp_core::Preparation,
     ) -> Option<Style> {
         let chosen = self.pick(completed)?;
-        if matches!(chosen, Style::Stutter | Style::LoopBuild | Style::Beatmatch) {
+        if matches!(
+            chosen,
+            Style::Scratch | Style::Stutter | Style::LoopBuild | Style::Beatmatch
+        ) {
             let timed = |p: &amp_core::Preparation| {
                 amp_core::mix_schedule::timing_reliable(p)
                     && p.bpm

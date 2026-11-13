@@ -244,6 +244,18 @@ struct LevelFade {
     elapsed: u64,
     stop: bool,
 }
+struct ScratchIntro {
+    beat: u64,
+    elapsed: u64,
+    origin: f64,
+}
+// Four one-beat forward/reverse drum strokes, calculated on the audio clock.
+fn scratch_motion(elapsed: u64, beat: u64) -> (f64, f32) {
+    let phase = (elapsed % beat.max(1)) as f64 / beat.max(1) as f64;
+    let offset = phase.min(1. - phase);
+    let edge = (phase / 0.02).min((1. - phase) / 0.02).clamp(0., 1.) as f32;
+    (offset, edge * if phase < 0.5 { 0.4 } else { 0.16 })
+}
 struct Fade {
     from: f32,
     to: f32,
@@ -254,6 +266,7 @@ struct Fade {
     grid: Option<crate::mix_schedule::Grid>,
     boundary: Option<f64>,
     mashup: Option<(u64, u64)>,
+    scratch: Option<ScratchIntro>,
 }
 #[derive(Default)]
 struct SampleVoice {
@@ -286,6 +299,12 @@ enum Command {
     ScheduledFade {
         to: f32,
         seconds: f32,
+        grid: crate::mix_schedule::Grid,
+    },
+    ScratchFade {
+        to: f32,
+        seconds: f32,
+        beat: f32,
         grid: crate::mix_schedule::Grid,
     },
     Mashup {
@@ -445,6 +464,31 @@ impl Mixer {
                     self.sections[d] = Some(s);
                     self.controls.section_state[d].store(1, Relaxed);
                 }
+                Command::ScratchFade {
+                    to,
+                    seconds,
+                    beat,
+                    grid,
+                } => {
+                    self.fade = Some(Fade {
+                        from: get(&self.controls.crossfader),
+                        to,
+                        total: (seconds * self.rate as f32).max(1.) as u64,
+                        elapsed: 0,
+                        incoming: self.controls.pair_indices()[usize::from(to > 0.5)],
+                        started: false,
+                        grid: Some(grid),
+                        boundary: None,
+                        mashup: None,
+                        scratch: Some(ScratchIntro {
+                            beat: (beat * self.rate as f32).round().max(1.) as u64,
+                            elapsed: 0,
+                            origin: 0.,
+                        }),
+                    });
+                    set(&self.controls.fade_progress, 0.);
+                    self.controls.fading.store(true, Relaxed);
+                }
                 Command::Mashup {
                     to,
                     fade,
@@ -463,6 +507,7 @@ impl Mixer {
                         grid: Some(grid),
                         boundary: None,
                         mashup: Some((fade, hold)),
+                        scratch: None,
                     });
                     set(&self.controls.fade_progress, 0.);
                     self.controls.fading.store(true, Relaxed);
@@ -480,6 +525,7 @@ impl Mixer {
                         grid: Some(grid),
                         boundary: None,
                         mashup: None,
+                        scratch: None,
                     });
                     self.controls.fading.store(true, Relaxed);
                 }
@@ -567,6 +613,7 @@ impl Mixer {
                         grid: None,
                         boundary: None,
                         mashup: None,
+                        scratch: None,
                     });
                     self.controls.fading.store(true, Relaxed);
                 }
@@ -784,6 +831,7 @@ impl Mixer {
                 c.fading.store(false, Relaxed);
             }
             let mut mashup_mix = None;
+            let mut scratch_read: Option<(usize, f64)> = None;
             if let Some(fade) = &mut self.fade {
                 let outgoing = c.other(fade.incoming);
                 let position = self.voices[outgoing]
@@ -801,8 +849,41 @@ impl Mixer {
                 if !fade.started && due && c.ready[fade.incoming].load(Relaxed) {
                     c.play[fade.incoming].store(true, Relaxed);
                     fade.started = true;
+                    if let Some(intro) = &mut fade.scratch {
+                        intro.origin = self.voices[fade.incoming]
+                            .source
+                            .as_ref()
+                            .map_or(0., |s| s.position);
+                    }
                 }
-                if fade.started {
+                let mut preview = false;
+                if fade.started
+                    && let Some(intro) = &mut fade.scratch
+                {
+                    if intro.elapsed < intro.beat * 4 {
+                        let (offset, gain) = scratch_motion(intro.elapsed, intro.beat);
+                        scratch_read = Some((
+                            fade.incoming,
+                            intro.origin
+                                + offset
+                                    * intro.beat as f64
+                                    * c.effective_rate(fade.incoming) as f64,
+                        ));
+                        let mut levels = [1.; 2];
+                        levels[fade.incoming % 2] = gain;
+                        let mut masks = [[1.; 3]; 2];
+                        masks[fade.incoming % 2] = [0., 0., 1.];
+                        mashup_mix = Some((levels, masks));
+                        intro.elapsed += 1;
+                        preview = true;
+                    } else {
+                        if let Some(source) = &mut self.voices[fade.incoming].source {
+                            source.position = intro.origin;
+                        }
+                        fade.scratch = None;
+                    }
+                }
+                if fade.started && !preview {
                     if let Some((ramp, _)) = fade.mashup
                         && c.finished[outgoing].load(Relaxed)
                     {
@@ -942,13 +1023,16 @@ impl Mixer {
                     source.position = l.origin + l.phase * l.rate as f64;
                     Some(frame)
                 } else {
-                    let rate = if c.vinyl_follow[d].load(Relaxed) && c.scratching[d].load(Relaxed) {
-                        let target = (f64::from_bits(c.vinyl_target[d].load(Relaxed)))
-                            .max(source.history_start as f64);
-                        ((target - source.position) * 0.025).clamp(-4., 4.) as f32
-                    } else {
-                        rates[d]
-                    };
+                    let rate =
+                        if let Some((_, target)) = scratch_read.filter(|(deck, _)| *deck == d) {
+                            (target - source.position).clamp(-4., 4.) as f32
+                        } else if c.vinyl_follow[d].load(Relaxed) && c.scratching[d].load(Relaxed) {
+                            let target = (f64::from_bits(c.vinyl_target[d].load(Relaxed)))
+                                .max(source.history_start as f64);
+                            ((target - source.position) * 0.025).clamp(-4., 4.) as f32
+                        } else {
+                            rates[d]
+                        };
                     source.next(rate)
                 };
                 if frame.is_none()
@@ -1018,21 +1102,25 @@ impl Mixer {
                         - v.stem_mix[stem])
                         * 0.004;
                 }
-                let mut frame: Frame = if source.separated {
-                    std::array::from_fn(|ch| {
-                        frame[ch] * v.stem_mix[0]
-                            + frame[ch + 2] * v.stem_mix[1]
-                            + frame[ch + 4] * v.stem_mix[2]
-                    })
-                } else {
-                    [frame[0], frame[1]]
-                };
+                let mut frame: Frame =
+                    if source.separated && scratch_read.is_some_and(|(deck, _)| deck == d) {
+                        [frame[4] * v.stem_mix[2], frame[5] * v.stem_mix[2]]
+                    } else if source.separated {
+                        std::array::from_fn(|ch| {
+                            frame[ch] * v.stem_mix[0]
+                                + frame[ch + 2] * v.stem_mix[1]
+                                + frame[ch + 4] * v.stem_mix[2]
+                        })
+                    } else {
+                        [frame[0], frame[1]]
+                    };
                 if let Some(key_lock) = &mut source.key_lock {
                     frame = key_lock.frame(
                         frame,
                         rates[d],
                         c.key_lock[d].load(Relaxed),
-                        c.scratching[d].load(Relaxed),
+                        c.scratching[d].load(Relaxed)
+                            || scratch_read.is_some_and(|(deck, _)| deck == d),
                     );
                 }
                 v.gain += (get(&c.gain[d]).clamp(0., 1.) - v.gain) * 0.004;
@@ -1923,9 +2011,9 @@ impl Engine {
         {
             return Err("Not enough prepared audio remains for this mashup".into());
         }
-        if get(&self.controls.stem_level[self.controls.other(incoming)][0]) < 0.05
-            || get(&self.controls.stem_level[incoming][1])
-                + get(&self.controls.stem_level[incoming][2])
+        if get(&self.controls.stem_level[incoming][0]) < 0.05
+            || get(&self.controls.stem_level[self.controls.other(incoming)][1])
+                + get(&self.controls.stem_level[self.controls.other(incoming)][2])
                 < 0.05
         {
             return Err("The selected vocal or backing is muted by your stem settings".into());
@@ -1934,6 +2022,62 @@ impl Engine {
             to: (incoming % 2) as f32,
             fade: seconds,
             hold,
+            grid,
+        })
+    }
+    pub fn scratch_crossfade(
+        &self,
+        seconds: f32,
+        mut grid: crate::mix_schedule::Grid,
+        beat: f32,
+    ) -> Result<(), String> {
+        let incoming = self.controls.pair_indices()[usize::from(self.fader() < 0.5)];
+        let outgoing = self.controls.other(incoming);
+        if !seconds.is_finite()
+            || !(0.05..=30.).contains(&seconds)
+            || !beat.is_finite()
+            || !(0.2..=1.5).contains(&beat)
+            || !grid.period.is_finite()
+            || grid.period <= 0.
+            || !grid.anchor.is_finite()
+        {
+            return Err("Invalid scratch-in timing".into());
+        }
+        if !self.controls.stems_loaded[incoming].load(Relaxed)
+            || get(&self.controls.stem_level[incoming][2]) < 0.05
+            || !self.playing(outgoing)
+            || self.playing(incoming)
+            || self.fading()
+            || self.controls.pair_indices().iter().any(|d| {
+                self.controls.scratching[*d].load(Relaxed)
+                    || self.controls.looping[*d].load(Relaxed)
+            })
+        {
+            return Err(
+                "Scratch-in needs an idle prepared drum stem and a playing outgoing deck".into(),
+            );
+        }
+        // A scratch-in is a fast cut, independent of the saved ordinary blend duration.
+        let seconds = seconds.min(beat);
+        // The normal incoming entry still lands on the original grid, after one bar of preview.
+        let out_rate = self.controls.effective_rate(outgoing);
+        grid.anchor -= 4. * beat as f64 * out_rate as f64;
+        let delay = ((grid.next(self.position(outgoing) + 0.001) - self.position(outgoing))
+            / out_rate as f64)
+            .max(0.) as f32;
+        if self
+            .remaining(outgoing)
+            .is_none_or(|r| r < delay + 4. * beat + seconds + 0.2)
+            || self
+                .remaining(incoming)
+                .is_none_or(|r| r < seconds + beat + 0.2)
+        {
+            return Err("Not enough audio for a scratch-in".into());
+        }
+        self.send(Command::ScratchFade {
+            to: (incoming % 2) as f32,
+            seconds,
+            beat,
             grid,
         })
     }
@@ -2041,6 +2185,55 @@ fn stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn scratch_in_is_block_invariant_drum_only_and_returns_to_exact_entry() {
+        let run = |block: usize| {
+            let c = Arc::new(Controls::default());
+            let (tx, rx) = mpsc::sync_channel(32);
+            let mut mixer = Mixer::new(1000, rx, c.clone());
+            tx.send(Command::Load(0, source(0.01, 12000), true, 1))
+                .unwrap();
+            tx.send(Command::Load(
+                1,
+                layered_source([0.7, 0.3, 0.1], 12000),
+                false,
+                1,
+            ))
+            .unwrap();
+            mixer.render(1000, |_, _| {});
+            tx.send(Command::ScratchFade {
+                to: 1.,
+                seconds: 0.5,
+                beat: 0.5,
+                grid: crate::mix_schedule::Grid {
+                    period: 1.,
+                    anchor: 0.,
+                },
+            })
+            .unwrap();
+            let mut samples = Vec::new();
+            let mut left = 5000;
+            while left > 0 {
+                let count = left.min(block);
+                mixer.render(count, |_, f| samples.push(f[0]));
+                left -= count;
+            }
+            assert!(!c.play[0].load(Relaxed));
+            assert!(c.play[1].load(Relaxed));
+            assert!(!c.fading.load(Relaxed));
+            // Preview rewinds instead of stealing beats from the incoming song.
+            assert!((mixer.voices[1].source.as_ref().unwrap().position - 2000.).abs() <= 2.);
+            assert_eq!(c.underruns[1].load(Relaxed), 0);
+            // During the preview, loud incoming vocals/instruments cannot leak into the mix.
+            assert!(samples[1050..1400].iter().all(|v| v.abs() < 0.04));
+            samples
+        };
+        let sample = run(1);
+        for block in [64, 257, 1024] {
+            let other = run(block);
+            assert!(sample.iter().zip(other).all(|(a, b)| (a - b).abs() < 1e-6));
+        }
+    }
     fn source(value: f32, frames: usize) -> Source {
         let (mut p, c) = RingBuffer::new(frames + 1);
         for _ in 0..frames {
@@ -2169,6 +2362,32 @@ mod tests {
         );
         engine.stop(0);
         engine.stop(1);
+        for (deck, paths) in sets.iter().enumerate() {
+            let t = amp_core::Track {
+                path: paths[0].file_name().unwrap().into(),
+                title: "Scratch fixture".into(),
+                preparation: p.clone(),
+            };
+            engine
+                .load_with_stems(deck, dir.path(), &t, false, Some(paths.clone()))
+                .unwrap();
+        }
+        wait(&engine, &|e| {
+            e.controls
+                .pair_indices()
+                .iter()
+                .all(|d| e.controls.ready[*d].load(Relaxed))
+        });
+        engine.set_fader(0.);
+        wait(&engine, &|e| e.fader() == 0.);
+        engine.controls.play[0].store(true, Relaxed);
+        engine.scratch_crossfade(0.2, grid, 0.25).unwrap();
+        wait(&engine, &|e| e.fading());
+        wait(&engine, &|e| !e.fading() && !e.playing(0) && e.playing(1));
+        assert!(engine.take_decode_errors().is_empty());
+        assert_eq!(engine.controls.underruns[1].load(Relaxed), 0);
+        engine.stop(0);
+        engine.stop(1);
     }
     #[test]
     fn failed_mashup_incoming_returns_to_outgoing_bus() {
@@ -2242,7 +2461,7 @@ mod tests {
         m.render(2050, |_, _| {});
         let mut sum = 0.;
         m.render(100, |_, f| sum += f[0]);
-        let expected = (0.10 + 0.05 + 0.02) * std::f32::consts::FRAC_1_SQRT_2 * 0.75;
+        let expected = (0.40 + 0.20 + 0.30) * std::f32::consts::FRAC_1_SQRT_2 * 0.75;
         assert!(
             (sum / 100. - expected).abs() < 0.002,
             "hold {} expected {}",

@@ -434,6 +434,34 @@ impl Player {
             _ => Err("Cue name is ambiguous; use its ID".into()),
         }
     }
+    fn match_auto_pair(&mut self, outgoing: usize, incoming: usize) {
+        let matched = self
+            .loaded_track(outgoing)
+            .zip(self.loaded_track(incoming))
+            .filter(|(a, b)| {
+                amp_core::mix_schedule::timing_reliable(&a.preparation)
+                    && amp_core::mix_schedule::timing_reliable(&b.preparation)
+            })
+            .and_then(|(a, b)| a.preparation.bpm.zip(b.preparation.bpm))
+            .and_then(|(a, b)| {
+                amp_core::transition_plan::tempo_match(a, self.deck_rate(outgoing), b, 0.16)
+            });
+        if let Some(plan) = matched
+            && let Some(audio) = &self.audio
+            && audio.playing(outgoing)
+            && !audio.playing(incoming)
+        {
+            audio.controls.synced[incoming].store(false, Relaxed);
+            audio.set_rate(incoming, plan.rate as f32);
+            if audio.controls.synced[outgoing].load(Relaxed) && plan.pulse_factor == 1. {
+                let _ = audio.sync(incoming, true);
+            }
+            if audio.controls.key_lock_available[incoming].load(Relaxed) {
+                audio.controls.key_lock[incoming].store(true, Relaxed);
+            }
+            self.pitch[incoming] = (plan.rate as f32 - 1.) * 100.;
+        }
+    }
     fn mashup_pair_plan(
         &self,
         outgoing: usize,
@@ -470,17 +498,25 @@ impl Player {
         } else {
             crate::mix_schedule::Timing::Phrase16
         };
-        let grid = crate::mix_schedule::grid(
+        let grid = crate::mix_schedule::safe_grid_at_rates(
             out,
             next,
             audio.source_position(incoming),
             audio.source_position(outgoing) - audio.position(outgoing),
             timing,
+            out_rate,
+            in_rate,
         )?;
-        Some((
-            grid,
-            (self.run.transitions.mashup_beats as f64 * 60. / (out.bpm? * out_rate)) as f32,
-        ))
+        let hold = next
+            .extensions
+            .get("runtime_mix_landing")
+            .and_then(|v| v.as_f64())
+            .map(|landing| {
+                (landing - audio.source_position(incoming)) / in_rate
+                    - 2. * self.fade_seconds as f64
+            })
+            .unwrap_or(self.run.transitions.mashup_beats as f64 * 60. / (out.bpm? * out_rate));
+        (hold.is_finite() && (0.1..=120.).contains(&hold)).then_some((grid, hold as f32))
     }
     fn call_track(
         &mut self,
@@ -523,7 +559,8 @@ impl Player {
             && p.use_manual_cues
             && let Some(c) = track.preparation.manual_cues.iter().find(|c| {
                 (c.label.to_lowercase().contains("drop")
-                    || c.label.to_lowercase().contains("build"))
+                    || c.label.to_lowercase().contains("build")
+                    || matches!(c.kind.as_str(), "chorus" | "chorus_start" | "drop"))
                     && track.preparation.cue_out.is_none_or(|out| c.seconds < out)
             })
         {
@@ -549,6 +586,24 @@ impl Player {
         {
             track.preparation.cue_in = section.start;
             automatic_section = true;
+        }
+        if automatic_section
+            && let Some(feature) = track
+                .preparation
+                .cues
+                .iter()
+                .filter(|c| {
+                    matches!(c.kind.as_str(), "drop" | "chorus" | "chorus_start")
+                        && c.seconds >= amp_core::energy_profile::entry_bound(&track.preparation)
+                        && track.preparation.cue_out.is_none_or(|end| c.seconds < end)
+                })
+                .min_by(|a, b| {
+                    (a.seconds - track.preparation.cue_in)
+                        .abs()
+                        .total_cmp(&(b.seconds - track.preparation.cue_in).abs())
+                })
+        {
+            track.preparation.cue_in = feature.seconds;
         }
         track.preparation.validate()?;
         self.ensure_audio()?;
@@ -585,6 +640,26 @@ impl Player {
             None
         };
         let rate = matched_rate.unwrap_or(saved_rate) as f32;
+        let planned_mashup = self.run.force_mashup
+            || self.loaded_track(active).is_some_and(|out| {
+                self.run.transitions.pick_for_pair(
+                    self.run.completed_handoffs,
+                    &out.preparation,
+                    &track.preparation,
+                ) == Some(crate::transition_styles::Style::Mashup)
+            });
+        let preroll = if planned_mashup {
+            self.loaded_track(active)
+                .and_then(|out| out.preparation.bpm)
+                .map(|bpm| {
+                    2. * self.fade_seconds as f64
+                        + self.run.transitions.mashup_beats as f64 * 60.
+                            / (bpm * self.deck_rate(active))
+                })
+                .unwrap_or(self.fade_seconds as f64)
+        } else {
+            self.fade_seconds as f64
+        };
         if automatic_section
             && cue.is_none()
             && paired
@@ -594,7 +669,7 @@ impl Player {
                 &track.preparation,
                 track.preparation.cue_in,
                 rate as f64,
-                self.fade_seconds as f64,
+                preroll,
             )
         {
             track.preparation.cue_in = plan.entry;
@@ -1786,10 +1861,8 @@ impl Player {
                 );
             } else if ready && due {
                 let outgoing = self.other_deck(incoming);
-                if let Some(audio) = &self.audio
-                    && audio.controls.synced[outgoing].load(Relaxed)
-                {
-                    let _ = audio.sync(incoming, true);
+                if self.run.auto {
+                    self.match_auto_pair(outgoing, incoming);
                 }
                 let chosen = if self.run.force_mashup {
                     Some(crate::transition_styles::Style::Mashup)
@@ -1806,10 +1879,8 @@ impl Player {
                 } else {
                     None
                 };
-                if chosen == Some(crate::transition_styles::Style::Beatmatch) {
-                    self.sync_deck(incoming);
-                }
-                let flourish = chosen == Some(crate::transition_styles::Style::Scratch);
+                let flourish =
+                    !self.run.auto && chosen == Some(crate::transition_styles::Style::Scratch);
                 let safe = self.audio.as_ref().is_some_and(|a| {
                     a.playing(outgoing)
                         && a.position(outgoing) > 0.3
@@ -1860,7 +1931,8 @@ impl Player {
                     } else {
                         None
                     };
-                let bridge_needed = self.run.scratch_assist
+                let bridge_needed = !self.run.auto
+                    && self.run.scratch_assist
                     && !(chosen.is_none()
                         && self
                             .run
@@ -1930,20 +2002,8 @@ impl Player {
                     let grid = self
                         .loaded_track(outgoing)
                         .zip(self.loaded_track(incoming))
-                        .filter(|(out, next)| {
-                            self.run.transitions.timing.phrase_beats().is_none()
-                                || out.preparation.bpm.zip(next.preparation.bpm).is_some_and(
-                                    |(a, b)| {
-                                        (a * (self.deck_rate(outgoing))
-                                            / (b * (self.deck_rate(incoming)))
-                                            - 1.)
-                                            .abs()
-                                            < 0.005
-                                    },
-                                )
-                        })
                         .and_then(|(out, next)| {
-                            crate::mix_schedule::grid_at_rates(
+                            crate::mix_schedule::safe_grid_at_rates(
                                 &out.preparation,
                                 &next.preparation,
                                 a.source_position(incoming),
@@ -1970,6 +2030,29 @@ impl Player {
                             Err(e) => {
                                 self.status = format!("Mashup skipped: {e}; using normal blend");
                                 a.crossfade(seconds)
+                            }
+                        }
+                    } else if chosen == Some(crate::transition_styles::Style::Scratch)
+                        && self.run.auto
+                    {
+                        match grid
+                            .zip(beat)
+                            .ok_or_else(|| "Reliable matched grids required".to_string())
+                            .and_then(|(grid, beat)| a.scratch_crossfade(seconds, grid, beat))
+                        {
+                            Ok(()) => {
+                                self.status =
+                                    "Beat-locked incoming drum scratch, then phrase blend".into();
+                                Ok(())
+                            }
+                            Err(error) => {
+                                self.status =
+                                    format!("Scratch-in skipped: {error}; using clean blend");
+                                if let Some(grid) = grid {
+                                    a.scheduled_crossfade(seconds, grid)
+                                } else {
+                                    a.crossfade(seconds)
+                                }
                             }
                         }
                     } else if let Some(grid) = grid.filter(|g| {
@@ -2077,8 +2160,19 @@ impl Player {
             } else {
                 None
             };
-            let mix_seconds = self.fade_seconds
-                + auto_mashup_plan.map_or(0., |(_, hold)| self.fade_seconds + hold);
+            let next_scratch = self.run.transitions.pick(self.run.completed_handoffs)
+                == Some(crate::transition_styles::Style::Scratch);
+            let scratch_length = self
+                .loaded_track(active)
+                .and_then(|t| t.preparation.bpm)
+                .map(|b| (60. / (b * self.deck_rate(active))) as f32)
+                .map(|beat| 4. * beat + self.fade_seconds.min(beat));
+            let mix_seconds = if next_scratch {
+                scratch_length.unwrap_or(self.fade_seconds)
+            } else {
+                self.fade_seconds
+                    + auto_mashup_plan.map_or(0., |(_, hold)| self.fade_seconds + hold)
+            };
             let lead_timing = if auto_mashup_plan.is_some()
                 && self.run.transitions.timing.phrase_beats().is_none()
             {
@@ -2179,6 +2273,50 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    #[ignore = "muted native audio; requires AMP_WAVEFORM_FIXTURE"]
+    fn automatic_match_uses_sounding_deck_not_unrelated_master_or_toggle() {
+        let fixture = std::path::PathBuf::from(std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap());
+        let root = fixture.parent().unwrap();
+        let mut player = Player::default();
+        player.ensure_audio().unwrap();
+        player.audio.as_ref().unwrap().set_master(0.);
+        for (deck, bpm) in [120., 125.].into_iter().enumerate() {
+            let track = amp_core::Track {
+                path: fixture.file_name().unwrap().into(),
+                title: "Timing fixture".into(),
+                preparation: amp_core::Preparation {
+                    bpm: Some(bpm),
+                    beat_offset: Some(0.),
+                    ..Default::default()
+                },
+            };
+            player
+                .audio
+                .as_mut()
+                .unwrap()
+                .load(deck, root, &track, deck == 0)
+                .unwrap();
+            player.loaded_snapshot[deck] = Some(track);
+        }
+        wait(&mut player, |p| {
+            p.audio.as_ref().unwrap().controls.ready[1].load(Relaxed)
+        });
+        let audio = player.audio.as_ref().unwrap();
+        audio.set_rate(0, 1.05);
+        audio.controls.master_bpm.store(95f32.to_bits(), Relaxed);
+        audio.controls.synced[1].store(true, Relaxed);
+        player.match_auto_pair(0, 1);
+        let audio = player.audio.as_ref().unwrap();
+        assert!((audio.controls.effective_rate(1) - 126. / 125.).abs() < 1e-6);
+        assert!(!audio.controls.synced[1].load(Relaxed));
+        assert_eq!(f32::from_bits(audio.controls.master_bpm.load(Relaxed)), 95.);
+        // Repeated automatic matching is idempotent, never a Sync button toggle.
+        player.match_auto_pair(0, 1);
+        assert!(
+            (player.audio.as_ref().unwrap().controls.effective_rate(1) - 126. / 125.).abs() < 1e-6
+        );
+    }
     #[test]
     #[ignore = "native audio, muted; simulated playhead; requires AMP_WAVEFORM_FIXTURE"]
     fn auto_dj_hands_off_early_while_the_audio_tail_is_still_long() {
@@ -2610,7 +2748,7 @@ mod tests {
     }
     #[test]
     #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
-    fn occasional_scratch_runs_at_matched_tempo_and_keeps_auto_dj_running() {
+    fn unprepared_scratch_pair_falls_back_and_keeps_auto_dj_running() {
         let dir = tempfile::tempdir().unwrap();
         let fixture = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
         for i in 0..2 {
@@ -2652,7 +2790,6 @@ mod tests {
         player
             .execute_control(Action::MixNext { immediate: true })
             .unwrap();
-        wait(&mut player, |p| p.run.scratch_bridge.is_some());
         wait(&mut player, |p| p.run.completed_handoffs == 4);
         assert!(player.run.auto);
         assert_eq!(player.fade_seconds, 0.5);
@@ -2765,7 +2902,7 @@ mod tests {
     use super::*;
     #[test]
     #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
-    fn scratch_assist_bridges_large_tempo_gap_and_releases_on_cancel() {
+    fn large_tempo_gap_uses_clean_transition_and_can_cancel() {
         let dir = tempfile::tempdir().unwrap();
         let fixture = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
         for (i, bpm) in [120., 174.].into_iter().enumerate() {
@@ -2798,8 +2935,8 @@ mod tests {
                 energy: None,
             })
             .unwrap();
-        wait(&mut player, |p| p.run.scratch_bridge.is_some());
-        assert!(player.audio.as_ref().unwrap().controls.scratching[0].load(Relaxed));
+        wait(&mut player, |p| p.run.transition.is_some());
+        assert!(!player.audio.as_ref().unwrap().controls.scratching[0].load(Relaxed));
         player
             .execute_control(Action::AutoDj { enabled: false })
             .unwrap();

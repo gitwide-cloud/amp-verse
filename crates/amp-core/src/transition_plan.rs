@@ -48,7 +48,7 @@ pub fn landing(p: &Preparation, selected: f64, rate: f64, fade: f64) -> Option<L
         || !p.manual_cues.is_empty()
         || ![selected, rate, fade].iter().all(|v| v.is_finite())
         || rate <= 0.
-        || !(0.1..=30.).contains(&fade)
+        || !(0.1..=120.).contains(&fade)
     {
         return None;
     }
@@ -107,6 +107,9 @@ mod tests {
             ..Default::default()
         });
         let saved = p.clone();
+        // Two three-second ramps plus sixteen beats at 120 BPM: full mix at the drop.
+        let plan = landing(&p, 40., 1.02, 14.).unwrap();
+        assert!(((40. - plan.entry) / 1.02 - 14.).abs() < 1e-9);
         assert_eq!(
             landing(&p, 20., 1., 3.),
             Some(Landing {

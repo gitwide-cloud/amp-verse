@@ -24,7 +24,7 @@ pub fn compatible_with_keylock(
     }
     let pitch_out = if key_lock[0] { 1. } else { out_rate };
     let pitch_in = if key_lock[1] { 1. } else { in_rate };
-    if (a * out_rate / (b * in_rate) - 1.).abs() > 0.005
+    if (a * out_rate / (b * in_rate) - 1.).abs() > 0.0005
         || (12. * (pitch_out / pitch_in).log2()).abs() > 0.2
     {
         return false;
@@ -41,8 +41,8 @@ pub fn compatible_with_keylock(
     };
     key(out).zip(key(incoming)).is_some_and(|(a, b)| a == b)
 }
-/// During hold: outgoing vocals + incoming instruments/drums, with just one vocal source.
-/// Returns bus levels and per-deck stem masks, independent of saved/live stem gains.
+/// Incoming vocal over outgoing backing; reveal incoming backing at the landing.
+/// Session masks multiply user stem gains; no saved stem setting is changed.
 pub fn envelope(elapsed: u64, fade: u64, hold: u64, incoming: usize) -> ([f32; 2], [[f32; 3]; 2]) {
     let outgoing = 1 - incoming;
     let mut weights = [1.; 2];
@@ -50,16 +50,16 @@ pub fn envelope(elapsed: u64, fade: u64, hold: u64, incoming: usize) -> ([f32; 2
     if elapsed < fade {
         let p = elapsed as f32 / fade.max(1) as f32;
         weights[incoming] = p;
-        masks[outgoing] = [1., 1. - p, 1. - p];
-        masks[incoming] = [0., 1., 1.];
+        masks[outgoing] = [1. - p, 1., 1.];
+        masks[incoming] = [1., 0., 0.];
     } else if elapsed < fade + hold {
-        masks[outgoing] = [1., 0., 0.];
-        masks[incoming] = [0., 1., 1.];
+        masks[outgoing] = [0., 1., 1.];
+        masks[incoming] = [1., 0., 0.];
     } else {
         let p = ((elapsed - fade - hold) as f32 / fade.max(1) as f32).min(1.);
         weights[outgoing] = 1. - p;
-        masks[outgoing] = [1., 0., 0.];
-        masks[incoming] = [p, 1., 1.];
+        masks[outgoing] = [0., 1., 1.];
+        masks[incoming] = [1., p, p];
     }
     (weights, masks)
 }
@@ -99,7 +99,7 @@ mod tests {
     fn hold_has_one_vocal_and_restores_the_incoming_mix() {
         let (w, m) = envelope(150, 100, 200, 1);
         assert_eq!(w, [1., 1.]);
-        assert_eq!(m, [[1., 0., 0.], [0., 1., 1.]]);
+        assert_eq!(m, [[0., 1., 1.], [1., 0., 0.]]);
         let (w, m) = envelope(400, 100, 200, 1);
         assert_eq!(w, [0., 1.]);
         assert_eq!(m[1], [1.; 3]);
