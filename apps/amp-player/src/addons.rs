@@ -67,7 +67,7 @@ const ENTRIES: [Entry; 7] = [
         ],
     },
     Entry {
-        name: "AMP Analysis Engine",
+        name: "AMP Library Engine",
         kind: "Optional",
         summary: "Installable BPM, key, energy, waveform and cue analysis.",
         features: &[

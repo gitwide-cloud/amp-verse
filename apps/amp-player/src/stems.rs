@@ -31,7 +31,7 @@ fn worker_process(command: std::process::Command) -> process_wrap::std::CommandW
     wrapped.wrap(process_wrap::std::ProcessGroup::leader());
     wrapped
 }
-pub(super) fn runtime() -> Option<PathBuf> {
+pub(crate) fn runtime() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("AMP_STEM_PYTHON")
         .map(PathBuf::from)
         .filter(|p| p.is_file())
@@ -108,7 +108,7 @@ fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 3]> {
 pub fn ready(source: &Path) -> Option<[PathBuf; 3]> {
     ready_in(&cache_root()?, source)
 }
-pub(super) fn relocate_cached(source: &Path, destination: &Path) -> Result<(), String> {
+pub(crate) fn relocate_cached(source: &Path, destination: &Path) -> Result<(), String> {
     let Some(cache) = cache_root() else {
         return Ok(());
     };
@@ -174,7 +174,7 @@ fn restore_cached(cache: &Path, source: &Path) -> Result<bool, String> {
     Ok(true)
 }
 type Process = Arc<Mutex<Option<Box<dyn process_wrap::std::ChildWrapper>>>>;
-pub(super) fn separate_clip(cache: &Path, source: &Path) -> Result<[PathBuf; 3], String> {
+pub(crate) fn separate_clip(cache: &Path, source: &Path) -> Result<[PathBuf; 3], String> {
     let python = runtime().ok_or("Install the stem separator add-on first")?;
     prepare(
         cache,
@@ -568,11 +568,12 @@ impl Panel {
                     let sources: Vec<_> = library
                         .tracks
                         .iter()
-                        .map(|track| {
-                            (
-                                amp_core::music_sources::audio_path(&root, &track.path),
-                                track.title.clone(),
-                            )
+                        .filter_map(|track| {
+                            let source = amp_core::music_sources::audio_path(&root, &track.path);
+                            let mut prep = amp_core::preparation::load(&source).unwrap_or_default();
+                            amp_core::media_kind::inspect_audio(&source, &mut prep);
+                            amp_core::media_kind::is_music(&source, &prep)
+                                .then(|| (source, track.title.clone()))
                         })
                         .collect();
                     let total = sources.len();

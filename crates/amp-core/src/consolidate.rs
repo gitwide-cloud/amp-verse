@@ -30,6 +30,8 @@ pub struct Plan {
     pub id: String,
     pub root: PathBuf,
     pub files: Vec<Entry>,
+    #[serde(default)]
+    pub left_in_place: Vec<PathBuf>,
     pub groups: Vec<Group>,
     pub settings: show::Settings,
     pub playlists: Vec<Playlist>,
@@ -108,9 +110,14 @@ pub fn scan(
         playlists.push(Playlist::load(&path, root).map_err(|e| e.to_string())?);
     }
     let mut files = Vec::new();
+    let mut left_in_place = Vec::new();
     let mut hashes = BTreeMap::<String, Vec<usize>>::new();
     for (index, track) in library.tracks.iter().enumerate() {
         cancelled(cancel)?;
+        if !crate::media_kind::is_music(&track.path, &track.preparation) {
+            left_in_place.push(track.path.clone());
+            continue;
+        }
         progress(format!(
             "Checking song {} of {}: {}",
             index + 1,
@@ -162,6 +169,7 @@ pub fn scan(
         id: uuid::Uuid::new_v4().to_string(),
         root: root.canonicalize().map_err(|e| e.to_string())?,
         files,
+        left_in_place,
         groups,
         settings,
         playlists,
@@ -505,6 +513,15 @@ pub fn execute(
             }
         }
         prep.extensions.remove("_amp_sync");
+        if prep.analysis.is_some() {
+            let stat = fs::metadata(&dest).map_err(|e| e.to_string())?;
+            let modified = stat
+                .modified()
+                .map_err(|e| e.to_string())?
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?;
+            prep.extensions.insert("analysis_source_stat".into(),serde_json::json!({"size":stat.len(),"modified_ns":modified.as_nanos().to_string()}));
+        }
         if !resume || preparation::revision(&dest).is_none() {
             preparation::save(&destination, relative, &prep)?;
         }
@@ -616,9 +633,12 @@ pub fn execute(
     let mut report = Report {
         destination: destination.clone(),
         moved: 0,
-        retained: plan.files.len() - keepers.len(),
+        retained: plan.files.len() - keepers.len() + plan.left_in_place.len(),
         warnings: vec![],
     };
+    if !plan.left_in_place.is_empty() {
+        report.warnings.push("Spoken audio stays in its original folders and is not copied into the consolidated music folder. Keep those original sources available for listening.".into());
+    }
     for (index, relative) in &keepers {
         cancelled(cancel)?;
         let entry = &plan.files[*index];
@@ -657,6 +677,18 @@ pub fn execute(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn spoken_files_stay_in_place_and_song_references_stay_relative() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Speeches")).unwrap();
+        std::fs::write(root.path().join("Speeches/Talk.mp3"), b"speech").unwrap();
+        std::fs::write(root.path().join("Music.mp3"), b"music").unwrap();
+        let plan = scan(root.path(), &AtomicBool::new(false), |_| {}).unwrap();
+        assert_eq!(plan.files.len(), 1);
+        assert_eq!(plan.left_in_place, vec![PathBuf::from("Speeches/Talk.mp3")]);
+        assert!(!plan.files[0].relative.is_absolute());
+        assert!(root.path().join("Speeches/Talk.mp3").is_file());
+    }
     #[test]
     fn artist_album_rename_preserves_portable_artwork_and_cues() {
         let source = tempfile::tempdir().unwrap();

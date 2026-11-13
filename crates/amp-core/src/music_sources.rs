@@ -315,7 +315,9 @@ mod tests {
         add(main.path(), extra.path()).unwrap();
         let jobs = crate::scan_job_inputs(main.path()).unwrap();
         assert_eq!(jobs.tracks.len(), 1);
-        assert_eq!(jobs.tracks[0].preparation, crate::Preparation::default());
+        let mut input = jobs.tracks[0].preparation.clone();
+        assert!(input.extensions.remove("scan_source_stat").is_some());
+        assert_eq!(input, crate::Preparation::default());
         assert!(crate::scan(extra.path()).is_err());
         fs::rename(
             extra.path().join("ampdj/library.json"),

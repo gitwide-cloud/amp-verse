@@ -1,30 +1,28 @@
 //! Offline-first library, preparation data and process audio adapter. No GUI or network dependency.
+pub mod dj_engine;
+pub mod dj_logic;
+pub mod library_engine;
 #[cfg(feature = "analysis")]
-pub mod analysis;
+pub use library_engine::analysis;
 pub mod arrangement;
-pub mod artwork;
 pub mod background;
 pub mod batch;
-pub mod catalog_db;
-pub mod consolidate;
+pub(crate) use library_engine::catalog_shards;
 pub mod coordination;
 pub mod discovery;
-pub mod dj_phrasing;
 pub mod energy_profile;
 pub mod engine_api;
-pub mod genres;
-pub mod mix_schedule;
-pub mod music_sources;
-pub mod offline;
-pub mod preparation;
-pub mod review;
 pub mod show;
 pub mod smart;
 pub mod smart_filters;
-pub mod stem_archive;
-pub mod stem_mix;
-pub mod storage;
-pub mod transition_plan;
+// Compatibility names keep existing integrations on the same implementation.
+pub use dj_engine::{stem_archive, stem_mix};
+pub use dj_logic::{dj_phrasing, mix_schedule, transition_plan};
+pub use library_engine::{
+    analysis_queue, artwork, catalog_db, consolidate, genres, media_kind, music_sources, offline,
+    preparation, review, storage,
+};
+
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -126,7 +124,7 @@ fn scan_single(root: &Path, metadata: bool) -> io::Result<Library> {
     let root = root.canonicalize()?;
     storage::register(&root);
     let mut tracks = Vec::new();
-    let catalog = if metadata {
+    let mut catalog = if metadata {
         catalog_db::preparations(&root).map_err(io::Error::other)?
     } else {
         Default::default()
@@ -135,7 +133,7 @@ fn scan_single(root: &Path, metadata: bool) -> io::Result<Library> {
         dir: &Path,
         root: &Path,
         tracks: &mut Vec<Track>,
-        catalog: &std::collections::BTreeMap<String, Preparation>,
+        catalog: &mut std::collections::BTreeMap<String, Preparation>,
         metadata: bool,
     ) -> io::Result<Folder> {
         let mut folder = Folder {
@@ -169,13 +167,25 @@ fn scan_single(root: &Path, metadata: bool) -> io::Result<Library> {
                 );
                 let mut preparation = if !metadata {
                     Preparation::default()
-                } else if let Some(prep) = catalog.get(&key) {
-                    prep.clone()
+                } else if let Some(prep) = catalog.remove(&key) {
+                    prep
                 } else {
                     preparation::load(&path).map_err(io::Error::other)?
                 };
                 if metadata {
                     genres::read_embedded(&path, &mut preparation);
+                } else if let Ok(stat) = entry.metadata()
+                    && let Ok(time) = stat.modified()
+                    && let Ok(time) = time.duration_since(std::time::UNIX_EPOCH)
+                {
+                    preparation.extensions.insert("scan_source_stat".into(),serde_json::json!({"size":stat.len(),"modified_ns":time.as_nanos().to_string()}));
+                }
+                let content = media_kind::kind(&path, &preparation);
+                if content != media_kind::Kind::Music {
+                    preparation.extensions.insert(
+                        "media_kind_detected".into(),
+                        serde_json::json!(content.id()),
+                    );
                 }
                 folder.tracks.push(tracks.len());
                 tracks.push(Track {
@@ -198,7 +208,7 @@ fn scan_single(root: &Path, metadata: bool) -> io::Result<Library> {
         }
         Ok(folder)
     }
-    let tree = visit(&root, &root, &mut tracks, &catalog, metadata)?;
+    let tree = visit(&root, &root, &mut tracks, &mut catalog, metadata)?;
     Ok(Library { tracks, tree })
 }
 pub fn supported(p: &Path) -> bool {

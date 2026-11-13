@@ -442,6 +442,7 @@ pub struct Lease {
 pub enum Skip {
     Busy,
     Complete,
+    NonMusic,
 }
 pub enum Claimed {
     Owned(Lease),
@@ -688,7 +689,22 @@ pub fn analyze_shared(root: &Path, relative: &Path, force: bool) -> Result<Analy
     };
     let _heartbeat = lease.keep_alive();
     let audio = crate::resolve(root, relative).map_err(|e| e.to_string())?;
-    let (before, bytes) = crate::preparation::load_with_revision(&audio)?;
+    let (mut before, bytes) = crate::preparation::load_with_revision(&audio)?;
+    if !force {
+        before.extensions.remove("media_kind_detected");
+        if !before.extensions.contains_key("media_kind") {
+            crate::genres::read_embedded(&audio, &mut before);
+        }
+        let kind = crate::media_kind::kind(&audio, &before);
+        if kind != crate::media_kind::Kind::Music {
+            before
+                .extensions
+                .insert("media_kind_detected".into(), serde_json::json!(kind.id()));
+            lease.stamp(&mut before);
+            crate::preparation::publish_claimed(root, relative, &before, bytes.as_deref(), &lease)?;
+            return Ok(AnalysisResult::Skipped(Skip::NonMusic));
+        }
+    }
     if (!force
         || completed_version(&before)
             .is_some_and(|v| v > engine_version(crate::engine_api::ENGINE_ID).unwrap()))
@@ -784,6 +800,26 @@ mod tests {
         let mut c: Claim = read(&lease.path).unwrap().unwrap();
         c.expires_ms = 0;
         atomic_write(&lease.path, &c).unwrap();
+    }
+    #[cfg(feature = "analysis")]
+    #[test]
+    fn spoken_folder_is_classified_without_decoding_or_moving_audio() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Speeches")).unwrap();
+        let audio = root.path().join("Speeches/Talk.mp3");
+        std::fs::write(&audio, b"not an audio codec fixture").unwrap();
+        crate::catalog_db::compact(root.path()).unwrap();
+        assert!(matches!(
+            analyze_shared(root.path(), Path::new("Speeches/Talk.mp3"), false).unwrap(),
+            AnalysisResult::Skipped(Skip::NonMusic)
+        ));
+        let saved = crate::preparation::load(&audio).unwrap();
+        assert!(saved.analysis.is_none());
+        assert_eq!(
+            crate::media_kind::kind(Path::new("Speeches/Talk.mp3"), &saved),
+            crate::media_kind::Kind::Speech
+        );
+        assert_eq!(std::fs::read(audio).unwrap(), b"not an audio codec fixture");
     }
     #[test]
     fn short_record_contention_retries_without_bypassing_the_lock() {

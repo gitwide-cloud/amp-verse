@@ -11,6 +11,23 @@ fn error(e: impl std::fmt::Display) -> String {
 pub fn path(root: &Path) -> PathBuf {
     root.join("ampdj/catalog.ampdb")
 }
+/// Additional sources get their own portable catalog before automatic jobs write results.
+pub fn ensure(root: &Path) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        if path(root).is_file() {
+            return Ok(());
+        }
+        match compact(root) {
+            Ok(_) => return Ok(()),
+            Err(_) if path(root).is_file() => return Ok(()),
+            Err(e) if e.contains("busy") && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100))
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
 /// Older JSON-only clients reject identity version 2 instead of creating stale metadata.
 pub fn fence_legacy_clients(root: &Path) -> Result<(), String> {
     if !path(root).is_file() {
@@ -61,7 +78,7 @@ fn open_copy(root: &Path) -> Result<(tempfile::TempDir, Connection), String> {
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(error)?;
-        if version != 1 {
+        if !matches!(version, 1 | 2) {
             return Err("Unsupported catalog version".into());
         }
     } else {
@@ -70,6 +87,24 @@ fn open_copy(root: &Path) -> Result<(tempfile::TempDir, Connection), String> {
     db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")
         .map_err(error)?;
     Ok((dir, db))
+}
+/// Shared queue transactions edit only the small index snapshot, never a writable NAS DB.
+pub(crate) fn queue_access<T>(
+    root: &Path,
+    write: bool,
+    work: impl FnOnce(&mut Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
+    if write {
+        crate::catalog_shards::migrate(root, true)?;
+        let (dir, mut db) = open_copy(root)?;
+        let value = work(&mut db)?;
+        publish(root, dir, db)?;
+        Ok(value)
+    } else {
+        let mut db = open_read(root)?;
+        work(&mut db)
+    }
 }
 // Readers hold the publication lock and open only a fully committed immutable snapshot.
 // This reads indexed pages directly; it never creates a journal or writable NAS connection.
@@ -86,7 +121,7 @@ fn open_read(root: &Path) -> Result<Connection, String> {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(error)?;
-    if version != 1 {
+    if !matches!(version, 1 | 2) {
         return Err("Unsupported catalog version".into());
     }
     Ok(db)
@@ -99,6 +134,9 @@ pub fn read(document: &Path) -> Result<Option<Vec<u8>>, String> {
         return Ok(None);
     }
     let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
+    if crate::catalog_shards::active(&root)? {
+        return crate::catalog_shards::read(&root, &key);
+    }
     let db = open_read(&root)?;
     db.query_row("SELECT document FROM records WHERE key=?1", [key], |r| {
         r.get::<_, String>(0)
@@ -123,6 +161,11 @@ pub fn write_guarded(
     }
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(error)?;
     let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
+    crate::catalog_shards::migrate(&root, false)?;
+    if crate::catalog_shards::active(&root)? {
+        crate::catalog_shards::write(&root, &key, &value.to_string(), verify)?;
+        return Ok(true);
+    }
     let (dir, db) = open_copy(&root)?;
     db.execute("INSERT INTO records(key,document) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET document=excluded.document", params![key,value.to_string()]).map_err(error)?;
     verify()?;
@@ -136,6 +179,9 @@ pub fn preparations(
         return Ok(Default::default());
     }
     let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
+    if crate::catalog_shards::active(root)? {
+        return crate::catalog_shards::preparations(root);
+    }
     let db = open_read(root)?;
     let mut query = db
         .prepare("SELECT key,document FROM records WHERE key LIKE 'tracks/%'")
@@ -369,6 +415,10 @@ pub fn compact(root: &Path) -> Result<usize, String> {
     transaction.commit().map_err(error)?;
     publish(root, dir, db)?;
     fence_legacy_clients(root)?;
+    // New clients now use the catalog, and old JSON clients are fenced. Retiring
+    // imported loose files must not block new index reads/writes for the whole cleanup.
+    drop(_guard);
+    drop(_migration);
     // The immutable recovery table retains the imported values before retiring loose JSON.
     // Never remove lock/lease files, source music, or a file changed by an older client.
     for (key, document) in &rows {

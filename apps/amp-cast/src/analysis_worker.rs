@@ -56,69 +56,120 @@ impl Worker {
         let state = self.clone();
         let cast = Arc::downgrade(cast);
         std::thread::spawn(move || {
+            while !state.enabled.load(Ordering::Relaxed) {
+                if state.stopped.load(Ordering::Relaxed) || cast.strong_count() == 0 {
+                    return;
+                }
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+            let Some(host) = cast.upgrade() else { return };
+            let queue = match amp_core::analysis_queue::Queue::for_library(&host.root, "cast") {
+                Ok(q) => q,
+                Err(e) => {
+                    state.progress.lock().unwrap().error = Some(e);
+                    return;
+                }
+            };
+            if let Err(e) = queue.seed_known(&host.tracks) {
+                state.progress.lock().unwrap().error = Some(e);
+            }
+            drop(host);
+            let scanner_queue = queue.clone();
+            let scanner_state = state.clone();
+            let scanner_cast = cast.clone();
+            let scanner = std::thread::spawn(move || {
+                loop {
+                    if scanner_state.stopped.load(Ordering::Relaxed) {
+                        break;
+                    }
+                    let Some(host) = scanner_cast.upgrade() else {
+                        break;
+                    };
+                    if scanner_state.enabled.load(Ordering::Relaxed) {
+                        scanner_state.progress.lock().unwrap().scanning = true;
+                        let outcome = amp_core::scan_job_inputs(&host.root)
+                            .map_err(|e| e.to_string())
+                            .and_then(|library| scanner_queue.enqueue_tracks(&library.tracks));
+                        let mut p = scanner_state.progress.lock().unwrap();
+                        p.scanning = false;
+                        if let Err(e) = outcome {
+                            p.error = Some(e);
+                        }
+                    }
+                    drop(host);
+                    for _ in 0..interval.clamp(10, 86400) {
+                        if scanner_state.stopped.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        std::thread::sleep(std::time::Duration::from_secs(1));
+                    }
+                }
+            });
             loop {
-                let Some(cast) = cast.upgrade() else {
-                    break;
-                };
                 if state.stopped.load(Ordering::Relaxed) {
                     break;
                 }
-                let busy = pause_for_radio && cast.station.blocking_lock().running;
+                let Some(host) = cast.upgrade() else { break };
+                let busy = state.pause_for_radio.load(Ordering::Relaxed)
+                    && host.station.blocking_lock().running;
                 state.progress.lock().unwrap().paused_for_radio = busy;
                 if state.enabled.load(Ordering::Relaxed) && !busy {
-                    let outcome = (|| {
-                        let library = amp_core::scan(&cast.root).map_err(|e| e.to_string())?;
-                        let count = amp_core::batch::workers(workers, library.tracks.len());
-                        *state.progress.lock().unwrap() = Progress {
-                            enabled: true,
-                            scanning: true,
-                            total: library.tracks.len(),
-                            workers: count,
-                            ..Default::default()
-                        };
-                        amp_core::batch::for_each(&library.tracks, count, |track| {
+                    let count = amp_core::batch::workers(workers, 32).max(1);
+                    let slots = vec![(); count];
+                    amp_core::batch::for_each(&slots, count, |_| {
+                        loop {
                             if state.stopped.load(Ordering::Relaxed)
                                 || !state.enabled.load(Ordering::Relaxed)
-                                || (pause_for_radio && cast.station.blocking_lock().running)
+                                || (state.pause_for_radio.load(Ordering::Relaxed)
+                                    && host.station.blocking_lock().running)
                             {
-                                return false;
+                                break;
                             }
-                            let outcome = amp_core::coordination::analyze_shared(
-                                &cast.root,
-                                &track.path,
-                                false,
-                            );
+                            let job = match queue.next() {
+                                Ok(Some(j)) => j,
+                                Ok(None) => break,
+                                Err(e) => {
+                                    state.progress.lock().unwrap().error = Some(e);
+                                    break;
+                                }
+                            };
+                            let _heartbeat = queue.keep_alive(&job);
+                            let outcome =
+                                amp_core::library_engine::analyze_job(&host.root, &job.path, false);
+                            let result = match &outcome {
+                                Ok(amp_core::coordination::AnalysisResult::Skipped(
+                                    amp_core::coordination::Skip::Busy,
+                                )) => queue.defer(&job),
+                                Ok(_) => queue.finish(&job, Ok(())),
+                                Err(e) => queue.finish(&job, Err(e)),
+                            };
                             let mut p = state.progress.lock().unwrap();
+                            p.workers = count;
                             match outcome {
                                 Ok(amp_core::coordination::AnalysisResult::Prepared(_)) => {
                                     p.completed += 1
                                 }
-                                Ok(amp_core::coordination::AnalysisResult::Skipped(_)) => {
-                                    p.reused_or_claimed += 1
-                                }
+                                Ok(_) => p.reused_or_claimed += 1,
                                 Err(e) => {
                                     p.failed += 1;
                                     p.error = Some(e);
                                 }
                             }
-                            true
-                        });
-                        Ok::<_, String>(())
-                    })();
-                    let mut p = state.progress.lock().unwrap();
-                    p.scanning = false;
-                    if let Err(e) = outcome {
-                        p.error = Some(e);
-                    }
+                            if let Err(e) = result {
+                                p.error = Some(e);
+                            }
+                            if let Ok(stats) = queue.stats() {
+                                p.total = stats.total;
+                            }
+                        }
+                        true
+                    });
                 }
-                drop(cast);
-                for _ in 0..interval.clamp(10, 86400) {
-                    if state.stopped.load(Ordering::Relaxed) {
-                        return;
-                    }
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                }
+                drop(host);
+                std::thread::sleep(std::time::Duration::from_secs(1));
             }
+            state.stopped.store(true, Ordering::Relaxed);
+            let _ = scanner.join();
         });
     }
 }

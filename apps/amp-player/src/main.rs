@@ -15,6 +15,8 @@ mod controllers;
 mod crossfade_settings;
 mod deck_rack;
 mod dj_browser;
+#[path = "mixer.rs"]
+mod dj_engine;
 mod dj_mixer;
 mod dj_settings;
 mod dlna;
@@ -35,11 +37,13 @@ mod live_mix;
 mod mashup;
 mod media_lookup;
 mod mix_schedule;
-mod mixer;
+use dj_engine as mixer;
+#[path = "performance.rs"]
+mod dj_logic;
 mod monitor;
 mod music_scenes;
 mod organized_library;
-mod performance;
+use dj_logic as performance;
 mod playback_owner;
 mod player_sequence;
 mod podcast_cache;
@@ -60,7 +64,7 @@ mod smart_actions;
 mod smart_filter_ui;
 mod smart_preview;
 mod station_download;
-mod stems;
+use dj_engine::stems;
 mod theme;
 mod track_columns;
 mod transition_controls;
@@ -534,8 +538,12 @@ impl Player {
             self.addons_open = true;
             return;
         }
-        if self.preparer.busy() || self.analyze_after_scan {
+        if self.analyze_after_scan {
             return;
+        }
+        if let Some(library) = &self.library {
+            self.preparer
+                .resume_cached(self.root.clone(), &library.tracks);
         }
         self.analyze_after_scan = true;
         let root = self.root.clone();
@@ -544,7 +552,8 @@ impl Player {
         std::thread::spawn(move || {
             let _ = tx.send(amp_core::scan_job_inputs(&root).map_err(|e| e.to_string()));
         });
-        self.preparer.status = "Checking all music sources for new songs before analysis…".into();
+        self.preparer.status =
+            "Queue running; checking folders for new songs in the background…".into();
     }
     fn poll_analysis_scan(&mut self) {
         let result = self
@@ -562,6 +571,8 @@ impl Player {
             self.analyze_after_scan = false;
             match result {
                 Ok(mut library) => {
+                    self.last_scan = std::time::Instant::now();
+                    self.preparer.batch_ref(self.root.clone(), &library.tracks);
                     if let Some(current) = &self.library {
                         let known: std::collections::HashMap<_, _> = current
                             .tracks
@@ -570,16 +581,28 @@ impl Player {
                             .collect();
                         for track in &mut library.tracks {
                             if let Some(old) = known.get(&track.path) {
+                                let detected = track
+                                    .preparation
+                                    .extensions
+                                    .get("media_kind_detected")
+                                    .cloned();
                                 track.preparation = old.preparation.clone();
+                                if !track.preparation.extensions.contains_key("media_kind")
+                                    && let Some(detected) = detected
+                                {
+                                    track
+                                        .preparation
+                                        .extensions
+                                        .insert("media_kind_detected".into(), detected);
+                                }
                                 track.title = old.title.clone();
                             }
                         }
                     }
+                    for track in &mut library.tracks {
+                        track.preparation.extensions.remove("scan_source_stat");
+                    }
                     self.accept_library_scan(library);
-                    self.preparer.batch(
-                        self.root.clone(),
-                        self.library.as_ref().unwrap().tracks.clone(),
-                    );
                 }
                 Err(error) => {
                     self.preparer.status = format!(
@@ -728,7 +751,14 @@ impl Player {
             && self.scan.is_none()
             && self.last_scan.elapsed() >= Duration::from_secs(120)
         {
-            self.scan();
+            if self.preparer.queue_enabled {
+                if self.analysis_scan.is_none() {
+                    self.request_library_analysis();
+                    self.last_scan = std::time::Instant::now();
+                }
+            } else {
+                self.scan();
+            }
         }
         if self.smart_preview.active()
             && (self.auxiliary_playing()

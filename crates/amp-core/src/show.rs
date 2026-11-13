@@ -339,19 +339,14 @@ pub fn eligible(p: &SmartPlaylist, t: &Track) -> bool {
         return false;
     }
     let id = song_id(t);
-    // Speech downloads stay out of broad music mixes. They can still be explicitly
-    // selected as songs, a dedicated folder, or an imported playlist source.
-    if t.preparation
-        .extensions
-        .get("media_kind")
-        .and_then(|v| v.as_str())
-        == Some("podcast")
+    // Broad folder selections are still music mixes. Spoken audio requires an
+    // explicit song selection or playlist membership, not merely a parent folder.
+    if !crate::media_kind::is_music(&t.path, &t.preparation)
         && !p.allowed.contains(&id)
         && !p
-            .folders
+            .playlist_sources
             .iter()
-            .any(|f| !f.as_os_str().is_empty() && crate::folder_contains(&t.path, f))
-        && !p.playlist_sources.iter().any(|s| s.songs.contains(&id))
+            .any(|source| source.songs.contains(&id))
     {
         return false;
     }

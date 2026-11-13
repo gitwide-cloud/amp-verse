@@ -64,7 +64,7 @@ impl Organizer {
                         match result {
                             Ok(report) => {
                                 self.status = format!(
-                                    "{} originals moved. {} duplicate or changed originals retained.",
+                                    "{} originals moved. {} originals left in place (duplicates, spoken audio or changed files).",
                                     report.moved, report.retained
                                 );
                                 self.report = Some(report);
@@ -111,6 +111,7 @@ impl Organizer {
                 let mut organize=plan.files.first().is_some_and(|f|f.organize_names);
                 if ui.add_enabled(!busy&&!self.destination.join("ampdj/consolidation.ampdb").exists(),egui::Checkbox::new(&mut organize,"Organize as Artist / Album / Title (rename files)")).changed(){for file in &mut plan.files{file.organize_names=organize;}self.confirmed=false;}
                 ui.weak("Renaming uses saved or embedded tags, with a short content ID to prevent filename collisions. Preview below before moving.");
+                if !plan.left_in_place.is_empty(){ui.label(format!("{} spoken-audio files stay in their original folders and are excluded from these moves.",plan.left_in_place.len()));}
                 let bytes:u64=plan.groups.iter().map(|g|plan.files[g.keeper].bytes).sum();
                 ui.strong(format!("Move preview: {} unique songs · {:.2} GiB",plan.groups.len(),bytes as f64/1073741824.));
                 ui.weak("A checksum-verified copy, preparation, playlist remap and recovery journal are written before any original is removed. Extra duplicate copies and their metadata stay in their source folders.");

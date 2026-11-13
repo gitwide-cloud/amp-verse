@@ -1,4 +1,6 @@
-//! Shared six-deck device stream. FFmpeg decoding stays off the audio callback.
+//! DJ Engine: device rendering and stem preparation. Musical decisions live in DJ Logic.
+#[path = "stems.rs"]
+pub(crate) mod stems;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Consumer, PushError, RingBuffer};
 use std::{

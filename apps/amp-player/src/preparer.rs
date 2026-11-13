@@ -35,6 +35,22 @@ pub struct Preparer {
     title: String,
     draft: Preparation,
     job: Option<mpsc::Receiver<Update>>,
+    queue: Option<amp_core::analysis_queue::Queue>,
+    queue_init: Option<
+        mpsc::Receiver<
+            Result<
+                (
+                    amp_core::analysis_queue::Queue,
+                    amp_core::analysis_queue::Stats,
+                ),
+                String,
+            >,
+        >,
+    >,
+    queue_discovery: Option<mpsc::Receiver<Result<amp_core::analysis_queue::Stats, String>>>,
+    queue_root: PathBuf,
+    pub queue_enabled: bool,
+    stop_queue: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub status: String,
     active_workers: usize,
     total: usize,
@@ -156,6 +172,23 @@ impl Preparer {
             {
                 self.save_inline(library);
             }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Content type:");
+            let selected = amp_core::media_kind::kind(&self.path, &self.draft);
+            for (label, kind) in [
+                ("Music", amp_core::media_kind::Kind::Music),
+                ("Audiobook", amp_core::media_kind::Kind::Audiobook),
+                ("Speech", amp_core::media_kind::Kind::Speech),
+                ("Podcast", amp_core::media_kind::Kind::Podcast),
+            ] {
+                if ui.selectable_label(selected == kind, label).clicked() {
+                    self.draft
+                        .extensions
+                        .insert("media_kind".into(), serde_json::json!(kind.id()));
+                }
+            }
+            ui.weak("Save preparation to keep this choice. Files stay in place.");
         });
         if amp_core::review::proposal(&self.draft)
             .is_some_and(|p| amp_core::energy_profile::read(&p).is_some())
@@ -467,11 +500,17 @@ impl Preparer {
             self.stem_preview = None;
         }
     }
+    pub fn failed(&self) -> usize {
+        self.failures
+    }
     pub fn progress(&self) -> (usize, usize) {
         (self.done, self.total)
     }
     pub fn busy(&self) -> bool {
-        self.job.is_some() || self.compact_job.is_some()
+        self.job.is_some()
+            || self.compact_job.is_some()
+            || self.queue_init.is_some()
+            || self.queue_discovery.is_some()
     }
     pub fn catalog_ui(&mut self, ui: &mut egui::Ui, root: &std::path::Path, blocked: bool) {
         if let Some(rx) = &self.compact_job
@@ -481,13 +520,13 @@ impl Preparer {
             self.compact_job = None;
         }
         ui.heading("Portable catalog");
-        ui.weak("One local catalog file for song analysis, cues and playlists. No database server needed. Close other AMP versions before converting a shared library.");
+        ui.weak("A shared index points to 500-song catalog files. More files are created as needed, with no fixed library limit. No database server needed.");
         if amp_core::catalog_db::path(root).is_file() {
-            ui.label("This library uses ampdj/catalog.ampdb");
+            ui.label("Index: ampdj/catalog.ampdb. Starting the analysis queue organizes song catalogs in ampdj/catalogs and keeps a recovery copy.");
         } else if ui
             .add_enabled(
                 !blocked && !self.busy(),
-                egui::Button::new("Consolidate catalog into one file"),
+                egui::Button::new("Create portable catalog storage"),
             )
             .clicked()
         {
@@ -545,16 +584,203 @@ impl Preparer {
         self.review_selected.clear();
         self.open = true;
     }
-    pub fn batch(&mut self, root: PathBuf, tracks: Vec<Track>) {
-        if self.busy() {
+    pub fn batch_ref(&mut self, root: PathBuf, tracks: &[Track]) {
+        self.queue_inputs(root, tracks, true);
+    }
+    pub fn resume_cached(&mut self, root: PathBuf, tracks: &[Track]) {
+        self.queue_inputs(root, tracks, false);
+    }
+    fn queue_inputs(&mut self, root: PathBuf, tracks: &[Track], verify: bool) {
+        if self.queue_init.is_some() || self.queue_discovery.is_some() {
             return;
         }
-        self.total = tracks.len();
-        self.done = 0;
-        self.failures = 0;
-        self.skipped = 0;
-        self.status = format!("Preparing {} tracks...", self.total);
-        self.start(root, tracks, false);
+        let queue = if self.queue_root == root {
+            self.queue.clone()
+        } else {
+            None
+        };
+        self.queue_root = root.clone();
+        self.queue_enabled = true;
+        if self.total == 0 {
+            self.total = tracks.len();
+        }
+        let inputs: Vec<_> = tracks
+            .iter()
+            .filter(|t| amp_core::media_kind::is_music(&t.path, &t.preparation))
+            .map(|t| {
+                let mut preparation = Preparation {
+                    analysis: t.preparation.analysis.clone(),
+                    source_sha256: t.preparation.source_sha256.clone(),
+                    ..Default::default()
+                };
+                if let Some(kind) = t.preparation.extensions.get("media_kind") {
+                    preparation
+                        .extensions
+                        .insert("media_kind".into(), kind.clone());
+                }
+                if let Some(stat) = t.preparation.extensions.get("scan_source_stat") {
+                    preparation
+                        .extensions
+                        .insert("scan_source_stat".into(), stat.clone());
+                }
+                if let Some(stat) = t.preparation.extensions.get("analysis_source_stat") {
+                    preparation
+                        .extensions
+                        .insert("analysis_source_stat".into(), stat.clone());
+                }
+                Track {
+                    path: t.path.clone(),
+                    title: String::new(),
+                    preparation,
+                }
+            })
+            .collect();
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.queue_init = Some(rx);
+        let (discovered, discovery) = mpsc::sync_channel(1);
+        self.queue_discovery = Some(discovery);
+        self.status = "Opening the saved queue; folder discovery runs separately.".into();
+        std::thread::spawn(move || {
+            let opened = (|| {
+                let q = match queue {
+                    Some(q) => q,
+                    None => amp_core::analysis_queue::Queue::for_library(&root, "desktop")?,
+                };
+                q.seed_known(&inputs)?;
+                let stats = q.stats()?;
+                Ok::<_, String>((q, stats))
+            })();
+            match opened {
+                Ok((q, stats)) => {
+                    if tx.send(Ok((q.clone(), stats))).is_err() {
+                        return;
+                    }
+                    let result = if verify {
+                        q.enqueue_tracks(&inputs).and_then(|_| q.stats())
+                    } else {
+                        q.stats()
+                    };
+                    let _ = discovered.send(result);
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                }
+            }
+        });
+    }
+    pub fn retry_failed(&mut self) {
+        if self.queue_init.is_some() {
+            return;
+        }
+        let Some(q) = self.queue.clone() else { return };
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.queue_init = Some(rx);
+        self.queue_enabled = true;
+        std::thread::spawn(move || {
+            let result = q
+                .retry_failed()
+                .and_then(|_| q.stats())
+                .map(|stats| (q, stats));
+            let _ = tx.send(result);
+        });
+    }
+    pub fn stop_queue(&mut self) {
+        self.queue_enabled = false;
+        self.stop_queue
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.status = "Stopping after active songs; pending work is saved.".into();
+    }
+    fn start_queue(&mut self, root: PathBuf) {
+        let Some(q) = self.queue.clone() else { return };
+        if crate::engine::path().is_none() {
+            self.status =
+                "Install the optional analysis engine to continue the saved queue.".into();
+            return;
+        }
+        let (tx, rx) = mpsc::sync_channel(8);
+        self.job = Some(rx);
+        self.stop_queue = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = self.stop_queue.clone();
+        let workers = crate::preparation_speed::Mode::Fast
+            .workers(amp_core::batch::cpu_count())
+            .max(1);
+        self.status = "Processing saved analysis queue; new songs append at the end.".into();
+        std::thread::spawn(move || {
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    let q = &q;
+                    let stop = &stop;
+                    let tx = &tx;
+                    let root = &root;
+                    scope.spawn(move || {
+                        loop {
+                            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            let job = match q.next() {
+                                Ok(Some(job)) => job,
+                                Ok(None) => break,
+                                Err(e) => {
+                                    let _ = tx.send(Update {
+                                        root: root.clone(),
+                                        path: PathBuf::new(),
+                                        result: Err(e),
+                                        selected: false,
+                                        skipped: false,
+                                    });
+                                    break;
+                                }
+                            };
+                            let _heartbeat = q.keep_alive(&job);
+                            let _permit = crate::preparation_speed::analysis_permit();
+                            let mut skipped = false;
+                            let result = match crate::engine::analyze(root, &job.path, None) {
+                                Ok(Some(p)) => Ok(p),
+                                Ok(None) => {
+                                    skipped = true;
+                                    preparation::load(&amp_core::music_sources::audio_path(
+                                        root, &job.path,
+                                    ))
+                                }
+                                Err(e) => Err(e),
+                            };
+                            let waiting = skipped
+                                && result.as_ref().is_ok_and(|p| {
+                                    !amp_core::analysis_queue::Queue::cached_complete(
+                                        root,
+                                        &Track {
+                                            path: job.path.clone(),
+                                            title: String::new(),
+                                            preparation: p.clone(),
+                                        },
+                                    )
+                                });
+                            let recorded = if waiting {
+                                q.defer(&job)
+                            } else {
+                                q.finish(&job, result.as_ref().map(|_| ()).map_err(String::as_str))
+                            };
+                            let result = match recorded {
+                                Ok(()) => result,
+                                Err(e) => Err(e),
+                            };
+                            if tx
+                                .send(Update {
+                                    root: root.clone(),
+                                    path: job.path,
+                                    result,
+                                    selected: false,
+                                    skipped,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                }
+            })
+        });
     }
     fn start(&mut self, root: PathBuf, tracks: Vec<Track>, selected: bool) {
         if crate::engine::path().is_none() {
@@ -562,7 +788,7 @@ impl Preparer {
             return;
         }
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(8);
         self.job = Some(rx);
         self.active_workers = amp_core::batch::workers(
             crate::preparation_speed::mode().workers(amp_core::batch::cpu_count()),
@@ -604,13 +830,64 @@ impl Preparer {
         });
     }
     pub fn poll(&mut self, root: &std::path::Path, library: Option<&mut Library>) {
+        let initialized = self.queue_init.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(value) => Some(value),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(_) => Some(Err(
+                "Queue initialization interrupted; completed metadata was kept".into(),
+            )),
+        });
+        if let Some(result) = initialized {
+            self.queue_init = None;
+            match result {
+                Ok((q, stats)) => {
+                    self.queue = Some(q);
+                    self.total = stats.total;
+                    self.done = stats.done + stats.failed;
+                    self.failures = stats.failed;
+                    if self.queue_enabled && self.job.is_none() && stats.pending > 0 {
+                        self.start_queue(root.into());
+                    }
+                }
+                Err(e) => {
+                    self.status = e;
+                    self.queue_discovery = None;
+                }
+            }
+        }
+        let discovered = self
+            .queue_discovery
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(value) => Some(value),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(_) => Some(Err(
+                    "Folder discovery interrupted; saved queue was retained".into(),
+                )),
+            });
+        if let Some(result) = discovered {
+            self.queue_discovery = None;
+            match result {
+                Ok(stats) => {
+                    self.total = stats.total;
+                    if self.job.is_none() {
+                        self.done = stats.done + stats.failed;
+                        self.failures = stats.failed;
+                        if self.queue_enabled && stats.pending > 0 {
+                            self.start_queue(root.into());
+                        }
+                    }
+                }
+                Err(e) => self.status = e,
+            }
+        }
         self.active_workers = crate::preparation_speed::mode()
             .workers(amp_core::batch::cpu_count())
             .min(self.total);
         let mut updates = Vec::new();
         let mut finished = false;
         if let Some(rx) = &self.job {
-            loop {
+            for _ in 0..8 {
                 match rx.try_recv() {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -670,6 +947,21 @@ impl Preparer {
                 );
             }
             self.job = None;
+            if let Some(q) = &self.queue
+                && let Ok(stats) = q.stats()
+            {
+                self.total = stats.total;
+                self.done = stats.done + stats.failed;
+                self.failures = stats.failed;
+                if self.queue_enabled && stats.pending > 0 {
+                    self.start_queue(root.into());
+                } else if self.queue_enabled {
+                    self.status = format!(
+                        "Queue complete: {} done, {} failed. Watching folders for new songs.",
+                        stats.done, stats.failed
+                    );
+                }
+            }
         }
     }
     pub fn show(

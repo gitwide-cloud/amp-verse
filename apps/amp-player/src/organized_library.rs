@@ -513,7 +513,7 @@ impl Player {
         ui.add_space(18.);
         skin::panel(ui, false, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.heading("Analysis progress");
+            ui.heading("Analysis queue");
             let (done, total) = self.preparer.progress();
             if total > 0 {
                 ui.add(
@@ -546,11 +546,17 @@ impl Player {
                     !self.preparer.busy()
                         && !self.analyze_after_scan
                         && !self.root.as_os_str().is_empty(),
-                    egui::Button::new("Analyze library"),
+                    egui::Button::new("Start / resume analysis"),
                 )
                 .clicked()
             {
                 self.request_library_analysis();
+            }
+            if self.preparer.failed() > 0 && ui.button("Retry failed songs").clicked() {
+                self.preparer.retry_failed();
+            }
+            if self.preparer.queue_enabled && ui.button("Stop analysis queue").clicked() {
+                self.preparer.stop_queue();
             }
             crate::preparation_speed::controls(ui);
             ui.weak("Analysis requires the optional engine add-on. Manual edits remain protected.");
