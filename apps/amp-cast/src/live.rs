@@ -67,6 +67,7 @@ async fn audio(State(cast): State<Arc<Cast>>, headers: HeaderMap, body: Bytes) -
     }
     station.live_seen = Some(std::time::Instant::now());
     station.audio_ready = true;
+    cast.recovery.push(&body);
     let _ = cast.audio.send(body);
     StatusCode::NO_CONTENT.into_response()
 }

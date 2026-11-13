@@ -16,6 +16,8 @@ public final class PlaybackService extends MediaSessionService {
     private static PlaybackService instance;
     private DjEngine dj;
     private boolean djOwner;
+    private Runnable radioRetry;
+    private int radioAttempts;
     private final android.os.Handler handler=new android.os.Handler(android.os.Looper.getMainLooper());
     static void claimDj(){if(instance!=null){instance.djOwner=true;if(instance.session!=null)instance.session.getPlayer().pause();}}
     private void claimPlayer(){if(djOwner){djOwner=false;if(dj!=null)dj.pauseForPlayer();}}
@@ -49,7 +51,9 @@ public final class PlaybackService extends MediaSessionService {
         super.onCreate();
         instance=this;
         settings=getSharedPreferences("settings",MODE_PRIVATE);AudioDsp.load(settings);settings.registerOnSharedPreferenceChangeListener(changed);
-        ExoPlayer player = new ExoPlayer.Builder(this,renderers(this,true)).build();
+        ExoPlayer player = new ExoPlayer.Builder(this,renderers(this,true))
+            .setMediaSourceFactory(new androidx.media3.exoplayer.source.DefaultMediaSourceFactory(new ProtectedCastSource.Factory(this)))
+            .setLoadControl(new androidx.media3.exoplayer.DefaultLoadControl.Builder().setBufferDurationsMs(5000,20000,2500,4000).setPrioritizeTimeOverSizeThresholds(true).build()).build();
         player.setAudioAttributes(new AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(), true);
         player.setHandleAudioBecomingNoisy(true);
         player.setWakeMode(C.WAKE_MODE_LOCAL);
@@ -57,9 +61,32 @@ public final class PlaybackService extends MediaSessionService {
         catch (IllegalStateException error) { android.util.Log.e("AMPVerse", "Library load failed", error); }
         player.setRepeatMode(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("repeat", false) ? Player.REPEAT_MODE_ALL : Player.REPEAT_MODE_OFF);
         player.setShuffleModeEnabled(settings.getBoolean("shuffle",false));
-        player.addListener(new Player.Listener(){@Override public void onPlayWhenReadyChanged(boolean ready,int reason){if(ready)claimPlayer();}@Override public void onIsPlayingChanged(boolean playing){if(!playing){AudioDsp.spectrum=new float[24];AudioDsp.spectrumTime=0;}}});
+        player.addListener(new Player.Listener(){
+            @Override public void onPlayWhenReadyChanged(boolean ready,int reason){if(ready)claimPlayer();else cancelRadioRetry();}
+            @Override public void onMediaItemTransition(androidx.media3.common.MediaItem item,int reason){
+                player.setWakeMode(isRadio(item)?C.WAKE_MODE_NETWORK:C.WAKE_MODE_LOCAL);
+                if(!isRadio(item)){cancelRadioRetry();radioAttempts=0;}
+            }
+            @Override public void onPlayerError(androidx.media3.common.PlaybackException error){retryRadio(player);}
+            @Override public void onPlaybackStateChanged(int state){if(state==Player.STATE_ENDED)retryRadio(player);}
+            @Override public void onIsPlayingChanged(boolean playing){if(playing){radioAttempts=0;cancelRadioRetry();}else{AudioDsp.spectrum=new float[24];AudioDsp.spectrumTime=0;}}
+        });
         session = new MediaSession.Builder(this, player).setSessionActivity(PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT)).build();
         handler.post(fades);
+    }
+    private static boolean isRadio(androidx.media3.common.MediaItem item){return item!=null&&item.mediaId.equals("amp-radio");}
+    private void cancelRadioRetry(){if(radioRetry!=null){handler.removeCallbacks(radioRetry);radioRetry=null;}}
+    private void retryRadio(ExoPlayer player){
+        androidx.media3.common.MediaItem item=player.getCurrentMediaItem();
+        if(!isRadio(item)||!player.getPlayWhenReady()||djOwner||radioRetry!=null)return;
+        long delay=Math.min(6000,500L<<Math.min(4,radioAttempts++));
+        radioRetry=()->{
+            radioRetry=null;
+            if(!djOwner&&player.getPlayWhenReady()&&item.equals(player.getCurrentMediaItem())&&(player.getPlayerError()!=null||player.getPlaybackState()==Player.STATE_ENDED)){
+                player.setMediaItem(item);player.prepare();player.play();
+            }
+        };
+        handler.postDelayed(radioRetry,delay);
     }
     static androidx.media3.exoplayer.DefaultRenderersFactory renderers(android.content.Context context) {return renderers(context,false);}
     static androidx.media3.exoplayer.DefaultRenderersFactory renderers(android.content.Context context,boolean playerFade) {
@@ -72,7 +99,7 @@ public final class PlaybackService extends MediaSessionService {
     }
     @Override public MediaSession onGetSession(MediaSession.ControllerInfo info) { return session; }
     @Override public void onDestroy() {
-        handler.removeCallbacks(fades);
+        handler.removeCallbacks(fades);cancelRadioRetry();
         instance=null;
         if(dj!=null){dj.close(this);dj=null;}
         if(settings!=null)settings.unregisterOnSharedPreferenceChangeListener(changed);

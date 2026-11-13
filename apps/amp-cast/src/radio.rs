@@ -376,6 +376,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
                 break;
             }
             station.audio_ready = true;
+            stream_cast.recovery.push(&buffer[..n]);
             let _ = sender.send(Bytes::copy_from_slice(&buffer[..n]));
         }
     });

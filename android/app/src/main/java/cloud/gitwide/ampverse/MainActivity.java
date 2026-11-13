@@ -79,7 +79,7 @@ public final class MainActivity extends Activity {
                 player = pending.get();
                 syncSavedLibrary();
                 player.addListener(new Player.Listener() {
-                    @Override public void onPlayerError(PlaybackException error) { message = "Cannot play this file: " + error.getErrorCodeName(); refresh(); }
+                    @Override public void onPlayerError(PlaybackException error) { message = isRadio()?"Radio connection interrupted; reconnecting…":"Cannot play this file: " + error.getErrorCodeName(); refresh(); }
                     @Override public void onMediaItemTransition(MediaItem item, int reason) { refresh(); }
                 });
                 draw();
