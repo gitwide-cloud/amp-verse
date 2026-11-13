@@ -1,4 +1,4 @@
-//! AMP Lab-only URL import. No shell, cookies, user yt-dlp config, or playlist expansion.
+//! AMP Lab-only URL import. No shell, cookies, user yt-dlp config, or hidden playlist expansion.
 use eframe::egui;
 use process_wrap::std::*;
 use std::{
@@ -56,6 +56,154 @@ pub fn video_url(input: &str) -> Result<String, String> {
         return Err("That URL does not contain a valid YouTube video ID.".into());
     }
     Ok(format!("https://www.youtube.com/watch?v={id}"))
+}
+
+fn playlist_url(input: &str) -> Result<String, String> {
+    let u = url::Url::parse(input.trim()).map_err(|_| "Paste a complete YouTube playlist URL.")?;
+    if !matches!(u.scheme(), "http" | "https")
+        || !u.username().is_empty()
+        || u.password().is_some()
+        || u.port().is_some()
+        || !matches!(
+            u.host_str(),
+            Some("youtube.com" | "www.youtube.com" | "m.youtube.com" | "music.youtube.com")
+        )
+        || !matches!(u.path(), "/playlist" | "/watch")
+    {
+        return Err("Use a YouTube playlist or video-with-playlist URL.".into());
+    }
+    let id = u
+        .query_pairs()
+        .find(|(k, _)| k == "list")
+        .map(|(_, v)| v.into_owned())
+        .ok_or("This URL has no playlist ID.")?;
+    if !(2..=150).contains(&id.len())
+        || !id
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+    {
+        return Err("Invalid playlist ID.".into());
+    }
+    Ok(format!("https://www.youtube.com/playlist?list={id}"))
+}
+fn playlist_entries(info: &serde_json::Value) -> Result<Vec<String>, String> {
+    let entries = info["entries"]
+        .as_array()
+        .ok_or("No playlist entries returned.")?;
+    if entries.is_empty() || entries.len() > 500 {
+        return Err("Choose a playlist containing 1–500 videos.".into());
+    }
+    let mut urls = Vec::new();
+    for entry in entries {
+        if let Some(id) = entry["id"].as_str()
+            && let Ok(url) = video_url(&format!("https://www.youtube.com/watch?v={id}"))
+            && !urls.contains(&url)
+        {
+            urls.push(url);
+        }
+    }
+    if urls.is_empty() {
+        return Err("No available video IDs in this playlist.".into());
+    }
+    Ok(urls)
+}
+fn save_download_playlist(paths: &[PathBuf], dir: &Path, name: &str) -> Result<PathBuf, String> {
+    let mut file = tempfile::NamedTempFile::new_in(dir).map_err(|e| e.to_string())?;
+    writeln!(file, "#EXTM3U").map_err(|e| e.to_string())?;
+    for path in paths {
+        let relative = path
+            .strip_prefix(dir)
+            .map_err(|_| "Unexpected playlist file location")?;
+        writeln!(file, "{}", relative.to_string_lossy()).map_err(|e| e.to_string())?;
+    }
+    file.as_file().sync_all().map_err(|e| e.to_string())?;
+    let name = safe_name(name);
+    for i in 0..10000 {
+        let path = dir.join(if i == 0 {
+            format!("{name}.m3u8")
+        } else {
+            format!("{name} ({i}).m3u8")
+        });
+        match file.persist_noclobber(&path) {
+            Ok(_) => return Ok(path),
+            Err(e) if e.error.kind() == io::ErrorKind::AlreadyExists => file = e.file,
+            Err(e) => return Err(e.error.to_string()),
+        }
+    }
+    Err("Too many playlists with this name".into())
+}
+
+fn playlist_download(
+    url: &str,
+    dir: &Path,
+    tools: &Tools,
+    cancel: &AtomicBool,
+    tx: &mpsc::SyncSender<Event>,
+) -> Result<(Vec<PathBuf>, String), String> {
+    let mut cmd = tools.yt_command();
+    cmd.args([
+        "--yes-playlist",
+        "--flat-playlist",
+        "--playlist-end",
+        "501",
+        "--dump-single-json",
+        "--skip-download",
+        "--",
+    ])
+    .arg(url);
+    progress(tx, "Reading playlist…", None);
+    let raw = run(cmd, cancel, tx, Duration::from_secs(180))?;
+    let info: serde_json::Value =
+        serde_json::from_str(&raw).map_err(|_| "Invalid playlist information")?;
+    let urls = playlist_entries(&info)?;
+    let mut saved = Vec::new();
+    let mut errors = Vec::new();
+    for (i, url) in urls.iter().enumerate() {
+        if cancel.load(Ordering::SeqCst) {
+            break;
+        }
+        progress(
+            tx,
+            &format!("Playlist item {} / {}", i + 1, urls.len()),
+            None,
+        );
+        match download(url, dir, tools, cancel, tx) {
+            Ok(path) => {
+                let _ = tx.send(Event::Saved(path.clone()));
+                saved.push(path);
+            }
+            Err(e) => {
+                if cancel.load(Ordering::SeqCst) {
+                    break;
+                }
+                errors.push(format!("Item {}: {e}", i + 1));
+            }
+        }
+    }
+    let state = if cancel.load(Ordering::SeqCst) {
+        "Cancelled"
+    } else {
+        "Finished"
+    };
+    let message = format!(
+        "{state}: {} MP3s saved, {} failed. Completed files are kept.{}",
+        saved.len(),
+        errors.len(),
+        errors.first().map(|e| format!("\n{e}")).unwrap_or_default()
+    );
+    let playlist = if saved.is_empty() {
+        String::new()
+    } else {
+        match save_download_playlist(
+            &saved,
+            dir,
+            info["title"].as_str().unwrap_or("YouTube playlist"),
+        ) {
+            Ok(path) => format!("\nPlaylist saved: {}", path.display()),
+            Err(e) => format!("\nMP3s kept, but could not save the playlist: {e}"),
+        }
+    };
+    Ok((saved, format!("{message}{playlist}")))
 }
 
 fn downloads() -> Result<PathBuf, String> {
@@ -166,6 +314,8 @@ impl Tools {
 enum Event {
     Progress(String, Option<f32>),
     Finished(Result<PathBuf, String>),
+    Saved(PathBuf),
+    Batch(Result<(Vec<PathBuf>, String), String>),
 }
 struct Job {
     cancel: Arc<AtomicBool>,
@@ -179,6 +329,8 @@ impl Drop for Job {
 #[derive(Default)]
 pub struct Panel {
     url: String,
+    playlist: bool,
+    completed: Vec<PathBuf>,
     status: String,
     progress: Option<f32>,
     job: Option<Job>,
@@ -188,7 +340,12 @@ pub struct Panel {
 }
 impl Panel {
     fn start(&mut self) {
-        let url = match video_url(&self.url) {
+        let playlist = self.playlist;
+        let url = match if playlist {
+            playlist_url(&self.url)
+        } else {
+            video_url(&self.url)
+        } {
             Ok(u) => u,
             Err(e) => {
                 self.status = e;
@@ -206,6 +363,13 @@ impl Panel {
         self.failed = false;
         self.status = "Checking download tools…".into();
         thread::spawn(move || {
+            if playlist {
+                let result = Tools::discover().and_then(|tools| {
+                    downloads().and_then(|dir| playlist_download(&url, &dir, &tools, &cancel, &tx))
+                });
+                let _ = tx.send(Event::Batch(result));
+                return;
+            }
             let result = Tools::discover().and_then(|tools| {
                 downloads().and_then(|dir| download(&url, &dir, &tools, &cancel, &tx))
             });
@@ -223,6 +387,23 @@ impl Panel {
                             self.progress = p;
                         }
                     }
+                    Ok(Event::Saved(path)) => {
+                        self.completed.push(path);
+                    }
+                    Ok(Event::Batch(result)) => {
+                        match result {
+                            Ok((_, message)) => {
+                                self.status = message;
+                                self.failed = false;
+                            }
+                            Err(e) => {
+                                self.status = e;
+                                self.failed = true;
+                            }
+                        }
+                        finished = Some(Err(String::new()));
+                        break;
+                    }
                     Ok(Event::Finished(result)) => {
                         finished = Some(result);
                         break;
@@ -239,14 +420,20 @@ impl Panel {
         if let Some(result) = finished {
             self.job = None;
             self.progress = None;
-            self.failed = result.is_err();
+            if !result.as_ref().is_err_and(|e| e.is_empty()) {
+                self.failed = result.is_err();
+            }
             match result {
                 Ok(path) => {
                     self.status = "MP3 saved. Opening in AMP Lab…".into();
                     self.ready = Some(path);
                     self.open_pending = true;
                 }
-                Err(e) => self.status = e,
+                Err(e) => {
+                    if !e.is_empty() {
+                        self.status = e;
+                    }
+                }
             }
         }
         if self.open_pending {
@@ -267,6 +454,10 @@ impl Panel {
         crate::skin::panel(ui, false, |ui| {
             ui.horizontal_wrapped(|ui| {
                 ui.strong("YouTube URL");
+                ui.add_enabled(
+                    self.job.is_none(),
+                    egui::Checkbox::new(&mut self.playlist, "Playlist"),
+                );
                 ui.add_enabled(
                     self.job.is_none(),
                     egui::TextEdit::singleline(&mut self.url)
@@ -299,6 +490,26 @@ impl Panel {
                     self.open_pending = true;
                 }
             });
+            if !self.completed.is_empty() {
+                egui::CollapsingHeader::new(format!("Downloaded MP3s ({})", self.completed.len()))
+                    .show(ui, |ui| {
+                        egui::ScrollArea::vertical()
+                            .max_height(140.)
+                            .show(ui, |ui| {
+                                for path in &self.completed {
+                                    if ui
+                                        .button(
+                                            path.file_name().unwrap_or_default().to_string_lossy(),
+                                        )
+                                        .clicked()
+                                    {
+                                        self.ready = Some(path.clone());
+                                        self.open_pending = true;
+                                    }
+                                }
+                            });
+                    });
+            }
             if !self.status.is_empty() {
                 ui.label(&self.status);
             }
@@ -353,7 +564,8 @@ fn run(
     {
         command
             .wrap(CreationFlags(
-                windows::Win32::System::Threading::CREATE_NO_WINDOW,
+                windows::Win32::System::Threading::CREATE_NO_WINDOW
+                    | windows::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS,
             ))
             .wrap(JobObject);
     }
@@ -622,6 +834,8 @@ fn download(
         "-vn",
         "-c:a",
         "libmp3lame",
+        "-threads",
+        "2",
         "-b:a",
         "256k",
         "-id3v2_version",
@@ -745,6 +959,53 @@ mod tests {
         assert!(panel.failed);
         assert!(panel.job.is_none());
         assert!(panel.status.contains("interrupted"));
+    }
+    #[test]
+    fn batch_results_do_not_replace_unsaved_editor_automatically() {
+        let (tx, rx) = mpsc::sync_channel(4);
+        let mut panel = Panel {
+            job: Some(Job {
+                cancel: Arc::new(AtomicBool::new(false)),
+                rx,
+            }),
+            ..Default::default()
+        };
+        tx.send(Event::Saved(PathBuf::from("saved.mp3"))).unwrap();
+        tx.send(Event::Batch(Ok((
+            vec![PathBuf::from("saved.mp3")],
+            "Finished: 1 MP3 saved, 1 failed".into(),
+        ))))
+        .unwrap();
+        assert!(panel.poll(&egui::Context::default()).is_none());
+        assert_eq!(panel.completed.len(), 1);
+        assert!(panel.status.contains("1 failed"));
+        assert!(panel.job.is_none());
+    }
+    #[test]
+    #[ignore = "requires AMP_LAB_YOUTUBE_FIXTURE executable, Deno and real FFmpeg"]
+    fn local_playlist_keeps_success_when_an_item_is_private() {
+        let mut tools = Tools::discover().unwrap();
+        tools.yt = PathBuf::from(std::env::var_os("AMP_LAB_YOUTUBE_FIXTURE").unwrap());
+        let dir = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::sync_channel(64);
+        let (saved, message) = playlist_download(
+            "https://www.youtube.com/playlist?list=PLfixture",
+            dir.path(),
+            &tools,
+            &AtomicBool::new(false),
+            &tx,
+        )
+        .unwrap();
+        assert_eq!(saved.len(), 1);
+        assert!(saved[0].is_file());
+        assert!(message.contains("1 failed"));
+        assert!(crate::lab_editor::duration(&saved[0]).unwrap() > 0.);
+        assert!(rx.try_iter().any(|e| matches!(e, Event::Saved(_))));
+        assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 2);
+        let list = fs::read_to_string(dir.path().join("YouTube playlist.m3u8")).unwrap();
+        assert!(list.starts_with("#EXTM3U\n"));
+        assert!(list.contains("[BaW_jenozKc].mp3"));
+        assert!(!list.contains("abcdefghijk"));
     }
     #[test]
     #[ignore = "requires AMP_LAB_YOUTUBE_FIXTURE executable, Deno and real FFmpeg"]
@@ -899,6 +1160,28 @@ mod tests {
         .unwrap();
         let result = download(&url, dir.path(), &tools, &AtomicBool::new(false), &tx);
         assert!(result.is_ok(), "Live YouTube test: {result:?}");
+    }
+    #[test]
+    fn playlist_validation_bounds_and_deduplication() {
+        assert_eq!(
+            playlist_url("https://youtube.com/watch?v=BaW_jenozKc&list=PL123").unwrap(),
+            "https://www.youtube.com/playlist?list=PL123"
+        );
+        for u in [
+            "https://youtube.com.evil/playlist?list=PL123",
+            "https://user@youtube.com/playlist?list=PL123",
+            "https://youtube.com/channel/abc?list=PL123",
+            "https://youtu.be/BaW_jenozKc",
+        ] {
+            assert!(playlist_url(u).is_err());
+        }
+        let v = serde_json::json!({"entries":[{"id":"BaW_jenozKc"},null,{"id":"bad"},{"id":"BaW_jenozKc"}]});
+        assert_eq!(playlist_entries(&v).unwrap().len(), 1);
+        assert!(playlist_entries(&serde_json::json!({"entries":[]})).is_err());
+        assert!(
+            playlist_entries(&serde_json::json!({"entries":vec![serde_json::Value::Null;501]}))
+                .is_err()
+        );
     }
     #[test]
     fn validates_video_and_strips_playlist_and_tracking() {

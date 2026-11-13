@@ -27,6 +27,18 @@ public class RadioOfflineTest {
    device.findObject(androidx.test.uiautomator.By.text(java.util.regex.Pattern.compile("Close",java.util.regex.Pattern.CASE_INSENSITIVE))).click();
   }
  }
+ @Test public void cancelDisconnectsAStalledAudioTransfer()throws Exception {
+  Context app=InstrumentationRegistry.getInstrumentation().getTargetContext();File output=File.createTempFile("offline-cancel-",".part",app.getCacheDir());
+  ServerSocket server=new ServerSocket(0,1,InetAddress.getByName("127.0.0.1"));java.util.concurrent.CountDownLatch headers=new java.util.concurrent.CountDownLatch(1),release=new java.util.concurrent.CountDownLatch(1);
+  Thread host=new Thread(()->{try(Socket socket=server.accept()){BufferedReader reader=new BufferedReader(new InputStreamReader(socket.getInputStream()));String line;while((line=reader.readLine())!=null&&!line.isEmpty()){}socket.getOutputStream().write("HTTP/1.1 200 OK\r\nContent-Length: 10000\r\n\r\na".getBytes(StandardCharsets.US_ASCII));socket.getOutputStream().flush();headers.countDown();release.await(8,java.util.concurrent.TimeUnit.SECONDS);}catch(Exception ignored){}});host.start();
+  java.util.concurrent.atomic.AtomicBoolean cancel=new java.util.concurrent.atomic.AtomicBoolean();java.util.concurrent.ExecutorService executor=java.util.concurrent.Executors.newSingleThreadExecutor();
+  try{
+   CastClient client=new CastClient("http://127.0.0.1:"+server.getLocalPort(),"");
+   java.util.concurrent.Future<Boolean> task=executor.submit(()->{try{client.download(0,output,10000,"unused",cancel::get);return false;}catch(Exception expected){return true;}});
+   assertTrue(headers.await(3,java.util.concurrent.TimeUnit.SECONDS));cancel.set(true);
+   assertTrue("Cancel must not wait for the twenty-second network timeout",task.get(3,java.util.concurrent.TimeUnit.SECONDS));
+  }finally{cancel.set(true);release.countDown();server.close();host.join(2000);executor.shutdownNow();output.delete();}
+ }
  @Test public void originalAudioAndCuesSurviveOfflineDownloadAndConflict()throws Exception {
   Context app=InstrumentationRegistry.getInstrumentation().getTargetContext();
   File sandbox=new File(app.getCacheDir(),"station-test-"+java.util.UUID.randomUUID());assertTrue(sandbox.mkdir());
@@ -49,7 +61,15 @@ public class RadioOfflineTest {
    CastClient client=new CastClient("http://127.0.0.1:"+server.getLocalPort(),"");
    JSONObject manifest=new JSONObject().put("server_id","server").put("station_id","station").put("library_id","library").put("tracks",new JSONArray().put(new JSONObject().put("id",0).put("title","Test song").put("extension","wav")));
    JSONObject playlist=new JSONObject().put("name","My station playlist").put("tracks",new JSONArray().put(0).put(0));
-   File saved=RadioOffline.save(isolated,client,manifest,playlist);
+   java.util.List<Integer> progress=new java.util.ArrayList<>();
+   try{RadioOffline.save(isolated,client,manifest,new JSONObject().put("tracks",new JSONArray()));fail("Empty playlist must not publish");}catch(IOException expected){assertTrue(expected.getMessage().contains("no songs"));}
+   File saved=RadioOffline.save(isolated,client,manifest,playlist,new RadioOffline.Progress(){public void song(int i,int n,String title){assertEquals(2,n);progress.add(i);}public boolean cancelled(){return false;}});
+   assertEquals(java.util.Arrays.asList(1,2),progress);
+   java.util.concurrent.atomic.AtomicBoolean cancel=new java.util.concurrent.atomic.AtomicBoolean();
+   try{RadioOffline.save(isolated,client,manifest,playlist,new RadioOffline.Progress(){public void song(int i,int n,String title){if(i==2)cancel.set(true);}public boolean cancelled(){return cancel.get();}});fail("Cancelled playlist must not publish");}catch(IOException expected){}
+   assertEquals(1,RadioOffline.albums(isolated).size());
+   assertEquals(1,new File(sandbox,"radio-offline").listFiles().length);
+
    assertArrayEquals(audio,Files.readAllBytes(new File(saved,"track-0.wav").toPath()));
    assertEquals(2,RadioOffline.items(saved).size());
    JSONObject cues=new JSONObject(RadioOffline.items(saved).get(0).mediaMetadata.extras.getString("amp-preparation"));

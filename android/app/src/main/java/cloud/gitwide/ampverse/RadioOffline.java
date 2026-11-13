@@ -8,27 +8,35 @@ import java.util.*;
 import org.json.*;
 /** Separate station downloads. Never merges into the phone-folder library or uploads edits. */
 final class RadioOffline {
+    interface Progress {void song(int index,int total,String title);boolean cancelled();}
     static File save(Context context,CastClient client,JSONObject manifest,JSONObject playlist)throws Exception {
+        return save(context,client,manifest,playlist,new Progress(){public void song(int i,int n,String t){}public boolean cancelled(){return Thread.currentThread().isInterrupted();}});
+    }
+    static File save(Context context,CastClient client,JSONObject manifest,JSONObject playlist,Progress progress)throws Exception {
         File base=new File(context.getFilesDir(),"radio-offline");if(!base.isDirectory()&&!base.mkdirs())throw new IOException("Cannot create offline storage");
         String token=UUID.randomUUID().toString();File stage=new File(base,".pending-"+token);if(!stage.mkdir())throw new IOException("Cannot stage download");boolean published=false;
         try {
             JSONArray ids=playlist.getJSONArray("tracks"),tracks=manifest.getJSONArray("tracks"),items=new JSONArray();Map<Integer,JSONObject> catalog=new HashMap<>();for(int i=0;i<tracks.length();i++){JSONObject t=tracks.getJSONObject(i);catalog.put(t.getInt("id"),t);}
+            if(ids.length()==0)throw new IOException("This playlist has no songs to download. Choose another playlist or update its sources on the host.");
             Map<Integer,JSONObject> copied=new HashMap<>();
             for(int i=0;i<ids.length();i++){
+                if(progress.cancelled())throw new IOException("Download cancelled. Existing offline playlists were kept.");
                 int id=ids.getInt(i);JSONObject item=copied.get(id);
+                JSONObject description=catalog.get(id);progress.song(i+1,ids.length(),description==null?"Song":description.optString("title","Song"));
                 if(item==null){
                     JSONObject entry=catalog.get(id);if(entry==null)throw new IOException("Song missing from station");
                     JSONObject meta=client.get("/api/smart/tracks/"+id+"/metadata");
                     for(String key:new String[]{"server_id","station_id","library_id"})if(!manifest.optString(key).equals(meta.optString(key)))throw new IOException("Station changed during download");
                     String extension=entry.optString("extension","audio");if(!extension.matches("[A-Za-z0-9]{1,8}"))extension="audio";
                     String name="track-"+id+"."+extension;File audio=new File(stage,name);
-                    client.download(id,audio,meta.getLong("bytes"),meta.getString("sha256"));
+                    client.download(id,audio,meta.getLong("bytes"),meta.getString("sha256"),progress::cancelled);
                     JSONObject preparation=meta.getJSONObject("preparation");preparation.put("source_sha256",meta.getString("sha256"));
                     CatalogStore.put(new File(stage,"ampdj/catalog.ampdb"),"tracks/"+name+".json",preparation.toString());
                     item=new JSONObject().put("file",name).put("title",entry.optString("title","Song")).put("preparation",preparation);copied.put(id,item);
                 }
                 items.put(item);
             }
+            if(progress.cancelled())throw new IOException("Download cancelled. Existing offline playlists were kept.");
             JSONObject album=new JSONObject().put("version",1).put("name",playlist.optString("name","Station playlist")).put("source",manifest).put("playlist",playlist).put("items",items).put("offline_changes","local_only");
             CatalogStore.put(new File(stage,"ampdj/catalog.ampdb"),"offline-playlist",album.toString());
             File target=new File(base,token);Files.move(stage.toPath(),target.toPath(),StandardCopyOption.ATOMIC_MOVE);published=true;return target;

@@ -2064,7 +2064,15 @@ impl Player {
                     } else {
                         None
                     };
-                    let seconds = build_plan.map_or(self.fade_seconds, |(_, seconds)| seconds);
+                    let seconds = build_plan.map_or_else(
+                        || {
+                            amp_core::transition_plan::tail_fade(
+                                self.fade_seconds,
+                                a.remaining(outgoing),
+                            )
+                        },
+                        |(_, seconds)| seconds,
+                    );
                     let grid = self
                         .loaded_track(outgoing)
                         .zip(self.loaded_track(incoming))

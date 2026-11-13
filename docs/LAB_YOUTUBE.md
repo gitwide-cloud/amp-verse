@@ -33,7 +33,7 @@ The script fetches pinned official GitHub releases, verifies release SHA256 dige
 
 ## Boundaries
 
-Accepts ordinary YouTube watch, youtu.be, Shorts, live-video permalink and embed URLs containing a single valid video ID. Canonicalization removes playlist/tracking parameters, and yt-dlp also receives `--no-playlist`. Playlist-only/channel URLs and ongoing livestreams are rejected. Only completed single videos are imported. No cookies, browser sessions, user yt-dlp configuration, user plugins, DRM bypass or access-control bypass are used. Private/unavailable videos, network failures, disk errors and conversion errors leave the existing editor/source intact.
+Accepts ordinary YouTube watch, youtu.be, Shorts, live-video permalink and embed URLs containing a single valid video ID. Canonicalization removes playlist/tracking parameters, and yt-dlp also receives `--no-playlist`. Channel URLs and ongoing livestreams are rejected. With Playlist off, video URLs still download one video and strip playlist parameters. With Playlist on, a YouTube playlist URL (or video URL with a list ID) queues up to 500 unique video IDs. Items download/convert sequentially; failed/private items are reported and skipped. A collision-safe M3U8 playlist is also saved beside the MP3s, containing only successful downloads in playlist order (including a partial playlist after Cancel). Completed MP3s remain available under Downloaded MP3s; choose a result to open through Lab’s normal unsaved-edit protection. Cancel stops the active process tree and retains completed files. Re-running a playlist currently downloads its available entries again with collision-safe names; persistent resume/deduplication is not implemented. No cookies, browser sessions, user yt-dlp configuration, user plugins, DRM bypass or access-control bypass are used. Private/unavailable videos, network failures, disk errors and conversion errors leave the existing editor/source intact.
 
 The UI uses bounded worker channels. Processes use structured argument arrays and isolated Windows Job Objects / Unix process groups; cancellation and timeouts terminate the whole tree. No URL-import screens are added to Player, DJ, Library or Android.
 
@@ -42,3 +42,18 @@ The UI uses bounded worker channels. Processes use structured argument arrays an
 Focused tests cover URL validation and playlist stripping, progress parsing, safe Unicode filenames, atomic filename collisions, missing tools, disk-path errors, private/network/invalid-audio failures, original preservation, and declined/blocked edit replacement. A locally compiled fake downloader and **real FFmpeg/Deno** exercise the entire download/conversion/publication/automatic-delivery path, including Cancel during download and conversion and a spawned grandchild heartbeat. A real editor-open test verifies waveform decoding and source preservation.
 
 Live verification on Windows also succeeded against the public Big Buck Bunny test video (`aqz-KE-bpKQ`) using the official pinned yt-dlp/Deno and installed FFmpeg. The older upstream test ID `BaW_jenozKc` was unavailable and correctly reported as such; its fixtures remain deterministic local tests. Live YouTube access is intentionally excluded from routine CI, where it could fail due to video/network availability. Linux CI runs the local pipeline with real codecs and packages the official runtime bundle.
+
+## Suno
+There is no built-in Suno URL downloader. Suno's official export flow supports
+individual song downloads and multi-select Download All ZIP exports, subject to
+the account's available download options. Extract the audio from the official ZIP
+and open the files in AMP Lab or add their folder in AMP Library. Suno mobile
+offline playlists remain inside Suno and are not portable MP3 exports.
+Sources checked 2026-11-13:
+- https://help.suno.com/en/articles/2409921
+- https://help.suno.com/en/articles/14467265
+
+1.0.8 verification: local playlist fixture with a successful item and a private
+item, real FFmpeg conversion, retained successful audio/M3U8 membership, result
+selection without automatic editor replacement, and existing process-tree Cancel
+tests passed. Live playlist downloading was not exercised in this pass.

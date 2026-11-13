@@ -8,6 +8,11 @@ fn main(){
     }
     let exe=env::current_exe().unwrap();let name=exe.file_stem().unwrap().to_string_lossy();
     assert!(args.iter().any(|a|a=="--no-playlist"));assert!(args.iter().any(|a|a=="--ignore-config"));
+    if args.iter().any(|a|a=="--flat-playlist") {
+        assert!(args.iter().any(|a|a=="--yes-playlist"));
+        println!("{{\"entries\":[{{\"id\":\"BaW_jenozKc\"}},{{\"id\":\"abcdefghijk\"}}]}}");return;
+    }
+    if args.last().unwrap().ends_with("v=abcdefghijk") {eprintln!("ERROR: Private video");std::process::exit(1);}
     assert_eq!(args.last().unwrap(),"https://www.youtube.com/watch?v=BaW_jenozKc");
     if name.contains("network"){eprintln!("ERROR: network timed out");std::process::exit(1);}
     if name.contains("private"){eprintln!("ERROR: Private video");std::process::exit(1);}

@@ -5,6 +5,18 @@ pub struct TempoMatch {
     pub rate: f64,
     pub pulse_factor: f64,
 }
+/// Keep the fade inside the outgoing audio tail, leaving one UI tick of margin.
+/// Unknown duration retains the user's setting; never modifies the saved preference.
+pub fn tail_fade(requested: f32, remaining: Option<f32>) -> f32 {
+    let requested = if requested.is_finite() {
+        requested.clamp(0.1, 120.)
+    } else {
+        3.
+    };
+    remaining
+        .filter(|r| r.is_finite())
+        .map_or(requested, |r| requested.min((r - 0.15).max(0.1)))
+}
 /// Interpret half/double-time analysis without accelerating a song by 2x.
 pub fn tempo_match(out_bpm: f64, out_rate: f64, in_bpm: f64, limit: f64) -> Option<TempoMatch> {
     if ![out_bpm, out_rate, in_bpm, limit]
@@ -147,6 +159,14 @@ pub fn landing(p: &Preparation, selected: f64, rate: f64, fade: f64) -> Option<L
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn fade_finishes_before_the_outgoing_tail() {
+        assert!((tail_fade(8., Some(2.)) - 1.85).abs() < 0.001);
+        assert_eq!(tail_fade(3., Some(30.)), 3.);
+        assert_eq!(tail_fade(3., None), 3.);
+        assert_eq!(tail_fade(3., Some(f32::NAN)), 3.);
+        assert_eq!(tail_fade(8., Some(0.1)), 0.1);
+    }
     #[test]
     fn build_swap_lands_both_drops_and_preserves_cues() {
         let mut out = Preparation {

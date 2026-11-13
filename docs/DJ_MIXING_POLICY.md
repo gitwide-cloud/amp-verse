@@ -94,3 +94,10 @@ rejection of missing/late/distant cues and mismatched tempos, preservation of
 cue data, and an audio-clock rendered handoff. This is not a claim of listening
 to every transition in the referenced sets or learning crowd response from video.
 Reverb-tail automation and full-set energy-arc learning are not added by 1.0.7.
+
+## 1.0.8 tail protection
+Ordinary handoffs cap the session fade to the outgoing audio remaining minus 150 ms.
+A late request no longer schedules an eight-second fade over a two-second tail.
+The stored fade preference is unchanged; buildup/drop plans keep their explicit
+musical duration and existing source bounds. This is a timing safeguard, not an
+analysis-accuracy improvement.

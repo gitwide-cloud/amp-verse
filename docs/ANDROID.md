@@ -165,3 +165,11 @@ The main navigation is Player, Library, DJ and Devices. Devices separates Listen
 Portrait DJ uses one focused A/B deck with a persistent crossfader/Mix next strip above navigation. Wider windows put the mixer between both decks. Mixer settings open a scrollable dialog with master volume, remembered crossfade-time steppers and EQ access. Detailed seeking/staging and deck settings are expandable. Panel expansion and browsing scroll positions are retained. Short Player windows use independently scrollable transport and queue panes. Navigation uses inline icons in short windows, with at least 48dp targets.
 
 This changes Android UI only; the desktop UI research remains a future pass. No phone analysis engine was added. The test build has versionCode 26 and preserves the existing signing identity. It is installed for device testing rather than replacing the shared stable desktop/Android update manifest with an Android-only release.
+
+## 0.2.10 offline download feedback
+Cast playlist downloads show current song/total and a Cancel button. Cancel
+disconnects the active audio transfer, removes the unfinished staged playlist,
+and preserves already-published offline playlists. Completion offers Open offline
+playlists. Audio integrity hashes and preparation/cues remain verified before
+publication; no Android analysis engine is included. Downloads still require
+explicit host sharing and an explicit Save offline action.

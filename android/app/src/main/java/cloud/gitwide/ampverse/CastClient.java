@@ -40,21 +40,27 @@ final class CastClient {
     String stream(){return base+"/listen.mp3";}
     String phoneStream(){return protectedAudio?base+"/amp-protected.mp3?server="+android.net.Uri.encode(serverId)+"&station="+android.net.Uri.encode(stationId):stream();}
     void download(int id,java.io.File file,long expected,String checksum)throws Exception {
+        download(id,file,expected,checksum,()->false);
+    }
+    void download(int id,java.io.File file,long expected,String checksum,java.util.function.BooleanSupplier cancelled)throws Exception {
         if(expected<0||expected>2L*1024*1024*1024)throw new IOException("Track exceeds download limit");
         HttpURLConnection connection=(HttpURLConnection)new URL(base+"/api/smart/tracks/"+id+"/audio").openConnection();
         connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(5000);connection.setReadTimeout(20000);
         if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);
+        java.util.concurrent.atomic.AtomicBoolean done=new java.util.concurrent.atomic.AtomicBoolean();
+        Thread watcher=new Thread(()->{while(!done.get()){if(cancelled.getAsBoolean()){connection.disconnect();return;}try{Thread.sleep(100);}catch(InterruptedException e){return;}}},"amp-offline-cancel");watcher.setDaemon(true);watcher.start();
         try {
+            if(cancelled.getAsBoolean())throw new IOException("Download cancelled");
             if(connection.getResponseCode()!=200)throw new IOException("Song download rejected: "+connection.getResponseCode());
             java.security.MessageDigest digest=java.security.MessageDigest.getInstance("SHA-256");long total=0;
             try(InputStream input=connection.getInputStream();FileOutputStream output=new FileOutputStream(file)) {
                 byte[] buffer=new byte[65536];int n;
-                while((n=input.read(buffer))!=-1){if(Thread.currentThread().isInterrupted())throw new IOException("Download cancelled");total+=n;if(total>expected)throw new IOException("Audio changed during download");output.write(buffer,0,n);digest.update(buffer,0,n);}
+                while((n=input.read(buffer))!=-1){if(Thread.currentThread().isInterrupted()||cancelled.getAsBoolean())throw new IOException("Download cancelled");total+=n;if(total>expected)throw new IOException("Audio changed during download");output.write(buffer,0,n);digest.update(buffer,0,n);}
                 output.getFD().sync();
             }
             StringBuilder hash=new StringBuilder();for(byte b:digest.digest())hash.append(String.format(java.util.Locale.ROOT,"%02x",b&255));
             if(total!=expected||!hash.toString().equalsIgnoreCase(checksum))throw new IOException("Song integrity check failed");
-        } finally {connection.disconnect();}
+        } finally {done.set(true);watcher.interrupt();connection.disconnect();}
     }
     JSONObject get(String path)throws Exception {return new JSONObject(request(path,false));}
     void post(String path,JSONObject body)throws Exception {request(path,true,body);}
