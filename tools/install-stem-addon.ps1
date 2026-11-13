@@ -18,6 +18,11 @@ if ($LASTEXITCODE -ne 0) { throw 'Could not install the selected audio runtime.'
 & $stemPython -m pip install demucs==4.0.1 'numpy<2'
 if ($LASTEXITCODE -ne 0) { throw 'Could not install Demucs.' }
 Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../apps/amp-player/src/stem_worker.py') -Destination (Join-Path $Destination 'stem_worker.py') -Force
+# Keep older players' embedded workers quiet as well; never replace a custom startup hook.
+$startupHook=Join-Path $Destination 'Lib/site-packages/sitecustomize.py'
+if (!(Test-Path -LiteralPath $startupHook) -or ((Get-Content -LiteralPath $startupHook -Raw) -match 'AMP-owned stem runtime compatibility')) {
+    Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../apps/amp-player/src/stem_sitecustomize.py') -Destination $startupHook -Force
+}
 if ($DownloadModel) {
     $priorTorchHome = $env:TORCH_HOME
     try {

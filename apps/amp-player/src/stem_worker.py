@@ -8,6 +8,19 @@ import subprocess
 import time
 
 
+def run_audio(command, **kwargs):
+    """Hide decoder/export subprocesses too, not only this Python parent."""
+    if os.name == "nt":
+        kwargs["creationflags"] = kwargs.get("creationflags", 0) | subprocess.CREATE_NO_WINDOW
+        startup = subprocess.STARTUPINFO()
+        startup.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startup.wShowWindow = subprocess.SW_HIDE
+        kwargs["startupinfo"] = startup
+    if "input" not in kwargs:
+        kwargs.setdefault("stdin", subprocess.DEVNULL)
+    return subprocess.run(command, **kwargs)
+
+
 def activity_at(path, now=None):
     try:
         now = time.time() * 1000 if now is None else now
@@ -87,7 +100,7 @@ def main():
     ffmpeg = os.environ.get("AMP_STEM_FFMPEG", "ffmpeg")
     rate = model.samplerate
     checkpoint()
-    raw = subprocess.run([ffmpeg, "-v", "error", "-threads", "1", "-i", args.source, "-t", "1801", "-ac", "2", "-ar", str(rate), "-f", "f32le", "pipe:1"], check=True, capture_output=True).stdout
+    raw = run_audio([ffmpeg, "-v", "error", "-threads", "1", "-i", args.source, "-t", "1801", "-ac", "2", "-ar", str(rate), "-f", "f32le", "pipe:1"], check=True, capture_output=True).stdout
     samples = np.frombuffer(raw, dtype="<f4").reshape(-1, 2).copy()
     if len(samples) < rate // 4 or len(samples) > rate * 1800 or not np.isfinite(samples).all():
         raise RuntimeError("Prepare a valid song between 0.25 seconds and 30 minutes")
@@ -122,7 +135,7 @@ def main():
         if not np.isfinite(values).all():
             raise RuntimeError("Invalid separated samples")
         target = out / (name + ".wav")
-        subprocess.run([ffmpeg, "-v", "error", "-threads", "1", "-y", "-f", "f32le", "-ar", str(rate), "-ac", "2", "-i", "pipe:0", "-c:a", "pcm_f32le", str(target)], input=values.tobytes(), check=True)
+        run_audio([ffmpeg, "-v", "error", "-threads", "1", "-y", "-f", "f32le", "-ar", str(rate), "-ac", "2", "-i", "pipe:0", "-c:a", "pcm_f32le", str(target)], input=values.tobytes(), check=True)
         manifest["files"][name] = {"sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "bytes": target.stat().st_size}
     (out / "audio.json").write_text(json.dumps(manifest), encoding="utf-8")
     print("Vocals, instruments and drums ready", flush=True)

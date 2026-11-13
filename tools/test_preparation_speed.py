@@ -11,6 +11,8 @@ import time
 import threading
 from contextlib import contextmanager
 import unittest
+from unittest import mock
+import sys
 
 REPO = Path(__file__).resolve().parents[1]
 WORKER = REPO / "apps/amp-player/src/stem_worker.py"
@@ -36,6 +38,48 @@ def playback_marker(marker, mode):
 
 
 class PreparationTests(unittest.TestCase):
+    @unittest.skipUnless(os.name == "nt", "Windows console launch flags")
+    def test_decoder_and_encoder_hide_child_windows_without_losing_streams(self):
+        with mock.patch.object(worker.subprocess,"run",return_value="done") as run:
+            self.assertEqual(worker.run_audio(["ffmpeg","decode"],capture_output=True,check=True),"done")
+            options=run.call_args.kwargs
+            self.assertTrue(options["creationflags"] & subprocess.CREATE_NO_WINDOW)
+            self.assertTrue(options["startupinfo"].dwFlags & subprocess.STARTF_USESHOWWINDOW)
+            self.assertEqual(options["startupinfo"].wShowWindow,subprocess.SW_HIDE)
+            self.assertTrue(options["capture_output"])
+            worker.run_audio(["ffmpeg","encode"],input=b"audio",check=True)
+            self.assertEqual(run.call_args.kwargs["input"],b"audio")
+            self.assertNotIn("stdin",run.call_args.kwargs)
+        result=worker.run_audio([sys.executable,"-c","import ctypes; print(ctypes.windll.kernel32.GetConsoleWindow())"],capture_output=True,check=True)
+        self.assertEqual(result.stdout.strip(),b"0")
+
+    @unittest.skipUnless(os.name == "nt", "Windows private-runtime compatibility")
+    def test_legacy_worker_fix_is_scoped_and_hides_descendants(self):
+        with tempfile.TemporaryDirectory() as directory:
+            folder=Path(directory)
+            shutil.copyfile(REPO / "apps/amp-player/src/stem_sitecustomize.py",folder / "sitecustomize.py")
+            env=dict(os.environ,PYTHONPATH=directory,AMP_STEM_FFMPEG="amp-owned-test")
+            code="import subprocess,sys; print(subprocess.Popen.__name__); print(subprocess.run([sys.executable,'-c','import ctypes; print(ctypes.windll.kernel32.GetConsoleWindow())'],capture_output=True,check=True).stdout.decode().strip())"
+            result=subprocess.run([sys.executable,"-c",code],capture_output=True,check=True,creationflags=subprocess.CREATE_NO_WINDOW,env=env)
+            self.assertEqual(result.stdout.decode().splitlines(),["_AmpHiddenPopen","0"])
+            env.pop("AMP_STEM_FFMPEG")
+            result=subprocess.run([sys.executable,"-c","import subprocess; print(subprocess.Popen.__name__)"],capture_output=True,check=True,creationflags=subprocess.CREATE_NO_WINDOW,env=env)
+            self.assertEqual(result.stdout.strip(),b"Popen")
+
+    @unittest.skipUnless(os.environ.get("AMP_STEM_FFMPEG"), "real FFmpeg not selected")
+    def test_hidden_audio_decode_export_and_errors_remain_available(self):
+        ffmpeg=os.environ["AMP_STEM_FFMPEG"]
+        audio=worker.run_audio([ffmpeg,"-v","error","-threads","1","-f","lavfi","-i","sine=frequency=440:duration=0.25","-ac","2","-ar","44100","-f","f32le","pipe:1"],capture_output=True,check=True).stdout
+        self.assertEqual(len(audio),11025*2*4)
+        with tempfile.TemporaryDirectory() as directory:
+            target=Path(directory)/"sample.wav"
+            worker.run_audio([ffmpeg,"-v","error","-y","-f","f32le","-ar","44100","-ac","2","-i","pipe:0","-c:a","pcm_f32le",str(target)],input=audio,capture_output=True,check=True)
+            self.assertTrue(target.read_bytes().startswith(b"RIFF"))
+            self.assertGreater(target.stat().st_size,len(audio))
+            with self.assertRaises(subprocess.CalledProcessError) as failure:
+                worker.run_audio([ffmpeg,"-v","error","-i",str(Path(directory)/"missing.wav")],capture_output=True,check=True)
+            self.assertTrue(failure.exception.stderr)
+
     def test_expiring_pause_marker(self):
         with tempfile.TemporaryDirectory() as directory:
             marker = Path(directory) / "pause"
