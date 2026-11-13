@@ -21,4 +21,3 @@ injected short denial, immediate propagation of unrelated errors, deferred jobs,
 legacy contention recovery and preservation of genuine audio failures.
 
 Live verification: six legacy contention failures were restored to pending. After installing 1.0.11, completed jobs increased from 4903 to 4909 while genuine unreadable audio remained separately recorded. Playback was restored paused. Workspace checks, the Windows publication tests, two progress-counter regressions, strict Clippy and release builds passed.
-
