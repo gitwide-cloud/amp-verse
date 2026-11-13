@@ -444,6 +444,7 @@ impl Control {
                     .route("/api/v1/info", get(info))
                     .route("/api/v1/state", get(state))
                     .route("/api/v1/catalog", get(catalog))
+                    .route("/api/v1/playlists", get(playlists))
                     .route("/api/v1/resources", get(resources))
                     .route("/api/v1/resources/playlists", get(resource_playlists))
                     .route("/api/v1/resources/scenes", get(resource_scenes))
@@ -563,6 +564,45 @@ async fn catalog(State(s): State<Arc<Shared>>, h: HeaderMap) -> axum::response::
         return StatusCode::UNAUTHORIZED.into_response();
     }
     Json(s.catalog.lock().map(|v| v.clone()).unwrap_or(Value::Null)).into_response()
+}
+fn playlist_summaries(catalog: &Value) -> Vec<Value> {
+    [("playlists", "smart"), ("regular_playlists", "playlist")]
+        .into_iter()
+        .flat_map(|(key, kind)| {
+            catalog[key]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(move |p| {
+                    Some(json!({"id":p["id"].as_str()?,"name":p["name"].as_str()?,"kind":kind}))
+                })
+        })
+        .collect()
+}
+#[cfg(test)]
+#[test]
+fn remote_playlist_names_do_not_include_library_or_rules() {
+    let catalog = json!({"songs":vec![json!({"title":"Song","cues":[1,2,3]});14000],"playlists":[{"id":"smart","name":"Rock","source_folders":["private"],"tracks":vec!["song";14000]}],"regular_playlists":[{"id":"regular_one","name":"Party"}]});
+    let lists = playlist_summaries(&catalog);
+    assert_eq!(
+        lists,
+        vec![
+            json!({"id":"smart","name":"Rock","kind":"smart"}),
+            json!({"id":"regular_one","name":"Party","kind":"playlist"})
+        ]
+    );
+    assert!(serde_json::to_vec(&lists).unwrap().len() < 256);
+}
+async fn playlists(State(s): State<Arc<Shared>>, h: HeaderMap) -> axum::response::Response {
+    if !authorized(&s, &h) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let lists = s
+        .catalog
+        .lock()
+        .map(|c| playlist_summaries(&c))
+        .unwrap_or_default();
+    Json(json!({"playlists":lists,"session":s.session})).into_response()
 }
 async fn resources(
     State(s): State<Arc<Shared>>,

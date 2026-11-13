@@ -1,5 +1,15 @@
 # AMP Verse architecture
 
+Remote transport connection uses only `/api/v1/info` and `/api/v1/state`.
+It must never depend on downloading the full catalog. Desktop 1.0.5 adds
+`/api/v1/playlists`, returning only authenticated playlist IDs, names and kinds,
+including regular and Smart Playlists independently of offline-sharing flags.
+Android 0.2.8 fetches these names when Change playlist is opened and searches
+`/api/v1/resources?scope=all` in pages of 25 on demand. Browsing uses a separate
+request queue, so a slow search cannot hold up playback commands. Browse errors
+leave transport connected. Basic Play/Pause/Stop target the active playback
+owner; explicit deck selection remains available for deck tools.
+
 
 ## Desktop library and Android Remote ownership (current direction)
 

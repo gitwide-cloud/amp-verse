@@ -12,6 +12,7 @@ import java.util.concurrent.*;
 final class RemotePanel extends LinearLayout {
     private final Activity activity;private final Appearance colors;
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
+    private final ExecutorService browsingWorker=Executors.newSingleThreadExecutor();
     private final ExecutorService discoveryWorkers=Executors.newFixedThreadPool(2);
     private final Button discoverButton;
     private final TextView discoveryStatus;
@@ -26,6 +27,7 @@ final class RemotePanel extends LinearLayout {
     private String base="",secret="",session="",deck="a";private volatile boolean closed;private boolean connected;
     private static String rememberedBase="",rememberedSecret="";
     private int reconnectAttempts;
+    private int searchGeneration; private Runnable pendingSearch;
     private volatile int generation;private final android.os.Handler handler=new android.os.Handler(android.os.Looper.getMainLooper());
     private final okhttp3.OkHttpClient socketClient=new okhttp3.OkHttpClient.Builder().pingInterval(10,TimeUnit.SECONDS).build();
     private okhttp3.WebSocket socket;
@@ -41,10 +43,10 @@ final class RemotePanel extends LinearLayout {
         addView(button("Disconnect remote",this::disconnect));connectionOptions=UiSections.fold(this,colors,"Connection settings",connectionStart);status=label("Choose the desktop control server. Cast radio has its own screen.",14);addView(status);now=label("Not connected",18);addView(now);
         controls=new LinearLayout(a);controls.setOrientation(VERTICAL);addView(controls);controls.setVisibility(GONE);
         row(controls,button("A",()->{deck="a";status.setText("Selected deck A");}),button("B",()->{deck="b";status.setText("Selected deck B");}));
-        row(controls,button("Play",()->command("play","deck",deck)),button("Pause",()->command("pause","deck",deck)),button("Stop",()->command("stop","deck",deck)));
+        row(controls,button("Play",()->command("play","deck","auto")),button("Pause",()->command("pause","deck","auto")),button("Stop",()->command("stop","deck","auto")));
         row(controls,button("Restart cue",()->command("restart_cue","deck",deck)),button("Preload next",()->command("preload_next")),button("Mix next",()->command("mix_next","immediate",true)));
         autoMix=new Switch(a);autoMix.setText("Auto Mix");autoMix.setTextColor(colors.text);Chrome.toggle(autoMix,colors);autoMix.setContentDescription("Auto Mix on uses the engine; off is manual");autoMix.setOnCheckedChangeListener((view,enabled)->{if(!updatingAutoMix)command("auto_dj","enabled",enabled);});controls.addView(autoMix);
-        controls.addView(button("Desktop Smart Playlists",this::choosePlaylist));
+        controls.addView(button("Change playlist",this::choosePlaylist));
         controls.addView(label("Crossfader · A ↔ B",15));SeekBar fader=new SeekBar(a);Chrome.slider(fader,colors.accent);fader.setMax(100);fader.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){command("set_crossfader","value",b.getProgress()/100.);}public void onProgressChanged(SeekBar b,int value,boolean user){}});controls.addView(fader);
         int advancedStart=controls.getChildCount();
         row(controls,button("Hype",()->command("set_style","style","hype")),button("Steady",()->command("set_style","style","steady")),button("Chill",()->command("set_style","style","chill")));
@@ -62,7 +64,7 @@ final class RemotePanel extends LinearLayout {
         for(int side=0;side<2;side++){final int s=side;controls.addView(label((s==0?"Left":"Right")+" desktop Cue Deck",17));row(controls,button("Play cue",()->cue(s,"play")),button("Pause cue",()->cue(s,"pause")),button("Stop cue",()->cue(s,"stop")));row(controls,button("Send → A",()->cue(s,"send","deck","a")),button("Send → B",()->cue(s,"send","deck","b")));controls.addView(label((s==0?"Left":"Right")+" desktop sampler",15));for(int r=0;r<3;r++){Button[] pads=new Button[3];for(int col=0;col<3;col++){final int pad=r*3+col+1;pads[col]=button("Pad "+pad,()->command("side_sampler","side",s,"pad",pad));}row(controls,pads);}}
         UiSections.fold(controls,colors,"More DJ controls",advancedStart);
         search=field("Search desktop songs",false);search.setContentDescription("Search desktop music");songs=new LinearLayout(a);songs.setOrientation(VERTICAL);addView(songs);search.setVisibility(GONE);songs.setVisibility(GONE);
-        search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int s,int count,int after){}public void onTextChanged(CharSequence t,int s,int before,int count){renderSongs();}public void afterTextChanged(android.text.Editable e){}});
+        search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int s,int count,int after){}public void onTextChanged(CharSequence t,int s,int before,int count){searchSongs();}public void afterTextChanged(android.text.Editable e){}});
         if(address.getText().toString().equals(rememberedBase)&&!rememberedBase.isEmpty())handler.post(this::connect);
         handler.post(this::discover);
         addView(label("Control desktop playback here. Open Cast to listen on this phone.",13));
@@ -73,7 +75,10 @@ final class RemotePanel extends LinearLayout {
     private void row(LinearLayout target,Button...buttons){LinearLayout row=new LinearLayout(activity);for(Button b:buttons)row.addView(b,new LayoutParams(0,(int)(50*getResources().getDisplayMetrics().density),1));target.addView(row);}
     private interface Work {JSONObject run()throws Exception;}
     private void submit(Work work,java.util.function.Consumer<JSONObject> done){submit(work,done,error->status.setText("Desktop: "+describe(error)));}
-    private void submit(Work work,java.util.function.Consumer<JSONObject> done,java.util.function.Consumer<Exception> failed){if(closed)return;final int expected=generation;worker.execute(()->{if(closed||expected!=generation)return;try{JSONObject value=work.run();activity.runOnUiThread(()->{if(!closed&&expected==generation)done.accept(value);});}catch(Exception error){activity.runOnUiThread(()->{if(!closed&&expected==generation)failed.accept(error);});}});}
+    private void submit(Work work,java.util.function.Consumer<JSONObject> done,java.util.function.Consumer<Exception> failed){submitOn(worker,work,done,failed);}
+    private void submitBrowse(Work work,java.util.function.Consumer<JSONObject> done,java.util.function.Consumer<Exception> failed){submitOn(browsingWorker,work,done,failed);}
+    private void submitOn(ExecutorService executor,Work work,java.util.function.Consumer<JSONObject> done,java.util.function.Consumer<Exception> failed){if(closed)return;final int expected=generation;executor.execute(()->{if(closed||expected!=generation)return;try{JSONObject value=work.run();activity.runOnUiThread(()->{if(!closed&&expected==generation)done.accept(value);});}catch(Exception error){activity.runOnUiThread(()->{if(!closed&&expected==generation)failed.accept(error);});}});}
+
     private void disconnect(){generation++;connected=false;session="";rememberedBase="";rememberedSecret="";if(socket!=null)socket.cancel();controls.setVisibility(GONE);search.setVisibility(GONE);songs.setVisibility(GONE);now.setText("Disconnected · host playback continues");}
     private void discover(){
         if(closed||discoveryPending>0)return;
@@ -128,10 +133,10 @@ final class RemotePanel extends LinearLayout {
         generation++;connected=false;if(socket!=null){socket.cancel();socket=null;}
         CastClient validated=new CastClient(address.getText().toString(),"");base=validated.base;URI hostUri=new URI(base);if(hostUri.getPort()==-1)base=new URI(hostUri.getScheme(),null,hostUri.getHost(),8790,null,null,null).toString();secret=password.getText().toString();session="";
         String endpoint=base,credential=secret;controls.setVisibility(GONE);status.setText("Checking AMP API and password…");
-        submit(()->{JSONObject info=request(endpoint,credential,"/api/v1/info",null);if(info.optInt("protocol")!=1||!info.optString("service").equals("amp-control")||info.optString("session").isEmpty())throw new IOException("Incompatible version. Update the desktop AMP Verse host.");JSONObject state=request(endpoint,credential,"/api/v1/state",null);if(!info.optString("session").equals(state.optJSONObject("control").optString("session")))throw new IOException("Host restarted. Connect again.");JSONObject result=request(endpoint,credential,"/api/v1/catalog",null);result.put("state",state).put("control",info);return result;},value->{
+        submit(()->handshake(endpoint,credential),value->{
             session=value.optJSONObject("control").optString("session");connected=true;reconnectAttempts=0;rememberedBase=endpoint;rememberedSecret=credential;
-            catalog=value.optJSONArray("songs");if(catalog==null)catalog=new JSONArray();playlists=value.optJSONArray("playlists");if(playlists==null)playlists=new JSONArray();JSONArray regular=value.optJSONArray("regular_playlists");if(regular!=null)for(int i=0;i<regular.length();i++){JSONObject p=regular.optJSONObject(i);if(p!=null)playlists.put(p);}
-            activity.getSharedPreferences("settings",0).edit().putString("remote-server",endpoint).apply();controls.setVisibility(VISIBLE);search.setVisibility(VISIBLE);songs.setVisibility(VISIBLE);status.setText("Connected · authenticated AMP host · "+catalog.length()+" songs");showState(value.optJSONObject("state"));renderSongs();openEvents(generation,endpoint,credential,session);
+            catalog=new JSONArray();playlists=new JSONArray();
+            activity.getSharedPreferences("settings",0).edit().putString("remote-server",endpoint).apply();controls.setVisibility(VISIBLE);search.setVisibility(VISIBLE);songs.setVisibility(VISIBLE);status.setText("Connected · playback controls ready");showState(value.optJSONObject("state"));renderSongs();openEvents(generation,endpoint,credential,session);
         },error->{if(automatic&&retryable(error))lost(generation,error);else status.setText("Desktop: "+describe(error));});
     }catch(Exception error){status.setText(describe(error));}}
     private void openEvents(final int expected,String endpoint,String credential,String identity){
@@ -175,12 +180,44 @@ final class RemotePanel extends LinearLayout {
     private void command(String action,Object...fields){try{JSONObject body=new JSONObject().put("id","android-"+UUID.randomUUID()).put("action",action);for(int i=0;i<fields.length;i+=2)body.put(fields[i].toString(),fields[i+1]);String endpoint=base,credential=secret,identity=session;if(endpoint.isEmpty()||!connected)throw new IllegalArgumentException("Connect first");submit(()->{JSONObject reply=request(endpoint,credential,"/api/v1/command",body,identity);if(!reply.optBoolean("ok"))throw new IOException(reply.optString("error","Command rejected"));return request(endpoint,credential,"/api/v1/state",null,identity);},state->{status.setText("Accepted · "+action);showState(state);});}catch(Exception error){status.setText(error.getMessage());}}
     private void cue(int side,String operation,Object...fields){try{JSONObject value=new JSONObject().put("operation",operation);for(int i=0;i<fields.length;i+=2)value.put(fields[i].toString(),fields[i+1]);command("cue_deck","side",side,"operation",value);}catch(Exception error){status.setText(error.getMessage());}}
     private void loadPlaylist(JSONObject p){if(p.optString("id").startsWith("regular_"))command("load_playlist","playlist",p.optString("id"));else command("load_smart_playlist","playlist",p.optString("id"),"execution","load_only");}
-    private void choosePlaylist(){String[] names=new String[playlists.length()];for(int i=0;i<names.length;i++)names[i]=playlists.optJSONObject(i).optString("name");new AlertDialog.Builder(activity).setTitle("Load desktop playlist").setItems(names,(d,i)->loadPlaylist(playlists.optJSONObject(i))).setNegativeButton("Cancel",null).show();}
+    static JSONObject handshake(String endpoint,String credential)throws Exception {
+        JSONObject info=request(endpoint,credential,"/api/v1/info",null);
+        if(info.optInt("protocol")!=1||!info.optString("service").equals("amp-control")||info.optString("session").isEmpty())throw new IOException("Incompatible version. Update the desktop AMP Verse host.");
+        JSONObject state=request(endpoint,credential,"/api/v1/state",null,info.getString("session"));
+        return new JSONObject().put("control",info).put("state",state);
+    }
+    private void choosePlaylist(){
+        if(!connected)return;
+        String endpoint=base,credential=secret,identity=session;
+        status.setText("Loading playlist names…");
+        submitBrowse(()->request(endpoint,credential,"/api/v1/playlists",null,identity),value->{
+            if(!identity.equals(value.optString("session"))){status.setText("Host changed. Connect again.");return;}
+            playlists=value.optJSONArray("playlists");if(playlists==null)playlists=new JSONArray();
+            if(playlists.length()==0){status.setText("Connected · no playlists saved on the desktop yet");return;}
+            String[] names=new String[playlists.length()];for(int i=0;i<names.length;i++)names[i]=playlists.optJSONObject(i).optString("name");
+            status.setText("Connected · choose a playlist");
+            new AlertDialog.Builder(activity).setTitle("Change desktop playlist").setItems(names,(d,i)->loadPlaylist(playlists.optJSONObject(i))).setNegativeButton("Cancel",null).show();
+        },error->status.setText("Playback controls remain connected. Could not load playlists: "+describe(error)+". Update the desktop host if needed."));
+    }
+    private void searchSongs(){
+        final int queryGeneration=++searchGeneration;
+        if(pendingSearch!=null)handler.removeCallbacks(pendingSearch);
+        catalog=new JSONArray();renderSongs();
+        String query=search.getText().toString().trim();if(!connected||query.isEmpty())return;
+        final String endpoint=base,credential=secret,identity=session;
+        pendingSearch=()->submitBrowse(()->request(endpoint,credential,"/api/v1/resources?scope=all&limit=25&q="+android.net.Uri.encode(query),null,identity),value->{
+            if(queryGeneration!=searchGeneration)return;
+            if(!identity.equals(value.optString("session"))){status.setText("Host changed. Connect again.");return;}
+            catalog=value.optJSONArray("songs");if(catalog==null)catalog=new JSONArray();renderSongs();
+            if(value.optInt("total")>catalog.length())songs.addView(label("Showing first 25 matches · refine your search",13));
+        },error->{if(queryGeneration==searchGeneration)status.setText("Playback controls remain connected. Song search unavailable: "+describe(error));});
+        handler.postDelayed(pendingSearch,350);
+    }
     private void renderSongs(){songs.removeAllViews();String query=search.getText().toString().toLowerCase(Locale.ROOT);int count=0;for(int i=0;i<catalog.length();i++){JSONObject song=catalog.optJSONObject(i);if(song==null||!song.optString("title").toLowerCase(Locale.ROOT).contains(query))continue;if(count++>=100)break;songs.addView(button(song.optString("title"),()->new AlertDialog.Builder(activity).setTitle(song.optString("title")).setItems(new String[]{"Load → A","Load → B","Load left Cue Deck","Load right Cue Deck","Saved cues","Request in next 1–5 songs"},(d,n)->{if(n<2)command("call_song","song",song.optString("id"),"deck",n==0?"a":"b","execution","load_only");else if(n<4)cue(n-2,"load","song",song.optString("id"));else if(n==5){new AlertDialog.Builder(activity).setTitle("Play within how many songs?").setItems(new String[]{"1","2","3","4","5"},(a,j)->command("request_song","song",song.optString("id"),"within",j+1)).show();}else{JSONArray cues=song.optJSONArray("cues");if(cues==null)cues=new JSONArray();final JSONArray saved=cues;String[] names=new String[cues.length()];for(int j=0;j<names.length;j++)names[j]=cues.optJSONObject(j).optString("name")+" · "+cues.optJSONObject(j).optDouble("seconds");new AlertDialog.Builder(activity).setTitle("Load saved cue → "+deck.toUpperCase(Locale.ROOT)).setItems(names,(a,j)->command("call_song","song",song.optString("id"),"cue",saved.optJSONObject(j).optString("id"),"deck",deck,"execution","load_only")).show();}}).show()));}if(count>100)songs.addView(label("First 100 matches · refine search",13));}
     static JSONObject request(String base,String secret,String path,JSONObject body)throws Exception {return request(base,secret,path,body,"");}
     static JSONObject request(String base,String secret,String path,JSONObject body,String identity)throws Exception {
         HttpURLConnection connection=(HttpURLConnection)new URL(base+path).openConnection();connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(4000);connection.setReadTimeout(7000);if(!secret.isEmpty())connection.setRequestProperty("x-amp-password",secret);if(!identity.isEmpty())connection.setRequestProperty("x-amp-session",identity);
-        try{if(body!=null){connection.setRequestMethod("POST");connection.setDoOutput(true);connection.setRequestProperty("Content-Type","application/json");try(OutputStream output=connection.getOutputStream()){output.write(body.toString().getBytes(StandardCharsets.UTF_8));}}int code=connection.getResponseCode();if(code<200||code>=300){String reason=code==401||code==403?"Incorrect password or host session changed. Connect again.":"desktop rejected this request";InputStream failure=connection.getErrorStream();if(failure!=null)try(InputStream input=failure;ByteArrayOutputStream message=new ByteArrayOutputStream()){byte[] buffer=new byte[512];int count;while(message.size()<4096&&(count=input.read(buffer,0,Math.min(buffer.length,4096-message.size())))!=-1)message.write(buffer,0,count);String text=message.toString("UTF-8");try{reason=new JSONObject(text).optString("error",reason);}catch(JSONException ignored){if(!text.isEmpty())reason=text.substring(0,Math.min(180,text.length()));}}throw new IOException("HTTP "+code+": "+reason);}try(InputStream input=connection.getInputStream();ByteArrayOutputStream output=new ByteArrayOutputStream()){byte[] bytes=new byte[8192];int n;while((n=input.read(bytes))!=-1){if(output.size()+n>8*1024*1024)throw new IOException("Catalog too large");output.write(bytes,0,n);}JSONObject result=new JSONObject(output.toString("UTF-8"));if(!identity.isEmpty()&&path.equals("/api/v1/state")){JSONObject control=result.optJSONObject("control");if(control==null||!identity.equals(control.optString("session")))throw new IOException("Host session changed. Reconnect before sending more commands.");}return result;}}finally{connection.disconnect();}
+        try{if(body!=null){connection.setRequestMethod("POST");connection.setDoOutput(true);connection.setRequestProperty("Content-Type","application/json");try(OutputStream output=connection.getOutputStream()){output.write(body.toString().getBytes(StandardCharsets.UTF_8));}}int code=connection.getResponseCode();if(code<200||code>=300){String reason=code==401||code==403?"Incorrect password or host session changed. Connect again.":"desktop rejected this request";InputStream failure=connection.getErrorStream();if(failure!=null)try(InputStream input=failure;ByteArrayOutputStream message=new ByteArrayOutputStream()){byte[] buffer=new byte[512];int count;while(message.size()<4096&&(count=input.read(buffer,0,Math.min(buffer.length,4096-message.size())))!=-1)message.write(buffer,0,count);String text=message.toString("UTF-8");try{reason=new JSONObject(text).optString("error",reason);}catch(JSONException ignored){if(!text.isEmpty())reason=text.substring(0,Math.min(180,text.length()));}}throw new IOException("HTTP "+code+": "+reason);}try(InputStream input=connection.getInputStream();ByteArrayOutputStream output=new ByteArrayOutputStream()){byte[] bytes=new byte[8192];int n;while((n=input.read(bytes))!=-1){if(output.size()+n>8*1024*1024)throw new IOException("This response is too large; refine the song search");output.write(bytes,0,n);}JSONObject result=new JSONObject(output.toString("UTF-8"));if(!identity.isEmpty()&&path.equals("/api/v1/state")){JSONObject control=result.optJSONObject("control");if(control==null||!identity.equals(control.optString("session")))throw new IOException("Host session changed. Reconnect before sending more commands.");}return result;}}finally{connection.disconnect();}
     }
-    void close(){closed=true;generation++;discoveryGeneration++;discoveryWorkers.shutdownNow();handler.removeCallbacksAndMessages(null);if(socket!=null)socket.cancel();socketClient.dispatcher().executorService().shutdown();socketClient.connectionPool().evictAll();worker.shutdownNow();}
+    void close(){closed=true;generation++;discoveryGeneration++;discoveryWorkers.shutdownNow();handler.removeCallbacksAndMessages(null);if(socket!=null)socket.cancel();socketClient.dispatcher().executorService().shutdown();socketClient.connectionPool().evictAll();worker.shutdownNow();browsingWorker.shutdownNow();}
 }
