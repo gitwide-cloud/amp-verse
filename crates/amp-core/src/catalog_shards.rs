@@ -58,7 +58,7 @@ fn publish(local: &Path, target: &Path) -> Result<(), String> {
             .open(&pending)
             .and_then(|f| f.sync_all())
             .map_err(err)?;
-        fs::rename(&pending, target).map_err(err)
+        super::catalog_db::replace_snapshot(&pending, target)
     })();
     if result.is_err() {
         let _ = fs::remove_file(pending);

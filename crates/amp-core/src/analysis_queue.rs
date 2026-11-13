@@ -123,6 +123,7 @@ impl Queue {
                 })?;
             }
         }
+        q.recover_contention()?;
         Ok(q)
     }
     pub fn open(file: &Path, root: &Path) -> Result<Self, String> {
@@ -358,7 +359,20 @@ impl Queue {
             worker: Some(worker),
         }
     }
+    pub fn temporary_failure(message: &str) -> bool {
+        message.contains("Shared record busy; retry after reloading")
+    }
+    pub fn recover_contention(&self) -> Result<usize, String> {
+        let n:usize=self.access(false,|db|db.query_row("SELECT COUNT(*) FROM analysis_jobs WHERE state='failed' AND error LIKE '%Shared record busy; retry after reloading%'",[],|r|r.get(0)).map_err(err))?;
+        if n == 0 {
+            return Ok(0);
+        }
+        self.access(true,|db|{let tx=db.transaction().map_err(err)?;let count=tx.execute("UPDATE analysis_jobs SET state='pending',token=NULL,expires=0,error=NULL WHERE state='failed' AND error LIKE '%Shared record busy; retry after reloading%'",[]).map_err(err)?;tx.commit().map_err(err)?;Ok(count)})
+    }
     pub fn finish(&self, job: &Job, result: Result<(), &str>) -> Result<(), String> {
+        if result.is_err_and(Self::temporary_failure) {
+            return self.defer(job);
+        }
         let stamp = std::fs::metadata(crate::music_sources::audio_path(&self.root, &job.path))
             .ok()
             .and_then(|m| {
@@ -595,5 +609,29 @@ mod tests {
         assert_eq!(q.stats().unwrap().done, 5001);
         assert_eq!(q.stats().unwrap().pending, 1000);
         assert_eq!(q.next().unwrap().unwrap().path, Path::new("5001.wav"));
+    }
+}
+
+#[cfg(test)]
+mod transient_failure_tests {
+    use super::*;
+    #[test]
+    fn lock_contention_stays_pending_and_legacy_contention_is_recovered() {
+        let dir = tempfile::tempdir().unwrap();
+        let q = Queue::open(&dir.path().join("queue.db"), dir.path()).unwrap();
+        q.enqueue_rows(vec![("song.mp3".into(), "stamp".into(), false)])
+            .unwrap();
+        let job = q.next().unwrap().unwrap();
+        q.finish(&job, Err("Shared record busy; retry after reloading"))
+            .unwrap();
+        assert_eq!(q.stats().unwrap().failed, 0);
+        assert_eq!(q.stats().unwrap().pending, 1);
+        q.access(true,|db|{db.execute("UPDATE analysis_jobs SET state='failed',error='Shared record busy; retry after reloading'",[]).map_err(err)?;Ok(())}).unwrap();
+        assert_eq!(q.recover_contention().unwrap(), 1);
+        assert_eq!(q.stats().unwrap().failed, 0);
+        let job = q.next().unwrap().unwrap();
+        q.finish(&job, Err("Audio decoding failed")).unwrap();
+        assert_eq!(q.recover_contention().unwrap(), 0);
+        assert_eq!(q.stats().unwrap().failed, 1);
     }
 }

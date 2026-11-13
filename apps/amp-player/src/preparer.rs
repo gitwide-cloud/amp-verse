@@ -49,6 +49,7 @@ pub struct Preparer {
     >,
     queue_discovery: Option<mpsc::Receiver<Result<amp_core::analysis_queue::Stats, String>>>,
     queue_root: PathBuf,
+    queue_retry_at: Option<std::time::Instant>,
     pub queue_enabled: bool,
     stop_queue: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub status: String,
@@ -599,6 +600,7 @@ impl Preparer {
         } else {
             None
         };
+        self.queue_retry_at = None;
         self.queue_root = root.clone();
         self.queue_enabled = true;
         if self.total == 0 {
@@ -685,12 +687,14 @@ impl Preparer {
         });
     }
     pub fn stop_queue(&mut self) {
+        self.queue_retry_at = None;
         self.queue_enabled = false;
         self.stop_queue
             .store(true, std::sync::atomic::Ordering::Relaxed);
         self.status = "Stopping after active songs; pending work is saved.".into();
     }
     fn start_queue(&mut self, root: PathBuf) {
+        self.queue_retry_at = None;
         let Some(q) = self.queue.clone() else { return };
         if crate::engine::path().is_none() {
             self.status =
@@ -728,7 +732,13 @@ impl Preparer {
                                         selected: false,
                                         skipped: false,
                                     });
-                                    break;
+                                    for _ in 0..20 {
+                                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                            break;
+                                        }
+                                        std::thread::sleep(std::time::Duration::from_millis(100));
+                                    }
+                                    continue;
                                 }
                             };
                             let _heartbeat = q.keep_alive(&job);
@@ -760,6 +770,7 @@ impl Preparer {
                             } else {
                                 q.finish(&job, result.as_ref().map(|_| ()).map_err(String::as_str))
                             };
+                            let queue_failed = recorded.is_err();
                             let result = match recorded {
                                 Ok(()) => result,
                                 Err(e) => Err(e),
@@ -767,7 +778,11 @@ impl Preparer {
                             if tx
                                 .send(Update {
                                     root: root.clone(),
-                                    path: job.path,
+                                    path: if queue_failed {
+                                        PathBuf::new()
+                                    } else {
+                                        job.path
+                                    },
                                     result,
                                     selected: false,
                                     skipped,
@@ -900,6 +915,25 @@ impl Preparer {
         }
         let mut library = library;
         for update in updates {
+            if update.path.as_os_str().is_empty() {
+                if let Err(error) = update.result {
+                    self.status = format!(
+                        "Shared queue unavailable: {error}. Waiting and retrying; completed work is safe."
+                    );
+                }
+                continue;
+            }
+            if update
+                .result
+                .as_ref()
+                .is_err_and(|e| amp_core::analysis_queue::Queue::temporary_failure(e))
+            {
+                self.status = format!(
+                    "Shared metadata busy for {}. Song remains queued for retry.",
+                    update.path.display()
+                );
+                continue;
+            }
             self.done += 1;
             self.skipped += usize::from(update.skipped);
             match update.result {
@@ -954,7 +988,8 @@ impl Preparer {
                 self.done = stats.done + stats.failed;
                 self.failures = stats.failed;
                 if self.queue_enabled && stats.pending > 0 {
-                    self.start_queue(root.into());
+                    self.queue_retry_at =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
                 } else if self.queue_enabled {
                     self.status = format!(
                         "Queue complete: {} done, {} failed. Watching folders for new songs.",
@@ -962,6 +997,15 @@ impl Preparer {
                     );
                 }
             }
+        }
+        if self.job.is_none()
+            && self.queue_enabled
+            && self
+                .queue_retry_at
+                .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.queue_retry_at = None;
+            self.start_queue(root.into());
         }
     }
     pub fn show(
@@ -1162,5 +1206,43 @@ mod workflow_tests {
             Some(127.)
         );
         assert!(editor.selected_track(main.path(), &track));
+    }
+}
+#[cfg(test)]
+mod queue_progress_tests {
+    use super::*;
+    fn check_waiting(path: PathBuf, error: &str) {
+        let mut preparer = Preparer {
+            total: 10,
+            done: 3,
+            failures: 1,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        preparer.job = Some(rx);
+        tx.send(Update {
+            root: PathBuf::from("unused"),
+            path,
+            result: Err(error.into()),
+            selected: false,
+            skipped: false,
+        })
+        .unwrap();
+        preparer.poll(std::path::Path::new("unused"), None);
+        assert_eq!(preparer.done, 3);
+        assert_eq!(preparer.failures, 1);
+        assert!(!preparer.status.starts_with(':'));
+        drop(tx);
+    }
+    #[test]
+    fn queue_access_errors_are_not_failed_or_completed_songs() {
+        check_waiting(PathBuf::new(), "Access is denied. (os error 5)");
+    }
+    #[test]
+    fn metadata_contention_does_not_advance_song_progress() {
+        check_waiting(
+            PathBuf::from("song.mp3"),
+            "Shared record busy; retry after reloading",
+        );
     }
 }

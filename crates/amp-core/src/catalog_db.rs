@@ -94,17 +94,50 @@ pub(crate) fn queue_access<T>(
     write: bool,
     work: impl FnOnce(&mut Connection) -> Result<T, String>,
 ) -> Result<T, String> {
-    let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
-    if write {
-        crate::catalog_shards::migrate(root, true)?;
-        let (dir, mut db) = open_copy(root)?;
-        let value = work(&mut db)?;
-        publish(root, dir, db)?;
-        Ok(value)
-    } else {
-        let mut db = open_read(root)?;
-        work(&mut db)
+    let operation = (|| {
+        let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
+        if write {
+            crate::catalog_shards::migrate(root, true)?;
+            let (dir, mut db) = open_copy(root)?;
+            let value = work(&mut db)?;
+            publish(root, dir, db)?;
+            Ok(value)
+        } else {
+            let mut db = open_read(root)?;
+            work(&mut db)
+        }
+    })();
+    operation.map_err(|e: String| format!("Shared analysis queue {}: {e}", path(root).display()))
+}
+/// SMB/Windows readers can briefly deny atomic replacement. Retry the same rename,
+/// never delete the current catalog or fall back to an in-place write.
+pub(crate) fn replace_snapshot(source: &Path, target: &Path) -> Result<(), String> {
+    retry_replace(|| fs::rename(source, target)).map_err(|e| {
+        format!(
+            "Cannot publish shared catalog {}: {e}. Existing data was retained",
+            target.display()
+        )
+    })
+}
+fn retry_replace(mut operation: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    for attempt in 0..8 {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt < 7
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock
+                    ) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    (20u64 << attempt).min(200),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
     }
+    unreachable!()
 }
 // Readers hold the publication lock and open only a fully committed immutable snapshot.
 // This reads indexed pages directly; it never creates a journal or writable NAS connection.
@@ -276,7 +309,7 @@ fn publish(root: &Path, dir: tempfile::TempDir, db: Connection) -> Result<(), St
             .open(&pending)
             .and_then(|f| f.sync_all())
             .map_err(error)?;
-        fs::rename(&pending, path(root)).map_err(error)
+        replace_snapshot(&pending, &path(root))
     })();
     if result.is_err() {
         let _ = fs::remove_file(pending);
@@ -499,5 +532,63 @@ mod tests {
         );
         assert_eq!(crate::preparation::load(&audio).unwrap().cue_in, 3.);
         assert_eq!(fs::read(audio).unwrap(), b"music");
+    }
+}
+
+#[cfg(test)]
+mod publication_retry_tests {
+    use super::*;
+    #[test]
+    fn temporary_denial_retries_without_deleting_the_previous_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("catalog");
+        let pending = dir.path().join("pending");
+        fs::write(&old, b"old").unwrap();
+        fs::write(&pending, b"new").unwrap();
+        let mut attempts = 0;
+        retry_replace(|| {
+            attempts += 1;
+            if attempts < 3 {
+                assert_eq!(fs::read(&old).unwrap(), b"old");
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            fs::rename(&pending, &old)
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert_eq!(fs::read(&old).unwrap(), b"new");
+    }
+    #[test]
+    fn unrelated_errors_are_not_retried() {
+        let mut attempts = 0;
+        let error = retry_replace(|| {
+            attempts += 1;
+            Err(std::io::ErrorKind::NotFound.into())
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_reader_releases_share_denial_before_atomic_replace() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("catalog");
+        let pending = dir.path().join("pending");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&pending, b"new").unwrap();
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&target)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(reader);
+        });
+        replace_snapshot(&pending, &target).unwrap();
+        release.join().unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new");
     }
 }
