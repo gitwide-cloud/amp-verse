@@ -64,7 +64,7 @@ pub fn show(
         for (index,label,help) in [
             (0,"Scratch","One bar of incoming drum scratches, beat-locked before the blend; needs prepared drums."),(1,"Stutter","A brief rhythmic repeat."),
             (2,"Tape brake","Slow the outgoing deck briefly."),(3,"Filter sweep","Sweep tone during the blend."),
-            (4,"Bass swap","Trade the low frequencies between decks."),(5,"Beatmatch tempo","Match prepared tempos within the supported range."),
+            (4,"Build/drop & bass swap","With compatible cued buildups, blend sixteen beats into the incoming drop; otherwise trade bass normally."),(5,"Beatmatch tempo","Match prepared tempos within the supported range."),
         ] {switch(ui,&mut settings.techniques[index],label,help);}
         switch(ui,&mut settings.loop_build,"Loop buildup","Shorten a beat loop before the handoff; requires BPM and enough mix time.");
         switch(ui,&mut settings.stem_swap,"Stem handoff","Requires prepared stems on both decks.");

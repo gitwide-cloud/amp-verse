@@ -462,6 +462,54 @@ impl Player {
             self.pitch[incoming] = (plan.rate as f32 - 1.) * 100.;
         }
     }
+    fn build_drop_pair_plan(
+        &self,
+        outgoing: usize,
+        incoming: usize,
+    ) -> Option<(crate::mix_schedule::Grid, f32)> {
+        let audio = self.audio.as_ref()?;
+        let out = &self.loaded_track(outgoing)?.preparation;
+        let next = &self.loaded_track(incoming)?.preparation;
+        if next
+            .extensions
+            .get("runtime_build_swap")
+            .and_then(|v| v.as_bool())
+            != Some(true)
+        {
+            return None;
+        }
+        let rate_out = self.deck_rate(outgoing);
+        let rate_in = self.deck_rate(incoming);
+        let locked = |deck: usize| {
+            audio.controls.key_lock[deck].load(Relaxed)
+                && audio.controls.key_lock_available[deck].load(Relaxed)
+        };
+        if !crate::mashup::compatible_with_keylock(
+            out,
+            next,
+            rate_out,
+            rate_in,
+            [locked(outgoing), locked(incoming)],
+        ) {
+            return None;
+        }
+        let plan = amp_core::transition_plan::build_swap(
+            out,
+            next,
+            audio.source_position(outgoing),
+            audio.source_position(incoming),
+            next.extensions.get("runtime_mix_landing")?.as_f64()?,
+            [rate_out, rate_in],
+        )?;
+        let origin = audio.source_position(outgoing) - audio.position(outgoing);
+        Some((
+            crate::mix_schedule::Grid {
+                period: plan.seconds * rate_out,
+                anchor: plan.outgoing_start - origin,
+            },
+            plan.seconds as f32,
+        ))
+    }
     fn mashup_pair_plan(
         &self,
         outgoing: usize,
@@ -640,14 +688,16 @@ impl Player {
             None
         };
         let rate = matched_rate.unwrap_or(saved_rate) as f32;
-        let planned_mashup = self.run.force_mashup
-            || self.loaded_track(active).is_some_and(|out| {
-                self.run.transitions.pick_for_pair(
-                    self.run.completed_handoffs,
-                    &out.preparation,
-                    &track.preparation,
-                ) == Some(crate::transition_styles::Style::Mashup)
-            });
+        let planned_type = self.loaded_track(active).and_then(|out| {
+            self.run.transitions.pick_for_pair(
+                self.run.completed_handoffs,
+                &out.preparation,
+                &track.preparation,
+            )
+        });
+        let planned_mashup =
+            self.run.force_mashup || planned_type == Some(crate::transition_styles::Style::Mashup);
+        let planned_build = planned_type == Some(crate::transition_styles::Style::BassSwap);
         let preroll = if planned_mashup {
             self.loaded_track(active)
                 .and_then(|out| out.preparation.bpm)
@@ -656,6 +706,11 @@ impl Player {
                         + self.run.transitions.mashup_beats as f64 * 60.
                             / (bpm * self.deck_rate(active))
                 })
+                .unwrap_or(self.fade_seconds as f64)
+        } else if planned_build {
+            self.loaded_track(active)
+                .and_then(|out| out.preparation.bpm)
+                .map(|bpm| 16. * 60. / (bpm * self.deck_rate(active)))
                 .unwrap_or(self.fade_seconds as f64)
         } else {
             self.fade_seconds as f64
@@ -673,6 +728,12 @@ impl Player {
             )
         {
             track.preparation.cue_in = plan.entry;
+            if planned_build {
+                track
+                    .preparation
+                    .extensions
+                    .insert("runtime_build_swap".into(), json!(true));
+            }
             track.preparation.extensions.insert(
                 "runtime_mix_landing".into(),
                 serde_json::json!(plan.landing),
@@ -1998,7 +2059,12 @@ impl Player {
                         "Crossfader changed after preload; request the next song again".into();
                     self.run.cancel_automation();
                 } else {
-                    let seconds = self.fade_seconds;
+                    let build_plan = if chosen == Some(crate::transition_styles::Style::BassSwap) {
+                        self.build_drop_pair_plan(outgoing, incoming)
+                    } else {
+                        None
+                    };
+                    let seconds = build_plan.map_or(self.fade_seconds, |(_, seconds)| seconds);
                     let grid = self
                         .loaded_track(outgoing)
                         .zip(self.loaded_track(incoming))
@@ -2018,7 +2084,11 @@ impl Player {
                     } else {
                         None
                     };
-                    let result = if let Some((mashup_grid, hold)) = mashup_plan {
+                    let result = if let Some((build_grid, _)) = build_plan {
+                        self.status =
+                            "16-beat buildup handoff: incoming track owns the drop".into();
+                        a.scheduled_crossfade(seconds, build_grid)
+                    } else if let Some((mashup_grid, hold)) = mashup_plan {
                         match a.mashup(seconds, hold, mashup_grid) {
                             Ok(()) => {
                                 self.status = format!(
@@ -2167,7 +2237,19 @@ impl Player {
                 .and_then(|t| t.preparation.bpm)
                 .map(|b| (60. / (b * self.deck_rate(active))) as f32)
                 .map(|beat| 4. * beat + self.fade_seconds.min(beat));
-            let mix_seconds = if next_scratch {
+            let build_length = if self.run.transitions.pick(self.run.completed_handoffs)
+                == Some(crate::transition_styles::Style::BassSwap)
+            {
+                self.run
+                    .preloaded
+                    .and_then(|(incoming, _)| self.build_drop_pair_plan(active, incoming))
+                    .map(|(_, seconds)| seconds)
+            } else {
+                None
+            };
+            let mix_seconds = if let Some(seconds) = build_length {
+                seconds
+            } else if next_scratch {
                 scratch_length.unwrap_or(self.fade_seconds)
             } else {
                 self.fade_seconds

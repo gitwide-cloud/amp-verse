@@ -2186,6 +2186,39 @@ fn stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
 mod tests {
     use super::*;
     #[test]
+    fn buildup_handoff_reaches_the_new_drop_on_the_audio_clock() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(32);
+        let mut mixer = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.2, 16000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(1, source(0.4, 16000), false, 1))
+            .unwrap();
+        mixer.render(1000, |_, _| {});
+        // Old drop at source second 10. New entry is second 12, new drop 20:
+        // begin at old second 2 and hand over after sixteen 120-BPM beats.
+        tx.send(Command::ScheduledFade {
+            to: 1.,
+            seconds: 8.,
+            grid: crate::mix_schedule::Grid {
+                period: 8.,
+                anchor: 2.,
+            },
+        })
+        .unwrap();
+        mixer.render(8999, |_, _| {});
+        assert!(c.fading.load(Relaxed));
+        assert!(c.play[0].load(Relaxed));
+        mixer.render(3, |_, _| {});
+        assert!(!c.fading.load(Relaxed));
+        assert!(!c.play[0].load(Relaxed));
+        assert!(c.play[1].load(Relaxed));
+        assert!(
+            (12. + mixer.voices[1].source.as_ref().unwrap().position / 1000. - 20.).abs() < 0.004
+        );
+        assert_eq!(c.underruns[1].load(Relaxed), 0);
+    }
+    #[test]
     fn scratch_in_is_block_invariant_drum_only_and_returns_to_exact_entry() {
         let run = |block: usize| {
             let c = Arc::new(Controls::default());

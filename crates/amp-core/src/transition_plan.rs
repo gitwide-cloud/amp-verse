@@ -39,6 +39,83 @@ pub struct Landing {
     pub entry: f64,
     pub landing: f64,
 }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct BuildSwap {
+    pub outgoing_start: f64,
+    pub outgoing_drop: f64,
+    pub seconds: f64,
+}
+/// Match two complete sixteen-beat buildups. Cues identify musical events; an
+/// arbitrary loud section is not enough. Never seek the sounding deck or move cues.
+pub fn build_swap(
+    out: &Preparation,
+    incoming: &Preparation,
+    position: f64,
+    entry: f64,
+    drop: f64,
+    rates: [f64; 2],
+) -> Option<BuildSwap> {
+    let [out_rate, in_rate] = rates;
+    if ![position, entry, drop, out_rate, in_rate]
+        .iter()
+        .all(|v| v.is_finite())
+        || out_rate <= 0.
+        || in_rate <= 0.
+        || !crate::mix_schedule::timing_reliable(out)
+        || !crate::mix_schedule::timing_reliable(incoming)
+    {
+        return None;
+    }
+    let bpm_out = out.bpm?;
+    let bpm_in = incoming.bpm?;
+    if !incoming
+        .manual_cues
+        .iter()
+        .chain(&incoming.cues)
+        .any(|cue| {
+            matches!(cue.kind.as_str(), "drop" | "chorus_start" | "chorus")
+                && (cue.seconds - drop).abs() <= 0.01
+        })
+    {
+        return None;
+    }
+    if (bpm_out * out_rate / (bpm_in * in_rate) - 1.).abs() > 0.0005 {
+        return None;
+    }
+    let seconds = 16. * 60. / (bpm_out * out_rate);
+    // Preload must already contain the whole incoming buildup, not be stretched
+    // or silently sought after its decoder has been prepared.
+    if ((drop - entry) / in_rate - seconds).abs() > 0.01
+        || entry < 0.
+        || incoming.cue_out.is_some_and(|end| drop >= end)
+    {
+        return None;
+    }
+    let phase = |p: &Preparation, at: f64| {
+        ((at - p.beat_offset.unwrap()) * p.bpm.unwrap() / 60.).rem_euclid(1.)
+    };
+    let find = |cues: &[crate::preparation::Cue]| {
+        cues.iter()
+            .filter(|cue| {
+                matches!(cue.kind.as_str(), "drop" | "chorus_start" | "chorus")
+                    && cue.seconds.is_finite()
+                    && out.cue_out.is_none_or(|end| cue.seconds < end)
+            })
+            .filter_map(|cue| {
+                let start = cue.seconds - seconds * out_rate;
+                let wait = (start - position) / out_rate;
+                let error =
+                    (phase(out, cue.seconds) - phase(incoming, drop) + 0.5).rem_euclid(1.) - 0.5;
+                (wait >= 0.15 && wait <= seconds && error.abs() <= 0.02).then_some(BuildSwap {
+                    outgoing_start: start,
+                    outgoing_drop: cue.seconds,
+                    seconds,
+                })
+            })
+            .min_by(|a, b| a.outgoing_start.total_cmp(&b.outgoing_start))
+    };
+    find(&out.manual_cues).or_else(|| find(&out.cues))
+}
 /// For an automatically selected section/drop, start privately before the landing
 /// so the new section arrives as the crossfade completes. Exact user fade time is retained.
 pub fn landing(p: &Preparation, selected: f64, rate: f64, fade: f64) -> Option<Landing> {
@@ -70,6 +147,45 @@ pub fn landing(p: &Preparation, selected: f64, rate: f64, fade: f64) -> Option<L
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn build_swap_lands_both_drops_and_preserves_cues() {
+        let mut out = Preparation {
+            bpm: Some(120.),
+            beat_offset: Some(0.),
+            cue_out: Some(120.),
+            ..Default::default()
+        };
+        out.manual_cues.push(crate::preparation::Cue {
+            seconds: 100.,
+            kind: "drop".into(),
+            ..Default::default()
+        });
+        let mut incoming = Preparation {
+            bpm: Some(125.),
+            beat_offset: Some(0.),
+            cue_out: Some(100.),
+            ..Default::default()
+        };
+        incoming.cues.push(crate::preparation::Cue {
+            seconds: 38.4,
+            kind: "drop".into(),
+            ..Default::default()
+        });
+        let saved = out.clone();
+        let rates = [1., 120. / 125.];
+        let plan = build_swap(&out, &incoming, 90., 30.72, 38.4, rates).unwrap();
+        assert_eq!(plan.outgoing_start, 92.);
+        assert_eq!(plan.seconds, 8.);
+        assert!((30.72 + plan.seconds * rates[1] - 38.4).abs() < 1e-9);
+        assert_eq!(plan.outgoing_start + plan.seconds, plan.outgoing_drop);
+        assert_eq!(out, saved);
+        assert!(build_swap(&out, &incoming, 95., 30.72, 38.4, rates).is_none());
+        assert!(build_swap(&out, &incoming, 20., 30.72, 38.4, rates).is_none());
+        assert!(build_swap(&out, &incoming, 90., 35., 38.4, rates).is_none());
+        assert!(build_swap(&out, &incoming, 90., 30.72, 38.4, [1., 1.]).is_none());
+        out.manual_cues[0].kind = "energy-start".into();
+        assert!(build_swap(&out, &incoming, 90., 30.72, 38.4, rates).is_none());
+    }
     #[test]
     fn half_double_time_uses_small_pitch_changes_and_rejects_extreme_stretch() {
         assert_eq!(

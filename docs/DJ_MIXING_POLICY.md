@@ -58,3 +58,39 @@ Additional muted native tests verify idempotent matching against a 126-BPM
 sounding deck despite an unrelated 95-BPM master, and clean fallback without
 prepared stems. The full workspace suite passed (319 tests, 56 skipped), with
 strict Clippy checks; the skipped platform/fixture tests are not claimed as run.
+
+## Artist-video research and 1.0.7
+
+Evidence reviewed:
+
+- [Martin Garrix's Capital XTRA masterclass](https://www.capitalxtra.com/artists/martin-garrix/dj-masterclass/tutorial/)
+  and its [embedded video](https://www.youtube.com/watch?v=tNgUDuRtc_s).
+  The broadcaster describes a demonstration of mixer effects for crowd energy.
+  This supports studying purposeful effect placement, not an exact undocumented
+  knob recipe or a claim that AMP sounds like Garrix.
+- [Armin's official transition lesson](https://www.masterclass.com/classes/armin-van-buuren-teaches-dance-music/chapters/using-the-decks-armin-s-techniques)
+  publicly lists overlaps, tempo changes, reverb, channel layering and loops.
+  [His official year-mix preparation stream](https://www.youtube.com/watch?v=_NghSHqtquE)
+  is a useful follow-up reference. Its description was accessible; the full
+  four-hour audiovisual session and paid lesson were not audited here.
+- [Marshmello's official Ultra 2023 set](https://www.youtube.com/watch?v=deDFAmOPYkQ)
+  was located, but not fully auditioned. The practical timing rule comes from
+  [DJ Carlo's Marshmello technique breakdown](https://www.youtube.com/watch?v=hBbZ5iPXld8),
+  whose indexed description specifies aligning sixteen-beat buildups before
+  handing over the drop. This is the educator's explanation, not a statement
+  from Marshmello himself.
+
+The new build/drop planner is an original implementation of that general rule.
+It is available through **Build/drop & bass swap**, not an artist-branded preset.
+It requires compatible loaded tuning, rate-matched timing, an incoming drop cue
+with a complete sixteen-beat lead-in, and a nearby future outgoing drop cue.
+Reviewed outgoing cues take priority. The sounding deck is never sought; source
+cues and the saved ordinary fade duration remain unchanged. Missing data, an
+already-passed cue, a distant cue or ambiguous half-time phrasing uses the
+existing normal transition. An unlabelled energy peak is not a drop cue.
+
+Tests cover unequal original BPMs, complete buildup length, exact landing math,
+rejection of missing/late/distant cues and mismatched tempos, preservation of
+cue data, and an audio-clock rendered handoff. This is not a claim of listening
+to every transition in the referenced sets or learning crowd response from video.
+Reverb-tail automation and full-set energy-arc learning are not added by 1.0.7.
