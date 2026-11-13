@@ -18,6 +18,19 @@ use std::{
 fn cache_root() -> Option<PathBuf> {
     crate::theme::settings_path().and_then(|p| p.parent().map(|p| p.join("prepared-stems")))
 }
+fn worker_process(command: std::process::Command) -> process_wrap::std::CommandWrap {
+    let mut wrapped = process_wrap::std::CommandWrap::from(command);
+    #[cfg(windows)]
+    wrapped
+        .wrap(process_wrap::std::CreationFlags(
+            windows::Win32::System::Threading::CREATE_NO_WINDOW
+                | windows::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS,
+        ))
+        .wrap(process_wrap::std::JobObject);
+    #[cfg(unix)]
+    wrapped.wrap(process_wrap::std::ProcessGroup::leader());
+    wrapped
+}
 pub(super) fn runtime() -> Option<PathBuf> {
     if let Some(path) = std::env::var_os("AMP_STEM_PYTHON")
         .map(PathBuf::from)
@@ -245,11 +258,7 @@ fn prepare(
         command.env("AMP_STEM_FFMPEG", exe);
     }
     crate::preparation_speed::configure(&mut command);
-    let mut wrapped = process_wrap::std::CommandWrap::from(command);
-    #[cfg(windows)]
-    wrapped.wrap(process_wrap::std::JobObject);
-    #[cfg(unix)]
-    wrapped.wrap(process_wrap::std::ProcessGroup::leader());
+    let mut wrapped = worker_process(command);
     *process.lock().map_err(|_| "Stem process unavailable")? =
         Some(wrapped.spawn().map_err(|e| e.to_string())?);
     let status = loop {
@@ -816,6 +825,26 @@ pub fn remix_gains(knobs: [f32; 3]) -> [f32; 3] {
 }
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the installed Windows stem Python runtime"]
+    fn real_worker_job_keeps_python_console_hidden() {
+        let python = std::env::var("AMP_STEM_PYTHON").expect("stem Python fixture");
+        let folder = tempfile::tempdir().unwrap();
+        let result = folder.path().join("console.txt");
+        let script = folder.path().join("probe.py");
+        std::fs::write(&script, "import ctypes,sys\nfrom pathlib import Path\nk=ctypes.windll.kernel32\nk.GetCurrentProcess.restype=ctypes.c_void_p\nk.GetPriorityClass.argtypes=[ctypes.c_void_p]\nPath(sys.argv[1]).write_text(str(k.GetConsoleWindow())+','+str(k.GetPriorityClass(k.GetCurrentProcess())))\n").unwrap();
+        let mut command = amp_core::command(&python);
+        command
+            .arg(script)
+            .arg(&result)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = super::worker_process(command).spawn().unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(result).unwrap().trim(), "0,16384");
+    }
     #[test]
     fn remix_knobs_mute_isolate_and_restore_each_component() {
         assert_eq!(super::remix_gains([0.; 3]), [1.; 3]);
