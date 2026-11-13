@@ -4,11 +4,26 @@ use std::{
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 pub const PAUSE_ENV: &str = "AMP_PREPARATION_PAUSE_FILE";
-pub fn paused_at(path: &Path, now: u64) -> bool {
-    std::fs::read_to_string(path)
-        .ok()
-        .and_then(|value| value.trim().parse::<u64>().ok())
-        .is_some_and(|until| until > now && until <= now.saturating_add(10_000))
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activity {
+    Idle,
+    Slow,
+    Pause,
+}
+pub fn activity_at(path: &Path, now: u64) -> Activity {
+    let value = std::fs::read_to_string(path).unwrap_or_default();
+    let mut parts = value.split_whitespace();
+    let until = parts
+        .next()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(0);
+    if until <= now || until > now.saturating_add(10_000) {
+        return Activity::Idle;
+    }
+    match parts.next() {
+        Some("slow") => Activity::Slow,
+        _ => Activity::Pause,
+    }
 }
 pub fn now_ms() -> u64 {
     SystemTime::now()
@@ -18,8 +33,15 @@ pub fn now_ms() -> u64 {
 }
 pub fn checkpoint() {
     if let Some(path) = std::env::var_os(PAUSE_ENV) {
-        while paused_at(Path::new(&path), now_ms()) {
-            std::thread::sleep(Duration::from_millis(100));
+        loop {
+            match activity_at(Path::new(&path), now_ms()) {
+                Activity::Pause => std::thread::sleep(Duration::from_millis(100)),
+                Activity::Slow => {
+                    std::thread::sleep(Duration::from_millis(20));
+                    break;
+                }
+                Activity::Idle => break,
+            }
         }
     }
 }
@@ -52,7 +74,11 @@ mod tests {
             ("9999999", false),
         ] {
             std::fs::write(&path, text).unwrap();
-            assert_eq!(paused_at(&path, 1000), expected);
+            assert_eq!(activity_at(&path, 1000) == Activity::Pause, expected);
         }
+        std::fs::write(&path, "1200 slow").unwrap();
+        assert_eq!(activity_at(&path, 1000), Activity::Slow);
+        std::fs::write(&path, "1200 pause").unwrap();
+        assert_eq!(activity_at(&path, 1000), Activity::Pause);
     }
 }

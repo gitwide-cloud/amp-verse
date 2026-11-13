@@ -8,6 +8,8 @@ import shutil
 import subprocess
 import tempfile
 import time
+import threading
+from contextlib import contextmanager
 import unittest
 
 REPO = Path(__file__).resolve().parents[1]
@@ -17,6 +19,22 @@ worker = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(worker)
 
 
+@contextmanager
+def playback_marker(marker, mode):
+    stopped = threading.Event()
+    def renew():
+        while not stopped.is_set():
+            marker.write_text(str(int(time.time() * 1000) + 8000) + " " + mode)
+            stopped.wait(0.1)
+    thread = threading.Thread(target=renew)
+    thread.start()
+    try:
+        yield
+    finally:
+        stopped.set()
+        thread.join()
+
+
 class PreparationTests(unittest.TestCase):
     def test_expiring_pause_marker(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -24,9 +42,14 @@ class PreparationTests(unittest.TestCase):
             for content, expected in [("1200", True), ("900", False), ("bad", False), ("9999999", False)]:
                 marker.write_text(content)
                 self.assertEqual(worker.pause_active(marker, 1000), expected)
+            marker.write_text("1200 slow")
+            self.assertEqual(worker.activity_at(marker,1000),"slow")
+            self.assertFalse(worker.pause_active(marker,1000))
+            marker.write_text("1200 pause")
+            self.assertTrue(worker.pause_active(marker,1000))
 
     @unittest.skipUnless(os.environ.get("AMP_ENGINE_EXE"), "real analysis engine not selected")
-    def test_real_analysis_pauses_resumes_reuses_and_cleans_local_stage(self):
+    def test_real_analysis_switches_from_pause_to_slow_and_reuses_completed_work(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "song.wav"
@@ -42,8 +65,9 @@ class PreparationTests(unittest.TestCase):
                 process.stdin.close()
                 time.sleep(1)
                 self.assertIsNone(process.poll(), "analysis must wait for playback")
-                marker.write_text("0")
-                process.wait(timeout=40)
+                with playback_marker(marker, "slow"):
+                    process.wait(timeout=40)
+                    self.assertEqual(worker.activity_at(marker), "slow", "analysis must complete while playback is still active")
                 self.assertEqual(json.loads(process.stdout.read())["status"], "prepared")
                 repeated = subprocess.run([os.environ["AMP_ENGINE_EXE"]], input=request, capture_output=True, env=env, timeout=20, check=True)
                 self.assertEqual(json.loads(repeated.stdout)["status"], "skipped")
@@ -57,7 +81,7 @@ class PreparationTests(unittest.TestCase):
                 process.stderr.close()
 
     @unittest.skipUnless(os.environ.get("AMP_STEM_PYTHON"), "real stem runtime not selected")
-    def test_real_gpu_stems_pause_during_separation_then_resume(self):
+    def test_real_gpu_stems_switch_from_pause_to_slow_and_finish_during_playback(self):
         python = os.environ["AMP_STEM_PYTHON"]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -85,8 +109,10 @@ class PreparationTests(unittest.TestCase):
                     time.sleep(1)
                     self.assertIsNone(process.poll())
                     self.assertFalse((root / "result/audio.json").exists())
-                    marker.write_text("0")
-                    self.assertEqual(process.wait(timeout=120), 0, log.read_text(errors="replace"))
+                    with playback_marker(marker, "slow"):
+                        self.assertEqual(process.wait(timeout=120), 0, log.read_text(errors="replace"))
+                        self.assertEqual(worker.activity_at(marker), "slow")
+                    self.assertIn("Working slowly during playback", log.read_text(errors="replace"))
                     manifest = json.loads((root / "result/audio.json").read_text())
                     self.assertEqual(manifest["device"], "cuda")
                     self.assertEqual(set(manifest["files"]), {"vocals", "instrumental", "drums"})

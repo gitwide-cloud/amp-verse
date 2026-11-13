@@ -53,3 +53,14 @@ Official compatibility/install sources: [PyTorch previous versions](https://docs
 Local verification used an RTX 3080 Ti Laptop GPU: real separation paused mid-job and resumed, produced checked three-part outputs, and preserved the original audio. The real analysis engine was checked for pause/resume, completed-work reuse and temporary-cache cleanup. These checks do not establish universal hardware latency guarantees.
 
 V1.0.1 validation: 312 workspace tests passed (53 hardware/network cases skipped), plus three real preparation integration checks and two opted-in native checks. Installed-player verification loaded the saved Quiet preference, started a muted DJ deck, observed preparation pause while the playhead advanced, recorded zero underruns, and observed preparation resume after pausing the deck. The Windows V1 preview includes the matching rebuilt analysis executable; update the player and analysis add-on together for cooperative pause support.
+
+## Playback preparation choices (V1.0.2)
+
+Under **Library → Analyze Music → During playback**, select one remembered behavior:
+
+- **Keep working slowly** (default): analysis admits one new song at a time; running analysis yields between audio blocks. Stems continue with one CPU thread and longer gaps between GPU/model segments. Normal Quiet/Balanced/Fast budgets return when playback ends.
+- **Pause preparation**: running analysis/stems wait at safe checkpoints and new work waits until playback ends. A current decoder/import or inference segment can finish before the next checkpoint.
+
+The choice can change while jobs and music are running. No source audio, completed preparation, or live deck snapshot is replaced by switching it. Pause markers expire after a crash. This replaces V1.0.1's unconditional pause. The resource limits reduce contention; they cannot guarantee every audio driver or third-party workload will be glitch-free. Choose Pause preparation if your system needs maximum separation from background work.
+
+V1.0.2 verification: 313 workspace tests passed, with 53 hardware/network-dependent cases skipped. Real analysis and CUDA stem jobs were switched from Pause to Slow while a continuously renewed playback marker remained active; both completed successfully. Native installed-player tests loaded each saved policy, kept a muted DJ deck advancing with zero underruns, and restored the idle state after playback paused. The policy controls were checked in a rendered Analyze Music screen.

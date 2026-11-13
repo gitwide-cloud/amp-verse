@@ -482,7 +482,7 @@ impl Panel {
             && let Some(python) = runtime()
         {
             self.gpu_checked = true;
-            self.gpu_status = "Checking GPU support (waits for playback to stop)…".into();
+            self.gpu_status = "Checking GPU support…".into();
             let (tx, rx) = mpsc::channel();
             self.gpu_rx = Some(rx);
             std::thread::spawn(move || {
@@ -523,9 +523,8 @@ impl Panel {
         }
         ui.heading("Prepare Stems");
         ui.label(&self.gpu_status);
-        crate::preparation_speed::controls(ui);
         ui.label("Separate vocals, instruments and beat for the DJ stem knobs.");
-        ui.weak("Uses your GPU when available, with a safe CPU fallback. Completed stems are reused; preparation pauses for playback.");
+        ui.weak("Uses your GPU when available, with a safe CPU fallback. Completed stems are reused. Your playback setting chooses slower work or an automatic pause.");
         if let Some(job) = &self.batch {
             let (done, total) = self.batch_progress;
             ui.add(

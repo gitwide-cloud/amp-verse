@@ -44,9 +44,27 @@ impl Mode {
         }
     }
 }
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PlaybackPolicy {
+    #[default]
+    Slow,
+    Pause,
+}
+impl PlaybackPolicy {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Slow => "Keep working slowly",
+            Self::Pause => "Pause preparation",
+        }
+    }
+    fn id(self) -> usize {
+        usize::from(self == Self::Pause)
+    }
+}
 struct Budget {
     mode: AtomicUsize,
     playing: AtomicBool,
+    policy: AtomicUsize,
     marker: tempfile::TempDir,
 }
 static BUDGET: OnceLock<Budget> = OnceLock::new();
@@ -60,6 +78,13 @@ fn budget() -> &'static Budget {
         Budget {
             mode: AtomicUsize::new(mode),
             playing: AtomicBool::new(false),
+            policy: AtomicUsize::new(
+                crate::theme::settings_path()
+                    .and_then(|p| {
+                        std::fs::read_to_string(p.with_file_name("playback-preparation.txt")).ok()
+                    })
+                    .is_some_and(|s| s.trim() == "pause") as usize,
+            ),
             marker: tempfile::TempDir::new().expect("Preparation playback gate"),
         }
     })
@@ -74,6 +99,26 @@ pub fn mode() -> Mode {
 pub fn playing() -> bool {
     budget().playing.load(Relaxed)
 }
+pub fn policy() -> PlaybackPolicy {
+    if budget().policy.load(Relaxed) == 1 {
+        PlaybackPolicy::Pause
+    } else {
+        PlaybackPolicy::Slow
+    }
+}
+pub fn paused() -> bool {
+    playing() && policy() == PlaybackPolicy::Pause
+}
+pub fn throttled() -> bool {
+    playing() && policy() == PlaybackPolicy::Slow
+}
+fn worker_limit(selected: Mode, cores: usize, active: bool, choice: PlaybackPolicy) -> usize {
+    if active && choice == PlaybackPolicy::Slow {
+        1
+    } else {
+        selected.workers(cores)
+    }
+}
 #[cfg(not(test))]
 fn publish_pause(active: bool) {
     use std::io::Write;
@@ -84,7 +129,12 @@ fn publish_pause(active: bool) {
         } else {
             0
         };
-        if write!(file, "{until}").is_ok() {
+        let choice = if policy() == PlaybackPolicy::Slow {
+            "slow"
+        } else {
+            "pause"
+        };
+        if write!(file, "{until} {choice}").is_ok() {
             let _ = file.persist(state.marker.path().join("pause"));
         }
     }
@@ -108,11 +158,14 @@ pub fn set_playing(active: bool) {
     }
 }
 pub fn wait(cancel: Option<&AtomicBool>) -> bool {
-    while playing() {
+    while paused() {
         if cancel.is_some_and(|c| c.load(Relaxed)) {
             return false;
         }
         std::thread::sleep(Duration::from_millis(100));
+    }
+    if throttled() {
+        std::thread::sleep(Duration::from_millis(2));
     }
     !cancel.is_some_and(|c| c.load(Relaxed))
 }
@@ -140,7 +193,7 @@ pub fn analysis_permit() -> AnalysisPermit {
         wait(None);
         if admit(
             &ANALYSIS_ACTIVE,
-            mode().workers(amp_core::batch::cpu_count()),
+            worker_limit(mode(), amp_core::batch::cpu_count(), playing(), policy()),
         ) {
             return AnalysisPermit;
         }
@@ -206,15 +259,44 @@ pub fn controls(ui: &mut egui::Ui) {
         selected.workers(amp_core::batch::cpu_count()),
         selected.stem_threads(amp_core::batch::cpu_count())
     ));
-    if playing() {
+    let mut choice = policy();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("During playback");
+        for option in [PlaybackPolicy::Slow, PlaybackPolicy::Pause] {
+            ui.selectable_value(&mut choice, option, option.label());
+        }
+    });
+    if choice != policy() {
+        budget().policy.store(choice.id(), Relaxed);
+        if let Some(path) =
+            crate::theme::settings_path().map(|p| p.with_file_name("playback-preparation.txt"))
+        {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(error) = std::fs::write(
+                path,
+                if choice == PlaybackPolicy::Slow {
+                    "slow"
+                } else {
+                    "pause"
+                },
+            ) {
+                ui.label(format!("Could not save playback policy: {error}"));
+            }
+        }
+        #[cfg(not(test))]
+        publish_pause(playing());
+    }
+    if paused() {
         ui.colored_label(
             crate::GOLD,
-            "Preparation paused for playback. It resumes automatically when playback stops.",
+            "Preparation paused for playback; it resumes automatically afterward.",
         );
+    } else if throttled() {
+        ui.colored_label(crate::GOLD,"Working slowly during playback: one analysis song, reduced stem CPU use and spaced GPU segments.");
     } else {
-        ui.weak(
-            "Playback takes priority. Analysis adjusts now; stem CPU limits apply to the next song.",
-        );
+        ui.weak("Both choices are remembered. Playback changes apply at the next safe processing checkpoint.");
     }
 }
 #[cfg(test)]
@@ -239,6 +321,15 @@ mod tests {
         assert!(!admit(&active, 1));
         active.fetch_sub(1, Relaxed);
         assert!(admit(&active, 1));
+    }
+    #[test]
+    fn playback_slow_caps_new_analysis_but_pause_keeps_normal_resume_budget() {
+        assert_eq!(worker_limit(Mode::Fast, 16, true, PlaybackPolicy::Slow), 1);
+        assert_eq!(worker_limit(Mode::Fast, 16, false, PlaybackPolicy::Slow), 8);
+        assert_eq!(
+            worker_limit(Mode::Balanced, 16, true, PlaybackPolicy::Pause),
+            4
+        );
     }
     #[test]
     fn cancelled_wait_returns_without_starting_a_song() {

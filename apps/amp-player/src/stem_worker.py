@@ -8,22 +8,37 @@ import subprocess
 import time
 
 
-def pause_active(path, now=None):
+def activity_at(path, now=None):
     try:
         now = time.time() * 1000 if now is None else now
-        until = int(Path(path).read_text().strip())
-        return now < until <= now + 10000
-    except (OSError, ValueError, TypeError):
-        return False
+        parts = Path(path).read_text().split()
+        until = int(parts[0])
+        if not now < until <= now + 10000:
+            return "idle"
+        return "slow" if len(parts) > 1 and parts[1] == "slow" else "pause"
+    except (OSError, ValueError, TypeError, IndexError):
+        return "idle"
+
+
+def pause_active(path, now=None):
+    return activity_at(path, now) == "pause"
 
 
 def checkpoint():
     path = os.environ.get("AMP_PREPARATION_PAUSE_FILE")
-    if path and pause_active(path):
+    state = activity_at(path) if path else "idle"
+    if state == "pause":
         print("Paused for playback", flush=True)
-        while pause_active(path):
+        while activity_at(path) == "pause":
             time.sleep(0.1)
+        state = activity_at(path)
         print("Resuming preparation", flush=True)
+    if state == "slow":
+        if getattr(checkpoint, "last_state", None) != state:
+            print("Working slowly during playback", flush=True)
+        time.sleep(0.75)
+    checkpoint.last_state = state
+    return state == "slow"
 
 
 def main():
@@ -38,7 +53,8 @@ def main():
     import torch
     import demucs.apply as demucs_apply
     from demucs.pretrained import get_model
-    torch.set_num_threads(max(1, min(8, int(os.environ.get("AMP_STEM_THREADS", "4")))))
+    normal_threads = max(1, min(8, int(os.environ.get("AMP_STEM_THREADS", "4"))))
+    torch.set_num_threads(1 if checkpoint() else normal_threads)
     torch.set_num_interop_threads(1)
     cuda = torch.cuda.is_available()
     device = "cuda" if cuda else "cpu"
@@ -62,7 +78,9 @@ def main():
     # Check each segment without blocking the GUI or modifying live audio buffers.
     original_apply = demucs_apply.apply_model
     def guarded_apply(*a, **kw):
-        checkpoint()
+        desired_threads = 1 if checkpoint() else normal_threads
+        if torch.get_num_threads() != desired_threads:
+            torch.set_num_threads(desired_threads)
         time.sleep(max(0, min(1000, int(os.environ.get("AMP_STEM_IDLE_MS", "30")))) / 1000)
         return original_apply(*a, **kw)
     demucs_apply.apply_model = guarded_apply

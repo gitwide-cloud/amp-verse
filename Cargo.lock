@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "amp-cast"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "amp-core",
  "async-stream",
@@ -80,7 +80,7 @@ dependencies = [
 
 [[package]]
 name = "amp-core"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "libc",
  "lofty",
@@ -94,7 +94,7 @@ dependencies = [
 
 [[package]]
 name = "amp-engine"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "amp-core",
  "serde_json",
@@ -102,7 +102,7 @@ dependencies = [
 
 [[package]]
 name = "amp-player"
-version = "1.0.1"
+version = "1.0.2"
 dependencies = [
  "amp-cast",
  "amp-core",
