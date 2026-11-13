@@ -36,3 +36,6 @@ pub mod preparation;
 pub mod review;
 #[path = "storage.rs"]
 pub mod storage;
+
+#[path = "transcripts.rs"]
+pub mod transcripts;

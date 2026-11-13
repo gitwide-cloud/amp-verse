@@ -43,3 +43,9 @@ JPEG/PNG artwork decoding uses image 0.25.10 (MIT OR Apache-2.0), https://github
 
 Verified portable updates use zip 4.6.1 (MIT); its license is included in licenses/zip/LICENSE. SHA-256 uses the existing RustCrypto sha2 dependency. Android update installation uses Android PackageManager and FileProvider; no third-party installer is bundled.
 Update ZIP compression dependencies include Zopfli (Apache-2.0) and bumpalo (MIT OR Apache-2.0); license copies are in licenses/zopfli and licenses/bumpalo.
+
+## Optional local speech transcription
+
+Library's Transcribe tool downloads faster-whisper 1.2.1 (MIT) from the official PyPI index into an isolated optional Python environment. It uses CTranslate2 (MIT), Hugging Face Hub (Apache-2.0), NumPy (BSD-3-Clause), and PyAV (BSD-3-Clause, with its separately licensed FFmpeg libraries). Their installed package metadata and license files remain with the optional environment. No speech runtime is linked into the base player. Python itself remains a separately installed runtime, under its PSF license. Preserve the environment's license notices if redistributing it.
+
+The optional model is Systran/faster-whisper-base, pinned revision ebe41f70d5b6dfa9166e2c581c45c9c0cfc57b66, downloaded from Hugging Face. It is a CTranslate2 conversion of OpenAI Whisper base, under MIT. Upstream sources: https://github.com/SYSTRAN/faster-whisper, https://github.com/OpenNMT/CTranslate2, https://huggingface.co/Systran/faster-whisper-base, https://github.com/openai/whisper. Audio is processed locally, not uploaded. Existing optional Demucs stem-separation terms continue to apply when vocals are prepared for speech recognition.

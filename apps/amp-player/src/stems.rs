@@ -185,6 +185,18 @@ pub(crate) fn separate_clip(cache: &Path, source: &Path) -> Result<[PathBuf; 3],
     )?;
     ready_in(cache, source).ok_or("Separated clip is incomplete".into())
 }
+pub(crate) fn for_transcription(
+    source: &Path,
+    cancel: &AtomicBool,
+) -> Result<[PathBuf; 3], String> {
+    if let Some(paths) = ready(source) {
+        return Ok(paths);
+    }
+    let cache = cache_root().ok_or("Stem cache unavailable")?;
+    let python = runtime().ok_or("Stem separator is not installed")?;
+    prepare(&cache, source, &python, cancel, &Arc::new(Mutex::new(None)))?;
+    ready(source).ok_or("Vocal preparation incomplete".into())
+}
 fn prepare(
     cache: &Path,
     source: &Path,

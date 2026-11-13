@@ -86,7 +86,7 @@ impl Player {
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(176.,height - 70.),egui::Layout::top_down(egui::Align::Min),|ui| {
                 egui::ScrollArea::vertical().id_salt("library-navigation").max_height((height-180.).max(160.)).show(ui,|ui|{
-                for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(7,icons::Icon::Analyze,"Equalizer"),(8,icons::Icon::Folder,"Organise library"),(9,icons::Icon::List,"Tags & artwork"),(10,icons::Icon::List,"Podcasts")] {
+                for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(11,icons::Icon::List,"Transcribe"),(7,icons::Icon::Analyze,"Equalizer"),(8,icons::Icon::Folder,"Organise library"),(9,icons::Icon::List,"Tags & artwork"),(10,icons::Icon::List,"Podcasts")] {
                     if icons::button(ui,icon,title,self.library_page==page,egui::vec2(172.,46.)).clicked(){self.library_page=page;}
                 }
                 });
@@ -117,6 +117,7 @@ impl Player {
                         let track=self.selected.and_then(|i|self.library.as_ref()?.tracks.get(i));self.lookup.show(ui,&self.root,track);
                     });},
                     10 => self.podcasts.show(ui),
+                    11 => {let track=self.selected.and_then(|i|self.library.as_ref()?.tracks.get(i));self.transcription.show(ui,&self.root,track);},
                     8 => {
                         let audio=&mut self.audio;
                         if let Some(destination)=self.organizer.show(ui,&self.root,blocked,||{if let Some(audio)=audio {for d in 0..6 {audio.stop(d);}}}) {self.connect_music_root(destination);}
@@ -602,6 +603,11 @@ impl Player {
                         .show(ui, |ui| {
                             if let Some(track) = track.as_ref() {
                                 self.lookup.cover(ui, &self.root, track);
+                                if ui.button("Transcribe this recording…").clicked() {
+                                    self.transcription.select_library(&self.root, track);
+                                    self.library_page = 11;
+                                }
+
                                 if ui.button("Find tags / album artwork...").clicked() {
                                     self.library_page = 9;
                                     self.lookup.query.clear();

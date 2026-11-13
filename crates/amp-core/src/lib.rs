@@ -408,6 +408,8 @@ impl Drop for Deck {
     }
 }
 
+pub use library_engine::transcripts;
+
 #[cfg(test)]
 mod tests {
     use super::*;

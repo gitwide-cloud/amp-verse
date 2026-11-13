@@ -64,6 +64,7 @@ mod smart_actions;
 mod smart_filter_ui;
 mod smart_preview;
 mod station_download;
+mod transcription;
 use dj_engine::stems;
 mod theme;
 mod track_columns;
@@ -153,6 +154,7 @@ struct Player {
     outputs: audio_output::Panel,
     lookup: media_lookup::Lookup,
     podcasts: podcasts::Podcasts,
+    transcription: transcription::Panel,
     podcast_play: Option<PathBuf>,
     auto_dj_controls: bool,
     scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
@@ -258,6 +260,7 @@ impl Default for Player {
             outputs: Default::default(),
             lookup: Default::default(),
             podcasts: Default::default(),
+            transcription: Default::default(),
             podcast_play: None,
             auto_dj_controls: false,
             scan: None,
@@ -788,6 +791,7 @@ impl Player {
         }
         let analysis_progress = self.preparer.progress();
         self.preparer.poll(&self.root, self.library.as_mut());
+        self.transcription.poll();
         if self.preparer.progress() != analysis_progress {
             self.library_generation = self.library_generation.wrapping_add(1);
         }
