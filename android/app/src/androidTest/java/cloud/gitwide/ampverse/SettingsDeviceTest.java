@@ -16,6 +16,10 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class SettingsDeviceTest {
+    @Test public void desktopOnlyReleaseExplainsMissingPhonePackage()throws Exception{
+        try{AppUpdate.androidPackage(new org.json.JSONObject("{\"packages\":{\"windows-x64\":{}}}"));fail("No Android package");}catch(java.io.IOException error){assertTrue(error.getMessage().contains("no Android installer"));assertTrue(error.getMessage().contains("unchanged"));}
+        assertNotNull(AppUpdate.androidPackage(new org.json.JSONObject("{\"packages\":{\"android-arm64\":{}}}")));
+    }
     @Test public void cancellationPreventsPendingInstaller() {
         Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
         SharedPreferences updates=context.getSharedPreferences("updates",0);

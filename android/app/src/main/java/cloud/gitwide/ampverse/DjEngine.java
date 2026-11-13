@@ -97,6 +97,7 @@ final class DjEngine {
     boolean active(int deck){return decks[deck].getPlayWhenReady()&&decks[deck].getPlaybackState()!=Player.STATE_ENDED;}
     void load(int deck,MediaItem item,long position) {
         if(active(deck)||(deck<2&&mixing)) {staged[deck]=item;stagedPosition[deck]=position;message="Replacement staged. Stop this deck, then Apply staged track.";return;}
+        decks[deck].setPlaybackParameters(PlaybackParameters.DEFAULT);
         decks[deck].setMediaItem(item,Math.max(cueIn(item),position));decks[deck].prepare();decks[deck].pause();staged[deck]=null;checkpoint();message="Track prepared; press Play when ready.";
     }
     void apply(int deck){if(staged[deck]!=null&&!active(deck)){MediaItem item=staged[deck];long position=stagedPosition[deck];load(deck,item,position);}}

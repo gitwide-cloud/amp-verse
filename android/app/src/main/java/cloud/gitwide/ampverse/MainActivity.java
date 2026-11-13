@@ -269,10 +269,6 @@ public final class MainActivity extends Activity {
             if (playing && !saved.isEmpty()) { player.prepare(); player.play(); }
         } catch (Exception error) { message = "Cannot load saved library: " + error.getMessage(); }
     }
-    private void saveQueue() {
-        try { List<MediaItem> items = new ArrayList<>(); for (int i = 0; i < player.getMediaItemCount(); i++) items.add(player.getMediaItemAt(i)); LibraryStore.write(this, items); message = "Library saved on this device."; }
-        catch (Exception error) { message = "Could not save library: " + error.getMessage(); }
-    }
     private boolean isRadio(){return player!=null&&player.getCurrentMediaItem()!=null&&player.getCurrentMediaItem().mediaId.equals("amp-radio");}
     private void radio(){
         EditText url=new EditText(this);url.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_URI);url.setSingleLine(true);url.setHint("https://station.example/stream.mp3");url.setText(prefs.getString("radio-url",""));
@@ -314,7 +310,10 @@ public final class MainActivity extends Activity {
             Map<String,String> importedSources=new HashMap<>();int skipped=0;
             Set<String> savedIds=new HashSet<>();
             try{for(MediaItem saved:LibraryStore.read(this))savedIds.add(saved.mediaId);}catch(Exception failure){error=failure.getMessage();}
-            if(tree!=null)try{uris.clear();uris.addAll(FolderScanner.scan(getContentResolver(),tree));FolderScanner.catalog(this,tree);}catch(Exception failure){error="Could not scan folder: "+failure.getMessage();uris.clear();}
+            if(tree!=null){
+                try{uris.clear();uris.addAll(FolderScanner.scan(getContentResolver(),tree));}catch(Exception failure){error="Could not scan folder: "+failure.getMessage();uris.clear();}
+                if(!uris.isEmpty())try{FolderScanner.catalog(this,tree);}catch(Exception failure){error="Songs added without saved preparation: "+failure.getMessage();}
+            }
             final android.content.SharedPreferences sources=getSharedPreferences("import-sources",MODE_PRIVATE);
             for (Uri uri : uris) {
                 if(savedIds.contains(sources.getString(uri.toString(),""))){if(tree!=null)getSharedPreferences("phone-folders",0).edit().putString(sources.getString(uri.toString(),""),android.provider.DocumentsContract.getTreeDocumentId(tree)).apply();skipped++;continue;}
@@ -323,12 +322,12 @@ public final class MainActivity extends Activity {
                     String name = "Imported audio";
                     try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) { if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0); }
                     if(tree==null)getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                    String prep=tree==null?null:FolderScanner.preparation(getContentResolver(),tree,uri);
+                    String prep=null;if(tree!=null)try{prep=FolderScanner.preparation(getContentResolver(),tree,uri);}catch(Exception failure){error="Some saved preparation could not be read; original songs remain playable.";}
                     MediaItem item=LibraryStore.reference(this,uri,name,prep);
                     added.add(item);
                     importedSources.put(uri.toString(),item.mediaId);
-                    final int count=added.size();runOnUiThread(()->{message="Saving local songs… "+count;refresh();});
-                } catch (Exception failure) { if (target != null) target.delete(); error = failure.getMessage(); }
+                    final int count=added.size();runOnUiThread(()->{message="Indexing songs… "+count;refresh();});
+                } catch (Exception failure) { error = failure.getMessage(); }
             }
             String failure = error; final int skippedCount=skipped;
             runOnUiThread(() -> {

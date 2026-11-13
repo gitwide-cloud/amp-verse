@@ -10,6 +10,18 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class FolderScanDeviceTest {
+    @Test public void readsSplitCatalogAndDoesNotReuseCuesAfterBadSource()throws Exception{
+        android.content.Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
+        InstrumentationRegistry.getInstrumentation().getUiAutomation().adoptShellPermissionIdentity("android.permission.MANAGE_DOCUMENTS");
+        try{
+            Uri tree=DocumentsContract.buildTreeDocumentUri("cloud.gitwide.ampverse.test.documents","split-root");
+            List<Uri> songs=FolderScanner.scan(context.getContentResolver(),tree);assertEquals(1,songs.size());FolderScanner.catalog(context,tree);
+            org.json.JSONObject prep=new org.json.JSONObject(FolderScanner.preparation(context.getContentResolver(),tree,songs.get(0)));assertEquals(9.5,prep.getDouble("cue_in"),.001);assertEquals(126,prep.getInt("bpm"));
+            Uri bad=DocumentsContract.buildTreeDocumentUri("cloud.gitwide.ampverse.test.documents","bad-root");List<Uri> retained=FolderScanner.scan(context.getContentResolver(),bad);assertEquals(1,retained.size());
+            try{FolderScanner.catalog(context,bad);fail("Bad catalog must report failure");}catch(Exception expected){}
+            assertNull("Previous source cues must not leak",FolderScanner.preparation(context.getContentResolver(),bad,retained.get(0)));assertEquals(1,retained.size());
+        }finally{InstrumentationRegistry.getInstrumentation().getUiAutomation().dropShellPermissionIdentity();}
+    }
     @Test public void scansNestedAudioAndSkipsOtherFilesAndCycles()throws Exception{
         Uri root=DocumentsContract.buildTreeDocumentUri("cloud.gitwide.ampverse.test.documents","root");
         InstrumentationRegistry.getInstrumentation().getUiAutomation().adoptShellPermissionIdentity("android.permission.MANAGE_DOCUMENTS");

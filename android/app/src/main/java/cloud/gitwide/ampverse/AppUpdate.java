@@ -33,6 +33,11 @@ final class AppUpdate {
     private static JSONObject json(String url)throws Exception {
         try(InputStream in=open(url);ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] b=new byte[8192];int n;while((n=in.read(b))!=-1){if(out.size()+n>1048576)throw new IOException("Update metadata too large");out.write(b,0,n);}return new JSONObject(out.toString("UTF-8"));}finally{if(active!=null)active.disconnect();}
     }
+    static JSONObject androidPackage(JSONObject manifest)throws IOException {
+        JSONObject packages=manifest.optJSONObject("packages"),phone=packages==null?null:packages.optJSONObject("android-arm64");
+        if(phone==null)throw new IOException("This release has no Android installer. Your app is unchanged; open GitHub Releases or try again after an Android update is published.");
+        return phone;
+    }
     static void start(Context context){if(busy)return;Context app=context.getApplicationContext();busy=true;cancelled=false;status="Checking for updates…";
         new Thread(()->{File partial=null;try{
             JSONObject release=json("https://api.github.com/repos/gitwide-cloud/amp-verse/releases/latest");String tag=release.getString("tag_name");
@@ -40,7 +45,7 @@ final class AppUpdate {
             if(ReleaseCheck.compare(tag,BuildConfig.VERSION_NAME)<=0){status="You have the latest Android update.";return;}
             String base=GITHUB+"/releases/download/"+tag+"/";JSONObject manifest=json(base+"amp-update.json");
             if(manifest.optInt("schema")!=1||ReleaseCheck.compare(manifest.getString("version"),tag)!=0)throw new IOException("Update manifest version mismatch");
-            JSONObject p=manifest.getJSONObject("packages").getJSONObject("android-arm64");
+            JSONObject p=androidPackage(manifest);
             if(p.getLong("version_code")<=BuildConfig.VERSION_CODE){status="You have the latest Android update.";return;}
             String name=p.getString("name"),hash=p.getString("sha256");long size=p.getLong("size");
             if(!name.matches("[A-Za-z0-9][A-Za-z0-9._-]{0,178}\\.apk")||name.contains("..")||!hash.matches("[A-Fa-f0-9]{64}")||size<1||size>536870912)throw new IOException("Invalid update package information");
