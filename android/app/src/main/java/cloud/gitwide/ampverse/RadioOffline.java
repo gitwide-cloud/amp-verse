@@ -14,7 +14,7 @@ final class RadioOffline {
     }
     static File save(Context context,CastClient client,JSONObject manifest,JSONObject playlist,Progress progress)throws Exception {
         File base=new File(context.getFilesDir(),"radio-offline");if(!base.isDirectory()&&!base.mkdirs())throw new IOException("Cannot create offline storage");
-        String token=UUID.randomUUID().toString();File stage=new File(base,".pending-"+token);if(!stage.mkdir())throw new IOException("Cannot stage download");boolean published=false;
+        String token=UUID.randomUUID().toString();File stage=new File(base,".pending-"+token);if(!stage.mkdir())throw new IOException("Cannot stage download");boolean published=false;List<android.net.Uri> stagedAudio=new ArrayList<>();
         try {
             JSONArray ids=playlist.getJSONArray("tracks"),tracks=manifest.getJSONArray("tracks"),items=new JSONArray();Map<Integer,JSONObject> catalog=new HashMap<>();for(int i=0;i<tracks.length();i++){JSONObject t=tracks.getJSONObject(i);catalog.put(t.getInt("id"),t);}
             if(ids.length()==0)throw new IOException("This playlist has no songs to download. Choose another playlist or update its sources on the host.");
@@ -32,22 +32,28 @@ final class RadioOffline {
                     client.download(id,audio,meta.getLong("bytes"),meta.getString("sha256"),progress::cancelled);
                     JSONObject preparation=meta.getJSONObject("preparation");preparation.put("source_sha256",meta.getString("sha256"));
                     CatalogStore.put(new File(stage,"ampdj/catalog.ampdb"),"tracks/"+name+".json",preparation.toString());
-                    item=new JSONObject().put("file",name).put("title",entry.optString("title","Song")).put("preparation",preparation);copied.put(id,item);
+                    item=new JSONObject().put("file",name).put("title",entry.optString("title","Song")).put("preparation",preparation);
+                    if(android.os.Build.VERSION.SDK_INT>=29){android.net.Uri managed=ManagedMusic.stage(context,audio,playlist.optString("name","Playlist"),entry.optString("title","Song"));stagedAudio.add(managed);audio.delete();item.put("uri",managed.toString());}
+                    copied.put(id,item);
                 }
                 items.put(item);
             }
             if(progress.cancelled())throw new IOException("Download cancelled. Existing offline playlists were kept.");
             JSONObject album=new JSONObject().put("version",1).put("name",playlist.optString("name","Station playlist")).put("source",manifest).put("playlist",playlist).put("items",items).put("offline_changes","local_only");
             CatalogStore.put(new File(stage,"ampdj/catalog.ampdb"),"offline-playlist",album.toString());
+            for(android.net.Uri uri:stagedAudio){if(progress.cancelled())throw new IOException("Download cancelled");ManagedMusic.publish(context,uri);}
             File target=new File(base,token);Files.move(stage.toPath(),target.toPath(),StandardCopyOption.ATOMIC_MOVE);published=true;return target;
-        } finally {if(!published)removeStage(stage);}
+        } finally {if(!published){for(android.net.Uri uri:stagedAudio)ManagedMusic.discard(context,uri);removeStage(stage);}}
     }
     private static void removeStage(File file){File[] children=file.listFiles();if(children!=null)for(File child:children)removeStage(child);file.delete();}
     static List<File> albums(Context context){List<File> result=new ArrayList<>();File[] files=new File(context.getFilesDir(),"radio-offline").listFiles();if(files!=null)for(File file:files)if(!file.getName().startsWith(".")&&(new File(file,"playlist.json").isFile()||new File(file,"ampdj/catalog.ampdb").isFile()))result.add(file);return result;}
     static JSONObject album(File folder)throws Exception{String packed=CatalogStore.get(new File(folder,"ampdj/catalog.ampdb"),"offline-playlist");return new JSONObject(packed!=null?packed:new String(Files.readAllBytes(new File(folder,"playlist.json").toPath()),StandardCharsets.UTF_8));}
     static List<MediaItem> items(File folder)throws Exception {
         List<MediaItem> result=new ArrayList<>();JSONArray entries=album(folder).getJSONArray("items");
-        for(int i=0;i<entries.length();i++){JSONObject entry=entries.getJSONObject(i);File audio=new File(folder,entry.getString("file"));if(!audio.getCanonicalPath().startsWith(folder.getCanonicalPath()+File.separator)||!audio.isFile())throw new IOException("Offline song unavailable");android.os.Bundle extras=new android.os.Bundle();extras.putString("amp-preparation",entry.getJSONObject("preparation").toString());result.add(new MediaItem.Builder().setMediaId("station-"+folder.getName()+"-"+audio.getName()).setUri(android.net.Uri.fromFile(audio)).setMediaMetadata(new MediaMetadata.Builder().setTitle(entry.optString("title")).setArtist("Offline station").setExtras(extras).build()).build());}return result;
+        for(int i=0;i<entries.length();i++){JSONObject entry=entries.getJSONObject(i);File audio=new File(folder,entry.getString("file"));android.net.Uri source;
+            if(entry.has("uri")){source=android.net.Uri.parse(entry.getString("uri"));if(!"content".equals(source.getScheme())||!"media".equals(source.getAuthority()))throw new IOException("Invalid managed music reference");}
+            else{if(!audio.getCanonicalPath().startsWith(folder.getCanonicalPath()+File.separator)||!audio.isFile())throw new IOException("Offline song unavailable");source=android.net.Uri.fromFile(audio);}
+            android.os.Bundle extras=new android.os.Bundle();extras.putString("amp-preparation",entry.getJSONObject("preparation").toString());result.add(new MediaItem.Builder().setMediaId("station-"+folder.getName()+"-"+audio.getName()).setUri(source).setMediaMetadata(new MediaMetadata.Builder().setTitle(entry.optString("title")).setArtist("Offline station").setExtras(extras).build()).build());}return result;
     }
     static List<MediaItem> all(Context context){List<MediaItem> result=new ArrayList<>();for(File folder:albums(context))try{result.addAll(items(folder));}catch(Exception ignored){}return result;}
 }

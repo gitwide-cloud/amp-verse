@@ -48,6 +48,7 @@ public final class MainActivity extends Activity {
     private byte[] displayedArtwork;
     private SeekBar seek;
     private Button play, shuffleButton, repeatButton;
+    private String libraryFacet="",libraryValue="";
     private boolean library, dragging, importing;
     private String module = "AMP Player";
     private Appearance appearance;
@@ -199,14 +200,20 @@ public final class MainActivity extends Activity {
     }
     private void drawLibrary(){
         LinearLayout top=card();Button add=button(importing?"Adding music…":"+ Add music",this::addMusic);add.setEnabled(!importing);top.addView(add);
-        LinearLayout tabs=new LinearLayout(this);for(String section:new String[]{"Songs","Playlists"}){boolean selected=libraryTab.equals(section);Button tab=button(section,()->{libraryTab=section;draw();});tab.setSelected(selected);tab.setTextColor(Chrome.ink(appearance,selected));tab.setBackground(Chrome.button(appearance,selected));tabs.addView(tab,new LinearLayout.LayoutParams(0,dp(48),1));}top.addView(tabs);
+        LinearLayout tabs=new LinearLayout(this);for(String section:new String[]{"Songs","Playlists","Offline"}){boolean selected=libraryTab.equals(section);Button tab=button(section,()->{libraryTab=section;draw();});tab.setSelected(selected);tab.setTextColor(Chrome.ink(appearance,selected));tab.setBackground(Chrome.button(appearance,selected));tabs.addView(tab,new LinearLayout.LayoutParams(0,dp(48),1));}top.addView(tabs);
         if(libraryTab.equals("Songs"))drawQueue(true);
+        else if(libraryTab.equals("Offline")){
+            LinearLayout downloads=card();downloads.addView(label("Music/AMP Library · synced playlists",16,accent));
+            List<File> albums=RadioOffline.albums(this);if(albums.isEmpty())downloads.addView(label("Save a playlist from Cast & Remote to listen offline with its prepared cues.",14,muted));
+            for(File folder:albums)try{String name=RadioOffline.album(folder).optString("name","Playlist");downloads.addView(button(name,()->{try{List<MediaItem> items=RadioOffline.items(folder);if(player!=null&&!items.isEmpty()){player.setMediaItems(items);player.prepare();player.play();}}catch(Exception e){message=e.getMessage();refresh();}}));}catch(Exception ignored){}
+        }
         else page.addView(new PhoneLibraryPanel(this,appearance,items->{if(player!=null&&!items.isEmpty()){player.setMediaItems(items);player.prepare();player.play();message="Playlist playing";}}));
     }
     private void drawQueue(boolean editable){
         LinearLayout queue=card();queue.addView(label(editable?"Songs":"Now Playing",16,accent));
         final boolean radio=isRadio();final List<MediaItem> localItems=new ArrayList<>();
         try{if(radio||editable)localItems.addAll(LibraryStore.read(this));else if(player!=null)for(int i=0;i<player.getMediaItemCount();i++)localItems.add(player.getMediaItemAt(i));}catch(Exception error){message="Cannot read local library: "+error.getMessage();}
+        if(editable){LinearLayout browse=new LinearLayout(this);for(String facet:new String[]{"All songs","Artists","Albums"})browse.addView(button(facet,()->{if(facet.equals("All songs")){libraryFacet="";libraryValue="";draw();return;}java.util.SortedSet<String> values=new java.util.TreeSet<>(String.CASE_INSENSITIVE_ORDER);for(MediaItem item:localItems){CharSequence v=facet.equals("Artists")?item.mediaMetadata.artist:item.mediaMetadata.albumTitle;values.add(v==null||v.toString().trim().isEmpty()?"Unknown":v.toString());}String[] names=values.toArray(new String[0]);new android.app.AlertDialog.Builder(this).setTitle(facet).setItems(names,(d,n)->{libraryFacet=facet;libraryValue=names[n];draw();}).setNegativeButton("Cancel",null).show();}),new LinearLayout.LayoutParams(0,dp(48),1));queue.addView(browse);if(!libraryFacet.isEmpty())queue.addView(label(libraryFacet+" · "+libraryValue,14,accent));}
         EditText search=new EditText(this);search.setSingleLine(true);search.setHint("Search your songs");search.setTextColor(text);search.setHintTextColor(muted);search.setContentDescription("Search phone music");search.setText(musicQuery);queue.addView(search);
         LinearLayout rows=new LinearLayout(this);rows.setOrientation(LinearLayout.VERTICAL);queue.addView(rows);
         Runnable filter=()->{rows.removeAllViews();drawMusicRows(rows,localItems,radio,editable,search.getText().toString().trim().toLowerCase(Locale.ROOT));};
@@ -216,6 +223,7 @@ public final class MainActivity extends Activity {
         int matches=0,shown=0;
         for(int i=0;i<localItems.size();i++){
             MediaItem candidate=localItems.get(i);
+            if(editable&&!libraryFacet.isEmpty()){CharSequence value=libraryFacet.equals("Artists")?candidate.mediaMetadata.artist:candidate.mediaMetadata.albumTitle;String group=value==null||value.toString().trim().isEmpty()?"Unknown":value.toString();if(!group.equalsIgnoreCase(libraryValue))continue;}
             String description=String.valueOf(candidate.mediaMetadata.title)+" "+String.valueOf(candidate.mediaMetadata.artist)+" "+String.valueOf(candidate.mediaMetadata.albumTitle);
             if(!description.toLowerCase(Locale.ROOT).contains(query))continue;matches++;if(shown++>=queueLimit)continue;
             final int index=i;MediaItem item=localItems.get(i);LinearLayout row=new LinearLayout(this);
@@ -314,13 +322,11 @@ public final class MainActivity extends Activity {
                 try {
                     String name = "Imported audio";
                     try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) { if (cursor != null && cursor.moveToFirst()) name = cursor.getString(0); }
-                    File dir = new File(getFilesDir(), "audio"); if (!dir.isDirectory() && !dir.mkdirs()) throw new IOException("Cannot create local audio folder");
-                    String extension = name.lastIndexOf('.') >= 0 ? name.substring(name.lastIndexOf('.')).replaceAll("[^.a-zA-Z0-9]", "") : ".audio";
-                    target = new File(dir, UUID.randomUUID() + extension);
-                    try (InputStream input = getContentResolver().openInputStream(uri); OutputStream output = new FileOutputStream(target)) { if (input == null) throw new IOException("Cannot open audio"); byte[] bytes = new byte[65536]; int size; while ((size = input.read(bytes)) != -1) output.write(bytes, 0, size); }
-                    if(tree!=null){String prep=FolderScanner.preparation(getContentResolver(),tree,uri);if(prep!=null){CatalogStore.put(this,"tracks/"+target.getName()+".json",prep);}}
-                    added.add(LibraryStore.item(target, name));
-                    importedSources.put(uri.toString(),target.getName());
+                    if(tree==null)getContentResolver().takePersistableUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                    String prep=tree==null?null:FolderScanner.preparation(getContentResolver(),tree,uri);
+                    MediaItem item=LibraryStore.reference(this,uri,name,prep);
+                    added.add(item);
+                    importedSources.put(uri.toString(),item.mediaId);
                     final int count=added.size();runOnUiThread(()->{message="Saving local songs… "+count;refresh();});
                 } catch (Exception failure) { if (target != null) target.delete(); error = failure.getMessage(); }
             }
@@ -333,7 +339,7 @@ public final class MainActivity extends Activity {
                     if(tree!=null){String folder=android.provider.DocumentsContract.getTreeDocumentId(tree);android.content.SharedPreferences.Editor folders=getSharedPreferences("phone-folders",0).edit();for(MediaItem item:added)folders.putString(item.mediaId,folder);folders.apply();}
                     android.content.SharedPreferences.Editor sourceEditor=sources.edit();for(Map.Entry<String,String> entry:importedSources.entrySet())sourceEditor.putString(entry.getKey(),entry.getValue());sourceEditor.apply();
                     if (player != null && !isRadio()) player.addMediaItems(added);
-                    message = "Saved " + added.size() + " songs offline." + (skippedCount>0?" Skipped "+skippedCount+" already imported.":"") + (failure.isEmpty() ? "" : " "+failure);
+                    message = "Added " + added.size() + " songs. Original files stay in place." + (skippedCount>0?" Skipped "+skippedCount+" already imported.":"") + (failure.isEmpty() ? "" : " "+failure);
                 } catch (Exception saveError) { message = "Could not save imports: " + saveError.getMessage(); }
                 module="AMP Library";library = true; draw();
             }); worker.shutdown();

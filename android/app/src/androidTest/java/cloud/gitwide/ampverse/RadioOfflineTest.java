@@ -70,7 +70,9 @@ public class RadioOfflineTest {
    assertEquals(1,RadioOffline.albums(isolated).size());
    assertEquals(1,new File(sandbox,"radio-offline").listFiles().length);
 
-   assertArrayEquals(audio,Files.readAllBytes(new File(saved,"track-0.wav").toPath()));
+   android.net.Uri managed=RadioOffline.items(saved).get(0).localConfiguration.uri;
+   try(InputStream in=isolated.getContentResolver().openInputStream(managed)){assertArrayEquals(audio,in.readAllBytes());}
+   if(android.os.Build.VERSION.SDK_INT>=29){assertEquals("content",managed.getScheme());try(android.database.Cursor c=isolated.getContentResolver().query(managed,new String[]{android.provider.MediaStore.Audio.Media.RELATIVE_PATH},null,null,null)){assertTrue(c.moveToFirst());assertTrue(c.getString(0).startsWith(ManagedMusic.PATH));}}
    assertEquals(2,RadioOffline.items(saved).size());
    JSONObject cues=new JSONObject(RadioOffline.items(saved).get(0).mediaMetadata.extras.getString("amp-preparation"));
    assertEquals("my-drop",cues.getJSONArray("manual_cues").getJSONObject(0).getString("id"));
@@ -79,6 +81,6 @@ public class RadioOfflineTest {
    manifest.put("station_id","changed");try{RadioOffline.save(isolated,client,manifest,playlist);fail("Must reject changed station");}catch(IOException expected){}
    assertEquals(1,RadioOffline.albums(isolated).size());
    assertEquals(1,new File(sandbox,"radio-offline").listFiles().length);
-  } finally {server.close();thread.join(2000);try(java.util.stream.Stream<Path> paths=Files.walk(sandbox.toPath())){paths.sorted(java.util.Comparator.reverseOrder()).forEach(path->path.toFile().delete());}}
+  } finally {for(File folder:RadioOffline.albums(isolated))try{for(androidx.media3.common.MediaItem item:RadioOffline.items(folder))if("content".equals(item.localConfiguration.uri.getScheme()))ManagedMusic.discard(isolated,item.localConfiguration.uri);}catch(Exception ignored){}server.close();thread.join(2000);try(java.util.stream.Stream<Path> paths=Files.walk(sandbox.toPath())){paths.sorted(java.util.Comparator.reverseOrder()).forEach(path->path.toFile().delete());}}
  }
 }

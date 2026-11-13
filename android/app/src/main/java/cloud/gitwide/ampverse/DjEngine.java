@@ -44,7 +44,7 @@ final class DjEngine {
     private final List<MediaItem> autoSource=new ArrayList<>();
     private final Deque<String> recentAuto=new ArrayDeque<>();
     private void rememberAuto(MediaItem item){if(item==null)return;recentAuto.addLast(item.mediaId);while(recentAuto.size()>Math.max(1,autoRules.optInt("recent_repeat",5)))recentAuto.removeFirst();}
-    private boolean refillAuto(){if(!autoRules.optBoolean("smart")||autoRules.optString("fallback","relax_recent").equals("stop")||autoSource.isEmpty())return false;String current=decks[fader<.5?0:1].getCurrentMediaItem()==null?"":decks[fader<.5?0:1].getCurrentMediaItem().mediaId;List<MediaItem> next=PhoneSmartRules.repeatCandidates(autoSource,recentAuto,current,autoRules.optInt("recent_repeat",5));if(next.isEmpty())return false;autoQueue.clear();autoQueue.addAll(next);nextAuto=0;return true;}
+    private boolean refillAuto(){if(!autoRules.optBoolean("smart")||autoRules.optString("fallback","relax_recent").equals("stop")||autoSource.isEmpty())return false;String current=decks[fader<.5?0:1].getCurrentMediaItem()==null?"":decks[fader<.5?0:1].getCurrentMediaItem().mediaId;List<MediaItem> next=DjLogic.repeatCandidates(autoSource,recentAuto,current,autoRules.optInt("recent_repeat",5));if(next.isEmpty())return false;autoQueue.clear();autoQueue.addAll(next);nextAuto=0;return true;}
 
     private final Runnable autoTick=this::advanceAuto;
     float fader=0,master=.75f;
@@ -73,13 +73,14 @@ final class DjEngine {
             }
         }
         destination=prefs.getInt("destination",0)==1?1:0;setFader(0);
-        for(int i=0;i<4;i++){String uri=prefs.getString("prepared-uri-"+i,"");if(!uri.isEmpty())try{android.net.Uri parsed=android.net.Uri.parse(uri);java.io.File file=new java.io.File(parsed.getPath());if("file".equals(parsed.getScheme())&&file.isFile()&&file.getCanonicalPath().startsWith(service.getFilesDir().getCanonicalPath()+java.io.File.separator)){MediaItem item=new MediaItem.Builder().setMediaId(prefs.getString("prepared-id-"+i,file.getName())).setUri(parsed).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle(prefs.getString("prepared-title-"+i,file.getName())).setExtras(preparedExtras(prefs.getString("prepared-metadata-"+i,"{}"))).build()).build();decks[i].setMediaItem(item,prefs.getLong("prepared-position-"+i,0));decks[i].prepare();decks[i].pause();}}catch(Exception error){message="A previously prepared phone track is unavailable.";}}
+        for(int i=0;i<4;i++){String uri=prefs.getString("prepared-uri-"+i,"");if(!uri.isEmpty())try{android.net.Uri parsed=android.net.Uri.parse(uri);java.io.File file=new java.io.File(parsed.getPath());if(("content".equals(parsed.getScheme())&&readable(service,parsed))||("file".equals(parsed.getScheme())&&file.isFile()&&file.getCanonicalPath().startsWith(service.getFilesDir().getCanonicalPath()+java.io.File.separator))){MediaItem item=new MediaItem.Builder().setMediaId(prefs.getString("prepared-id-"+i,file.getName())).setUri(parsed).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle(prefs.getString("prepared-title-"+i,file.getName())).setExtras(preparedExtras(prefs.getString("prepared-metadata-"+i,"{}"))).build()).build();decks[i].setMediaItem(item,prefs.getLong("prepared-position-"+i,0));decks[i].prepare();decks[i].pause();}}catch(Exception error){message="A previously prepared phone track is unavailable.";}}
 
     }
+    private static boolean readable(Context context,android.net.Uri uri){try(android.content.res.AssetFileDescriptor descriptor=context.getContentResolver().openAssetFileDescriptor(uri,"r")){return descriptor!=null;}catch(Exception e){return false;}}
     static JSONObject preparation(MediaItem item){try{return new JSONObject(item!=null&&item.mediaMetadata.extras!=null?item.mediaMetadata.extras.getString("amp-preparation","{}"):"{}");}catch(Exception e){return new JSONObject();}}
     static Bundle preparedExtras(String json){Bundle extras=new Bundle();extras.putString("amp-preparation",json);return extras;}
-    static long cueIn(MediaItem item){return Math.max(0,(long)(preparation(item).optDouble("cue_in",0)*1000));}
-    static long cueOut(MediaItem item,long duration){JSONObject p=preparation(item);long end=(long)(p.optDouble("cue_out",-1)*1000);return end>cueIn(item)?(duration>0?Math.min(duration,end):end):duration;}
+    static long cueIn(MediaItem item){return DjLogic.cueIn(item);}
+    static long cueOut(MediaItem item,long duration){return DjLogic.cueOut(item,duration);}
     void fadeSeconds(int value){fadeSeconds=Math.max(1,Math.min(30,value));prefs.edit().putInt("fade-seconds",fadeSeconds).apply();}
     void request(MediaItem item,int within){
         if(within<1||within>5){message="Choose 1–5 songs.";return;}
@@ -111,9 +112,10 @@ final class DjEngine {
         if(auto){
             if(nextAuto>=autoQueue.size()&&!refillAuto()){message="No next song available in this playlist.";return;}
             MediaItem queued=autoQueue.get(nextAuto),loaded=decks[next].getCurrentMediaItem();
-            if(!active(next)&&(loaded==null||!queued.mediaId.equals(loaded.mediaId)))load(next,queued,PhoneSmartRules.entry(queued,autoRules));
+            if(!active(next)&&(loaded==null||!queued.mediaId.equals(loaded.mediaId)))load(next,queued,DjLogic.entry(queued,autoRules));
         }
         if(decks[next].getCurrentMediaItem()==null){message="Load the other deck before mixing.";return;}
+        if(auto)decks[next].setPlaybackParameters(new PlaybackParameters(DjLogic.tempoRatio(decks[mixOutgoing].getCurrentMediaItem(),decks[next].getCurrentMediaItem(),decks[mixOutgoing].getPlaybackParameters().speed),1));
         play(next);if(!active(next))return;mixFrom=fader;mixTo=next;mixStarted=0;mixWaitingSince=SystemClock.uptimeMillis();mixing=true;
         if(auto&&nextAuto<autoQueue.size()&&autoQueue.get(nextAuto).mediaId.equals(decks[next].getCurrentMediaItem().mediaId)){requests.remove(autoQueue.get(nextAuto).mediaId);rememberAuto(autoQueue.get(nextAuto));nextAuto++;}
         handler.post(mixTick);
@@ -134,7 +136,7 @@ final class DjEngine {
         if(active(0)&&active(1)){message="Stop one main deck before starting Auto DJ.";return;}
         decks[0].setRepeatMode(Player.REPEAT_MODE_OFF);decks[1].setRepeatMode(Player.REPEAT_MODE_OFF);
         int current=active(1)?1:0;setFader(current);
-        if(!active(current)){load(current,autoQueue.get(0),PhoneSmartRules.entry(autoQueue.get(0),autoRules));play(current);rememberAuto(autoQueue.get(0));nextAuto=1;}else{nextAuto=0;MediaItem loaded=decks[current].getCurrentMediaItem();for(int i=0;i<autoQueue.size();i++)if(loaded!=null&&loaded.mediaId.equals(autoQueue.get(i).mediaId)){nextAuto=i+1;break;}}
+        if(!active(current)){load(current,autoQueue.get(0),DjLogic.entry(autoQueue.get(0),autoRules));play(current);rememberAuto(autoQueue.get(0));nextAuto=1;}else{nextAuto=0;MediaItem loaded=decks[current].getCurrentMediaItem();for(int i=0;i<autoQueue.size();i++)if(loaded!=null&&loaded.mediaId.equals(autoQueue.get(i).mediaId)){nextAuto=i+1;break;}}
         if(!active(current)){message="Could not start playback; Auto DJ remains off.";return;}
         auto=true;handler.post(autoTick);message="Auto DJ running.";
     }
@@ -142,7 +144,7 @@ final class DjEngine {
         if(!auto||closed)return;
         if(!mixing){int current=fader<.5?0:1,other=1-current;
             if(nextAuto>=autoQueue.size()&&!refillAuto()){if(!active(current)){auto=false;message="Playlist finished.";}else handler.postDelayed(autoTick,200);return;}
-            if(!active(other)){MediaItem next=autoQueue.get(nextAuto);MediaItem loaded=decks[other].getCurrentMediaItem();if(loaded==null||!next.mediaId.equals(loaded.mediaId)){load(other,next,PhoneSmartRules.entry(next,autoRules));}}
+            if(!active(other)){MediaItem next=autoQueue.get(nextAuto);MediaItem loaded=decks[other].getCurrentMediaItem();if(loaded==null||!next.mediaId.equals(loaded.mediaId)){load(other,next,DjLogic.entry(next,autoRules));}}
             long duration=cueOut(decks[current].getCurrentMediaItem(),decks[current].getDuration());if(duration>0&&duration-decks[current].getCurrentPosition()<=fadeSeconds*1000L){mixNext();}
             else if(decks[current].getPlaybackState()==Player.STATE_ENDED){mixNext();}
         }
