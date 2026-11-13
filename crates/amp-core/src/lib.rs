@@ -3,6 +3,7 @@
 pub mod analysis;
 pub mod arrangement;
 pub mod artwork;
+pub mod background;
 pub mod batch;
 pub mod catalog_db;
 pub mod consolidate;

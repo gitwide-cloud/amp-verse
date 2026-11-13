@@ -379,8 +379,23 @@ fn result(
     Ok(p)
 }
 pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, String> {
+    crate::background::checkpoint();
     existing.validate()?;
-    let fingerprint = preparation::fingerprint(path)?;
+    let before = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    let staged = if let Some(directory) = std::env::var_os("AMP_PREPARATION_CACHE_DIR") {
+        std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+        let file = tempfile::Builder::new()
+            .prefix("analysis-")
+            .suffix(".audio")
+            .tempfile_in(directory)
+            .map_err(|e| e.to_string())?;
+        crate::background::copy_input(path, file.path())?;
+        Some(file)
+    } else {
+        None
+    };
+    let input = staged.as_ref().map_or(path, |file| file.path());
+    let fingerprint = preparation::fingerprint(input)?;
     if existing
         .source_sha256
         .as_ref()
@@ -388,10 +403,9 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
     {
         return Err("Audio differs from saved preparation. Review or remove the stale sidecar before analyzing.".into());
     }
-    let before = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let mut child = crate::command("ffmpeg")
         .args(["-v", "error", "-threads", "1", "-i"])
-        .arg(path)
+        .arg(input)
         .args(["-vn", "-ac", "1", "-ar", "11025", "-f", "f32le", "pipe:1"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -410,6 +424,7 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
         let mut chroma_sum = [0.; 12];
         let mut total = 0usize;
         loop {
+            crate::background::checkpoint();
             let mut n = 0;
             while n < buffer.len() {
                 let got = stream.read(&mut buffer[n..]).map_err(|e| e.to_string())?;
@@ -459,6 +474,7 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
                 break;
             }
         }
+        crate::background::checkpoint();
         result(
             &energy,
             &rhythmic,

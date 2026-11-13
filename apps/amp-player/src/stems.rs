@@ -7,7 +7,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Child, Stdio},
+    process::Stdio,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -160,7 +160,7 @@ fn restore_cached(cache: &Path, source: &Path) -> Result<bool, String> {
     amp_core::catalog_db::save_local_record(&archive, &id, &manifest)?;
     Ok(true)
 }
-type Process = Arc<Mutex<Option<Child>>>;
+type Process = Arc<Mutex<Option<Box<dyn process_wrap::std::ChildWrapper>>>>;
 pub(super) fn separate_clip(cache: &Path, source: &Path) -> Result<[PathBuf; 3], String> {
     let python = runtime().ok_or("Install the stem separator add-on first")?;
     prepare(
@@ -180,6 +180,9 @@ fn prepare(
     process: &Process,
 ) -> Result<(), String> {
     fs::create_dir_all(cache).map_err(|e| e.to_string())?;
+    if !crate::preparation_speed::wait(Some(cancel)) {
+        return Err("Stem preparation canceled".into());
+    }
     let id = stamp(source)?;
     let _lock = amp_core::coordination::Lock::acquire(&cache.join(&id))?;
     if let Some(paths) = ready_in(cache, source) {
@@ -193,12 +196,19 @@ fn prepare(
             );
             manifest["source_name"] =
                 json!(source.file_name().unwrap_or_default().to_string_lossy());
-            amp_core::stem_archive::store(
+            amp_core::stem_archive::store_with_checkpoint(
                 &archive,
                 &id,
                 &manifest,
                 paths[0].parent().unwrap(),
                 cancel,
+                || {
+                    if crate::preparation_speed::wait(Some(cancel)) {
+                        Ok(())
+                    } else {
+                        Err("Stem preparation canceled".into())
+                    }
+                },
             )?;
         }
         return Ok(());
@@ -234,8 +244,14 @@ fn prepare(
     {
         command.env("AMP_STEM_FFMPEG", exe);
     }
+    crate::preparation_speed::configure(&mut command);
+    let mut wrapped = process_wrap::std::CommandWrap::from(command);
+    #[cfg(windows)]
+    wrapped.wrap(process_wrap::std::JobObject);
+    #[cfg(unix)]
+    wrapped.wrap(process_wrap::std::ProcessGroup::leader());
     *process.lock().map_err(|_| "Stem process unavailable")? =
-        Some(command.spawn().map_err(|e| e.to_string())?);
+        Some(wrapped.spawn().map_err(|e| e.to_string())?);
     let status = loop {
         let mut slot = process.lock().map_err(|_| "Stem process unavailable")?;
         let child = slot.as_mut().ok_or("Stem process stopped")?;
@@ -265,6 +281,9 @@ fn prepare(
                 .join(" ")
         ));
     }
+    if !crate::preparation_speed::wait(Some(cancel)) {
+        return Err("Stem preparation canceled".into());
+    }
     let audio: Value = serde_json::from_slice(
         &fs::read(stage.path().join("audio.json")).map_err(|e| e.to_string())?,
     )
@@ -286,12 +305,19 @@ fn prepare(
         return Err("Source changed or preparation canceled; result not published".into());
     }
     let manifest = json!({"version":1,"source_stamp":id,"source_name":source.file_name().unwrap_or_default().to_string_lossy(),"source_sha256":source_hash,"audio":audio});
-    amp_core::stem_archive::store(
+    amp_core::stem_archive::store_with_checkpoint(
         &cache.join("stems.ampdb"),
         &id,
         &manifest,
         stage.path(),
         cancel,
+        || {
+            if crate::preparation_speed::wait(Some(cancel)) {
+                Ok(())
+            } else {
+                Err("Stem preparation canceled".into())
+            }
+        },
     )?;
     fs::remove_file(input).map_err(|e| format!("Remove staged input: {e}"))?;
     // A previously corrupted generation is retained, never overwritten silently.
@@ -303,7 +329,7 @@ fn prepare(
         )
         .map_err(|e| e.to_string())?;
     }
-    drop(command);
+    drop(wrapped);
     for file in ["audio.json", "worker.py", "worker.log"] {
         let _ = fs::remove_file(stage.path().join(file));
     }
@@ -334,6 +360,9 @@ pub struct Panel {
     batch_rx: Option<mpsc::Receiver<(usize, usize, String)>>,
     batch_progress: (usize, usize),
     batch_status: String,
+    gpu_rx: Option<mpsc::Receiver<String>>,
+    gpu_status: String,
+    gpu_checked: bool,
     status: [String; 6],
     level: [[f32; 3]; 6],
     generation: [u64; 6],
@@ -347,6 +376,9 @@ impl Default for Panel {
             batch_rx: None,
             batch_progress: (0, 0),
             batch_status: String::new(),
+            gpu_rx: None,
+            gpu_status: String::new(),
+            gpu_checked: false,
             status: Default::default(),
             level: [[0.; 3]; 6],
             generation: [0; 6],
@@ -446,9 +478,54 @@ impl Panel {
             self.batch = None;
             self.batch_rx = None;
         }
+        if !self.gpu_checked
+            && let Some(python) = runtime()
+        {
+            self.gpu_checked = true;
+            self.gpu_status = "Checking GPU support (waits for playback to stop)…".into();
+            let (tx, rx) = mpsc::channel();
+            self.gpu_rx = Some(rx);
+            std::thread::spawn(move || {
+                let result = (|| -> Result<String, String> {
+                    crate::preparation_speed::wait(None);
+                    let stage = tempfile::tempdir().map_err(|e| e.to_string())?;
+                    let worker = stage.path().join("probe.py");
+                    fs::write(&worker, include_str!("stem_worker.py"))
+                        .map_err(|e| e.to_string())?;
+                    let mut command = amp_core::command(python.to_string_lossy().as_ref());
+                    command.arg(worker).arg("--probe");
+                    crate::preparation_speed::configure(&mut command);
+                    let output = command.output().map_err(|e| e.to_string())?;
+                    if !output.status.success() {
+                        return Err(
+                            "Stem runtime could not be checked; reinstall the stem add-on".into(),
+                        );
+                    }
+                    let value: Value =
+                        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+                    Ok(if value["device"] == "cuda" {
+                        format!(
+                            "GPU ready: {}",
+                            value["name"].as_str().unwrap_or("NVIDIA GPU")
+                        )
+                    } else {
+                        "CPU fallback — GPU runtime unavailable. Install the GPU stem add-on to accelerate compatible NVIDIA hardware.".into()
+                    })
+                })();
+                let _ = tx.send(result.unwrap_or_else(|error| error));
+            });
+        }
+        if let Some(rx) = &self.gpu_rx
+            && let Ok(status) = rx.try_recv()
+        {
+            self.gpu_status = status;
+            self.gpu_rx = None;
+        }
         ui.heading("Prepare Stems");
+        ui.label(&self.gpu_status);
+        crate::preparation_speed::controls(ui);
         ui.label("Separate vocals, instruments and beat for the DJ stem knobs.");
-        ui.weak("Prepares this library one song at a time. Existing prepared stems are reused; active playback stays unchanged.");
+        ui.weak("Uses your GPU when available, with a safe CPU fallback. Completed stems are reused; preparation pauses for playback.");
         if let Some(job) = &self.batch {
             let (done, total) = self.batch_progress;
             ui.add(

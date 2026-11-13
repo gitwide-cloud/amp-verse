@@ -552,12 +552,7 @@ impl Player {
             {
                 self.request_library_analysis();
             }
-            ui.label("Parallel songs (0 = automatic)");
-            ui.add_enabled(
-                !self.preparer.busy(),
-                egui::DragValue::new(&mut self.preparer.workers)
-                    .range(0..=amp_core::batch::cpu_count().min(32)),
-            );
+            crate::preparation_speed::controls(ui);
             ui.weak("Analysis requires the optional engine add-on. Manual edits remain protected.");
         });
         ui.add_space(18.);

@@ -68,6 +68,8 @@ fn analyze_with(
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
+    crate::preparation_speed::wait(None);
+    crate::preparation_speed::configure(&mut command);
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

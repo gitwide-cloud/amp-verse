@@ -12,6 +12,7 @@ pub enum Owner {
 
 impl Player {
     pub(super) fn claim_playback(&mut self, owner: Owner, starting: usize, transition: bool) {
+        crate::preparation_speed::set_playing(true);
         if owner == Owner::Dj {
             self.auto = false;
             if let Some(audio) = &self.audio {

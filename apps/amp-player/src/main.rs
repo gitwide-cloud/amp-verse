@@ -44,6 +44,7 @@ mod playback_owner;
 mod player_sequence;
 mod podcast_cache;
 mod podcasts;
+mod preparation_speed;
 mod preparer;
 mod remote_access;
 mod resources;
@@ -3519,6 +3520,9 @@ impl eframe::App for Player {
         self.poll_control();
         self.poll_controllers();
         self.performance_tick();
+        preparation_speed::set_playing(
+            self.library_preview_blocked() || self.live_mix.as_ref().is_some_and(|b| b.running()),
+        );
         if let Some(c) = &self.control {
             c.publish(self.control_snapshot());
             if self.catalog_updated.elapsed() > Duration::from_secs(2) {
@@ -3782,6 +3786,9 @@ fn main() -> eframe::Result {
         return Ok(());
     }
     let mut player = Player::default();
+    if player.screenshot_view == "v1-analysis" {
+        player.library_page = 6;
+    }
     if player.screenshot_view.is_empty() {
         player.recovery = session::Recovery::open(&player.root);
     }

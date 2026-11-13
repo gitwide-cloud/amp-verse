@@ -36,7 +36,6 @@ pub struct Preparer {
     draft: Preparation,
     job: Option<mpsc::Receiver<Update>>,
     pub status: String,
-    pub workers: usize,
     active_workers: usize,
     total: usize,
     done: usize,
@@ -565,14 +564,21 @@ impl Preparer {
 
         let (tx, rx) = mpsc::channel();
         self.job = Some(rx);
-        self.active_workers = amp_core::batch::workers(self.workers, tracks.len());
-        let workers = self.active_workers;
+        self.active_workers = amp_core::batch::workers(
+            crate::preparation_speed::mode().workers(amp_core::batch::cpu_count()),
+            tracks.len(),
+        );
+        let workers = crate::preparation_speed::Mode::Fast
+            .workers(amp_core::batch::cpu_count())
+            .min(tracks.len());
         self.status = format!(
-            "Preparing {} tracks with {workers} parallel workers",
-            tracks.len()
+            "Preparing {} tracks with up to {} parallel workers",
+            tracks.len(),
+            self.active_workers
         );
         std::thread::spawn(move || {
             amp_core::batch::for_each(&tracks, workers, |track| {
+                let _permit = crate::preparation_speed::analysis_permit();
                 let mut skipped = false;
                 let result = match crate::engine::analyze(
                     &root,
@@ -598,6 +604,9 @@ impl Preparer {
         });
     }
     pub fn poll(&mut self, root: &std::path::Path, library: Option<&mut Library>) {
+        self.active_workers = crate::preparation_speed::mode()
+            .workers(amp_core::batch::cpu_count())
+            .min(self.total);
         let mut updates = Vec::new();
         let mut finished = false;
         if let Some(rx) = &self.job {

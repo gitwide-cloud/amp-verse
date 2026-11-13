@@ -10,6 +10,7 @@ if (!(Test-Path -LiteralPath $binary)) { throw 'Build the V1 player first.' }
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null
 # Copy runtime tools and their notices together; never alter the stable installation.
 foreach ($name in @('ffmpeg.exe','ffprobe.exe','ffplay.exe','yt-dlp.exe','deno.exe','licenses','addons','tools','lab-tools','AUDIO_TOOL_NOTICES.md')) {
+    if ($name -in @('addons','tools','lab-tools') -and (Test-Path -LiteralPath (Join-Path $Destination $name))) { continue }
     $source = Join-Path $previous $name
     if (Test-Path -LiteralPath $source) { Copy-Item -LiteralPath $source -Destination $Destination -Recurse -Force }
 }
@@ -18,6 +19,13 @@ foreach ($name in @('amp-player.exe','amp-keylock.dll','amp-update.exe')) {
 }
 foreach ($name in @('LICENSE','THIRD_PARTY_NOTICES.md','docs')) {
     Copy-Item -LiteralPath (Join-Path $repo $name) -Destination $Destination -Recurse -Force
+}
+# An existing optional engine must move with the player to gain cooperative playback pauses.
+$installedEngine=Join-Path $Destination 'addons/amp-engine.exe'
+$builtEngine=Join-Path $repo 'target/release/amp-engine.exe'
+if (Test-Path -LiteralPath $installedEngine) {
+    if (!(Test-Path -LiteralPath $builtEngine)) { throw 'Build the matching amp-engine executable before updating this preview.' }
+    Copy-Item -LiteralPath $builtEngine -Destination $installedEngine -Force
 }
 Copy-Item -LiteralPath (Join-Path $repo 'assets/amp-verse.ico') -Destination $Destination -Force
 $shell = New-Object -ComObject WScript.Shell
