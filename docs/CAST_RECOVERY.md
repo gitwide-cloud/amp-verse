@@ -20,6 +20,13 @@ paths. Both still share the phone's final Wi-Fi hop; outages exceeding available
 buffering can interrupt playback. Audio endpoints retain existing public LAN
 listening semantics; hashes detect corruption, not malicious servers.
 
+Cast also retains a validated device-local startup catalog. A warm restart uses
+that playback snapshot immediately and refreshes its next-start snapshot on a
+background thread. A failed scan retains the previous completed catalog. The
+current server's loaded track list remains fixed for its session, as before;
+restart to adopt the refreshed catalog. This cache does not write shared music
+metadata. An existing matching desktop catalog can seed the initial snapshot.
+
 Ordinary `/listen.mp3`, Google Home and other receivers remain compatible but
 do not use this Android-specific recovery client. Android discovers support
 when connecting to a server; reconnect after upgrading an already selected
@@ -41,3 +48,8 @@ server.
   Kotlin metadata compatibility warnings.
 - Physical Ethernet/Wi-Fi failover remains unverified: Ethernet was disconnected
   on the test PC. Unattended overnight operation is also not yet verified.
+- Actual LAN playback from the installed live DJ server to the Pixel passed,
+  with zero rebuffer events during the monitored interval. This is a short
+  functional check, not a long-duration Wi-Fi reliability measurement.
+- Startup catalog tests reject mismatched roots, unsafe paths and interrupted
+  files; an opt-in import test passed against the user's 13,963-track catalog.

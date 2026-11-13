@@ -1,4 +1,5 @@
 use std::{net::SocketAddr, path::PathBuf};
+mod startup_catalog;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(
@@ -7,7 +8,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("Usage: amp-cast <music-folder>; AMP_CAST_BIND=0.0.0.0:8787 enables LAN")?,
     )
     .canonicalize()?;
-    let library = amp_core::scan(&root)?;
     let address: SocketAddr = std::env::var("AMP_CAST_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8787".into())
         .parse()?;
@@ -19,6 +19,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(amp_core::coordination::device_config_dir()?.join("cast"));
     let first_start = !config_dir.join("server.json").exists();
     let config = amp_cast::config::Config::load(&config_dir)?;
+    let catalog_file = config_dir.join("startup-catalog.json");
+    let library = if let Some(library) = startup_catalog::load(&catalog_file, &root) {
+        let refresh_root = root.clone();
+        let refresh_file = catalog_file.clone();
+        tokio::task::spawn_blocking(move || match amp_core::scan(&refresh_root) {
+            Ok(fresh) => {
+                if let Err(error) = startup_catalog::save(&refresh_file, &refresh_root, &fresh) {
+                    eprintln!("Catalog refresh could not be saved: {error}");
+                }
+            }
+            Err(error) => eprintln!("Catalog refresh failed; previous snapshot retained: {error}"),
+        });
+        library
+    } else {
+        let library = amp_core::scan(&root)?;
+        if let Err(error) = startup_catalog::save(&catalog_file, &root, &library) {
+            eprintln!("Startup catalog could not be saved: {error}");
+        }
+        library
+    };
     amp_core::coordination::device_id()?;
     amp_core::coordination::library_id(&root)?;
     let cast = amp_cast::Cast::with_identity(
