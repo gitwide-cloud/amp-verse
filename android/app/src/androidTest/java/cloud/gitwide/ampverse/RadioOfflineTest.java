@@ -12,10 +12,29 @@ import java.nio.file.*;
 import org.json.*;
 @RunWith(AndroidJUnit4.class)
 public class RadioOfflineTest {
+ @Test public void emptyOfflineListOffersRecoveryWithoutStartingPlayback()throws Exception {
+  Context app=InstrumentationRegistry.getInstrumentation().getTargetContext();
+  org.junit.Assume.assumeTrue(RadioOffline.albums(app).isEmpty());
+  androidx.test.uiautomator.UiDevice device=androidx.test.uiautomator.UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+  device.wakeUp();device.executeShellCommand("wm dismiss-keyguard");
+  Intent intent=new Intent(app,MainActivity.class).putExtra("module","AMP Cast").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+  try(androidx.test.core.app.ActivityScenario<MainActivity> scenario=androidx.test.core.app.ActivityScenario.launch(intent)) {
+   assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Offline playlists")),5000));
+   device.findObject(androidx.test.uiautomator.By.text("Offline playlists")).click();
+   assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("No offline playlists yet")),3000));
+   assertNotNull(device.findObject(androidx.test.uiautomator.By.text(java.util.regex.Pattern.compile("Find stations",java.util.regex.Pattern.CASE_INSENSITIVE))));
+   assertNotNull(device.findObject(androidx.test.uiautomator.By.textContains("does not download its songs")));
+   device.findObject(androidx.test.uiautomator.By.text(java.util.regex.Pattern.compile("Close",java.util.regex.Pattern.CASE_INSENSITIVE))).click();
+  }
+ }
  @Test public void originalAudioAndCuesSurviveOfflineDownloadAndConflict()throws Exception {
   Context app=InstrumentationRegistry.getInstrumentation().getTargetContext();
   File sandbox=new File(app.getCacheDir(),"station-test-"+java.util.UUID.randomUUID());assertTrue(sandbox.mkdir());
   Context isolated=new ContextWrapper(app){@Override public File getFilesDir(){return sandbox;}};
+  assertTrue(RadioOffline.albums(isolated).isEmpty());
+  File pending=new File(sandbox,"radio-offline/.pending-fixture/ampdj");assertTrue(pending.mkdirs());new File(pending,"catalog.ampdb").createNewFile();
+  assertTrue("Incomplete downloads must not appear",RadioOffline.albums(isolated).isEmpty());
+  new File(pending,"catalog.ampdb").delete();pending.delete();pending.getParentFile().delete();
   byte[] audio="original test audio".getBytes(StandardCharsets.UTF_8);
   StringBuilder checksum=new StringBuilder();for(byte b:java.security.MessageDigest.getInstance("SHA-256").digest(audio))checksum.append(String.format(java.util.Locale.ROOT,"%02x",b&255));
   JSONObject prep=new JSONObject().put("cue_in",1.25).put("cue_out",8.).put("bpm",128).put("manual_override",true).put("manual_cues",new JSONArray().put(new JSONObject().put("id","my-drop").put("number",3).put("seconds",1.25).put("label","My drop")));
