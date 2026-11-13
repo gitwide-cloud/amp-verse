@@ -6,48 +6,17 @@ pub fn energy(p: &Preparation) -> Option<f64> {
         .and_then(|v| v.as_f64())
         .filter(|v| v.is_finite() && (0. ..=1.).contains(v))
 }
-fn harmonic(s: &str) -> Option<(i32, u8)> {
-    let s = s.trim().to_ascii_uppercase();
-    let mode = *s.as_bytes().last()?;
-    if mode != b'A' && mode != b'B' {
-        return None;
-    }
-    let n = s[..s.len() - 1].parse::<i32>().ok()?;
-    (1..=12).contains(&n).then_some((n, mode))
-}
+use amp_dj_policy::harmonic;
 pub(crate) fn cost(a: &Preparation, b: &Preparation, target: Option<f64>) -> f64 {
-    let tempo = match (a.bpm, b.bpm) {
-        (Some(a), Some(b)) if a > 0. && b > 0. => {
-            (crate::transition_plan::tempo_distance(a, b) * 12.).min(4.)
-        }
-        _ => 2.,
-    };
-    let key = match (
-        a.harmonic_key.as_deref().and_then(harmonic),
-        b.harmonic_key.as_deref().and_then(harmonic),
-    ) {
-        (Some((a, m)), Some((b, n))) => {
-            let d = (a - b).abs();
-            let d = d.min(12 - d);
-            if d == 0 {
-                if m == n { 0. } else { 0.25 }
-            } else if d == 1 && m == n {
-                0.4
-            } else {
-                2. + d as f64 * 0.2
-            }
-        }
-        _ => 1.5,
-    };
-    let continuity = match (energy(a), energy(b)) {
-        (Some(a), Some(b)) => (a - b).abs() * 4.,
-        _ => 1.,
-    };
-    let drift = match (target, energy(b)) {
-        (Some(a), Some(b)) => (a - b).abs() * 6.,
-        _ => 1.,
-    };
-    tempo + key + continuity + drift
+    amp_dj_policy::pair_cost(
+        a.bpm.unwrap_or(f64::NAN),
+        b.bpm.unwrap_or(f64::NAN),
+        energy(a).unwrap_or(f64::NAN),
+        energy(b).unwrap_or(f64::NAN),
+        target.unwrap_or(f64::NAN),
+        amp_dj_policy::key_code(a.harmonic_key.as_deref().unwrap_or("")),
+        amp_dj_policy::key_code(b.harmonic_key.as_deref().unwrap_or("")),
+    )
 }
 /// Keeps the first song as the anchor. Returns an exact permutation, including repeats.
 /// Greedy ordering is a recommendation; it is not beat synchronization or a guarantee of a mix.

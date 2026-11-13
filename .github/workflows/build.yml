@@ -182,6 +182,11 @@ jobs:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.0.12077973
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.9'

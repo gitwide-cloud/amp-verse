@@ -1,4 +1,4 @@
-# Engine boundaries (1.0.9)
+# Engine boundaries (1.0.10)
 
 Library Engine owns shared catalogs, the durable analysis queue, source discovery,
 content classification, preparation, duplicate detection, organization and metadata
@@ -27,3 +27,10 @@ from measured handoffs, but no automatic cue coaching/training is claimed here.
 Approved cues and loaded playback snapshots must remain protected. Separate
 installable DJ/logic packages or an independently shared native renderer are not
 introduced by this change.
+
+Shared runtime DJ decisions now live in crates/amp-dj-policy: tempo interpretation,
+track-pair scoring, beat-grid boundaries and safe fade limits. Desktop/server call
+this crate directly. Android packages the same Rust crate as a small JNI library;
+Java adapts its MediaItems and user preferences. Platform transport ownership,
+cue UI, source eligibility and advanced performance orchestration remain adapters.
+This is not full desktop DSP/transition-feature parity on the phone.

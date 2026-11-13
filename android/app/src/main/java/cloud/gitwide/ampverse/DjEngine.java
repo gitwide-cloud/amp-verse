@@ -77,7 +77,7 @@ final class DjEngine {
 
     }
     private static boolean readable(Context context,android.net.Uri uri){try(android.content.res.AssetFileDescriptor descriptor=context.getContentResolver().openAssetFileDescriptor(uri,"r")){return descriptor!=null;}catch(Exception e){return false;}}
-    static JSONObject preparation(MediaItem item){try{return new JSONObject(item!=null&&item.mediaMetadata.extras!=null?item.mediaMetadata.extras.getString("amp-preparation","{}"):"{}");}catch(Exception e){return new JSONObject();}}
+    static JSONObject preparation(MediaItem item){try{JSONObject prep=new JSONObject(item!=null&&item.mediaMetadata.extras!=null?item.mediaMetadata.extras.getString("amp-preparation","{}"):"{}");if(prep.optBoolean("sync_source_changed")&&!prep.optBoolean("manual_override")){for(String key:new String[]{"bpm","beat_offset","key","harmonic_key","analysis","energy_profile","energy","stems","cues"})prep.remove(key);prep.put("cue_in",0).remove("cue_out");}return prep;}catch(Exception e){return new JSONObject();}}
     static Bundle preparedExtras(String json){Bundle extras=new Bundle();extras.putString("amp-preparation",json);return extras;}
     static long cueIn(MediaItem item){return DjLogic.cueIn(item);}
     static long cueOut(MediaItem item,long duration){return DjLogic.cueOut(item,duration);}
@@ -125,7 +125,7 @@ final class DjEngine {
         if(!mixing||closed)return;
         int incoming=1-mixOutgoing;
         if(!decks[incoming].isPlaying()){if(decks[incoming].getPlayerError()!=null||decks[incoming].getPlaybackState()==Player.STATE_ENDED||SystemClock.uptimeMillis()-mixWaitingSince>15000){cancelMix();decks[incoming].pause();message="Could not prepare the next song; current deck retained.";}else handler.postDelayed(mixTick,30);return;}
-        if(mixStarted==0){mixStarted=SystemClock.uptimeMillis();long incomingDuration=decks[incoming].getDuration(),outgoingRemaining=decks[mixOutgoing].getDuration()-decks[mixOutgoing].getCurrentPosition();mixDuration=fadeSeconds*1000L;if(incomingDuration>0)mixDuration=Math.min(mixDuration,Math.max(250,incomingDuration-decks[incoming].getCurrentPosition()-100));if(outgoingRemaining>0)mixDuration=Math.min(mixDuration,Math.max(250,outgoingRemaining));}float progress=Math.min(1,(SystemClock.uptimeMillis()-mixStarted)/(float)mixDuration);
+        if(mixStarted==0){mixStarted=SystemClock.uptimeMillis();long incomingDuration=decks[incoming].getDuration(),outgoingRemaining=decks[mixOutgoing].getDuration()-decks[mixOutgoing].getCurrentPosition();mixDuration=(long)(SharedDjLogic.fade(fadeSeconds,outgoingRemaining>0?outgoingRemaining/1000.:Double.NaN)*1000);if(incomingDuration>0)mixDuration=Math.min(mixDuration,Math.max(250,incomingDuration-decks[incoming].getCurrentPosition()-100));if(outgoingRemaining>0)mixDuration=Math.min(mixDuration,Math.max(250,outgoingRemaining));}float progress=Math.min(1,(SystemClock.uptimeMillis()-mixStarted)/(float)mixDuration);
         setFader(mixFrom+(mixTo-mixFrom)*progress);
         if(progress>=1){decks[mixOutgoing].pause();mixing=false;message="Mix complete.";}else handler.postDelayed(mixTick,30);
     }

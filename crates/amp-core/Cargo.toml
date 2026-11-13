@@ -9,6 +9,7 @@ default = []
 analysis = []
 
 [dependencies]
+amp-dj-policy = { path = "../amp-dj-policy" }
 lofty = "0.25.5"
 rusqlite = { version = "0.37", features = ["bundled", "blob"] }
 serde.workspace = true

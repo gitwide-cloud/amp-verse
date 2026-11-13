@@ -101,13 +101,15 @@ final class CastPanel extends LinearLayout {
         android.app.AlertDialog dialog=new android.app.AlertDialog.Builder(activity).setTitle("Save "+playlist.optString("name","playlist")+" offline").setView(content).setNegativeButton("Cancel",null).create();
         dialog.setCancelable(false);dialog.show();dialog.getButton(-2).setOnClickListener(v->{cancel.set(true);detail.setText("Cancelling; existing downloads are kept…");dialog.getButton(-2).setEnabled(false);});
         work(()->{try{
-            java.io.File folder=RadioOffline.save(activity,selected,manifest,playlist,new RadioOffline.Progress(){
+            JSONObject latest=selected.get("/api/smart/manifest"),chosen=null;JSONArray available=latest.getJSONArray("playlists");for(int i=0;i<available.length();i++){JSONObject candidate=available.getJSONObject(i);if(!playlist.optString("id").isEmpty()?playlist.optString("id").equals(candidate.optString("id")):playlist.optString("name").equals(candidate.optString("name"))){chosen=candidate;break;}}
+            if(chosen==null)throw new java.io.IOException("This playlist is no longer shared. Your saved offline copy was kept.");
+            java.io.File folder=RadioOffline.save(activity,selected,latest,chosen,new RadioOffline.Progress(){
                 public boolean cancelled(){return cancel.get()||closed||Thread.currentThread().isInterrupted();}
                 public void song(int i,int total,String title){activity.runOnUiThread(()->{if(!closed&&!cancel.get()){bar.setMax(Math.max(1,total));bar.setProgress(i-1);detail.setText(i+" / "+total+" · "+title+"\nAudio + prepared cues");}});}
             });
-            String name=RadioOffline.album(folder).optString("name");
-            activity.runOnUiThread(()->{if(!closed)new android.app.AlertDialog.Builder(activity).setTitle("Available offline").setMessage(name+" is saved with its audio and cues.").setPositiveButton("Open offline playlists",(d,n)->offline()).setNegativeButton("Done",null).show();});
-            return "Saved "+name+" with cues.";
+            String name=RadioOffline.album(folder).optString("name");String syncSummary=RadioOffline.summary(folder);
+            activity.runOnUiThread(()->{if(!closed)new android.app.AlertDialog.Builder(activity).setTitle("Available offline").setMessage(name+"\n"+syncSummary).setNeutralButton("Review sync changes",(d,n)->RadioOffline.reviewConflicts(activity,folder)).setPositiveButton("Open offline playlists",(d,n)->offline()).setNegativeButton("Done",null).show();});
+            return name+": "+syncSummary;
         }catch(Exception e){if(cancel.get())return "Download cancelled. Existing offline playlists were kept.";throw e;}
         finally{activity.runOnUiThread(dialog::dismiss);}});
     }

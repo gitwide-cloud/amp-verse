@@ -12,8 +12,6 @@ final class DjLogic {
     static List<MediaItem> repeatCandidates(List<MediaItem> source,Collection<String> recent,String current,int avoid){return PhoneSmartRules.repeatCandidates(source,recent,current,avoid);}
     static float tempoRatio(MediaItem outgoing,MediaItem incoming,float outgoingSpeed){
         double a=DjEngine.preparation(outgoing).optDouble("bpm",0),b=DjEngine.preparation(incoming).optDouble("bpm",0);
-        if(!Double.isFinite(a)||!Double.isFinite(b)||a<=0||b<=0)return 1;
-        double ratio=a*outgoingSpeed/b;if(ratio<.65)ratio*=2;else if(ratio>1.5)ratio/=2;
-        return ratio>=.92&&ratio<=1.08?(float)ratio:1;
+        return (float)SharedDjLogic.tempoRate(a,outgoingSpeed,b,.08);
     }
 }

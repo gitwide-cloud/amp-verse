@@ -1,10 +1,11 @@
-# Android playback and library boundaries (0.2.11)
+# Android playback and library boundaries (0.2.13)
 
 Android includes a lightweight, service-owned DJ Engine: two main decks, cue decks,
 samplers and crossfade execution. DjLogic contains prepared cue/entry policy,
 repeat selection and conservative pitch-preserving tempo-ratio decisions. It
-consumes the desktop preparation format. It is currently a Java mobile policy,
-not the desktop Rust renderer compiled into Android. No BPM/key analyzer or stem
+consumes the desktop preparation format. Its tempo and track-pair decisions call the same Rust amp-dj-policy crate used by
+desktop/server; platform transport and metadata adapters remain Java. Desktop DSP
+is not compiled into Android. No BPM/key analyzer or stem
 separator is installed on the phone. Missing preparation remains usable for basic
 playback; a missing BPM does not invent a tempo match.
 
@@ -24,13 +25,16 @@ and cue documents privately; the public Music folder contains audio, not loose
 JSON sidecars. Android 9 retains the previous private offline download location.
 
 Local references never enter the station sync/download operation. Reconnecting
-never uploads phone edits to the host. Existing downloaded snapshots are retained;
-this release does not add automatic resync deletion or two-way synchronization.
+never uploads phone edits to the host. Repeated sync updates the existing playlist and reuses verified unchanged audio.
+Local cues and settings survive; conflicting desktop proposals are retained for
+review. Removed members are retained for re-addition, without automatic audio
+deletion. This remains an explicit download sync, not automatic two-way publishing.
+See INCREMENTAL_SYNC.md.
 
 Storage implementation follows Android's app-owned media guidance:
 https://developer.android.com/training/data-storage/shared/media
 
-Verification: build, Android lint (existing warnings retained), eight targeted
+Verification: build, Android lint (existing warnings retained), 27 targeted
 Pixel 7 instrumentation tests, including a local HTTP download fixture, actual
 MediaStore publication, checksum/cue retention, stalled-network cancellation,
 local reference persistence, recursive discovery and two-deck Auto DJ progression.

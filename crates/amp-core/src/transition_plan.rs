@@ -1,50 +1,8 @@
 //! Session-only pair planning. Never edits shared cues, grids or tempo metadata.
 use crate::Preparation;
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub struct TempoMatch {
-    pub rate: f64,
-    pub pulse_factor: f64,
-}
-/// Keep the fade inside the outgoing audio tail, leaving one UI tick of margin.
-/// Unknown duration retains the user's setting; never modifies the saved preference.
+pub use amp_dj_policy::{TempoMatch, tempo_distance, tempo_match};
 pub fn tail_fade(requested: f32, remaining: Option<f32>) -> f32 {
-    let requested = if requested.is_finite() {
-        requested.clamp(0.1, 120.)
-    } else {
-        3.
-    };
-    remaining
-        .filter(|r| r.is_finite())
-        .map_or(requested, |r| requested.min((r - 0.15).max(0.1)))
-}
-/// Interpret half/double-time analysis without accelerating a song by 2x.
-pub fn tempo_match(out_bpm: f64, out_rate: f64, in_bpm: f64, limit: f64) -> Option<TempoMatch> {
-    if ![out_bpm, out_rate, in_bpm, limit]
-        .iter()
-        .all(|v| v.is_finite())
-        || out_bpm <= 0.
-        || in_bpm <= 0.
-        || out_rate <= 0.
-        || !(0. ..=0.2).contains(&limit)
-    {
-        return None;
-    }
-    for pulse_factor in [1., 0.5, 2.] {
-        let rate = out_bpm * out_rate / (in_bpm * pulse_factor);
-        if (1. - limit..=1. + limit).contains(&rate) {
-            return Some(TempoMatch { rate, pulse_factor });
-        }
-    }
-    None
-}
-pub fn tempo_distance(a: f64, b: f64) -> f64 {
-    if !a.is_finite() || !b.is_finite() || a <= 0. || b <= 0. {
-        return 1.;
-    }
-    [0.5, 1., 2.]
-        .into_iter()
-        .map(|factor| (a / (b * factor)).ln().abs())
-        .fold(f64::INFINITY, f64::min)
+    amp_dj_policy::tail_fade(f64::from(requested), remaining.map_or(f64::NAN, f64::from)) as f32
 }
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Landing {

@@ -173,7 +173,7 @@ async fn manifest(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response
     }
     let work=tokio::task::spawn_blocking(move||lists(&cast).map(|playlists|{
         let shared:std::collections::HashSet<u64>=playlists.iter().filter_map(|p|p["tracks"].as_array()).flatten().filter_map(Value::as_u64).collect();
-        json!({"version":1,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"name":cast.station_name,"playlists":playlists,"tracks":cast.tracks.iter().enumerate().filter(|(id,_)|shared.contains(&(*id as u64))).map(|(id,t)|json!({"id":id,"title":t.title,"extension":t.path.extension().unwrap_or_default().to_string_lossy()})).collect::<Vec<_>>()})
+        json!({"version":1,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"name":cast.station_name,"playlists":playlists,"tracks":cast.tracks.iter().enumerate().filter(|(id,_)|shared.contains(&(*id as u64))).map(|(id,t)|json!({"id":id,"title":t.title,"track_key":amp_core::show::song_id(t),"extension":t.path.extension().unwrap_or_default().to_string_lossy()})).collect::<Vec<_>>()})
     })).await;
     match work {
         Ok(Ok(value)) => Json(value).into_response(),
@@ -191,13 +191,17 @@ async fn metadata(
     let work=tokio::task::spawn_blocking(move||->Result<Value,StatusCode>{
         let track=shared_track(&cast,id)?; let path=amp_core::resolve(&cast.root,&track.path).map_err(|_|StatusCode::NOT_FOUND)?;
         let (preparation,revision)=amp_core::preparation::load_with_revision(&path).map_err(|_|StatusCode::UNPROCESSABLE_ENTITY)?;
+        let before=std::fs::metadata(&path).map_err(|_|StatusCode::NOT_FOUND)?;
         let mut file=std::fs::File::open(&path).map_err(|_|StatusCode::NOT_FOUND)?;
         let mut hasher=Sha256::new(); let mut buffer=[0;65536]; let mut size=0u64;
         loop {let n=std::io::Read::read(&mut file,&mut buffer).map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;if n==0 {break;} size+=n as u64;hasher.update(&buffer[..n]);}
         if amp_core::preparation::revision(&path)!=revision {return Err(StatusCode::CONFLICT);}
         let checksum=format!("{:x}",hasher.finalize());
-        if preparation.source_sha256.as_deref().is_some_and(|saved|saved!=checksum) {return Err(StatusCode::CONFLICT);}
-        Ok(json!({"version":1,"id":id,"title":track.title,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"bytes":size,"sha256":checksum,"preparation":preparation}))
+        let after=std::fs::metadata(&path).map_err(|_|StatusCode::NOT_FOUND)?;
+        if before.len()!=after.len()||before.modified().ok()!=after.modified().ok(){return Err(StatusCode::CONFLICT);}
+        let preparation_current=preparation.source_sha256.as_deref().is_none_or(|saved|saved==checksum);
+        let metadata_revision=amp_core::coordination::revision(&serde_json::to_value(&preparation).map_err(|_|StatusCode::UNPROCESSABLE_ENTITY)?);
+        Ok(json!({"version":1,"id":id,"title":track.title,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"bytes":size,"sha256":checksum,"track_key":amp_core::show::song_id(track),"preparation_current":preparation_current,"revision":metadata_revision,"preparation":preparation}))
     }).await;
     match work {
         Ok(Ok(value)) => Json(value).into_response(),
@@ -408,6 +412,7 @@ mod tests {
             number: Some(3),
             ..Default::default()
         });
+        prep.source_sha256 = Some(format!("{:x}", Sha256::digest(b"original audio bytes")));
         amp_core::preparation::save(dir.path(), std::path::Path::new("song.mp3"), &prep).unwrap();
         amp_core::show::Settings::default()
             .save(dir.path())
@@ -485,6 +490,25 @@ mod tests {
         )
         .unwrap();
         assert_eq!(metadata["preparation"]["manual_cues"][0]["id"], "my-drop");
+        assert!(metadata["track_key"].as_str().unwrap().starts_with("song_"));
+        assert!(metadata["revision"].is_object());
+        std::fs::write(dir.path().join("song.mp3"), b"changed audio bytes").unwrap();
+        let changed = app
+            .clone()
+            .oneshot(request("/api/smart/tracks/0/metadata", "access"))
+            .await
+            .unwrap();
+        assert_eq!(changed.status(), StatusCode::OK);
+        let changed: Value = serde_json::from_slice(
+            &axum::body::to_bytes(changed.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(changed["preparation_current"], false);
+        assert_eq!(changed["preparation"]["manual_cues"][0]["id"], "my-drop");
+        std::fs::write(dir.path().join("song.mp3"), b"original audio bytes").unwrap();
+
         let response = app
             .clone()
             .oneshot(request("/api/smart/tracks/0/audio", "access"))

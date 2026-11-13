@@ -1,9 +1,9 @@
 [workspace]
-members = ["crates/amp-core", "apps/amp-player", "apps/amp-cast", "apps/amp-engine"]
+members = ["crates/amp-dj-policy", "crates/amp-core", "apps/amp-player", "apps/amp-cast", "apps/amp-engine"]
 resolver = "2"
 
 [workspace.package]
-version = "1.0.9"
+version = "1.0.10"
 edition = "2024"
 license = "MIT"
 

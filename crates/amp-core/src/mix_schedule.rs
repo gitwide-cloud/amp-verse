@@ -37,7 +37,7 @@ pub struct Grid {
 }
 impl Grid {
     pub fn next(self, position: f64) -> f64 {
-        self.anchor + ((position - self.anchor) / self.period).ceil() * self.period
+        amp_dj_policy::next_boundary(self.anchor, self.period, position)
     }
 }
 /// Reviewed phrase starts override counted estimates; no semantic chorus/verse recognition is implied.

@@ -205,7 +205,7 @@ public final class MainActivity extends Activity {
         else if(libraryTab.equals("Offline")){
             LinearLayout downloads=card();downloads.addView(label("Music/AMP Library · synced playlists",16,accent));
             List<File> albums=RadioOffline.albums(this);if(albums.isEmpty())downloads.addView(label("Save a playlist from Cast & Remote to listen offline with its prepared cues.",14,muted));
-            for(File folder:albums)try{String name=RadioOffline.album(folder).optString("name","Playlist");downloads.addView(button(name,()->{try{List<MediaItem> items=RadioOffline.items(folder);if(player!=null&&!items.isEmpty()){player.setMediaItems(items);player.prepare();player.play();}}catch(Exception e){message=e.getMessage();refresh();}}));}catch(Exception ignored){}
+            for(File folder:albums)try{String name=RadioOffline.album(folder).optString("name","Playlist");Button offlineButton=button(name,()->{try{List<MediaItem> items=RadioOffline.items(folder);if(player!=null&&!items.isEmpty()){player.setMediaItems(items);player.prepare();player.play();}}catch(Exception e){message=e.getMessage();refresh();}});offlineButton.setOnLongClickListener(v->{RadioOffline.reviewConflicts(this,folder);return true;});downloads.addView(offlineButton);}catch(Exception ignored){}
         }
         else page.addView(new PhoneLibraryPanel(this,appearance,items->{if(player!=null&&!items.isEmpty()){player.setMediaItems(items);player.prepare();player.play();message="Playlist playing";}}));
     }
