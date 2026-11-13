@@ -1,4 +1,4 @@
-# Library speech transcription (1.0.12 Preview)
+# Library speech transcription (1.0.13 Preview)
 
 Open Library > Transcribe, then use the selected Library recording or Open audio. Install speech tools on first use. This creates a separate optional runtime under addons/transcribe, using the existing stem Python or a Python 3.10+ installation. Repair speech tools retries setup after dependency failures. FFmpeg/FFprobe use the existing desktop tools. Windows and Linux use the same workflow; Linux needs Python with venv support and FFmpeg on PATH.
 
@@ -10,4 +10,15 @@ Playback's existing slow/pause background-work preference applies between chunks
 
 Results have timestamps and transcript search. Save transcript to Library publishes relative track references in the owning music source's ampdj/transcripts.ampdb, independent of the music-analysis catalog. Revision checks preserve another device's newer transcript on conflict. A local draft is retained in the settings directory after recognition for recovery if the NAS is unavailable. This is not automatic Android transcript synchronization. TXT and SRT export use separate files and cannot overwrite the original audio.
 
+
+## Folder queue
+
+Use Add folder to queue, then Start / resume queue. All supported audio in that folder and its subfolders is included; this is an explicit folder choice, not automatic speech classification. Known Library folders save transcripts at their owning library root. External folders save in their own ampdj directory. Metadata/cache folders and symbolic links are excluded.
+
+One recording runs at a time using the existing vocal-stem/CPU/GPU options. Each completed transcript saves automatically with revision protection; existing transcripts for identical source audio are reused. Failed recordings retain an error and do not stop later jobs. Retry failed recordings puts them back in the queue. View opens saved results for search/export. Clear queue removes jobs only, retaining audio and saved transcripts.
+
+Pause queue cancels the current worker; completed recordings stay saved and the interrupted recording returns to Queued. Resume restarts that recording. Closing/restarting the app similarly recovers in-progress jobs as queued, without automatically starting processing. The local settings file transcription-queue.ampdb remembers jobs and their options. Re-adding a folder appends new files and requeues files whose size/modification timestamp changed. This queue is local to the installation; it is not a shared multi-device speech job scheduler.
+
 Verification: core validation/caption formatting, relative storage and revision conflict protection; worker chunk offsets, no-speech/decoder errors preserving completed output, playback throttling markers; cancellation and completion delivery. A real local synthesized speech recording was recognized on CPU with timestamps. Installed Windows UI verification is recorded with this build; Linux operation requires platform-specific testing. Local CPU recognition and CUDA recognition of Demucs-separated vocals both passed on the Windows test machine.
+
+Folder queue verification: eight focused Rust tests passed (including six queue tests), along with the workspace checks and strict lint. The installed Windows app queued a folder and nested folder, continued after an invalid MP3, paused with two jobs retained, recovered those jobs after an app restart, and automatically saved both vocal-based transcripts. Both original test recordings remained byte-for-byte unchanged. Test queue entries were cleared afterward; saved transcripts were retained.

@@ -14,7 +14,22 @@ use std::{
     },
     time::Duration,
 };
+#[path = "transcription_queue.rs"]
+mod queue;
+
+#[derive(Clone)]
+struct Options {
+    python: PathBuf,
+    addon: PathBuf,
+    language: String,
+    vocals: bool,
+    gpu: bool,
+}
+
 enum Event {
+    Queue(Box<queue::Queue>),
+    BatchReady(queue::Input, Transcript),
+    BatchFinished(String),
     Status(String),
     Progress(f32),
     Ready(Transcript),
@@ -38,6 +53,9 @@ pub struct Panel {
     gpu: bool,
     language: String,
     dirty: bool,
+    queue: queue::Queue,
+    queue_loaded: bool,
+    batch: bool,
 }
 fn addon() -> Option<PathBuf> {
     Some(
@@ -94,7 +112,7 @@ fn wrapped(command: std::process::Command) -> process_wrap::std::CommandWrap {
 fn execute(
     mut command: std::process::Command,
     cancel: &AtomicBool,
-    tx: &mpsc::Sender<Event>,
+    tx: &mpsc::SyncSender<Event>,
     log: &Path,
 ) -> Result<(), String> {
     let errors = fs::File::create(log).map_err(|e| e.to_string())?;
@@ -221,6 +239,105 @@ fn duration(source: &Path, cancel: &AtomicBool) -> Result<f64, String> {
         std::thread::sleep(Duration::from_millis(100));
     }
 }
+fn recognize(
+    input: &queue::Input,
+    options: &Options,
+    cancel: &AtomicBool,
+    tx: &mpsc::SyncSender<Event>,
+) -> Result<Transcript, String> {
+    let queue::Input {
+        source,
+        root,
+        relative,
+    } = input;
+    let Options {
+        python,
+        addon,
+        language,
+        vocals,
+        gpu,
+    } = options;
+    let vocals = *vocals;
+    let gpu = *gpu;
+    let before = fs::metadata(source).map_err(|e| e.to_string())?;
+    let checksum = sha(source, cancel)?;
+    let work = tempfile::tempdir().map_err(|e| e.to_string())?;
+    let mut input = source.to_path_buf();
+    let mut input_kind = "original";
+    if vocals && (crate::stems::ready(source).is_some() || duration(source, cancel)? <= 1800.) {
+        let _ = tx.send(Event::Status("Preparing or restoring vocal stems…".into()));
+        match crate::stems::for_transcription(source, cancel) {
+            Ok(paths) => {
+                input = paths[0].clone();
+                input_kind = "vocals";
+            }
+            Err(e) => {
+                if cancel.load(Relaxed) {
+                    return Err("Transcription cancelled".into());
+                }
+                let _ = tx.send(Event::Status(format!(
+                    "Vocal isolation unavailable; using original recording. {e}"
+                )));
+            }
+        }
+    }
+    let script = work.path().join("transcribe.py");
+    let output = work.path().join("transcript.json");
+    fs::write(&script, include_str!("transcribe_worker.py")).map_err(|e| e.to_string())?;
+    let mut c = amp_core::command(python.to_string_lossy().as_ref());
+    c.arg(script)
+        .arg(&input)
+        .arg(&output)
+        .arg("--models")
+        .arg(addon.join("models"))
+        .arg("--language")
+        .arg(language)
+        .arg("--device")
+        .arg(if gpu { "auto" } else { "cpu" })
+        .arg("--ffmpeg")
+        .arg(tool("ffmpeg"))
+        .arg("--ffprobe")
+        .arg(tool("ffprobe"));
+    if let Some(stems) =
+        crate::stems::runtime().and_then(|p| p.parent()?.parent().map(Path::to_path_buf))
+    {
+        let dll = stems.join("Lib/site-packages/torch/lib");
+        c.env("AMP_TRANSCRIBE_CUDA_LIB", &dll);
+        if let Ok(path) = std::env::join_paths(
+            std::iter::once(dll).chain(
+                std::env::var_os("PATH")
+                    .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+                    .unwrap_or_default(),
+            ),
+        ) {
+            c.env("PATH", path);
+        }
+    }
+    execute(c, cancel, tx, &work.path().join("worker.log"))?;
+    if cancel.load(Relaxed) {
+        return Err("Transcription cancelled".into());
+    }
+    let after = fs::metadata(source).map_err(|e| e.to_string())?;
+    if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+        return Err("Source changed during transcription. Existing transcript kept; retry the current recording.".into());
+    }
+    if fs::metadata(&output).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
+        return Err("Transcript is too large; split the recording into chapters".into());
+    }
+    let mut doc: Transcript = serde_json::from_slice(&fs::read(output).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    doc.source_sha256 = checksum;
+    doc.input = input_kind.into();
+    doc.validate()?;
+    if let Some(file) = local_store() {
+        amp_core::catalog_db::save_local_record(
+            &file,
+            &draft_key(root, relative),
+            &serde_json::to_value(&doc).map_err(|e| e.to_string())?,
+        )?;
+    }
+    Ok(doc)
+}
 impl Panel {
     pub fn poll(&mut self) {
         let mut ended = false;
@@ -239,6 +356,20 @@ impl Panel {
                     }
                 };
                 match event {
+                    Event::Queue(q) => self.queue = *q,
+                    Event::BatchReady(input, doc) => {
+                        self.source = Some(input.source);
+                        self.root = input.root;
+                        self.relative = input.relative;
+                        self.expected = doc.revision;
+                        self.document = Some(doc);
+                        self.dirty = false;
+                    }
+                    Event::BatchFinished(message) => {
+                        self.status = message;
+                        self.batch = false;
+                        ended = true;
+                    }
                     Event::Status(text) => self.status = text,
                     Event::Progress(n) => {
                         self.progress = n;
@@ -312,7 +443,7 @@ impl Panel {
         let Some(destination) = addon() else {
             return;
         };
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(8);
         self.rx = Some(rx);
         self.cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.cancel.clone();
@@ -354,7 +485,7 @@ impl Panel {
                     .into();
             return;
         }
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(8);
         self.rx = Some(rx);
         self.cancel = Arc::new(AtomicBool::new(false));
         let cancel = self.cancel.clone();
@@ -365,99 +496,111 @@ impl Panel {
         self.progress = 0.;
         self.status = "Preparing speech input…".into();
         std::thread::spawn(move || {
-            let result = (|| {
-                let before = fs::metadata(&source).map_err(|e| e.to_string())?;
-                let checksum = sha(&source, &cancel)?;
-                let work = tempfile::tempdir().map_err(|e| e.to_string())?;
-                let mut input = source.clone();
-                let mut input_kind = "original";
-                if vocals
-                    && (crate::stems::ready(&source).is_some()
-                        || duration(&source, &cancel)? <= 1800.)
-                {
-                    let _ = tx.send(Event::Status("Preparing or restoring vocal stems…".into()));
-                    match crate::stems::for_transcription(&source, &cancel) {
-                        Ok(paths) => {
-                            input = paths[0].clone();
-                            input_kind = "vocals";
-                        }
-                        Err(e) => {
-                            if cancel.load(Relaxed) {
-                                return Err("Transcription cancelled".into());
-                            }
-                            let _ = tx.send(Event::Status(format!(
-                                "Vocal isolation unavailable; using original recording. {e}"
-                            )));
-                        }
-                    }
-                }
-                let script = work.path().join("transcribe.py");
-                let output = work.path().join("transcript.json");
-                fs::write(&script, include_str!("transcribe_worker.py"))
-                    .map_err(|e| e.to_string())?;
-                let mut c = amp_core::command(python.to_string_lossy().as_ref());
-                c.arg(script)
-                    .arg(&input)
-                    .arg(&output)
-                    .arg("--models")
-                    .arg(addon.join("models"))
-                    .arg("--language")
-                    .arg(language)
-                    .arg("--device")
-                    .arg(if gpu { "auto" } else { "cpu" })
-                    .arg("--ffmpeg")
-                    .arg(tool("ffmpeg"))
-                    .arg("--ffprobe")
-                    .arg(tool("ffprobe"));
-                if let Some(stems) = crate::stems::runtime()
-                    .and_then(|p| p.parent()?.parent().map(Path::to_path_buf))
-                {
-                    let dll = stems.join("Lib/site-packages/torch/lib");
-                    c.env("AMP_TRANSCRIBE_CUDA_LIB", &dll);
-                    if let Ok(path) = std::env::join_paths(
-                        std::iter::once(dll).chain(
-                            std::env::var_os("PATH")
-                                .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
-                                .unwrap_or_default(),
-                        ),
-                    ) {
-                        c.env("PATH", path);
-                    }
-                }
-                execute(c, &cancel, &tx, &work.path().join("worker.log"))?;
-                if cancel.load(Relaxed) {
-                    return Err("Transcription cancelled".into());
-                }
-                let after = fs::metadata(&source).map_err(|e| e.to_string())?;
-                if before.len() != after.len() || before.modified().ok() != after.modified().ok() {
-                    return Err("Source changed during transcription. Existing transcript kept; retry the current recording.".into());
-                }
-                if fs::metadata(&output).map_err(|e| e.to_string())?.len() > 32 * 1024 * 1024 {
-                    return Err("Transcript is too large; split the recording into chapters".into());
-                }
-                let mut doc: Transcript =
-                    serde_json::from_slice(&fs::read(output).map_err(|e| e.to_string())?)
-                        .map_err(|e| e.to_string())?;
-                doc.source_sha256 = checksum;
-                doc.input = input_kind.into();
-                doc.validate()?;
-                if let Some(file) = local_store() {
-                    amp_core::catalog_db::save_local_record(
-                        &file,
-                        &draft_key(&root, &relative),
-                        &serde_json::to_value(&doc).map_err(|e| e.to_string())?,
-                    )?;
-                }
-                Ok(doc)
-            })();
+            let result = recognize(
+                &queue::Input {
+                    source,
+                    root,
+                    relative,
+                },
+                &Options {
+                    python,
+                    addon,
+                    language,
+                    vocals,
+                    gpu,
+                },
+                &cancel,
+                &tx,
+            );
             let _ = tx.send(match result {
                 Ok(doc) => Event::Ready(doc),
                 Err(e) => Event::Failed(e),
             });
         });
     }
+    fn add_folder(&mut self, folder: PathBuf, root: &Path) {
+        let (tx, rx) = mpsc::sync_channel(8);
+        self.rx = Some(rx);
+        self.cancel = Arc::new(AtomicBool::new(false));
+        let cancel = self.cancel.clone();
+        let root = root.to_path_buf();
+        self.queue.settings = Some(queue::Settings {
+            vocals: self.vocals,
+            gpu: self.gpu,
+            language: self.language.clone(),
+        });
+        let mut queued = self.queue.clone();
+        self.status = "Finding recordings in this folder and subfolders…".into();
+        std::thread::spawn(move || {
+            let result = queue::scan(&folder, &root, &cancel).and_then(|inputs| {
+                let count = queued.add(inputs);
+                queued.save()?;
+                let _ = tx.send(Event::Queue(Box::new(queued)));
+                Ok(count)
+            });
+            let _ = tx.send(Event::BatchFinished(match result {
+                Ok(count) => {
+                    format!("Queued {count} new or changed recordings. Start the queue when ready.")
+                }
+                Err(e) => e,
+            }));
+        });
+    }
+    fn start_queue(&mut self) {
+        let (Some(python), Some(addon)) = (runtime(), addon()) else {
+            self.status = "Install speech tools first.".into();
+            return;
+        };
+        let language = self.language.trim().to_lowercase();
+        if !language.is_empty()
+            && (!language
+                .bytes()
+                .all(|b| b.is_ascii_lowercase() || b == b'-')
+                || language.len() > 12)
+        {
+            self.status =
+                "Use a language code such as en, or leave blank for automatic detection.".into();
+            return;
+        }
+        let options = Options {
+            python,
+            addon,
+            language,
+            vocals: self.vocals,
+            gpu: self.gpu,
+        };
+        let (tx, rx) = mpsc::sync_channel(8);
+        self.rx = Some(rx);
+        self.batch = true;
+        self.progress = 0.;
+        self.cancel = Arc::new(AtomicBool::new(false));
+        let cancel = self.cancel.clone();
+        self.queue.settings = Some(queue::Settings {
+            vocals: self.vocals,
+            gpu: self.gpu,
+            language: self.language.clone(),
+        });
+        let queued = self.queue.clone();
+        self.status = "Starting transcription queue…".into();
+        std::thread::spawn(move || queue::run(queued, options, cancel, tx));
+    }
     pub fn show(&mut self, ui: &mut egui::Ui, root: &Path, track: Option<&Track>) {
         self.poll();
+        if !self.queue_loaded {
+            self.queue_loaded = true;
+            match queue::Queue::load() {
+                Ok(q) => {
+                    if let Some(settings) = &q.settings {
+                        self.vocals = settings.vocals;
+                        self.gpu = settings.gpu;
+                        self.language = settings.language.clone();
+                        self.options_ready = true;
+                    }
+                    self.queue = q;
+                }
+                Err(e) => self.status = e,
+            }
+        }
         if !self.options_ready {
             self.vocals = true;
             self.options_ready = true;
@@ -492,6 +635,102 @@ impl Panel {
                 self.choose(parent.into(), PathBuf::from(name), source.clone());
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            if ui
+                .add_enabled(!busy, egui::Button::new("Add folder to queue…"))
+                .clicked()
+                && let Some(folder) = rfd::FileDialog::new().pick_folder()
+            {
+                self.add_folder(folder, root);
+            }
+            if ui
+                .add_enabled(
+                    !busy && self.queue.pending() > 0 && runtime().is_some(),
+                    egui::Button::new("Start / resume queue"),
+                )
+                .clicked()
+            {
+                self.start_queue();
+            }
+            if ui
+                .add_enabled(
+                    !busy && self.queue.failed() > 0,
+                    egui::Button::new("Retry failed recordings"),
+                )
+                .clicked()
+            {
+                self.queue.retry();
+                if let Err(e) = self.queue.save() {
+                    self.status = e;
+                }
+            }
+        });
+        if !self.queue.items.is_empty() {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(self.queue.summary());
+                if ui
+                    .add_enabled(!busy, egui::Button::new("Clear queue"))
+                    .on_hover_text("Remove queued jobs only; saved transcripts and audio are kept.")
+                    .clicked()
+                {
+                    self.queue.items.clear();
+                    if let Err(e) = self.queue.save() {
+                        self.status = e;
+                    }
+                }
+            });
+            ui.weak("Includes subfolders. Finished transcripts save automatically; failures do not stop the queue. Resume after closing the app.");
+            if let Some(item) = self
+                .queue
+                .items
+                .iter()
+                .find(|item| item.state == "Transcribing")
+            {
+                ui.label(format!("Now: {}", item.input.relative.display()));
+            }
+            egui::CollapsingHeader::new("Queued recordings / results").show(ui, |ui| {
+                egui::ScrollArea::vertical()
+                    .id_salt("speech-folder-queue")
+                    .max_height(170.)
+                    .show(ui, |ui| {
+                        for item in &self.queue.items {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(format!(
+                                    "{} · {}",
+                                    item.state,
+                                    item.input.relative.display()
+                                ));
+                                if !item.error.is_empty() {
+                                    ui.weak(&item.error);
+                                }
+                                if ui
+                                    .add_enabled(
+                                        !busy
+                                            && matches!(
+                                                item.state.as_str(),
+                                                "Saved" | "Already transcribed"
+                                            ),
+                                        egui::Button::new("View"),
+                                    )
+                                    .clicked()
+                                {
+                                    self.root = item.input.root.clone();
+                                    self.relative = item.input.relative.clone();
+                                    self.source = Some(item.input.source.clone());
+                                    match amp_core::transcripts::load(&self.root, &self.relative) {
+                                        Ok(doc) => {
+                                            self.expected = doc.as_ref().map_or(0, |d| d.revision);
+                                            self.document = doc;
+                                            self.dirty = false;
+                                        }
+                                        Err(e) => self.status = e,
+                                    }
+                                }
+                            });
+                        }
+                    });
+            });
+        }
         if let Some(source) = &self.source {
             ui.label(source.display().to_string());
         } else {
@@ -532,7 +771,11 @@ impl Panel {
             {
                 self.install();
             }
-            if busy && ui.button("Cancel").clicked() {
+            if busy
+                && ui
+                    .button(if self.batch { "Pause queue" } else { "Cancel" })
+                    .clicked()
+            {
                 self.cancel.store(true, Relaxed);
                 self.status = "Cancelling; existing transcripts are kept…".into();
             }
@@ -609,7 +852,7 @@ mod tests {
     use super::*;
     #[test]
     fn terminal_event_is_not_lost_when_sender_disconnects() {
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(8);
         let mut panel = Panel::default();
         panel.rx.replace(rx);
         tx.send(Event::Failed("readable failure".into())).unwrap();
@@ -621,7 +864,7 @@ mod tests {
     #[test]
     fn cancellation_stops_worker_promptly() {
         let work = tempfile::tempdir().unwrap();
-        let (tx, _rx) = mpsc::channel();
+        let (tx, _rx) = mpsc::sync_channel(8);
         let cancel = Arc::new(AtomicBool::new(false));
         let signal = cancel.clone();
         let timer = std::thread::spawn(move || {
