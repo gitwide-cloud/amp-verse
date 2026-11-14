@@ -2,6 +2,25 @@ use crate::{Player, mix_schedule::Timing};
 use eframe::egui;
 use std::sync::atomic::Ordering::Relaxed;
 impl Player {
+    /// Live waveforms select musical sections, rather than abruptly seeking audio.
+    pub(super) fn mix_to_waveform_section(&mut self, ctx: &egui::Context, deck: usize, at: f64) {
+        if !at.is_finite() {
+            return;
+        }
+        let Some(track) = self.loaded_track(deck) else {
+            return;
+        };
+        let target = amp_core::energy_profile::read(&track.preparation)
+            .and_then(|profile| {
+                profile
+                    .sections
+                    .into_iter()
+                    .find(|section| at >= section.start && at < section.end)
+            })
+            .map_or(at.max(0.), |section| section.start);
+        ctx.data_mut(|data| data.insert_temp(egui::Id::unique(("section-target", deck)), target));
+        self.select_deck_section(deck, target);
+    }
     pub(super) fn deck_sections(&mut self, ui: &mut egui::Ui, deck: usize) {
         let Some(track) = self.loaded_track(deck).cloned() else {
             return;
@@ -191,5 +210,35 @@ impl Player {
             .into(),
             Err(e) => e,
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn live_waveform_selects_section_start_without_editing_saved_cues() {
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        let mut track = amp_core::Track {
+            path: "missing.mp3".into(),
+            title: "Sections".into(),
+            preparation: Default::default(),
+        };
+        track.preparation.extensions.insert("energy_profile".into(), serde_json::json!({"version":1,"duration":20.,"step":1.,"curve":[],"sections":[{"id":"intro","name":"Intro","start":0.,"end":10.,"energy":0.3},{"id":"drop","name":"Drop","start":10.,"end":20.,"energy":0.9}]}));
+        player.loaded_snapshot[0] = Some(track);
+        player.mix_to_waveform_section(&ctx, 0, 16.);
+        assert_eq!(
+            ctx.data(|d| d.get_temp::<f64>(egui::Id::unique(("section-target", 0usize)))),
+            Some(10.)
+        );
+        assert_eq!(
+            player.loaded_snapshot[0]
+                .as_ref()
+                .unwrap()
+                .preparation
+                .cue_in,
+            0.
+        );
     }
 }

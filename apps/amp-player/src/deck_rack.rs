@@ -235,8 +235,7 @@ impl Player {
                 d,
             );
             if let Some(at) = self.waveforms[d].seek.take() {
-                let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
-                self.seek_deck_relative(d, at - position);
+                self.mix_to_waveform_section(ui.ctx(), d, at);
             }
         }
         if self.rack.overlay_waveforms {
@@ -252,7 +251,7 @@ impl Player {
                 egui::Sense::click(),
             );
             let response = response.on_hover_text(
-                "Click to seek live B; Shift-click to seek live A. Jog wheels remain independent.",
+                "Click to mix into a section on live B; Shift-click for live A. Paused decks prepare the section.",
             );
             if response.clicked()
                 && let Some(pointer) = response.interact_pointer_pos()
@@ -264,7 +263,8 @@ impl Player {
                 }];
                 let delta = ((pointer.x - rect.left()) / rect.width()) as f64 * self.wave_span
                     - self.wave_span * 0.3;
-                self.seek_deck_relative(d, delta);
+                let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
+                self.mix_to_waveform_section(ui.ctx(), d, position + delta);
             }
             for side in 0..2 {
                 let d = self.rack.live[side];
@@ -296,8 +296,7 @@ impl Player {
                     d,
                 );
                 if let Some(at) = self.waveforms[d].seek.take() {
-                    let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
-                    self.seek_deck_relative(d, at - position);
+                    self.mix_to_waveform_section(ui.ctx(), d, at);
                 }
             }
         }

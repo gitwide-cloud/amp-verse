@@ -11,3 +11,7 @@ The fix uses one clipped, transformed, layer-aware hit test for both highlightin
 Verification: real pointer-event tests cover all six physical decks, both main jog and strip surfaces, normal/reduced scales, single-consumer delivery, cursor feedback, and dragging from the actual Library through the DJ tab. Workspace tests and strict lint passed. Installed Windows verification passed for both B3 strip and the main jog panel; Linux native-window interaction is not tested here.
 
 Windows native verification: a DJ Library track was successfully dropped into B3 without starting playback. Fast native drags may deliver press, movement and release in one repaint; the source map now recovers those gestures from raw events.
+
+## Live section mixing (1.0.15 Preview)
+
+The large live waveforms now use the same section scheduler as the deck thumbnails. Click a section to blend into its beginning at the configured grid timing; a paused deck prepares that point. Overlay mode targets B, or A with Shift. Unanalyzed songs blend to the clicked time. Existing protected cue bounds and crossfade guards remain in effect. Section selection does not rewrite saved cues.

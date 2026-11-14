@@ -116,7 +116,7 @@ impl Player {
                     self.lab_open = pane == 3;
                 }
             }
-            ui.weak("1.0.14 Preview");
+            ui.weak("1.0.15 Preview");
             if ui
                 .button("Classic windows")
                 .on_hover_text("Return to the separate player and dockable windows")

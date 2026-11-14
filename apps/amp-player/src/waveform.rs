@@ -359,6 +359,43 @@ impl Lane {
                 Some((start + (at.x - rect.left()) as f64 / rect.width() as f64 * span).max(0.));
         }
         if let Some(t) = track {
+            if let Some(profile) = amp_core::energy_profile::read(&t.preparation) {
+                for (index, section) in profile.sections.iter().enumerate() {
+                    let left = time_x(section.start, camera, span, rect).max(rect.left());
+                    let right = time_x(section.end, camera, span, rect).min(rect.right());
+                    if right > left {
+                        let band = egui::Rect::from_min_max(
+                            egui::pos2(left, rect.top()),
+                            egui::pos2(right, rect.bottom()),
+                        );
+                        painter.rect_filled(
+                            band,
+                            0.,
+                            color.gamma_multiply(
+                                if position >= section.start && position < section.end {
+                                    0.18
+                                } else {
+                                    0.07
+                                },
+                            ),
+                        );
+                        painter.vline(
+                            left,
+                            rect.y_range(),
+                            Stroke::new(1., color.gamma_multiply(0.5)),
+                        );
+                        if right - left >= 28. {
+                            painter.text(
+                                egui::pos2(left + 3., rect.bottom()),
+                                egui::Align2::LEFT_BOTTOM,
+                                format!("{}", index + 1),
+                                egui::FontId::monospace(9.),
+                                color,
+                            );
+                        }
+                    }
+                }
+            }
             if let (Some(bpm), Some(offset)) = (
                 t.preparation.bpm.filter(|b| *b > 0.),
                 t.preparation.beat_offset,
