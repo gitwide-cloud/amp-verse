@@ -16,12 +16,12 @@ final class AppUpdate {
     static volatile boolean busy,cancelled;
     static volatile String status="Tap Update to download and install a newer release.";
     private static volatile HttpURLConnection active;
-    private static String hex(byte[] bytes){StringBuilder s=new StringBuilder();for(byte b:bytes)s.append(String.format(java.util.Locale.ROOT,"%02x",b));return s.toString();}
+    static String hex(byte[] bytes){StringBuilder s=new StringBuilder();for(byte b:bytes)s.append(String.format(java.util.Locale.ROOT,"%02x",b));return s.toString();}
     private static HttpURLConnection connection(String url)throws Exception {
         URL parsed=new URL(url);if(!parsed.getProtocol().equals("https"))throw new IOException("Update URL must use HTTPS");
         HttpURLConnection c=(HttpURLConnection)parsed.openConnection();c.setConnectTimeout(15000);c.setReadTimeout(5000);c.setRequestProperty("User-Agent","AMPVerse-Updater");c.setInstanceFollowRedirects(false);return c;
     }
-    private static InputStream open(String url)throws Exception {
+    static InputStream open(String url)throws Exception {
         for(int redirects=0;redirects<6;redirects++){
             if(cancelled)throw new IOException("Update cancelled");
             HttpURLConnection c=connection(url);active=c;int code=c.getResponseCode();
@@ -30,11 +30,12 @@ final class AppUpdate {
             return c.getInputStream();
         }throw new IOException("Too many download redirects");
     }
-    private static JSONObject json(String url)throws Exception {
+    static JSONObject json(String url)throws Exception {
         try(InputStream in=open(url);ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] b=new byte[8192];int n;while((n=in.read(b))!=-1){if(out.size()+n>1048576)throw new IOException("Update metadata too large");out.write(b,0,n);}return new JSONObject(out.toString("UTF-8"));}finally{if(active!=null)active.disconnect();}
     }
     static JSONObject androidPackage(JSONObject manifest)throws IOException {
-        JSONObject packages=manifest.optJSONObject("packages"),phone=packages==null?null:packages.optJSONObject("android-arm64");
+        JSONObject packages=manifest.optJSONObject("packages"),phone=packages==null?null:packages.optJSONObject("android-"+BuildConfig.EDITION+"-arm64");
+        if(phone==null&&packages!=null)phone=packages.optJSONObject("android-arm64");
         if(phone==null)throw new IOException("This release has no Android installer. Your app is unchanged; open GitHub Releases or try again after an Android update is published.");
         return phone;
     }

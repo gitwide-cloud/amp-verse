@@ -1,0 +1,28 @@
+AMP Lab Android URL import dependencies
+
+youtubedl-android 0.18.1, GPL-3.0
+https://github.com/yausername/youtubedl-android/tree/0.18.1
+Corresponding source and native dependency build scripts:
+https://github.com/yausername/youtubedl-android/archive/refs/tags/0.18.1.tar.gz
+
+This module packages the upstream Android Python/yt-dlp runtime and QuickJS.
+The application does not download arbitrary executable add-ons. Runtime
+updates are distributed in signed AMP Lab / AMP Verse Full APKs.
+
+yt-dlp and EJS:
+https://github.com/yt-dlp/yt-dlp
+https://github.com/yt-dlp/ejs
+JavaScript-runtime setup:
+https://github.com/yt-dlp/yt-dlp/wiki/EJS
+
+MP3 conversion uses the existing ffmpeg-kit-audio 8.1.9 dependency, whose
+licenses and corresponding-source information are included alongside this
+notice. The downloader wrapper's separate FFmpeg binary is not included.
+
+AMP Verse Full and AMP Lab binaries containing the GPL dependency are
+distributed under the GNU GPL version 3. Original source notices and the
+licenses of other components remain in force. AMP Verse Lite, DJ, Cast,
+Podcasts and Remote do not link this downloader dependency.
+
+The exact AMP source and build instructions accompany the matching public
+GitHub release at https://github.com/gitwide-cloud/amp-verse .

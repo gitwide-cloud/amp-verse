@@ -16,6 +16,9 @@ public final class PlaybackService extends MediaSessionService {
     private static PlaybackService instance;
     private DjEngine dj;
     private boolean djOwner;
+    static Player player(){return instance==null||instance.session==null?null:instance.session.getPlayer();}
+    static DjEngine existingDj(){return instance==null?null:instance.dj;}
+    static void pauseForLab(){if(instance!=null){instance.claimPlayer();if(instance.dj!=null)instance.dj.pauseForPlayer();if(instance.session!=null)instance.session.getPlayer().pause();}}
     private Runnable radioRetry;
     private int radioAttempts;
     private final android.os.Handler handler=new android.os.Handler(android.os.Looper.getMainLooper());
@@ -34,7 +37,7 @@ public final class PlaybackService extends MediaSessionService {
     private final Runnable fades=new Runnable(){public void run(){
         if(session!=null&&!djOwner){Player p=session.getPlayer();long duration=p.getDuration(),at=p.getCurrentPosition();
             androidx.media3.common.MediaItem item=p.getCurrentMediaItem();
-            boolean radio=item!=null&&item.mediaId.equals("amp-radio");
+            boolean radio=item!=null&&(item.mediaId.equals("amp-radio")||item.mediaId.startsWith("amp-podcast:"));
             float seconds=Math.max(1,getSharedPreferences("dj",MODE_PRIVATE).getInt("fade-seconds",3));
             float envelope=radio||duration<=0?1f:Math.min(Math.min(1f,at/(seconds*1000)),Math.max(0f,(duration-at)/(seconds*1000)));
             AudioDsp.playerEnvelope=envelope;
@@ -97,7 +100,10 @@ public final class PlaybackService extends MediaSessionService {
         };
         return renderers;
     }
-    @Override public MediaSession onGetSession(MediaSession.ControllerInfo info) { return session; }
+    @Override public MediaSession onGetSession(MediaSession.ControllerInfo info) {
+        if(!info.isTrusted()&&getPackageManager().checkSignatures(info.getUid(),android.os.Process.myUid())!=android.content.pm.PackageManager.SIGNATURE_MATCH)return null;
+        return session;
+    }
     @Override public void onDestroy() {
         handler.removeCallbacks(fades);cancelRadioRetry();
         instance=null;

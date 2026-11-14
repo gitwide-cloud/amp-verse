@@ -7,13 +7,23 @@ android {
         applicationId 'cloud.gitwide.ampverse'
         minSdk 28
         targetSdk 35
-        versionCode 33
-        versionName '0.2.13'
+        versionCode 35
+        versionName '0.3.1'
         ndk { abiFilters 'arm64-v8a' }
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
     buildFeatures { buildConfig true }
+    flavorDimensions 'edition'
+    productFlavors {
+        lite { dimension 'edition'; buildConfigField 'String', 'EDITION', '"lite"' }
+        full { dimension 'edition'; buildConfigField 'String', 'EDITION', '"full"' }
+    }
+    sourceSets.full.java.srcDirs += ['../features/dj/java','../features/remote/java','../features/cast/java','../features/lab/java','../features/podcasts/java']
+    sourceSets.full.assets.srcDir('../features/lab/assets')
+    sourceSets.full.res.srcDir('../features/lab/res')
+    packaging { jniLibs { useLegacyPackaging = true } }
+
     // Stable releases must use the existing installation's signing identity.
     // Keys live outside the repository; never publish an ephemeral CI debug key.
     signingConfigs {
@@ -29,10 +39,12 @@ android {
     buildTypes { release { signingConfig signingConfigs.published } }
 }
 dependencies {
+    testImplementation 'junit:junit:4.13.2'
     implementation 'com.squareup.okhttp3:okhttp:4.12.0'
-    implementation 'com.google.android.gms:play-services-cast-framework:22.3.0'
+    fullImplementation 'com.google.android.gms:play-services-cast-framework:22.3.0'
     implementation 'androidx.appcompat:appcompat:1.7.1'
-    implementation 'dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.9'
+    fullImplementation 'dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.9'
+    fullImplementation 'io.github.junkfood02.youtubedl-android:library:0.18.1'
     implementation 'androidx.media3:media3-exoplayer:1.8.1'
     implementation 'androidx.media3:media3-session:1.8.1'
     androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.3.0'

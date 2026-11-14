@@ -23,6 +23,7 @@ final class RetroLayout {
             item.setOnClickListener(v->{if(which==0)a.pick();else if(which==1){a.gainDb=0;a.fadeIn=0;a.fadeOut=0;a.normalize.setChecked(false);a.refresh();}
                 else if(which==2)a.licenses("licenses");else about(a);});
         }a.add(a.root,menu);
+        a.urlSection();
         LinearLayout display=a.column();display.setPadding(a.dp(10),a.dp(5),a.dp(10),a.dp(5));display.setBackgroundColor(Retro.INK);
         a.clock=a.label("0:00.000 / 0:00.000",23,Retro.LED);a.clock.setTypeface(Typeface.MONOSPACE);
         a.filename=a.label("NO TRACK LOADED",18,Retro.LED);a.add(display,a.clock);a.add(display,a.filename);
@@ -57,6 +58,7 @@ final class RetroLayout {
             nudge.setOnClickListener(v->a.waveformView.nudge(direction*.001));}
         a.add(waveBox,precision);a.zoomLabel=a.label("1×",12,Retro.BLUE);a.add(waveBox,a.zoomLabel);
         a.add(waveBox,a.label("Pinch or +/− to zoom; drag to pan. Seek: tap to hear. IN/OUT: tap to trim.",12,0xffb0bac5));a.add(a.root,waveBox);
+        a.timelineSection();
         LinearLayout clip=a.column();a.clipLabel=a.label("Start 0:00   End 0:00",16,Color.WHITE);a.clipLabel.setTypeface(Typeface.MONOSPACE);a.clipLabel.setBackgroundColor(Retro.INK);a.add(clip,a.clipLabel);
         a.clipLabel.setOnClickListener(v->new android.app.AlertDialog.Builder(a).setTitle("Trim time").setItems(new String[]{"Start","End"},(d,index)->{
             if(index==0)number(a,"Clip start",a.start,0,a.duration,x->{a.start=Math.min(x,a.end);a.refresh();});else number(a,"Clip end",a.end,a.start,a.duration,x->{a.end=x;a.refresh();});}).show());
@@ -79,7 +81,7 @@ final class RetroLayout {
         a.gainBar=a.seek(gains,667,p->{a.gainDb=-24+36.0*p/1000;a.refresh();});
         a.button(gains,"▥  Analyze peak",v->a.report(Double.isNaN(a.peakDb)?"Open audio to analyze peak":String.format(Locale.US,"Source peak: %.1f dBFS",a.peakDb)));a.addSection("Gain",gains);
         LinearLayout footer=a.column();footer.setPadding(a.dp(5),a.dp(6),a.dp(5),a.dp(6));footer.setBackground(Retro.plate(false));
-        a.button(footer,"♫  Export MP3…   |   256 kbps",v->a.save());a.status=a.label("Ready. Open an audio file.",14,0xffeeeeed);a.add(footer,a.status);a.add(a.root,footer);
+        a.button(footer,"♫  Export MP3…   |   256 kbps",v->a.save());a.button(footer,"Send clip to sampler…",v->SamplerExport.choose(a));a.status=a.label("Ready. Open an audio file.",14,0xffeeeeed);a.add(footer,a.status);a.add(a.root,footer);
         a.setContentView(scroll);a.refresh();
     }
     static void about(MainActivity a){

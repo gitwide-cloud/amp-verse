@@ -1,0 +1,2 @@
+ext.ampModule = 'lab'
+apply from: '../../companion.gradle'

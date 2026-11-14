@@ -189,7 +189,7 @@ jobs:
           targets: aarch64-linux-android
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
+          gradle-version: '8.11.1'
       - name: Build with the persistent Android signing identity
         env:
           KEYSTORE_BASE64: ${{ secrets.AMP_ANDROID_KEYSTORE_BASE64 }}
@@ -201,9 +201,9 @@ jobs:
           test -n "$KEYSTORE_BASE64" || { echo 'Configure the persistent AMP Android signing secrets before publishing an update.'; exit 1; }
           printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$AMP_ANDROID_KEYSTORE"
           trap 'rm -f "$AMP_ANDROID_KEYSTORE"' EXIT
-          gradle -p android :app:assembleRelease :app:lintRelease
-          python tools/package_downloads.py android --source android/app/build/outputs/apk/release --destination android-dist
-          python -c 'import json,pathlib; m=json.loads(pathlib.Path("android/app/build/outputs/apk/release/output-metadata.json").read_text()); pathlib.Path("android-dist/version-code.txt").write_text(str(m["elements"][0]["versionCode"]))'
+          gradle -p android :app:assembleLiteRelease :app:assembleFullRelease :app:testFullReleaseUnitTest :app:lintFullRelease :app:lintLiteRelease :amp-dj:assembleRelease :amp-dj:lintRelease :amp-lab:assembleRelease :amp-lab:lintRelease :amp-cast:assembleRelease :amp-cast:lintRelease :amp-podcasts:assembleRelease :amp-podcasts:lintRelease :amp-remote:assembleRelease :amp-remote:lintRelease
+          python tools/package_android_modules.py --variant release --release-tag "$GITHUB_REF_NAME" --destination android-dist
+          python -c 'import json,pathlib; m=json.loads(pathlib.Path("android/app/build/outputs/apk/full/release/output-metadata.json").read_text()); pathlib.Path("android-dist/version-code.txt").write_text(str(m["elements"][0]["versionCode"]))'
       - uses: actions/upload-artifact@v4
         with:
           name: android-published
@@ -240,7 +240,7 @@ jobs:
           name: android-published
           path: packages
       - name: Generate verified cross-platform update manifest
-        run: python tools/update_manifest.py --version "${GITHUB_REF_NAME#v}" --directory packages --apk "$(find packages -maxdepth 1 -name '*.apk' -print -quit)" --version-code "$(cat packages/version-code.txt)"
+        run: python tools/update_manifest.py --version "${GITHUB_REF_NAME#v}" --directory packages --apk "$(find packages -maxdepth 1 -name 'amp-verse-full-*.apk' -print -quit)" --version-code "$(cat packages/version-code.txt)"
       - name: Package optional AMP Podcasts
         run: python tools/package_podcasts.py --version "${GITHUB_REF_NAME#v}" --destination packages
       - uses: softprops/action-gh-release@v2

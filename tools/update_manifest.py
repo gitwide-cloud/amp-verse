@@ -19,6 +19,15 @@ def generate(directory, version, apk=None, version_code=None):
         if apk.parent.resolve() != directory.resolve() or apk.suffix != ".apk" or not version_code or version_code < 1:
             raise ValueError("APK must be a signed release asset in the package directory with a version code")
         packages["android-arm64"] = {**describe(apk), "version_code": version_code}
+    editions = directory / "android-packages.json"
+    if editions.is_file():
+        android = json.loads(editions.read_text(encoding="utf-8"))
+        for key in ("android-full-arm64", "android-lite-arm64"):
+            entry = android["packages"][key]
+            path = directory / entry["name"]
+            if path.parent.resolve() != directory.resolve() or not path.is_file() or describe(path) != {field: entry[field] for field in ("name", "sha256", "size")}:
+                raise ValueError("Android edition artifact failed verification")
+            packages[key] = {**describe(path), "version_code": entry["version_code"]}
     result = {"schema": 1, "version": version, "packages": packages}
     (directory / "amp-update.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     return result

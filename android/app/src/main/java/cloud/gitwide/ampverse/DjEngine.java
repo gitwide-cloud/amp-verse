@@ -157,10 +157,14 @@ final class DjEngine {
     void cueVolume(int side,float volume){decks[side+2].setVolume(volume);prefs.edit().putFloat("cue-volume-"+side,volume).apply();}
     void sampleVolume(int side,float volume){samplerVolume[side]=volume;prefs.edit().putFloat("sample-volume-"+side,volume).apply();for(int stream:streams[side])if(stream!=0)pool.setVolume(stream,volume,volume);}
     void assign(int side,int pad,String path,String name){
-        stopPad(side,pad);int old=sampleIds[side][pad];if(old!=0){pool.unload(old);ready.remove(old);}
-        samples[side][pad]=path;names[side][pad]=name;sampleIds[side][pad]=pool.load(path,1);
-        prefs.edit().putString("sample-"+side+"-"+pad,path).putString("name-"+side+"-"+pad,name).apply();message="Effect assigned. Tap its pad to play.";
+        assign(side,pad,path,name,loops[side][pad]);
     }
+    void assign(int side,int pad,String path,String name,boolean loop){
+        SamplerStore.save(prefs,side,pad,path,name,loop);
+        stopPad(side,pad);int old=sampleIds[side][pad];if(old!=0){pool.unload(old);ready.remove(old);}
+        samples[side][pad]=path;names[side][pad]=name;loops[side][pad]=loop;sampleIds[side][pad]=pool.load(path,1);message="Effect assigned. Tap its pad to play.";
+    }
+    void rename(int side,int pad,String name){SamplerStore.save(prefs,side,pad,samples[side][pad],name,loops[side][pad]);names[side][pad]=name;}
     void trigger(int side,int pad){int id=sampleIds[side][pad];if(!ready.contains(id)){message="Load a short effect first, or wait for decoding.";return;}PlaybackService.claimDj();stopPad(side,pad);streams[side][pad]=pool.play(id,samplerVolume[side],samplerVolume[side],1,loops[side][pad]?-1:0,1);}
     boolean playerRepeats(){return autoRules.optBoolean("smart")&&!autoRules.optString("fallback","relax_recent").equals("stop");}
     long playerPosition(){return decks[fader<.5?0:1].getCurrentPosition();}
@@ -173,8 +177,8 @@ final class DjEngine {
     }
     void pauseForPlayer(){auto(false);for(ExoPlayer deck:decks)deck.pause();for(int side=0;side<2;side++)for(int pad=0;pad<9;pad++)stopPad(side,pad);}
     void stopPad(int side,int pad){if(streams[side][pad]!=0)pool.stop(streams[side][pad]);streams[side][pad]=0;}
-    void clearPad(int side,int pad){stopPad(side,pad);pool.unload(sampleIds[side][pad]);ready.remove(sampleIds[side][pad]);sampleIds[side][pad]=0;samples[side][pad]="";names[side][pad]="PAD "+(pad+1);prefs.edit().remove("sample-"+side+"-"+pad).remove("name-"+side+"-"+pad).apply();}
-    void loop(int side,int pad,boolean value){loops[side][pad]=value;prefs.edit().putBoolean("loop-"+side+"-"+pad,value).apply();if(streams[side][pad]!=0)pool.setLoop(streams[side][pad],value?-1:0);}
+    void clearPad(int side,int pad){SamplerStore.clear(prefs,side,pad);stopPad(side,pad);pool.unload(sampleIds[side][pad]);ready.remove(sampleIds[side][pad]);sampleIds[side][pad]=0;samples[side][pad]="";names[side][pad]="PAD "+(pad+1);}
+    void loop(int side,int pad,boolean value){SamplerStore.save(prefs,side,pad,samples[side][pad],names[side][pad],value);loops[side][pad]=value;if(streams[side][pad]!=0)pool.setLoop(streams[side][pad],value?-1:0);}
     void pauseAll(){auto=false;handler.removeCallbacks(autoTick);cancelMix();for(ExoPlayer deck:decks)deck.pause();for(int s=0;s<2;s++)for(int p=0;p<9;p++)stopPad(s,p);}
     void checkpoint(){SharedPreferences.Editor edit=prefs.edit();for(int i=0;i<4;i++){MediaItem item=decks[i].getCurrentMediaItem();if(item!=null&&item.localConfiguration!=null)edit.putString("prepared-uri-"+i,item.localConfiguration.uri.toString()).putString("prepared-title-"+i,String.valueOf(item.mediaMetadata.title)).putString("prepared-id-"+i,item.mediaId).putLong("prepared-position-"+i,decks[i].getCurrentPosition()).putString("prepared-metadata-"+i,preparation(item).toString());else edit.remove("prepared-uri-"+i).remove("prepared-title-"+i).remove("prepared-id-"+i).remove("prepared-position-"+i);}edit.apply();}
     void close(PlaybackService service){closed=true;pauseAll();checkpoint();manager.abandonAudioFocusRequest(focus);for(MediaSession session:sessions){service.removeSession(session);session.release();}for(ExoPlayer deck:decks)deck.release();pool.release();}

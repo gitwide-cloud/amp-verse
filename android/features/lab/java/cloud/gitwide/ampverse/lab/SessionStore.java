@@ -18,6 +18,7 @@ final class SessionStore {
         JSONObject s=new JSONObject();s.put("version",1);s.put("file",a.input.getName());s.put("name",a.name);s.put("duration",a.duration);
         s.put("start",a.start);s.put("end",a.end);s.put("fadeIn",a.fadeIn);s.put("fadeOut",a.fadeOut);s.put("gain",a.gainDb);
         s.put("normalize",a.normalize.isChecked());s.put("edited",a.editedPreview);
+        s.put("lastExportedEdit",a.lastExportedEdit);
         s.put("zoom",a.waveformView.zoom);s.put("viewStart",a.waveformView.viewStart);s.put("targetStart",a.waveformView.targetStart);
         s.put("scrollY",a.editorScroll==null?0:a.editorScroll.getScrollY());return s;
     }
@@ -37,6 +38,7 @@ final class SessionStore {
             a.start=finite(s.optDouble("start",0),0);a.end=finite(s.optDouble("end",duration),duration);
             a.fadeIn=finite(s.optDouble("fadeIn",0),0);a.fadeOut=finite(s.optDouble("fadeOut",0),0);a.gainDb=finite(s.optDouble("gain",0),0);
             a.normalize.setChecked(s.optBoolean("normalize",false));a.editedPreview=s.optBoolean("edited",true);
+            a.lastExportedEdit=s.optString("lastExportedEdit","");
             a.filename.setText(a.name);a.refresh();a.waveformView.restoreViewport(s.optDouble("zoom",1),s.optDouble("viewStart",0),s.optBoolean("targetStart",true));
             a.refreshZoom();a.gainBar.setProgress((int)((a.gainDb+24)/36*1000));
             int scrollY=Math.max(0,s.optInt("scrollY",0));a.editorScroll.getViewTreeObserver().addOnGlobalLayoutListener(new android.view.ViewTreeObserver.OnGlobalLayoutListener(){

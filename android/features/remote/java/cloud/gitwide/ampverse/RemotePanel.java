@@ -43,6 +43,7 @@ final class RemotePanel extends LinearLayout {
         addView(button("Disconnect remote",this::disconnect));connectionOptions=UiSections.fold(this,colors,"Connection settings",connectionStart);status=label("Choose the desktop control server. Cast radio has its own screen.",14);addView(status);now=label("Not connected",18);addView(now);
         controls=new LinearLayout(a);controls.setOrientation(VERTICAL);addView(controls);controls.setVisibility(GONE);
         row(controls,button("A",()->{deck="a";status.setText("Selected deck A");}),button("B",()->{deck="b";status.setText("Selected deck B");}));
+        controls.addView(button("Choose desktop deck · A1–A3 / B1–B3",()->{String[] names={"Live A","Live B","A1","A2","A3","B1","B2","B3"},values={"a","b","a1","a2","a3","b1","b2","b3"};new AlertDialog.Builder(activity).setTitle("Desktop deck").setItems(names,(d,n)->{deck=values[n];status.setText("Selected "+names[n]+" · cue, seek and track loading target this deck");}).setNegativeButton("Close",null).show();}));
         row(controls,button("Play",()->command("play","deck","auto")),button("Pause",()->command("pause","deck","auto")),button("Stop",()->command("stop","deck","auto")));
         row(controls,button("Restart cue",()->command("restart_cue","deck",deck)),button("Preload next",()->command("preload_next")),button("Mix next",()->command("mix_next","immediate",true)));
         autoMix=new Switch(a);autoMix.setText("Auto Mix");autoMix.setTextColor(colors.text);Chrome.toggle(autoMix,colors);autoMix.setContentDescription("Auto Mix on uses the engine; off is manual");autoMix.setOnCheckedChangeListener((view,enabled)->{if(!updatingAutoMix)command("auto_dj","enabled",enabled);});controls.addView(autoMix);
@@ -71,7 +72,7 @@ final class RemotePanel extends LinearLayout {
     }
     private TextView label(String text,int size){TextView v=new TextView(activity);v.setText(text);v.setTextSize(size);v.setTextColor(colors.text);v.setPadding(6,10,6,10);return v;}
     private EditText field(String hint,boolean secret){EditText v=new EditText(activity);v.setSingleLine(true);v.setHint(hint);v.setTextColor(colors.text);v.setHintTextColor(colors.muted);v.setInputType(android.text.InputType.TYPE_CLASS_TEXT|(secret?android.text.InputType.TYPE_TEXT_VARIATION_PASSWORD:android.text.InputType.TYPE_TEXT_VARIATION_URI));addView(v);return v;}
-    private Button button(String text,Runnable action){Button b=new Button(activity);b.setText(text);b.setAllCaps(false);b.setMinWidth(0);b.setMinimumWidth(0);b.setTextSize(13);b.setMinHeight((int)(48*getResources().getDisplayMetrics().density));b.setPadding(4,8,4,8);b.setTextColor(text.equals("A")||text.endsWith("→ A")?DjEngine.AMBER:text.equals("B")||text.endsWith("→ B")?DjEngine.CYAN:Chrome.ink(colors,false));b.setBackground(Chrome.button(colors,false));b.setOnClickListener(v->action.run());return b;}
+    private Button button(String text,Runnable action){Button b=new Button(activity);b.setText(text);b.setAllCaps(false);b.setMinWidth(0);b.setMinimumWidth(0);b.setTextSize(13);b.setMinHeight((int)(48*getResources().getDisplayMetrics().density));b.setPadding(4,8,4,8);b.setTextColor(text.equals("A")||text.endsWith("→ A")?0xffffbf24:text.equals("B")||text.endsWith("→ B")?0xff22d4ed:Chrome.ink(colors,false));b.setBackground(Chrome.button(colors,false));b.setOnClickListener(v->action.run());return b;}
     private void row(LinearLayout target,Button...buttons){LinearLayout row=new LinearLayout(activity);for(Button b:buttons)row.addView(b,new LayoutParams(0,(int)(50*getResources().getDisplayMetrics().density),1));target.addView(row);}
     private interface Work {JSONObject run()throws Exception;}
     private void submit(Work work,java.util.function.Consumer<JSONObject> done){submit(work,done,error->status.setText("Desktop: "+describe(error)));}
@@ -108,7 +109,7 @@ final class RemotePanel extends LinearLayout {
                     nearbyDevices.addView(button(host.name+" · Cast station\n"+host.url.replace("http://",""),()->{
                         if(closed)return;
                         activity.getSharedPreferences("settings",0).edit().putString("cast-server",host.url).apply();
-                        activity.startActivity(new android.content.Intent(activity,MainActivity.class).putExtra("module","AMP Cast").addFlags(android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP));
+                        activity.startActivity(new android.content.Intent().setClassName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.MainActivity").putExtra("module","AMP Cast").addFlags(android.content.Intent.FLAG_ACTIVITY_SINGLE_TOP));
                     }));discoveryFound++;
                 }
                 discoveryFinished(scan,false);

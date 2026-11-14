@@ -1,0 +1,2 @@
+ext.ampModule = 'cast'
+apply from: '../../companion.gradle'

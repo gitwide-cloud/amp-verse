@@ -28,7 +28,7 @@ public class DjDeviceTest {
         MediaItem alpha=LibraryStore.item(a,"DJ test Alpha"),beta=LibraryStore.item(b,"DJ test Beta");
         DjEngine[] dj=new DjEngine[1];MediaItem[] prior=new MediaItem[4];long[] positions=new long[4];boolean[] playing=new boolean[4];float[] volumes=new float[4];boolean[] modes=new boolean[2],collapsed=new boolean[2];float[] fader={0},master={.75f};
         UiDevice device=UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());device.wakeUp();device.executeShellCommand("wm dismiss-keyguard");
-        Intent intent=new Intent(context(),MainActivity.class).putExtra("module","AMP DJ").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        Intent intent=new Intent(context(),MainActivity.class).putExtra("module","AMP DJ").putExtra("phone-ui",true).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(intent)){
             scenario.onActivity(activity->{activity.getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);activity.setShowWhenLocked(true);activity.setTurnScreenOn(true);});
             waitFor(()->{main(()->dj[0]=PlaybackService.dj());return dj[0]!=null;});

@@ -26,16 +26,15 @@ jobs:
           targets: aarch64-linux-android
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
-      - run: gradle -p android :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
-      - name: Name APK downloads with embedded version
-        id: package
-        run: python tools/package_downloads.py android --source android/app/build/outputs/apk/debug --destination android-dist >> "$GITHUB_OUTPUT"
+          gradle-version: '8.11.1'
+      - run: gradle -p android :app:assembleLiteDebug :app:assembleFullDebug :app:assembleFullDebugAndroidTest :app:testFullDebugUnitTest :app:lintFullDebug :app:lintLiteDebug :amp-dj:assembleDebug :amp-dj:lintDebug :amp-lab:assembleDebug :amp-lab:lintDebug :amp-cast:assembleDebug :amp-cast:lintDebug :amp-podcasts:assembleDebug :amp-podcasts:lintDebug :amp-remote:assembleDebug :amp-remote:lintDebug
+      - name: Package verified editions and signed companion APKs
+        run: python tools/package_android_modules.py --variant debug --release-tag "android-preview-${{ github.sha }}" --destination android-dist
       - uses: actions/upload-artifact@v4
         with:
-          name: amp-verse-android-v${{ steps.package.outputs.version }}-${{ github.run_number }}
+          name: amp-verse-android-modules-${{ github.run_number }}
           path: |
-            android-dist/*.apk
+            android-dist/
             third-party/mp3-lab/android-third-party-sources.zip
             third-party/mp3-lab/LICENSE
             third-party/mp3-lab/THIRD_PARTY_NOTICES.md

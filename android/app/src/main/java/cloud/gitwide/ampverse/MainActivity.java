@@ -51,6 +51,7 @@ public final class MainActivity extends Activity {
     private String libraryFacet="",libraryValue="";
     private boolean library, dragging, importing;
     private String module = "AMP Player";
+    private PodcastsPanel podcastsPanel;
     private Appearance appearance;
     private int queueLimit=100;
     private String musicQuery="";
@@ -60,13 +61,15 @@ public final class MainActivity extends Activity {
     private final Runnable tick = new Runnable() { public void run() { refresh(); handler.postDelayed(this, 500); } };
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
+        if(TvActivity.television(this)&&!getIntent().getBooleanExtra("phone-ui",false)){startActivity(new Intent(this,TvActivity.class).putExtra("module",getIntent().getStringExtra("module")));finish();return;}
         try{CatalogStore.migrate(this);}catch(Exception error){message=error.getMessage();}
         prefs = getSharedPreferences("settings", MODE_PRIVATE);
         if (state != null) { module=state.getString("module","AMP Player"); library=module.equals("AMP Library");libraryTab=state.getString("libraryTab","Songs");effectSide=state.getInt("effectSide",0);effectPad=state.getInt("effectPad",0); }
         if(state==null&&getIntent().hasExtra("module")){module=getIntent().getStringExtra("module");library=module.equals("AMP Library");}
         if(module.equals("AMP Cast")||module.equals("AMP Remote"))deviceMode=module;
         if(state!=null){Bundle positions=state.getBundle("scroll-positions");if(positions!=null)for(String key:positions.keySet())scrollPositions.put(key,positions.getInt(key));}
-        draw();
+        boolean openLab=module.equals("AMP Lab")&&Modules.embedded("lab");if(openLab)module="AMP Player";
+        draw();if(openLab)handler.post(()->selectModule("AMP Lab"));
     }
     @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);if(intent.hasExtra("module"))selectModule(intent.getStringExtra("module"));}
     @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state);saveScroll();Bundle positions=new Bundle();for(Map.Entry<String,Integer> value:scrollPositions.entrySet())positions.putInt(value.getKey(),value.getValue());state.putBundle("scroll-positions",positions); state.putString("module", module);state.putString("libraryTab",libraryTab);state.putInt("effectSide",effectSide);state.putInt("effectPad",effectPad); }
@@ -90,6 +93,7 @@ public final class MainActivity extends Activity {
     }
     @Override public void onStop() {
         if(djPanel!=null)djPanel.engine.checkpoint();
+        if(podcastsPanel!=null){podcastsPanel.close();podcastsPanel=null;}
         if(castPanel!=null){castPanel.close();castPanel=null;}
         if(remotePanel!=null){remotePanel.close();remotePanel=null;}
         handler.removeCallbacks(tick);
@@ -111,12 +115,14 @@ public final class MainActivity extends Activity {
         view.setTextColor(Chrome.ink(appearance,false));view.setBackgroundTintList(null);view.setBackground(Chrome.button(appearance,false));view.setOnClickListener(v->action.run());return view;
     }
     private void rowButton(LinearLayout row,String caption,Runnable action) { LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,dp(50),1);params.setMargins(dp(1),dp(2),dp(1),dp(2));row.addView(button(caption,action),params); }
-    private void selectModule(String name) { View focus=getCurrentFocus();if(focus!=null)((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(focus.getWindowToken(),0);if(name.equals("AMP Player"))PlaybackService.switchToPlayer();if(name.equals("AMP Lab")){if(player!=null)player.pause();startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;if(name.equals("AMP Cast")||name.equals("AMP Remote"))deviceMode=name;library=name.equals("AMP Library");draw(); }
+    private void selectModule(String name) { String feature=Modules.moduleId(name);if(feature!=null&&!Modules.embedded(feature)){Modules.open(this,feature);return;} View focus=getCurrentFocus();if(focus!=null)((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(focus.getWindowToken(),0);if(name.equals("AMP Player"))PlaybackService.switchToPlayer();if(name.equals("AMP Lab")){startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;if(name.equals("AMP Cast")||name.equals("AMP Remote"))deviceMode=name;library=name.equals("AMP Library");draw(); }
     private void openSettings(){startActivity(new Intent(this,SettingsActivity.class));}
     private void saveScroll(){if(moduleScroll!=null)scrollPositions.put(renderedKey,moduleScroll.getScrollY());if(queueScroll!=null)scrollPositions.put("player-queue",queueScroll.getScrollY());}
     private void draw() {
+        String feature=Modules.moduleId(module);if(feature!=null&&!Modules.embedded(feature)){Modules.open(this,feature);module="AMP Player";library=false;}
         saveScroll();moduleScroll=null;queueScroll=null;renderedKey=module+":"+libraryTab;
         djPanel=null;
+        if(podcastsPanel!=null){podcastsPanel.close();podcastsPanel=null;}
         if(remotePanel!=null){remotePanel.close();remotePanel=null;}
         if(castPanel!=null){castPanel.close();castPanel=null;}
         appearance=new Appearance(this);bg=appearance.background;panel=appearance.surface;text=appearance.text;muted=appearance.muted;accent=appearance.accent;
@@ -155,6 +161,7 @@ public final class MainActivity extends Activity {
                 public void playlist(java.util.List<MediaItem> items){if(player==null||items.isEmpty()){message="No offline songs available.";return;}player.setMediaItems(items);player.setRepeatMode(Player.REPEAT_MODE_OFF);player.prepare();player.play();message="Playing offline station playlist";refresh();}
                 public void stopListening(){if(player!=null&&isRadio()){player.stop();message="Phone listening stopped. Server station remains independent.";refresh();}}
             });page.addView(castPanel);
+        }else if(module.equals("AMP Podcasts")){podcastsPanel=new PodcastsPanel(this,appearance);page.addView(podcastsPanel);
         }else{
             LinearLayout info=card();
             String detail=module.equals("AMP Remote")?"Connect to the desktop library, browse songs or playlists, listen on this phone, then Save offline for Cast. This Remote workflow is not implemented in this preview yet.":module.equals("AMP Lab")?"AMP Lab uses the existing MP3 Lab editor foundation on desktop. Android audio editing and preparation tools are not implemented yet.":"Choose AMP Cast from the module dropdown to connect to a running radio station.";
@@ -162,7 +169,8 @@ public final class MainActivity extends Activity {
         }
         status=label(message,12,muted);if(module.equals("AMP Player")&&page.getOrientation()==LinearLayout.HORIZONTAL)root.addView(status,root.getChildCount()-1);else page.addView(status);refresh();
     }
-    private void showModules(){new android.app.AlertDialog.Builder(this).setTitle("AMP Verse").setItems(new String[]{"AMP Lab · edit audio","Settings & updates","About this player"},(d,n)->{if(n==0)selectModule("AMP Lab");else if(n==1)openSettings();else new android.app.AlertDialog.Builder(this).setTitle("AMP Verse "+BuildConfig.VERSION_NAME).setMessage("Your music manager with a smart DJ built in. Player and DJ share phone playback. Remote controls another computer; Cast connects station audio to a listening device.").setPositiveButton("Done",null).show();}).setNegativeButton("Close",null).show();}
+    private void showModules(){String[] choices={"AMP Player","AMP Library","AMP DJ","AMP Lab","AMP Cast","AMP Podcasts","AMP Remote","Add-ons","Settings & updates"};new android.app.AlertDialog.Builder(this).setTitle("AMP Verse · "+BuildConfig.EDITION).setItems(choices,(d,n)->{if(n==7)Modules.show(this);else if(n==8)openSettings();else selectModule(choices[n]);}).setNegativeButton("Close",null).show();}
+    @Override protected void onResume(){super.onResume();Modules.installPending(this);}
     private void audioOptions(){new android.app.AlertDialog.Builder(this).setTitle("Audio & devices").setMessage("Phone playback follows Android’s selected audio output. Casting station audio and controlling a computer are separate actions.").setItems(new String[]{"Bluetooth / phone audio settings","Listen & Cast · stations and speakers","Remote Control · another computer"},(d,n)->{if(n==0)startActivity(new Intent(android.provider.Settings.ACTION_BLUETOOTH_SETTINGS));else selectModule(n==1?"AMP Cast":"AMP Remote");}).setNegativeButton("Close",null).show();}
     private void navigation(){LinearLayout navigation=new LinearLayout(this);navigation.setPadding(0,dp(4),0,dp(2));String[] names={"Player","Library","DJ","Devices"};for(String name:names){String destination=name.equals("Devices")?deviceMode:"AMP "+name;boolean selected=name.equals("Devices")?(module.equals("AMP Cast")||module.equals("AMP Remote")):module.equals(destination);Button tab=button(name,()->selectModule(destination));tab.setTextSize(12);tab.setSelected(selected);tab.setTextColor(Chrome.ink(appearance,selected));tab.setBackground(Chrome.button(appearance,selected));tab.setContentDescription("Open "+name);tab.setTag("nav-"+name.toLowerCase(Locale.ROOT));boolean shortWindow=getResources().getConfiguration().screenHeightDp<520;NavIcon icon=new NavIcon(this,name,selected?Color.BLACK:text);tab.setCompoundDrawablesWithIntrinsicBounds(shortWindow?icon:null,shortWindow?null:icon,null,null);tab.setCompoundDrawablePadding(dp(4));tab.setMinHeight(dp(shortWindow?48:62));LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,-2,1);params.setMargins(dp(2),0,dp(2),0);navigation.addView(tab,params);}root.addView(navigation);}
     private void playerOptions(){boolean shuffle=player!=null&&player.getShuffleModeEnabled(),repeat=player!=null&&player.getRepeatMode()==Player.REPEAT_MODE_ALL;new android.app.AlertDialog.Builder(this).setTitle("Player options").setItems(new String[]{"Add music","Shuffle · "+(shuffle?"On":"Off"),"Repeat queue · "+(repeat?"On":"Off"),"Open stream URL"},(d,n)->{if(n==0)addMusic();else if(n==3)radio();else if(player!=null){if(n==1){player.setShuffleModeEnabled(!shuffle);prefs.edit().putBoolean("shuffle",!shuffle).apply();}else{player.setRepeatMode(repeat?Player.REPEAT_MODE_OFF:Player.REPEAT_MODE_ALL);prefs.edit().putBoolean("repeat",!repeat).apply();}refresh();}}).setNegativeButton("Close",null).show();}

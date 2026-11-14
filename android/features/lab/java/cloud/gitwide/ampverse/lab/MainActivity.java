@@ -26,7 +26,7 @@ public class MainActivity extends Activity {
     static final int PICK=10, SAVE=11;
     Button moduleMenu(){
         Button brand=new Button(this);brand.setText("ϟ AMP VERSE ▾ · AMP Lab");Retro.button(brand);brand.setContentDescription("AMP Verse module dropdown");
-        brand.setOnClickListener(v->{PopupMenu menu=new PopupMenu(this,brand);for(String name:new String[]{"AMP Player","AMP Library","AMP DJ","AMP Remote","AMP Lab","AMP Cast","Settings"})menu.getMenu().add(name);menu.setOnMenuItemClickListener(item->{String name=item.getTitle().toString();if(name.equals("AMP Lab"))return true;if(name.equals("Settings"))startActivity(new Intent(this,cloud.gitwide.ampverse.SettingsActivity.class));else{startActivity(new Intent(this,cloud.gitwide.ampverse.MainActivity.class).addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_SINGLE_TOP).putExtra("module",name));finish();}return true;});menu.show();});return brand;
+        brand.setOnClickListener(v->{PopupMenu menu=new PopupMenu(this,brand);for(String name:new String[]{"AMP Player","AMP Library","AMP DJ","AMP Remote","AMP Lab","AMP Cast","Settings"})menu.getMenu().add(name);menu.setOnMenuItemClickListener(item->{String name=item.getTitle().toString();if(name.equals("AMP Lab"))return true;if(name.equals("Settings"))startActivity(new Intent().setClassName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.SettingsActivity"));else{startActivity(new Intent().setClassName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.MainActivity").addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP|Intent.FLAG_ACTIVITY_SINGLE_TOP).putExtra("module",name));finish();}return true;});menu.show();});return brand;
     }
     static final int BG=0xff1d2027, PANEL=0xff303640, LED=0xff90f569;
     final Handler handler=new Handler(Looper.getMainLooper());
@@ -39,6 +39,64 @@ public class MainActivity extends Activity {
     double duration=0,start=0,end=0,fadeIn=0,fadeOut=0,gainDb=0;
     MediaPlayer player;
     volatile boolean busy;
+    volatile boolean foreground;
+    private android.media.AudioManager focusManager;
+    private android.media.AudioFocusRequest previewFocus;
+    private Uri completedDownload;
+    private final Runnable openCompletedDownload=new Runnable(){public void run(){if(isDestroyed()||!foreground||completedDownload==null)return;if(busy){handler.postDelayed(this,150);return;}Uri source=completedDownload;completedDownload=null;openSource(source);}};
+    boolean focusPreview(){if(!foreground)return false;if(focusManager==null)focusManager=(android.media.AudioManager)getSystemService(AUDIO_SERVICE);if(previewFocus==null)previewFocus=new android.media.AudioFocusRequest.Builder(android.media.AudioManager.AUDIOFOCUS_GAIN_TRANSIENT).setAudioAttributes(new android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA).setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC).build()).setOnAudioFocusChangeListener(change->{if(change<0)stop();},handler).build();return focusManager.requestAudioFocus(previewFocus)==android.media.AudioManager.AUDIOFOCUS_REQUEST_GRANTED;}
+    void releasePreviewFocus(){if(focusManager!=null&&previewFocus!=null)focusManager.abandonAudioFocusRequest(previewFocus);}
+    UrlDownload urlDownload;
+    TextView urlStatus;
+    Button downloadButton, cancelDownload, openDownload;
+    File downloadedSource;
+    MobileTimeline timeline;
+    void timelineSection(){if(timeline==null)timeline=new MobileTimeline(this);timeline.attach();}
+    String lastExportedEdit="";
+    Uri pendingSource;
+    String editSignature(){return input==null?"":input.getName()+"|"+start+"|"+end+"|"+fadeIn+"|"+fadeOut+"|"+gainDb+"|"+(normalize!=null&&normalize.isChecked());}
+    boolean hasEdits(){return input!=null&&(start>.001||Math.abs(end-duration)>.001||fadeIn>0||fadeOut>0||Math.abs(gainDb)>.001||(normalize!=null&&normalize.isChecked()))&&!editSignature().equals(lastExportedEdit);}
+    void openSource(Uri uri){
+        if(busy||urlDownload!=null)return;
+        if(hasEdits())new android.app.AlertDialog.Builder(this).setTitle("Keep your current edit?")
+            .setMessage("Export it before opening another source. The downloaded original will stay in AMP Lab downloads.")
+            .setPositiveButton("Export edit",(d,w)->{pendingSource=uri;save();})
+            .setNeutralButton("Discard edits and open",(d,w)->{pendingSource=null;load(uri);}).setNegativeButton("Keep editing",(d,w)->pendingSource=null).show();
+        else load(uri);
+    }
+    void urlSection(){
+        LinearLayout form=column();EditText url=new EditText(this);url.setSingleLine(true);url.setHint("Paste a YouTube video URL");url.setInputType(android.text.InputType.TYPE_CLASS_TEXT|android.text.InputType.TYPE_TEXT_VARIATION_URI);url.setTextColor(Retro.appearance.text);url.setHintTextColor(Retro.appearance.muted);url.setContentDescription("YouTube video URL");add(form,url);
+        LinearLayout urlActions=new LinearLayout(this);Button paste=new Button(this),inspect=new Button(this);paste.setText("Paste");inspect.setText("Inspect URL");Retro.button(paste);Retro.button(inspect);urlActions.addView(paste,new LinearLayout.LayoutParams(0,dp(48),1));urlActions.addView(inspect,new LinearLayout.LayoutParams(0,dp(48),1));add(form,urlActions);
+        paste.setOnClickListener(v->{android.content.ClipboardManager clipboard=(android.content.ClipboardManager)getSystemService(CLIPBOARD_SERVICE);if(clipboard.hasPrimaryClip()&&clipboard.getPrimaryClip().getItemCount()>0)url.setText(clipboard.getPrimaryClip().getItemAt(0).coerceToText(this));});
+        inspect.setOnClickListener(v->{if(busy||urlDownload!=null)return;final String link;try{link=YouTubeUrl.normalize(url.getText().toString());}catch(Exception error){urlStatus.setText(error.getMessage());return;}inspectUrl(link);});
+        add(form,label("MP3 · 256 kbps. Conversion does not improve source quality.",12,Retro.appearance.muted));
+        downloadButton=button(form,"Download MP3",v->{
+            if(busy||urlDownload!=null)return;
+            final String link;try{link=YouTubeUrl.normalize(url.getText().toString());}catch(Exception error){urlStatus.setText(error.getMessage());return;}
+            new android.app.AlertDialog.Builder(this).setTitle("Download into AMP Lab?")
+                .setMessage("Only download audio you own or have permission to use. One video will be downloaded, then opened for editing. The original MP3 is kept separately.")
+                .setPositiveButton("Download",(dialog,which)->beginDownload(link)).setNegativeButton("Cancel",null).show();
+        });
+        urlStatus=label("Paste one video link. Playlist parameters are ignored.",13,Retro.appearance.muted);add(form,urlStatus);
+        cancelDownload=button(form,"Cancel download",v->{if(urlDownload!=null){urlStatus.setText("Cancelling…");urlDownload.cancel();}});cancelDownload.setVisibility(View.GONE);
+        openDownload=button(form,"Open downloaded MP3",v->{if(downloadedSource!=null)openSource(Uri.fromFile(downloadedSource));});openDownload.setVisibility(View.GONE);
+        button(form,"Downloaded audio",v->{File[] files=new File(getFilesDir(),"AMP Lab/downloads").listFiles((folder,name)->name.endsWith(".mp3"));if(files==null||files.length==0){urlStatus.setText("No completed downloads yet.");return;}java.util.Arrays.sort(files,(a,b)->Long.compare(b.lastModified(),a.lastModified()));String[] names=new String[files.length];for(int i=0;i<files.length;i++)names[i]=files[i].getName();new android.app.AlertDialog.Builder(this).setTitle("Original downloaded MP3s").setItems(names,(d,n)->openSource(Uri.fromFile(files[n]))).setNegativeButton("Close",null).show();});
+        addSection("YouTube URL",form);
+    }
+    void beginDownload(String link){
+        downloadButton.setEnabled(false);cancelDownload.setVisibility(View.VISIBLE);openDownload.setVisibility(View.GONE);
+        urlDownload=new UrlDownload(this,new UrlDownload.Listener(){
+            public void progress(String value){handler.post(()->{if(!isDestroyed())urlStatus.setText(value);});}
+            public void ready(File source){UrlDownload finished=urlDownload;handler.post(()->{urlDownload=null;if(isDestroyed())return;downloadedSource=source;downloadButton.setEnabled(true);cancelDownload.setVisibility(View.GONE);openDownload.setVisibility(View.VISIBLE);urlStatus.setText("Saved original MP3: "+source.getName());if(finished!=null&&finished.cancelled()){urlStatus.setText("Cancelled. The completed MP3 was kept in Downloaded audio.");return;}completedDownload=Uri.fromFile(source);handler.post(openCompletedDownload);});}
+            public void failed(String message){handler.post(()->{urlDownload=null;if(isDestroyed())return;downloadButton.setText("Retry download");downloadButton.setEnabled(true);cancelDownload.setVisibility(View.GONE);urlStatus.setText(message);});}
+        });urlDownload.start(link);
+    }
+    void inspectUrl(String link){downloadButton.setEnabled(false);cancelDownload.setVisibility(View.VISIBLE);urlDownload=new UrlDownload(this,new UrlDownload.Listener(){
+        public void progress(String value){handler.post(()->{if(!isDestroyed())urlStatus.setText(value);});}
+        public void ready(File file){}
+        public void failed(String message){handler.post(()->{urlDownload=null;if(isDestroyed())return;downloadButton.setEnabled(true);cancelDownload.setVisibility(View.GONE);urlStatus.setText(message);});}
+        public void inspected(org.json.JSONObject info){handler.post(()->{urlDownload=null;if(isDestroyed())return;downloadButton.setEnabled(true);cancelDownload.setVisibility(View.GONE);urlStatus.setText(info.optString("title","YouTube audio")+" · "+time(info.optDouble("duration"))+"\nOne video · MP3 256 kbps · ready to download");});}
+    });urlDownload.inspect(link);}
     volatile int previewGeneration;
     Retro.Wave waveformView;
     float[] waveform=new float[0];
@@ -79,7 +137,7 @@ public class MainActivity extends Activity {
         Button b=new Button(this);b.setText(title);Retro.button(b);b.setOnClickListener(onClick);
         LinearLayout.LayoutParams p=new LinearLayout.LayoutParams(-1,dp(45));p.setMargins(dp(3),dp(3),dp(3),dp(3));l.addView(b,p);return b;
     }
-    @Override public void onCreate(Bundle state){super.onCreate(state);Retro.configure(this);themeId=getSharedPreferences("settings",MODE_PRIVATE).getString("theme","classic");RetroLayout.create(this);
+    @Override public void onCreate(Bundle state){super.onCreate(state);if(cloud.gitwide.ampverse.BuildConfig.DEBUG&&getIntent().getBooleanExtra("amp-test-keep-awake",false))getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);Retro.configure(this);themeId=getSharedPreferences("settings",MODE_PRIVATE).getString("theme","classic");RetroLayout.create(this);
         if(!SessionStore.restore(this,state==null?null:state.getString("editingSession"))&&state!=null)SessionStore.restore(this,null);
     }
     void scheduleSessionSave(){handler.removeCallbacks(checkpoint);if(input!=null)handler.postDelayed(checkpoint,180);}
@@ -127,15 +185,19 @@ public class MainActivity extends Activity {
         }catch(IOException ex){report("Cannot open license: "+ex.getMessage());}
     }
     void pick(){
-        if(busy)return;
+        if(busy||urlDownload!=null)return;
         Intent i=new Intent(Intent.ACTION_OPEN_DOCUMENT);
         i.addCategory(Intent.CATEGORY_OPENABLE);i.setType("audio/*");startActivityForResult(i,PICK);
     }
     @Override protected void onActivityResult(int req,int result,Intent data){
         super.onActivityResult(req,result,data);
-        if(result!=RESULT_OK||data==null||data.getData()==null)return;
-        if(req==PICK)load(data.getData());
+        if(result!=RESULT_OK||data==null||data.getData()==null){if(req==SAVE)pendingSource=null;return;}
+        if(req==PICK)openSource(data.getData());
         if(req==SAVE)export(data.getData());
+        if(req==MobileTimeline.PICK)timeline.importAudio(data.getData());
+        if(req==MobileTimeline.EXPORT)timeline.export(data.getData());
+        if(req==MobileTimeline.SAVE_PROJECT)timeline.project(data.getData(),true);
+        if(req==MobileTimeline.OPEN_PROJECT)timeline.project(data.getData(),false);
     }
     void load(Uri uri){
         if(busy)return;busy=true;stop();report("Loading audio...");
@@ -158,7 +220,7 @@ public class MainActivity extends Activity {
                 handler.post(()->{
                     if(isDestroyed()){file.delete();busy=false;return;}
                     File previous=input;name=displayName;
-                    input=file;waveform=peaks;duration=seconds;start=0;end=seconds;fadeIn=0;fadeOut=0;gainDb=0;
+                    input=file;waveform=peaks;duration=seconds;start=0;end=seconds;fadeIn=0;fadeOut=0;gainDb=0;lastExportedEdit="";
                     inBar.setProgress(0);outBar.setProgress(1000);
                     fadeInBar.setProgress(0);fadeOutBar.setProgress(0);gainBar.setProgress(667);
                     normalize.setChecked(false);filename.setText(name);waveformView.fit();refresh();SessionStore.writeWave(this);
@@ -172,6 +234,7 @@ public class MainActivity extends Activity {
         }).start();
     }
     String displayName(Uri uri){
+        if("file".equals(uri.getScheme())&&uri.getPath()!=null)return new File(uri.getPath()).getName();
         try(Cursor cursor=getContentResolver().query(uri,new String[]{OpenableColumns.DISPLAY_NAME},null,null,null)){
             if(cursor!=null&&cursor.moveToFirst()){String title=cursor.getString(0);if(title!=null&&!title.trim().isEmpty())return title;}
         }catch(Exception ignored){}
@@ -193,6 +256,7 @@ public class MainActivity extends Activity {
         if(edited)b.append("-af ").append(quote(filters())).append(' ');
         return b.append("-codec:a libmp3lame -b:a 256k -ar 44100 -ac 2 -f mp3 ").append(quote(output.getAbsolutePath())).toString();
     }
+    String[] editArguments(File output,boolean edited){java.util.ArrayList<String> args=new java.util.ArrayList<>(java.util.Arrays.asList("-y","-nostdin","-v","error","-threads","1","-ss",Double.toString(start),"-i",input.toString(),"-t",Double.toString(end-start),"-map","0:a:0","-vn","-map_metadata","-1"));if(edited){args.add("-af");args.add(filters());}java.util.Collections.addAll(args,"-c:a","libmp3lame","-b:a","256k","-ar","44100","-ac","2","-f","mp3",output.toString());return args.toArray(new String[0]);}
     void preview(boolean edited){
         if(input==null||busy)return;
         if(end-start<.05){report("Choose a longer clip");return;}
@@ -205,8 +269,9 @@ public class MainActivity extends Activity {
                 report("Preview encoding failed");busy=false;return;
             }
             handler.post(()->{
-                if(generation!=previewGeneration||isDestroyed()){busy=false;return;}
+                if(generation!=previewGeneration||isDestroyed()||!foreground){busy=false;return;}
                 try{
+                    if(!focusPreview())throw new IOException("Phone audio is in use. Try preview again.");
                     player=new MediaPlayer();player.setDataSource(dest.getAbsolutePath());
                     player.prepare();player.setOnCompletionListener(mp->{stop();report("Preview finished");});
                     player.seekTo((long)((pendingSeek-playbackStart)*1000),MediaPlayer.SEEK_CLOSEST);
@@ -224,7 +289,9 @@ public class MainActivity extends Activity {
     }
     void stop(){
         previewGeneration++;
+        if(timeline!=null)timeline.stop();
         if(player!=null){try{player.stop();}catch(Exception ignored){}player.release();player=null;}
+        releasePreviewFocus();
     }
     void save(){
         if(input==null||busy)return;
@@ -236,6 +303,7 @@ public class MainActivity extends Activity {
     }
     void export(Uri uri){
         if(input==null||busy)return;
+        final String exported=editSignature();
         busy=true;report("Exporting MP3 at 256 kbps...");
         File temp=new File(getCacheDir(),"mp3_lab_export.mp3");
         FFmpegKit.executeAsync(command(temp,true),session->{
@@ -249,9 +317,9 @@ public class MainActivity extends Activity {
                     try{check.setDataSource(this,uri);String length=check.extractMetadata(MediaMetadataRetriever.METADATA_KEY_DURATION);
                         if(length==null||Long.parseLong(length)<=0)throw new IOException("Saved file has no playable audio");
                     }finally{check.release();}
-                    report("Saved and verified 256 kbps MP3");
+                    handler.post(()->{if(!isDestroyed()){lastExportedEdit=exported;SessionStore.save(this);}});report("Saved and verified 256 kbps MP3");
                 }catch(Exception e){report("Save failed: "+e.getMessage());}
-                finally{busy=false;temp.delete();}
+                finally{busy=false;temp.delete();handler.post(()->{if(!isDestroyed()&&exported.equals(lastExportedEdit)&&pendingSource!=null){Uri next=pendingSource;pendingSource=null;openSource(next);}});}
             }).start();
         });
     }
@@ -259,20 +327,7 @@ public class MainActivity extends Activity {
         byte[] data=new byte[65536];int n;
         while((n=in.read(data))!=-1)out.write(data,0,n);
     }
-    float[] readWaveform(File file,double seconds)throws IOException{
-        File pcm=File.createTempFile("waveform_",".pcm",getCacheDir());
-        try{
-            com.arthenica.ffmpegkit.FFmpegSession session=FFmpegKit.execute("-y -hide_banner -i "+quote(file.toString())+" -filter_complex "+quote("[0:a]asplit=2[wave][stats];[stats]astats=metadata=0:reset=0[meter]")+" -map [wave] -ac 1 -ar 2000 -f f32le "+quote(pcm.toString())+" -map [meter] -f null -");
-            if(!ReturnCode.isSuccess(session.getReturnCode()))return new float[0];
-            float[] peaks=new float[(int)Math.min(400000,Math.max(1200,Math.ceil(seconds*2000)))];float peak=0;long index=0;
-            try(DataInputStream in=new DataInputStream(new BufferedInputStream(new FileInputStream(pcm)))){
-                while(in.available()>=4){float v=Math.abs(Float.intBitsToFloat(Integer.reverseBytes(in.readInt())));int bin=(int)(index++/Math.max(1,seconds*2000)*peaks.length);if(bin<peaks.length)peaks[bin]=Math.max(peaks[bin],v);peak=Math.max(peak,v);}
-            }peakDb=peak>0?20*Math.log10(peak):Double.NEGATIVE_INFINITY;
-            java.util.regex.Matcher meter=java.util.regex.Pattern.compile("Peak level dB:\\s+(-?[0-9.]+|-inf)").matcher(session.getAllLogsAsString());
-            while(meter.find())peakDb=meter.group(1).equals("-inf")?Double.NEGATIVE_INFINITY:Double.parseDouble(meter.group(1));
-            return peaks;
-        }finally{pcm.delete();}
-    }
+    float[] readWaveform(File file,double seconds)throws IOException{WaveReader.Data data=WaveReader.read(file,seconds,getCacheDir());peakDb=data.peakDb();return data.peaks();}
     void rebuildRestoredWaveform(File source){
         busy=true;report("Session restored. Reading waveform…");
         new Thread(()->{try{float[] restored=readWaveform(source,duration);handler.post(()->{
@@ -284,7 +339,7 @@ public class MainActivity extends Activity {
         try{org.json.JSONObject saved=SessionStore.snapshot(this);if(saved!=null)state.putString("editingSession",saved.toString());}catch(Exception ignored){}
         super.onSaveInstanceState(state);
     }
-    @Override protected void onDestroy(){handler.removeCallbacks(checkpoint);stop();super.onDestroy();}
-    @Override protected void onResume(){super.onResume();String next=getSharedPreferences("settings",MODE_PRIVATE).getString("theme","classic");if(!next.equals(themeId)){String snapshot=null;try{org.json.JSONObject saved=SessionStore.snapshot(this);if(saved!=null)snapshot=saved.toString();}catch(Exception ignored){}themeId=next;Retro.configure(this);RetroLayout.create(this);if(snapshot!=null)SessionStore.restore(this,snapshot);}handler.post(playbackTick);}
-    @Override protected void onPause(){handler.removeCallbacks(playbackTick);handler.removeCallbacks(checkpoint);SessionStore.save(this);stop();super.onPause();}
+    @Override protected void onDestroy(){handler.removeCallbacks(checkpoint);handler.removeCallbacks(openCompletedDownload);if(urlDownload!=null)urlDownload.cancel();if(timeline!=null)timeline.close();stop();super.onDestroy();}
+    @Override protected void onResume(){super.onResume();foreground=true;String next=getSharedPreferences("settings",MODE_PRIVATE).getString("theme","classic");if(!next.equals(themeId)){String snapshot=null;try{org.json.JSONObject saved=SessionStore.snapshot(this);if(saved!=null)snapshot=saved.toString();}catch(Exception ignored){}themeId=next;Retro.configure(this);RetroLayout.create(this);if(snapshot!=null)SessionStore.restore(this,snapshot);}handler.post(playbackTick);handler.post(openCompletedDownload);}
+    @Override protected void onPause(){foreground=false;handler.removeCallbacks(playbackTick);handler.removeCallbacks(checkpoint);handler.removeCallbacks(openCompletedDownload);SessionStore.save(this);stop();super.onPause();}
 }
