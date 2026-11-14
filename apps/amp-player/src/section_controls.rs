@@ -17,7 +17,11 @@ impl Player {
                     .into_iter()
                     .find(|section| at >= section.start && at < section.end)
             })
-            .map_or(at.max(0.), |section| section.start);
+            .map_or(at.max(0.), |section| {
+                section
+                    .start
+                    .max(amp_core::energy_profile::entry_bound(&track.preparation))
+            });
         ctx.data_mut(|data| data.insert_temp(egui::Id::unique(("section-target", deck)), target));
         self.select_deck_section(deck, target);
     }
@@ -226,6 +230,8 @@ mod tests {
             preparation: Default::default(),
         };
         track.preparation.extensions.insert("energy_profile".into(), serde_json::json!({"version":1,"duration":20.,"step":1.,"curve":[],"sections":[{"id":"intro","name":"Intro","start":0.,"end":10.,"energy":0.3},{"id":"drop","name":"Drop","start":10.,"end":20.,"energy":0.9}]}));
+        track.preparation.cue_in = 5.;
+        track.preparation.manual_override = true;
         player.loaded_snapshot[0] = Some(track);
         player.mix_to_waveform_section(&ctx, 0, 16.);
         assert_eq!(
@@ -238,7 +244,12 @@ mod tests {
                 .unwrap()
                 .preparation
                 .cue_in,
-            0.
+            5.
+        );
+        player.mix_to_waveform_section(&ctx, 0, 7.);
+        assert_eq!(
+            ctx.data(|d| d.get_temp::<f64>(egui::Id::unique(("section-target", 0usize)))),
+            Some(5.)
         );
     }
 }

@@ -209,8 +209,8 @@ impl Lane {
                     ),
                 )
                 .intersect(rect);
-                let allowed = section.start
-                    >= amp_core::energy_profile::entry_bound(&track.preparation)
+                let allowed = section.end
+                    > amp_core::energy_profile::entry_bound(&track.preparation)
                     && track
                         .preparation
                         .cue_out
@@ -270,7 +270,11 @@ impl Lane {
                         }
                     ));
                     if allowed && response.clicked() {
-                        choice = Some(section.start);
+                        choice = Some(
+                            section
+                                .start
+                                .max(amp_core::energy_profile::entry_bound(&track.preparation)),
+                        );
                     }
                 }
             }
@@ -564,7 +568,7 @@ mod tests {
     use super::*;
     #[test]
     fn strip_sections_click_their_start_and_protect_manual_cue_bounds() {
-        for (section_index, expected) in [(0usize, None), (1, Some(10.))] {
+        for (section_index, expected) in [(0usize, Some(5.)), (1, Some(10.))] {
             let ctx = egui::Context::default();
             let mut lane = Lane::default();
             let mut track = amp_core::Track {
