@@ -40,6 +40,23 @@ impl Grid {
         amp_dj_policy::next_boundary(self.anchor, self.period, position)
     }
 }
+/// Commit the last phase-matched launch that finishes before the chosen exit.
+/// All positions use outgoing decoder source time; duration uses wall seconds.
+/// A late caller gets no schedule rather than waiting another whole phrase.
+pub fn launch_before_exit(grid: Grid, now: f64, exit: f64, rate: f64, seconds: f64) -> Option<f64> {
+    if ![grid.period, grid.anchor, now, exit, rate, seconds]
+        .iter()
+        .all(|v| v.is_finite())
+        || grid.period <= 0.
+        || rate <= 0.
+        || seconds <= 0.
+    {
+        return None;
+    }
+    let latest = exit - (seconds + 0.15) * rate;
+    let at = grid.anchor + ((latest - grid.anchor) / grid.period).floor() * grid.period;
+    (at >= now + 0.02 * rate).then_some(at)
+}
 /// Reviewed phrase starts override counted estimates; no semantic chorus/verse recognition is implied.
 pub fn phrase_anchor(p: &Preparation) -> Option<f64> {
     p.extensions
@@ -179,6 +196,27 @@ pub fn safe_grid_at_rates(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn committed_launch_finishes_before_exit_without_changing_fade_length() {
+        let grid = Grid {
+            period: 8.,
+            anchor: 5.,
+        };
+        assert_eq!(launch_before_exit(grid, 20., 32., 1., 3.), Some(21.));
+        assert_eq!(launch_before_exit(grid, 21.01, 32., 1., 3.), None);
+        let grid = Grid {
+            period: 0.5,
+            anchor: 0.13,
+        };
+        for rate in [0.84, 1., 1.16] {
+            let at = launch_before_exit(grid, 20., 30., rate, 3.).unwrap();
+            assert!(at + 3.15 * rate <= 30. + 1e-9);
+            assert!(at + grid.period + 3.15 * rate > 30.);
+            assert!(((at - grid.anchor) / grid.period).fract().abs() < 1e-9);
+        }
+        assert!(launch_before_exit(grid, 29.9, 30., 1., 3.).is_none());
+        assert!(launch_before_exit(grid, f64::NAN, 30., 1., 3.).is_none());
+    }
     #[test]
     fn matched_grids_keep_phase_for_a_thousand_beats_and_reject_drift() {
         let a = Preparation {

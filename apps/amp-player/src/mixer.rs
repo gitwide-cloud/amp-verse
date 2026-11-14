@@ -301,6 +301,7 @@ enum Command {
         seconds: f32,
     },
     ScheduledFade {
+        at: Option<f64>,
         to: f32,
         seconds: f32,
         grid: crate::mix_schedule::Grid,
@@ -517,7 +518,12 @@ impl Mixer {
                     self.controls.fading.store(true, Relaxed);
                     self.controls.mashup_active.store(true, Relaxed);
                 }
-                Command::ScheduledFade { to, seconds, grid } => {
+                Command::ScheduledFade {
+                    to,
+                    seconds,
+                    grid,
+                    at,
+                } => {
                     set(&self.controls.fade_progress, 0.);
                     self.fade = Some(Fade {
                         from: get(&self.controls.crossfader),
@@ -527,7 +533,7 @@ impl Mixer {
                         incoming: self.controls.pair_indices()[usize::from(to > 0.5)],
                         started: false,
                         grid: Some(grid),
-                        boundary: None,
+                        boundary: at,
                         mashup: None,
                         scratch: None,
                     });
@@ -2197,6 +2203,31 @@ impl Engine {
             return self.crossfade(seconds);
         }
         self.send(Command::ScheduledFade {
+            at: None,
+            to: (incoming % 2) as f32,
+            seconds: seconds.clamp(0.05, 30.),
+            grid,
+        })
+    }
+    /// A fixed source-clock deadline cannot roll into another phrase if the UI is late.
+    pub fn crossfade_at(
+        &self,
+        seconds: f32,
+        grid: crate::mix_schedule::Grid,
+        at: f64,
+    ) -> Result<(), String> {
+        let incoming = self.controls.pair_indices()[usize::from(self.fader() < 0.5)];
+        if !at.is_finite() || !self.loaded(incoming) || !self.playing(self.controls.other(incoming))
+        {
+            return Err("Prepare both decks before scheduling a blend".into());
+        }
+        if self.controls.looping[self.controls.other(incoming)].load(Relaxed)
+            || self.playing(incoming)
+        {
+            return self.crossfade(seconds);
+        }
+        self.send(Command::ScheduledFade {
+            at: Some(at),
             to: (incoming % 2) as f32,
             seconds: seconds.clamp(0.05, 30.),
             grid,
@@ -2299,6 +2330,7 @@ mod tests {
         // Old drop at source second 10. New entry is second 12, new drop 20:
         // begin at old second 2 and hand over after sixteen 120-BPM beats.
         tx.send(Command::ScheduledFade {
+            at: None,
             to: 1.,
             seconds: 8.,
             grid: crate::mix_schedule::Grid {
@@ -2799,6 +2831,7 @@ mod tests {
         tx.send(Command::Load(1, source(0.3, 6000), false, 1))
             .unwrap();
         tx.send(Command::ScheduledFade {
+            at: None,
             to: 1.,
             seconds: 0.3,
             grid: crate::mix_schedule::Grid {
@@ -2817,6 +2850,35 @@ mod tests {
         assert!(!controls.fading.load(Relaxed));
         assert_eq!(get(&controls.crossfader), 1.);
         assert!(!controls.play[0].load(Relaxed));
+    }
+    #[test]
+    fn committed_deadline_does_not_roll_a_full_phrase_when_received_near_boundary() {
+        for at in [0.49, 0.5] {
+            let controls = Arc::new(Controls::default());
+            let (tx, rx) = mpsc::sync_channel(32);
+            let mut mixer = Mixer::new(1000, rx, controls.clone());
+            tx.send(Command::Load(0, source(0.2, 6000), true, 1))
+                .unwrap();
+            tx.send(Command::Load(1, source(0.3, 6000), false, 1))
+                .unwrap();
+            mixer.render(490, |_, _| {});
+            tx.send(Command::ScheduledFade {
+                at: Some(at),
+                to: 1.,
+                seconds: 0.3,
+                grid: crate::mix_schedule::Grid {
+                    period: 8.,
+                    anchor: 0.5,
+                },
+            })
+            .unwrap();
+            mixer.render(11, |_, _| {});
+            assert!(controls.play[1].load(Relaxed));
+            mixer.render(301, |_, _| {});
+            assert!(!controls.fading.load(Relaxed));
+            assert!(!controls.play[0].load(Relaxed));
+            assert_eq!(get(&controls.crossfader), 1.);
+        }
     }
     #[test]
     fn rendered_preroll_drop_lands_after_exact_three_second_phrase_blend() {
@@ -2843,6 +2905,7 @@ mod tests {
         // The selected section at source second 20 is prepared from second 17.
         // Launch at outgoing second 5; its drop lands on the phrase at second 8.
         tx.send(Command::ScheduledFade {
+            at: None,
             to: 1.,
             seconds: 3.,
             grid: crate::mix_schedule::Grid {

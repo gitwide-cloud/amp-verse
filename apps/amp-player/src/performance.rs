@@ -2067,13 +2067,19 @@ impl Player {
                     } else {
                         None
                     };
-                    let seconds = build_plan.map_or_else(
-                        || {
-                            amp_core::transition_plan::tail_fade(
-                                self.fade_seconds,
-                                a.remaining(outgoing),
+                    let remaining = a.remaining(outgoing).map(|tail| {
+                        if !self.run.auto {
+                            return tail;
+                        }
+                        self.automatic_exit(outgoing).map_or(tail, |end| {
+                            tail.min(
+                                ((end - a.source_position(outgoing)) / self.deck_rate(outgoing))
+                                    .max(0.) as f32,
                             )
-                        },
+                        })
+                    });
+                    let seconds = build_plan.map_or_else(
+                        || amp_core::transition_plan::tail_fade(self.fade_seconds, remaining),
                         |(_, seconds)| seconds,
                     );
                     let grid = self
@@ -2136,15 +2142,38 @@ impl Player {
                                 }
                             }
                         }
-                    } else if let Some(grid) = grid.filter(|g| {
-                        a.remaining(outgoing).is_some_and(|r| {
+                    } else if let Some(grid) = grid {
+                        // Select once against the musical exit. A late UI tick must
+                        // never roll the handoff into another phrase past that exit.
+                        let exit = remaining.map(|tail| {
+                            a.position(outgoing) + f64::from(tail) * self.deck_rate(outgoing)
+                        });
+                        let at = exit.and_then(|end| {
+                            crate::mix_schedule::launch_before_exit(
+                                grid,
+                                a.position(outgoing),
+                                end,
+                                self.deck_rate(outgoing),
+                                f64::from(seconds),
+                            )
+                        });
+                        if self.run.auto {
+                            if let Some(at) = at {
+                                a.crossfade_at(seconds, grid, at)
+                            } else {
+                                a.crossfade(seconds)
+                            }
+                        } else if remaining.is_some_and(|r| {
                             r > seconds
-                                + (g.next(a.position(outgoing) + 0.1) - a.position(outgoing)) as f32
+                                + (grid.next(a.position(outgoing) + 0.1) - a.position(outgoing))
+                                    as f32
                                     / self.deck_rate(outgoing) as f32
                                 + 0.1
-                        })
-                    }) {
-                        a.scheduled_crossfade(seconds, grid)
+                        }) {
+                            a.scheduled_crossfade(seconds, grid)
+                        } else {
+                            a.crossfade(seconds)
+                        }
                     } else {
                         a.crossfade(seconds)
                     };

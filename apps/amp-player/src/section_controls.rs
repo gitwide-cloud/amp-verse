@@ -171,10 +171,17 @@ impl Player {
         }
         let playing = audio.playing(deck);
         let was_auto = self.run.auto;
+        // A section is the landing, rather than the beginning of the fade.
+        // Work only on this session clone; approved source bounds stay intact.
+        let rate = f64::from(audio.controls.effective_rate(deck));
+        let pre_roll = at - f64::from(self.fade_seconds) * rate;
+        if playing && pre_roll >= amp_core::energy_profile::entry_bound(&original) {
+            track.preparation.cue_in = pre_roll;
+        }
         let grid = crate::mix_schedule::grid(
             &original,
             &original,
-            at,
+            track.preparation.cue_in,
             audio.source_position(deck) - audio.position(deck),
             self.run.transitions.timing,
         );
