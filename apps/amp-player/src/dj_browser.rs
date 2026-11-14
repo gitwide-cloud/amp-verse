@@ -21,6 +21,12 @@ pub struct Browser {
     stem_status: std::collections::HashMap<PathBuf, (std::time::Instant, bool)>,
     stem_rx: Option<std::sync::mpsc::Receiver<Vec<(PathBuf, bool)>>>,
     membership: Membership,
+    snapshot: Option<std::sync::Arc<Library>>,
+    snapshot_root: PathBuf,
+    settings_snapshot: Option<std::sync::Arc<amp_core::show::Settings>>,
+    queue_snapshot: Vec<usize>,
+    selected_path: Option<PathBuf>,
+    refresh_generation: u64,
 }
 #[derive(Clone, PartialEq, Eq)]
 struct MatchKey {
@@ -30,7 +36,6 @@ struct MatchKey {
 struct MatchResult {
     key: MatchKey,
     indices: Vec<usize>,
-    at: std::time::Instant,
 }
 #[derive(Default)]
 struct Membership {
@@ -60,9 +65,7 @@ impl Membership {
         };
         let matching = self.cached.as_ref().filter(|result| result.key == key);
         let ready = matching.map(|result| result.indices.clone());
-        if self.job.is_none()
-            && matching.is_none_or(|result| result.at.elapsed() > Duration::from_secs(2))
-        {
+        if self.job.is_none() && matching.is_none() {
             let tracks = library.tracks.clone();
             let profile = profile.clone();
             let (tx, rx) = mpsc::channel();
@@ -74,17 +77,29 @@ impl Membership {
                     .filter(|(_, track)| amp_core::show::eligible(&profile, track))
                     .map(|(index, _)| index)
                     .collect();
-                let _ = tx.send(MatchResult {
-                    key,
-                    indices,
-                    at: std::time::Instant::now(),
-                });
+                let _ = tx.send(MatchResult { key, indices });
             });
         }
         ready
     }
 }
 impl Browser {
+    fn capture(
+        &mut self,
+        root: &Path,
+        library: &Library,
+        settings: &amp_core::show::Settings,
+        queue: &[usize],
+    ) {
+        self.snapshot_root = root.to_path_buf();
+        self.snapshot = Some(std::sync::Arc::new(library.clone()));
+        self.settings_snapshot = Some(std::sync::Arc::new(settings.clone()));
+        self.queue_snapshot = queue.to_vec();
+        self.refresh_generation = self.refresh_generation.wrapping_add(1);
+        self.membership = Membership::default();
+        self.stem_status.clear();
+        self.stem_rx = None;
+    }
     pub(super) fn selected_smart(&self) -> Option<&str> {
         (self.source == Source::Smart && !self.smart.is_empty()).then_some(self.smart.as_str())
     }
@@ -102,6 +117,16 @@ fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
 }
 impl Player {
     pub(super) fn dj_library_ui(&mut self, ui: &mut egui::Ui) {
+        if self.dj_browser.snapshot.is_none()
+            && let Some(library) = &self.library
+        {
+            self.dj_browser
+                .capture(&self.root, library, &self.run.settings, &self.queue);
+        }
+        let library_snapshot = self.dj_browser.snapshot.clone();
+        let snapshot_root = self.dj_browser.snapshot_root.clone();
+        let settings_snapshot = self.dj_browser.settings_snapshot.clone();
+        let mut refresh = false;
         if let Some(rx) = &self.dj_browser.stem_rx
             && let Ok(results) = rx.try_recv()
         {
@@ -124,7 +149,7 @@ impl Player {
                 .show(ui.ctx(), |ui| {
                     ui.heading(&track.title);
                     ui.label(
-                        amp_core::music_sources::audio_path(&self.root, &track.path)
+                        amp_core::music_sources::audio_path(&snapshot_root, &track.path)
                             .display()
                             .to_string(),
                     );
@@ -139,7 +164,8 @@ impl Player {
                                     });
                                 }
                             }
-                            let path = amp_core::music_sources::audio_path(&self.root, &track.path);
+                            let path =
+                                amp_core::music_sources::audio_path(&snapshot_root, &track.path);
                             ui.label(format!(
                                 "Stems: {}",
                                 self.dj_browser.stem_status.get(&path).map_or(
@@ -201,18 +227,9 @@ impl Player {
             .horizontal(|ui| {
                 skin::label(ui, "DJ Library");
                 self.remote_access_button(ui);
-                ui.menu_button("Columns", |ui| {save_columns |= self.dj_browser.columns.menu(ui);});
-
-                if ui.small_button("Refresh playlists").clicked() {
-                    match amp_core::show::Settings::load(&self.root) {
-                        Ok(settings) => {
-                            self.run.settings = settings;
-                            self.dj_browser.stem_status.clear();
-                            self.status = "Saved Smart Playlists refreshed. Loaded decks keep their current mix.".into();
-                        }
-                        Err(error) => self.status = format!("Could not refresh Smart Playlists: {error}"),
-                    }
-                }
+                ui.menu_button("Columns", |ui| {
+                    save_columns |= self.dj_browser.columns.menu(ui);
+                });
 
                 ui.add(
                     egui::Label::new(
@@ -300,7 +317,11 @@ impl Player {
                         .max_height((height - 160.).max(70.))
                         .show(ui, |ui| match self.dj_browser.source {
                             Source::Smart => {
-                                for profile in &self.run.settings.playlists {
+                                for profile in settings_snapshot
+                                    .as_ref()
+                                    .map(|settings| settings.playlists.as_slice())
+                                    .unwrap_or(&[])
+                                {
                                     let row = ui.selectable_value(
                                         &mut self.dj_browser.smart,
                                         profile.id.clone(),
@@ -344,7 +365,7 @@ impl Player {
                                 {
                                     self.dj_browser.folder.clear();
                                 }
-                                if let Some(lib) = &self.library {
+                                if let Some(lib) = &library_snapshot {
                                     Self::folder_tree(
                                         ui,
                                         &lib.tree,
@@ -374,7 +395,7 @@ impl Player {
                         .desired_width(ui.available_width())
                         .hint_text("Search this source"),
                 );
-                let Some(lib) = &self.library else {
+                let Some(lib) = &library_snapshot else {
                     ui.weak(if self.scan.is_some() {
                         "Scanning your music folders. Tracks will appear when the scan finishes."
                     } else {
@@ -382,6 +403,15 @@ impl Player {
                     });
                     return;
                 };
+                if self.dj_browser.source != Source::Smart {
+                    ui.horizontal(|ui| {
+                        edit_smart = ui.button("Edit sources / rules in Library").clicked();
+                        refresh |= ui
+                            .button("Refresh")
+                            .on_hover_text("Update this list from saved library data")
+                            .clicked();
+                    });
+                }
                 let mut indices: Vec<usize> = match self.dj_browser.source {
                     Source::Folders => lib
                         .tracks
@@ -395,23 +425,28 @@ impl Player {
                         .playlist
                         .and_then(|i| self.dj_browser.playlists.get(i))
                         .map(|(_, p)| playlist_indices(lib, p))
-                        .unwrap_or_else(|| self.queue.clone()),
+                        .unwrap_or_else(|| self.dj_browser.queue_snapshot.clone()),
                     Source::Smart => {
-                        if let Some(profile) = self
-                            .run
-                            .settings
-                            .playlists
-                            .iter()
-                            .find(|p| p.id == self.dj_browser.smart)
-                        {
+                        if let Some(profile) = settings_snapshot.as_ref().and_then(|settings| {
+                            settings
+                                .playlists
+                                .iter()
+                                .find(|p| p.id == self.dj_browser.smart)
+                        }) {
                             ui.horizontal(|ui| {
                                 ui.add_sized(
-                                    [(ui.available_width() - 400.).max(120.), 26.],
+                                    [(ui.available_width() - 485.).max(40.), 26.],
                                     egui::Label::new(egui::RichText::new(&profile.name).strong())
                                         .truncate(),
                                 );
                                 load_smart = ui.button("Load for Auto DJ").clicked();
                                 edit_smart = ui.button("Edit sources / rules in Library").clicked();
+                                refresh |= ui
+                                    .button("Refresh")
+                                    .on_hover_text(
+                                        "Update this list from saved rules and library data",
+                                    )
+                                    .clicked();
                             });
                             if self.show_editor.playlist_unsaved(&profile.id) {
                                 ui.colored_label(
@@ -425,7 +460,7 @@ impl Player {
                             match self.dj_browser.membership.indices(
                                 profile,
                                 lib,
-                                self.library_generation,
+                                self.dj_browser.refresh_generation,
                             ) {
                                 Some(indices) => indices,
                                 None => {
@@ -439,6 +474,10 @@ impl Player {
                             }
                         } else {
                             ui.weak("Choose a saved Smart Playlist on the left.");
+                            ui.horizontal(|ui| {
+                                edit_smart = ui.button("Edit sources / rules in Library").clicked();
+                                refresh |= ui.button("Refresh").clicked();
+                            });
                             Vec::new()
                         }
                     }
@@ -535,12 +574,11 @@ impl Player {
                                         {
                                             let value = if column.key == "stems" {
                                                 let path = amp_core::music_sources::audio_path(
-                                                    &self.root, &t.path,
+                                                    &snapshot_root,
+                                                    &t.path,
                                                 );
                                                 let cached = self.dj_browser.stem_status.get(&path);
-                                                if cached.is_none_or(|(at, _)| {
-                                                    at.elapsed().as_secs() > 30
-                                                }) {
+                                                if cached.is_none() {
                                                     stem_checks.push(path);
                                                 }
                                                 cached
@@ -559,7 +597,8 @@ impl Player {
                                                 ui.add_sized(
                                                     [column.width, 30.],
                                                     egui::Button::selectable(
-                                                        self.selected == Some(i),
+                                                        self.dj_browser.selected_path.as_ref()
+                                                            == Some(&t.path),
                                                         &value,
                                                     )
                                                     .truncate()
@@ -587,15 +626,27 @@ impl Player {
                                                 crate::dragdrop::source(
                                                     &response,
                                                     amp_core::music_sources::audio_path(
-                                                        &self.root, &t.path,
+                                                        &snapshot_root,
+                                                        &t.path,
                                                     ),
                                                 );
                                             }
                                             if response.clicked() {
-                                                self.selected = Some(i);
+                                                self.dj_browser.selected_path =
+                                                    Some(t.path.clone());
+                                                self.selected =
+                                                    self.library.as_ref().and_then(|library| {
+                                                        library
+                                                            .tracks
+                                                            .iter()
+                                                            .position(|track| track.path == t.path)
+                                                    });
                                             }
                                             if response.double_clicked() {
-                                                load = Some((self.dj_browser.destination, i));
+                                                load = Some((
+                                                    self.dj_browser.destination,
+                                                    t.path.clone(),
+                                                ));
                                             }
                                             response.context_menu(|ui| {
                                                 if ui
@@ -640,7 +691,7 @@ impl Player {
                                                     .clicked()
                                                 {
                                                     self.dj_browser.destination = deck;
-                                                    load = Some((deck, i));
+                                                    load = Some((deck, t.path.clone()));
                                                 }
                                             }
                                         });
@@ -663,6 +714,30 @@ impl Player {
                 }
             });
         });
+        if refresh {
+            match amp_core::show::Settings::load(&self.root) {
+                Ok(settings) => {
+                    self.run.settings = settings;
+                    for (path, playlist) in &mut self.dj_browser.playlists {
+                        if let Ok(saved) = Playlist::load(path, &self.root) {
+                            *playlist = saved;
+                        }
+                    }
+                    stem_checks.clear();
+                    if let Some(library) = &self.library {
+                        self.dj_browser.capture(
+                            &self.root,
+                            library,
+                            &self.run.settings,
+                            &self.queue,
+                        );
+                    }
+                    self.status =
+                        "DJ list refreshed. Loaded decks and playback are unchanged.".into();
+                }
+                Err(error) => self.status = format!("Could not refresh DJ list: {error}"),
+            }
+        }
         if save_columns && let Err(error) = self.dj_browser.columns.save() {
             self.status = format!("Could not save columns: {error}");
         }
@@ -710,7 +785,11 @@ impl Player {
                 Err(e) => self.status = e.to_string(),
             }
         }
-        if edit_smart {
+        if edit_smart && self.dj_browser.source != Source::Smart {
+            self.workspace.pane = 1;
+            self.library_open = true;
+            self.library_page = 5;
+        } else if edit_smart {
             context_edit = Some((
                 self.dj_browser.smart.clone(),
                 show_editor::PlaylistAction::Edit,
@@ -735,17 +814,16 @@ impl Player {
         {
             self.status = error;
         }
-        if let Some((deck, index)) = load {
-            self.selected = Some(index);
-            if let Some(track) = self
-                .library
-                .as_ref()
-                .and_then(|library| library.tracks.get(index))
-            {
-                let path = amp_core::music_sources::audio_path(&self.root, &track.path);
-                if let Err(error) = self.safe_load_path(self.rack.live[deck], path, None) {
-                    self.status = error;
-                }
+        if let Some((deck, track_path)) = load {
+            self.selected = self.library.as_ref().and_then(|library| {
+                library
+                    .tracks
+                    .iter()
+                    .position(|track| track.path == track_path)
+            });
+            let path = amp_core::music_sources::audio_path(&snapshot_root, &track_path);
+            if let Err(error) = self.safe_load_path(self.rack.live[deck], path, None) {
+                self.status = error;
             }
             self.dj_tab = 0;
         }
@@ -823,6 +901,73 @@ mod tests {
         assert_eq!(wait(&mut cache, &profile, &library, 2).len(), 7001);
     }
 
+    #[test]
+    fn displayed_snapshot_stays_fixed_until_explicit_refresh_and_keeps_paths() {
+        let mut library = Library {
+            tracks: vec![amp_core::Track {
+                path: "a.mp3".into(),
+                title: "Original".into(),
+                preparation: Default::default(),
+            }],
+            tree: Folder {
+                name: "Music".into(),
+                folders: vec![],
+                tracks: vec![0],
+            },
+        };
+        let mut settings = amp_core::show::Settings::default();
+        let mut second = library.tracks[0].clone();
+        second.path = "b.mp3".into();
+        second.title = "Second".into();
+        library.tracks.push(second);
+        let mut browser = Browser::default();
+        browser.capture(Path::new("music"), &library, &settings, &[0]);
+        let generation = browser.refresh_generation;
+        let profile = settings.playlists[0].clone();
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            if browser
+                .membership
+                .indices(&profile, browser.snapshot.as_ref().unwrap(), generation)
+                .is_some()
+            {
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        library.tracks[0].title = "Changed by analysis".into();
+        settings.playlists[0].name = "Changed rules".into();
+        library.tracks.reverse();
+        assert_eq!(
+            browser.snapshot.as_ref().unwrap().tracks[0].title,
+            "Original"
+        );
+        assert_ne!(
+            browser.settings_snapshot.as_ref().unwrap().playlists[0].name,
+            settings.playlists[0].name
+        );
+        for _ in 0..5 {
+            assert!(
+                browser
+                    .membership
+                    .indices(&profile, browser.snapshot.as_ref().unwrap(), generation)
+                    .is_some()
+            );
+            assert!(browser.membership.job.is_none());
+        }
+        browser.capture(Path::new("music"), &library, &settings, &[]);
+        assert_eq!(browser.refresh_generation, generation + 1);
+        assert_eq!(
+            browser.snapshot.as_ref().unwrap().tracks[1].title,
+            "Changed by analysis"
+        );
+        assert_eq!(
+            browser.snapshot.as_ref().unwrap().tracks[1].path,
+            PathBuf::from("a.mp3")
+        );
+        assert!(browser.queue_snapshot.is_empty());
+    }
     #[test]
     fn saved_playlist_keeps_order_and_duplicates_without_changing_library() {
         let library = Library {

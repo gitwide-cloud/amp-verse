@@ -23,3 +23,7 @@ Wheel down over a live waveform or deck thumbnail seeks forward; wheel up rewind
 The headphone icon beside Cue routes that deck exclusively to the pre-fader headphone bus, removing it from speaker and broadcast mixes without changing faders. Click again to restore the usual speaker routing. With no headphone output configured, the button opens setup. A separate output endpoint is required; the speaker endpoint is rejected. Monitoring does not start playback. Routing starts off at application startup.
 
 Regression checks cover wheel consumption/fine adjustment, private monitor audio with silent speaker and broadcast buses, restoration of speaker routing, and reduced-window layout.
+
+## Manual DJ browser refresh
+
+DJ Library pins a catalog/rules snapshot on first use. Background scans and analysis do not replace the visible tracks, metadata, folder tree, or Smart Playlist definitions. The Refresh button follows Edit sources / rules in Library and explicitly captures the latest saved data. Search and source selection still respond immediately. The former two-second eligibility polling loop is removed; matching runs once per selected snapshot/rule set. Deck loading resolves the captured song path, avoiding stale row indexes after library reordering. Refresh does not reload or interrupt prepared/playing decks.
