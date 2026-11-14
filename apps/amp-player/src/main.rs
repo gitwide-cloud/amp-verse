@@ -3062,9 +3062,10 @@ impl Player {
                         self.jog_wheel(ui, deck, &wheel);
                     });
                 }
-                let transport_width=(ui.available_width()-ui.spacing().item_spacing.x*3.)/4.;
+                let transport_width=(ui.available_width()-32.-ui.spacing().item_spacing.x*4.)/4.;
                 let transport=ui.horizontal(|ui|{
                     if skin::deck_button(ui,"CUE",accent,transport_width,false).on_hover_text("Return to the prepared cue IN and pause").clicked(){self.recue_deck(deck);}
+                    self.deck_headphones_button(ui, deck);
                     if skin::deck_button(ui,if self.playing[deck]{"PAUSE"}else{"PLAY"},accent,transport_width,true).clicked(){if deck==0{self.auto=false;}self.toggle_deck(deck);}
                     if skin::deck_button(ui,"SYNC",accent,transport_width,false).on_hover_text("Match prepared BPM to the other deck. Changes pitch with speed; beat-phase sync/key lock are not available.").clicked(){self.sync_deck(deck);}
                     if skin::deck_button(ui,"STOP",accent,transport_width,false).clicked(){self.stop(deck);}

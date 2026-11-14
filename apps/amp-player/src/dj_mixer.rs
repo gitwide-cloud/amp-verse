@@ -6,6 +6,7 @@ pub struct Panel {
     kill: [[bool; 3]; 6],
     sweep: [f32; 6],
     cue: [bool; 6],
+    phones_only: [bool; 6],
     cue_mix: f32,
     cue_volume: f32,
     output: Option<String>,
@@ -20,6 +21,7 @@ impl Default for Panel {
             kill: [[false; 3]; 6],
             sweep: [0.; 6],
             cue: [false; 6],
+            phones_only: [false; 6],
             cue_mix: 0.,
             cue_volume: 0.5,
             output: None,
@@ -65,6 +67,7 @@ impl Panel {
             controls.trim_db[d].store(self.gain[d].to_bits(), Relaxed);
             controls.sweep[d].store(self.sweep[d].to_bits(), Relaxed);
             controls.cue[d].store(self.cue[d], Relaxed);
+            controls.phones_only[d].store(self.phones_only[d], Relaxed);
             for b in 0..3 {
                 controls.eq_kill[d][b].store(self.kill[d][b], Relaxed);
             }
@@ -198,6 +201,71 @@ impl Player {
                 self.mixer_panel.status = error;
             }
         }
+    }
+    pub(super) fn deck_headphones_button(&mut self, ui: &mut egui::Ui, deck: usize) {
+        let selected = self.mixer_panel.phones_only[deck];
+        let (rect, button) = ui.allocate_exact_size(egui::vec2(32., 38.), egui::Sense::click());
+        let color = if selected {
+            if deck.is_multiple_of(2) {
+                skin::ORANGE
+            } else {
+                skin::CYAN
+            }
+        } else {
+            ui.visuals().text_color()
+        };
+        ui.painter().rect_filled(
+            rect,
+            4.,
+            if selected {
+                color.gamma_multiply(0.22)
+            } else {
+                ui.visuals().widgets.inactive.bg_fill
+            },
+        );
+        let center = rect.center();
+        let points = (0..=12)
+            .map(|n| {
+                let angle = std::f32::consts::PI + n as f32 / 12. * std::f32::consts::PI;
+                center + egui::vec2(angle.cos() * 8., angle.sin() * 8. - 1.)
+            })
+            .collect();
+        ui.painter()
+            .add(egui::Shape::line(points, egui::Stroke::new(2., color)));
+        for x in [-8., 8.] {
+            ui.painter().rect_filled(
+                egui::Rect::from_center_size(center + egui::vec2(x, 3.), egui::vec2(4., 9.)),
+                1.,
+                color,
+            );
+        }
+        let button=button.on_hover_cursor(egui::CursorIcon::PointingHand).on_hover_text("Headphones only: this deck goes to headphones, not speakers or broadcast. Click again to restore speaker routing.");
+        if button.clicked() {
+            if selected || self.mixer_panel.output.is_some() {
+                self.mixer_panel.phones_only[deck] = !selected;
+                if !selected {
+                    self.mixer_panel.cue_mix = 0.;
+                }
+                if let Some(audio) = &self.audio {
+                    self.mixer_panel.apply(audio);
+                }
+                self.status = if selected {
+                    "Deck returned to speaker mix"
+                } else {
+                    "Deck routed to headphones only"
+                }
+                .into();
+            } else {
+                self.status = "Choose a separate headphone output below, then press Phones".into();
+                egui::Popup::open_id(ui.ctx(), button.id.with("output"));
+            }
+        }
+        egui::Popup::from_response(&button)
+            .id(button.id.with("output"))
+            .open_memory(None)
+            .show(|ui| {
+                self.headphone_output(ui);
+            });
     }
     pub(super) fn headphone_output(&mut self, ui: &mut egui::Ui) {
         ui.set_max_width(340.);

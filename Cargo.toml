@@ -3,7 +3,7 @@ members = ["crates/amp-dj-policy", "crates/amp-core", "apps/amp-player", "apps/a
 resolver = "2"
 
 [workspace.package]
-version = "1.0.15"
+version = "1.0.16"
 edition = "2024"
 license = "MIT"
 

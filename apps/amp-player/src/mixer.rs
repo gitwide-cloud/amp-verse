@@ -69,6 +69,7 @@ pub struct Controls {
     pub eq_kill: [[AtomicBool; 3]; 6],
     pub sweep: [AtomicU32; 6],
     pub cue: [AtomicBool; 6],
+    pub phones_only: [AtomicBool; 6],
     pub cue_blend: AtomicU32,
     pub cue_volume: AtomicU32,
     pub cutoff: [AtomicU32; 6],
@@ -153,6 +154,7 @@ impl Default for Controls {
             eq_kill: std::array::from_fn(|_| std::array::from_fn(|_| AtomicBool::new(false))),
             sweep: std::array::from_fn(|_| atom(0.)),
             cue: std::array::from_fn(|_| AtomicBool::new(false)),
+            phones_only: std::array::from_fn(|_| AtomicBool::new(false)),
             cue_blend: atom(0.),
             cue_volume: atom(0.5),
             cutoff: std::array::from_fn(|_| atom(22000.)),
@@ -1146,10 +1148,13 @@ impl Mixer {
                     } else if sweeps[d] > 0.001 {
                         frame[ch] -= v.sweep_state[ch];
                     }
-                    if c.cue[d].load(Relaxed) {
+                    if c.cue[d].load(Relaxed) || c.phones_only[d].load(Relaxed) {
                         cue_mix[ch] += frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
                     }
                     frame[ch] *= v.gain;
+                    if c.phones_only[d].load(Relaxed) {
+                        frame[ch] = 0.;
+                    }
                     if d == 0 {
                         frame[ch] *= self.player_envelope;
                     }
@@ -1405,6 +1410,9 @@ impl Engine {
     }
     pub fn configure_monitor(&mut self, name: Option<&str>) -> Result<(), String> {
         if let Some(name) = name {
+            if name == self.device {
+                return Err("Choose a headphone output different from the speaker output".into());
+            }
             let (producer, consumer) = RingBuffer::new(self.sample_rate as usize / 2);
             let stream =
                 crate::monitor::open(name, self.sample_rate, consumer, self.controls.clone())?;
@@ -3245,6 +3253,30 @@ mod tests {
         assert!(engine.position(0) > 0.05);
         assert!(engine.take_decode_errors().is_empty());
         engine.stop(0);
+    }
+    #[test]
+    fn headphones_only_excludes_speakers_and_broadcast_but_keeps_monitor() {
+        let controls = Arc::new(Controls::default());
+        set(&controls.master, 1.);
+        set(&controls.gain[0], 1.);
+        set(&controls.crossfader, 0.);
+        set(&controls.cue_volume, 1.);
+        controls.phones_only[0].store(true, Relaxed);
+        let (tx, rx) = mpsc::sync_channel(8);
+        let (producer, mut monitor) = RingBuffer::new(10000);
+        let (tap, mut broadcast) = RingBuffer::new(10000);
+        tx.send(Command::Monitor(Some(producer))).unwrap();
+        tx.send(Command::Broadcast(Some(tap))).unwrap();
+        tx.send(Command::Load(0, source(0.2, 20000), true, 0))
+            .unwrap();
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        mixer.render(2000, |_, frame| assert_eq!(frame, [0.; 2]));
+        assert!(std::iter::from_fn(|| monitor.pop().ok()).any(|f| f[0].abs() > 0.1));
+        assert!(std::iter::from_fn(|| broadcast.pop().ok()).all(|f| f == [0.; 2]));
+        controls.phones_only[0].store(false, Relaxed);
+        let mut peak = 0_f32;
+        mixer.render(1000, |_, frame| peak = peak.max(frame[0].abs()));
+        assert!(peak > 0.1);
     }
     #[test]
     fn headphone_cue_is_pre_fader_and_trim_and_kills_affect_both_buses() {

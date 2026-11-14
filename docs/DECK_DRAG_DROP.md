@@ -15,3 +15,11 @@ Windows native verification: a DJ Library track was successfully dropped into B3
 ## Live section mixing (1.0.15 Preview)
 
 The large live waveforms now use the same section scheduler as the deck thumbnails. Click a section to blend into its beginning at the configured grid timing; a paused deck prepares that point. Overlay mode targets B, or A with Shift. Unanalyzed songs blend to the clicked time. Existing protected cue bounds and crossfade guards remain in effect. Section selection does not rewrite saved cues.
+
+## Waveform wheel and private deck monitoring (1.0.16 Preview)
+
+Wheel down over a live waveform or deck thumbnail seeks forward; wheel up rewinds. Shift-wheel uses a finer step. Wheel input is consumed by the hovered waveform, leaving section clicks for timed blends. Overlay mode selects B, or A with Shift.
+
+The headphone icon beside Cue routes that deck exclusively to the pre-fader headphone bus, removing it from speaker and broadcast mixes without changing faders. Click again to restore the usual speaker routing. With no headphone output configured, the button opens setup. A separate output endpoint is required; the speaker endpoint is rejected. Monitoring does not start playback. Routing starts off at application startup.
+
+Regression checks cover wheel consumption/fine adjustment, private monitor audio with silent speaker and broadcast buses, restoration of speaker routing, and reduced-window layout.

@@ -234,6 +234,9 @@ impl Player {
                 self.wave_span,
                 d,
             );
+            if let Some(delta) = self.waveforms[d].scrub.take() {
+                self.seek_deck_relative(d, delta);
+            }
             if let Some(at) = self.waveforms[d].seek.take() {
                 self.mix_to_waveform_section(ui.ctx(), d, at);
             }
@@ -253,6 +256,10 @@ impl Player {
             let response = response.on_hover_text(
                 "Click to mix into a section on live B; Shift-click for live A. Paused decks prepare the section.",
             );
+            if let Some(delta) = crate::waveform::wheel_seek(ui, &response) {
+                let d = self.rack.live[usize::from(!ui.input(|i| i.modifiers.shift))];
+                self.seek_deck_relative(d, delta);
+            }
             if response.clicked()
                 && let Some(pointer) = response.interact_pointer_pos()
             {
@@ -499,7 +506,7 @@ impl Player {
                             if ui.add(egui::Button::new(egui::RichText::new("LIVE").size(11.).color(if selected {egui::Color32::BLACK} else {accent(d)}))
                                 .fill(if selected {accent(d)} else {ui.visuals().widgets.inactive.bg_fill}))
                                 .on_hover_text("Control this deck with the jog wheel; keep its audio routing unchanged.").clicked() { self.rack.live[side] = d; }
-                            if transport_button(ui, d, self.playing[d], egui::vec2(24.,24.)).on_hover_text(if self.playing[d] {"Pause deck"} else {"Play deck"}).clicked() { self.toggle_deck(d); }
+                        if transport_button(ui, d, self.playing[d], egui::vec2(24.,24.)).on_hover_text(if self.playing[d] {"Pause deck"} else {"Play deck"}).clicked() { self.toggle_deck(d); }
                         });
                         ui.add(egui::Label::new(self.title(d)).truncate());
                         let track=self.loaded_snapshot[d].as_ref().or_else(||self.loaded[d].and_then(|i|self.library.as_ref()?.tracks.get(i)));
@@ -507,6 +514,7 @@ impl Player {
                             ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique(("section-target", d)), at));
                             self.select_deck_section(d,at);
                         }
+                        if let Some(delta) = self.waveforms[d].scrub.take() { self.seek_deck_relative(d,delta); }
                         if !compact {
                         ui.horizontal(|ui| {
                             if ui.small_button("LOOP").on_hover_text("Toggle a four-beat loop on this deck").clicked() { self.rack_loop(d); }
@@ -722,41 +730,22 @@ impl Player {
                         }
                     });
                     ui.horizontal(|ui| {
-                        if skin::deck_button(
-                            ui,
-                            "CUE",
-                            accent(d),
-                            if width <= 335. { 50. } else { 60. },
-                            false,
-                        )
-                        .clicked()
-                        {
+                        let button_width =
+                            ((ui.available_width() - 92. - ui.spacing().item_spacing.x * 5.) / 4.)
+                                .clamp(26., 60.);
+                        if skin::deck_button(ui, "CUE", accent(d), button_width, false).clicked() {
                             self.recue_deck(d);
                         }
-                        if transport_button(ui, d, self.playing[d], egui::vec2(60., 38.)).clicked()
+                        self.deck_headphones_button(ui, d);
+                        if transport_button(ui, d, self.playing[d], egui::vec2(button_width, 38.))
+                            .clicked()
                         {
                             self.toggle_deck(d);
                         }
-                        if skin::deck_button(
-                            ui,
-                            "SYNC",
-                            accent(d),
-                            if width <= 335. { 50. } else { 60. },
-                            false,
-                        )
-                        .clicked()
-                        {
+                        if skin::deck_button(ui, "SYNC", accent(d), button_width, false).clicked() {
                             self.sync_deck(d);
                         }
-                        if skin::deck_button(
-                            ui,
-                            "LOOP",
-                            accent(d),
-                            if width <= 335. { 50. } else { 60. },
-                            false,
-                        )
-                        .clicked()
-                        {
+                        if skin::deck_button(ui, "LOOP", accent(d), button_width, false).clicked() {
                             self.rack_loop(d);
                         }
                         ui.menu_button(if width <= 335. { "..." } else { "Controls" }, |ui| {

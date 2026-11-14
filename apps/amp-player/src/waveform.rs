@@ -21,11 +21,44 @@ pub struct Lane {
     pub tint: Option<Color32>,
     pub hide_caption: bool,
     pub seek: Option<f64>,
+    pub scrub: Option<f64>,
     path: Option<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
     rx: Option<mpsc::Receiver<Result<Peaks, String>>>,
     peaks: Arc<[[f32; 2]]>,
     error: Option<String>,
+}
+/// Wheel down advances, wheel up rewinds. Shift gives fine adjustment.
+pub(super) fn wheel_seek(ui: &egui::Ui, response: &egui::Response) -> Option<f64> {
+    if !response.hovered() {
+        return None;
+    }
+    ui.input_mut(|input| {
+        let mut delta = 0.;
+        input.raw.events.retain(|event| {
+            if let egui::Event::MouseWheel {
+                unit, delta: wheel, ..
+            } = event
+            {
+                let scale = match unit {
+                    egui::MouseWheelUnit::Point => 1.,
+                    egui::MouseWheelUnit::Line => 20.,
+                    egui::MouseWheelUnit::Page => 200.,
+                };
+                delta += (wheel.y + wheel.x) * scale;
+                false
+            } else {
+                true
+            }
+        });
+        if delta.abs() < 0.01 {
+            return None;
+        }
+        input.smooth_scroll_delta = egui::Vec2::ZERO;
+        Some(
+            f64::from(-delta.clamp(-120., 120.)) * if input.modifiers.shift { 0.005 } else { 0.05 },
+        )
+    })
 }
 #[derive(Default)]
 struct CacheEntry {
@@ -192,6 +225,9 @@ impl Lane {
             egui::Sense::click(),
         );
         let painter = ui.painter_at(rect);
+        if let Some(delta) = wheel_seek(ui, &response) {
+            self.scrub = Some(delta);
+        }
         let profile = track
             .and_then(|t| amp_core::energy_profile::read(&t.preparation))
             .filter(|p| p.duration > 0. && !p.sections.is_empty());
@@ -264,7 +300,7 @@ impl Lane {
                         section.end,
                         1. + section.energy * 9.,
                         if allowed {
-                            "Click: prepare here when paused; queue a timed jump when playing."
+                            "Click: prepare here when paused; queue a timed jump when playing. Wheel: seek; Shift-wheel: fine seek."
                         } else {
                             "Outside protected cue bounds. Edit cues in Library to enable."
                         }
@@ -349,6 +385,14 @@ impl Lane {
         ui.ctx()
             .data_mut(|data| data.insert_temp(egui::Id::unique(("waveform-lane", deck)), rect));
         let painter = ui.painter_at(rect);
+        if !self.ignore_seek
+            && let Some(delta) = wheel_seek(ui, &response)
+        {
+            self.scrub = Some(delta);
+        }
+        if !self.ignore_seek {
+            response.clone().on_hover_text("Click a section to mix into it. Wheel down: forward; wheel up: rewind. Shift-wheel: fine seek.");
+        }
         if !self.overlay {
             painter.rect_filled(rect, 3., Color32::from_rgb(5, 7, 10));
         }
@@ -668,5 +712,53 @@ mod tests {
         assert_eq!(time_x(12., 10., 20., r), 400.);
         assert_eq!(time_x(12., 12., 20., r), 300.);
         assert_eq!(time_x(10., 12., 20., r), 200.);
+    }
+}
+
+#[cfg(test)]
+mod wheel_tests {
+    use super::*;
+    #[test]
+    fn wheel_seeks_only_hovered_waveform_and_consumes_parent_scroll() {
+        for fine in [false, true] {
+            let ctx = egui::Context::default();
+            let mut result = None;
+            for frame in 0..3 {
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400., 200.),
+                    )),
+                    ..Default::default()
+                };
+                let modifiers = egui::Modifiers {
+                    shift: fine,
+                    ..Default::default()
+                };
+                raw.events.push(egui::Event::ModifiersChanged(modifiers));
+                raw.events
+                    .push(egui::Event::PointerMoved(egui::pos2(40., 40.)));
+                if frame == 2 {
+                    raw.events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        delta: egui::vec2(0., -40.),
+                        source: egui::MouseWheelSource::Unknown,
+                        phase: egui::TouchPhase::Move,
+                        modifiers,
+                    });
+                }
+                let mut output = ctx.run_ui(raw, |ui| {
+                    let (_, response) =
+                        ui.allocate_exact_size(egui::vec2(300., 100.), egui::Sense::click());
+                    if let Some(delta) = wheel_seek(ui, &response) {
+                        result = Some(delta);
+                        assert_eq!(ui.input(|i| i.smooth_scroll_delta), egui::Vec2::ZERO);
+                    }
+                    assert!(wheel_seek(ui, &response).is_none());
+                });
+                output.textures_delta.clear();
+            }
+            assert_eq!(result, Some(if fine { 0.2 } else { 2. }));
+        }
     }
 }
