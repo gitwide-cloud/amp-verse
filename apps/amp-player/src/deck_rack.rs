@@ -82,7 +82,11 @@ fn transport_button(
     let response = ui.add(
         egui::Button::new("")
             .min_size(size)
-            .corner_radius(7)
+            .corner_radius(if theme::current(ui.ctx()).material() {
+                20
+            } else {
+                7
+            })
             .fill(color)
             .stroke(egui::Stroke::new(1., color)),
     );
@@ -187,7 +191,7 @@ impl Player {
                     egui::RichText::new(NAMES[d])
                         .size(17.)
                         .strong()
-                        .color(accent(d)),
+                        .color(skin::color(ui, accent(d))),
                 );
                 let title_width = (ui.available_width() - 190.).max(80.);
                 ui.allocate_ui_with_layout(
@@ -200,7 +204,7 @@ impl Player {
                                 egui::RichText::new(self.title(d))
                                     .size(15.)
                                     .strong()
-                                    .color(accent(d)),
+                                    .color(skin::color(ui, accent(d))),
                             )
                             .truncate(),
                         );
@@ -547,7 +551,7 @@ impl Player {
                         ui.set_width(width - 18.);
                         ui.set_min_height((height - 24.) / 3. - 18.);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(NAMES[d]).strong().color(accent(d)));
+                            ui.label(egui::RichText::new(NAMES[d]).strong().color(skin::color(ui, accent(d))));
                             if ui.add(egui::Button::new(egui::RichText::new("LIVE").size(11.).color(if selected {egui::Color32::BLACK} else {accent(d)}))
                                 .fill(if selected {accent(d)} else {ui.visuals().widgets.inactive.bg_fill}))
                                 .on_hover_text("Control this deck with the jog wheel; keep its audio routing unchanged.").clicked() { self.rack.live[side] = d; }
@@ -986,7 +990,7 @@ impl Player {
                     ui.horizontal(|ui| {
                         for d in pair {
                             ui.vertical(|ui| {
-                                ui.colored_label(accent(d), NAMES[d]);
+                                ui.colored_label(skin::color(ui, accent(d)), NAMES[d]);
                                 ui.horizontal(|ui| {
                                     skin::meter(
                                         ui,

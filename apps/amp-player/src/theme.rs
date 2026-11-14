@@ -7,14 +7,44 @@ pub enum Theme {
     ModernLight,
     #[default]
     ModernDark,
+    MaterialDark,
+    MaterialLight,
 }
 impl Theme {
-    pub const ALL: [Self; 3] = [Self::Classic, Self::ModernLight, Self::ModernDark];
+    pub const ALL: [Self; 5] = [
+        Self::Classic,
+        Self::ModernLight,
+        Self::ModernDark,
+        Self::MaterialDark,
+        Self::MaterialLight,
+    ];
+    pub fn material(self) -> bool {
+        matches!(self, Self::MaterialDark | Self::MaterialLight)
+    }
+    pub fn light(self) -> bool {
+        matches!(self, Self::ModernLight | Self::MaterialLight)
+    }
+    pub fn primary_container(self) -> C {
+        if self == Self::MaterialLight {
+            C::from_rgb(255, 224, 157)
+        } else {
+            C::from_rgb(87, 66, 0)
+        }
+    }
+    pub fn on_primary(self) -> C {
+        if self.light() {
+            C::WHITE
+        } else {
+            C::from_rgb(63, 46, 0)
+        }
+    }
     pub fn id(self) -> &'static str {
         match self {
             Self::Classic => "classic",
             Self::ModernLight => "modern-light",
             Self::ModernDark => "modern-dark",
+            Self::MaterialDark => "material-3-dark",
+            Self::MaterialLight => "material-3-light",
         }
     }
     pub fn label(self) -> &'static str {
@@ -22,6 +52,8 @@ impl Theme {
             Self::Classic => "Classic",
             Self::ModernLight => "Modern Light",
             Self::ModernDark => "Modern Dark",
+            Self::MaterialDark => "Material 3 Dark",
+            Self::MaterialLight => "Material 3 Light",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -42,6 +74,26 @@ pub struct Palette {
 impl Theme {
     pub fn palette(self) -> Palette {
         match self {
+            Self::MaterialDark => Palette {
+                background: C::from_rgb(22, 20, 15),
+                surface: C::from_rgb(34, 31, 25),
+                elevated: C::from_rgb(49, 46, 39),
+                border: C::from_rgb(79, 70, 57),
+                text: C::from_rgb(233, 225, 212),
+                accent: C::from_rgb(233, 194, 108),
+                signal: C::from_rgb(173, 208, 164),
+                muted: C::from_rgb(206, 197, 180),
+            },
+            Self::MaterialLight => Palette {
+                background: C::from_rgb(255, 248, 239),
+                surface: C::from_rgb(249, 242, 230),
+                elevated: C::from_rgb(237, 230, 219),
+                border: C::from_rgb(130, 118, 100),
+                text: C::from_rgb(32, 27, 19),
+                accent: C::from_rgb(114, 85, 0),
+                signal: C::from_rgb(54, 100, 51),
+                muted: C::from_rgb(79, 70, 57),
+            },
             Self::Classic => Palette {
                 background: C::from_rgb(7, 8, 12),
                 surface: C::from_rgb(24, 28, 34),
@@ -126,13 +178,14 @@ pub fn current(ctx: &egui::Context) -> Theme {
 pub fn apply(ctx: &egui::Context, theme: Theme) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique("amp-theme"), theme));
     let p = theme.palette();
-    let light = theme == Theme::ModernLight;
+    let light = theme.light();
     ctx.set_theme(if light {
         egui::ThemePreference::Light
     } else {
         egui::ThemePreference::Dark
     });
     let mut style = (*ctx.global_style()).clone();
+    style.text_styles = egui::Style::default().text_styles;
     style.visuals = if light {
         egui::Visuals::light()
     } else {
@@ -140,7 +193,9 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
     };
     style.visuals.panel_fill = p.background;
     style.visuals.window_fill = p.surface;
-    style.visuals.selection.bg_fill = if light {
+    style.visuals.selection.bg_fill = if theme.material() {
+        theme.primary_container()
+    } else if light {
         C::from_rgb(255, 226, 143)
     } else {
         C::from_rgb(103, 72, 9)
@@ -157,7 +212,13 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
     };
     style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1., p.accent);
     style.visuals.hyperlink_color = p.accent;
-    let radius = if theme == Theme::Classic { 2 } else { 8 };
+    let radius = if theme.material() {
+        20
+    } else if theme == Theme::Classic {
+        2
+    } else {
+        8
+    };
     style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(radius);
     style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(radius);
     style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(radius);
@@ -166,6 +227,34 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
     style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1., p.text);
     style.spacing.button_padding = egui::vec2(10., 6.);
     style.spacing.item_spacing = egui::vec2(6., 5.);
+    if theme.material() {
+        style.visuals.extreme_bg_color = p.background;
+        style.visuals.text_edit_bg_color = Some(p.elevated);
+        style.visuals.faint_bg_color = p.surface;
+        style.visuals.window_corner_radius = egui::CornerRadius::same(24);
+        style.visuals.menu_corner_radius = egui::CornerRadius::same(16);
+        style.visuals.window_stroke = egui::Stroke::new(1., p.border);
+        style.visuals.widgets.noninteractive.bg_fill = p.surface;
+        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1., p.border);
+        style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(12);
+        style.visuals.widgets.inactive.weak_bg_fill = p.elevated;
+        style.visuals.widgets.hovered.weak_bg_fill = theme.primary_container();
+        style.visuals.widgets.hovered.bg_fill = theme.primary_container();
+        style.visuals.widgets.active.weak_bg_fill = theme.primary_container();
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        style.visuals.slider_trailing_fill = true;
+        style.spacing.button_padding = egui::vec2(10., 6.);
+        style.spacing.item_spacing = egui::vec2(6., 5.);
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.));
+    }
     ctx.set_global_style(style);
     for id in [
         egui::ViewportId::ROOT,

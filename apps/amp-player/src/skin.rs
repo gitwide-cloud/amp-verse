@@ -24,7 +24,7 @@ pub fn color(ui: &egui::Ui, value: C) -> C {
     if value == GREEN {
         return signal(ui);
     }
-    if crate::theme::current(ui.ctx()) == crate::theme::Theme::ModernLight {
+    if crate::theme::current(ui.ctx()).light() {
         if value == ORANGE {
             return C::from_rgb(150, 75, 0);
         }
@@ -55,7 +55,9 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
     let p = theme.palette();
     let bg = ui.painter().add(egui::Shape::Noop);
     let response = egui::Frame::new()
-        .corner_radius(if theme == crate::theme::Theme::Classic {
+        .corner_radius(if theme.material() {
+            16
+        } else if theme == crate::theme::Theme::Classic {
             2
         } else {
             10
@@ -84,8 +86,10 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
             ),
         );
     } else {
-        ui.painter()
-            .set(bg, egui::Shape::rect_filled(rect, 10., p.surface));
+        ui.painter().set(
+            bg,
+            egui::Shape::rect_filled(rect, if theme.material() { 16. } else { 10. }, p.surface),
+        );
     }
     if theme == crate::theme::Theme::Classic {
         let frame = rect.shrink(2.);
@@ -147,7 +151,7 @@ pub fn rack_panel<R>(
     let background = ui.painter().add(egui::Shape::Noop);
     let response = egui::Frame::new()
         .inner_margin(6)
-        .corner_radius(6)
+        .corner_radius(if theme.material() { 16 } else { 6 })
         .stroke(Stroke::new(
             if selected.is_some() { 1.7 } else { 1. },
             selected.unwrap_or(p.border),
@@ -173,8 +177,10 @@ pub fn rack_panel<R>(
             Stroke::new(1., C::from_rgb(125, 137, 149)),
         );
     } else {
-        ui.painter()
-            .set(background, egui::Shape::rect_filled(rect, 6., p.surface));
+        ui.painter().set(
+            background,
+            egui::Shape::rect_filled(rect, if theme.material() { 16. } else { 6. }, p.surface),
+        );
     }
     response
 }
@@ -215,7 +221,11 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     ui.painter().add(gradient(
         ui.painter(),
         rect,
-        p.elevated,
+        if theme.material() {
+            p.surface
+        } else {
+            p.elevated
+        },
         if theme == crate::theme::Theme::Classic {
             BLACK
         } else {
@@ -571,6 +581,14 @@ pub fn button(ui: &mut egui::Ui, text: &str, accent: C) -> egui::Response {
     let theme = crate::theme::current(ui.ctx());
     let p = theme.palette();
     let accent = color(ui, accent);
+    if theme.material() {
+        return ui.add(
+            egui::Button::new(RichText::new(text).color(p.text))
+                .corner_radius(20)
+                .fill(p.elevated)
+                .min_size(egui::vec2(0., 36.)),
+        );
+    }
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(text.len() as f32 * 7.4 + 24., 32.),
         egui::Sense::click(),
@@ -620,6 +638,22 @@ pub fn deck_button(
     width: f32,
     primary: bool,
 ) -> egui::Response {
+    let theme = crate::theme::current(ui.ctx());
+    if theme.material() {
+        let p = theme.palette();
+        let fill = if primary { p.accent } else { p.elevated };
+        return ui.add_sized(
+            [width, 42.],
+            egui::Button::new(RichText::new(text).size(15.).strong().color(if primary {
+                theme.on_primary()
+            } else {
+                p.text
+            }))
+            .fill(fill)
+            .corner_radius(20)
+            .stroke(Stroke::NONE),
+        );
+    }
     let accent = if primary {
         color(ui, GOLD)
     } else {

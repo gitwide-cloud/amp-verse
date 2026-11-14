@@ -1,0 +1,9 @@
+# Material 3 desktop themes — 1.0.22
+
+Two optional Appearance choices: **Material 3 Dark** and **Material 3 Light**. Open the triangle beside the module name, then choose the theme under Appearance. Existing Classic, Modern Dark and Modern Light choices remain available. The selected theme is remembered through the existing atomic preference file. Installing the update does not change the user's current selection.
+
+These are Material 3-inspired native egui themes, not Google's Android component library or dynamic wallpaper coloring. They use warm neutral surface/container roles, amber primary/container pairs, rounded cards, pill-shaped controls, filled search inputs, tonal interaction states, and compact desktop typography. Amber A / cyan B transport colors, dark audio displays and jog platters remain recognizable. Layout and playback behavior are unchanged. No new framework, assets, font download, background task or per-frame resource loading was added.
+
+Reference: official Material 3 color roles, https://m3.material.io/styles/color/the-color-system/ . Measurements for the principal role pairs (body/muted on highest surface; primary/on-primary; selected text/container) range from 7.41:1 to 10.44:1 in dark and 6.97:1 to 13.80:1 in light. This is palette verification, not whole-app accessibility certification; disabled/audio signal graphics have separate semantics.
+
+Verification: existing all-theme preference round trips and actual Appearance-menu interaction tests include both new variants. Workspace tests, local Lab fixtures, formatting and strict lint checks pass. Native isolated screenshots cover Player, Library and two-deck DJ in both variants. Linux uses the same theme implementation but was not run in this Windows environment. The release is staged beside the installed executable so current playback can continue until the next normal restart.
