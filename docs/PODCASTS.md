@@ -49,3 +49,13 @@ Download cancellation/collision/truncation and safe retention are covered by the
 - `workspace.rs`, `skin.rs`, `organized_library.rs`: module launch, dedicated workspace, compact Player seek controls and consistent theme background.
 - `plugins/amp-podcasts/amp-podcasts.ampplugin`, `tools/package_podcasts.py`, `.github/workflows/build.yml`: versioned source-provider package and release assets.
 - Root `Cargo.toml` / `Cargo.lock`: host version 1.0.17. No separate MP3 Lab repository was modified.
+
+## Delivery status
+
+Implementation commit: `1232931` on `feature/version-1-preview`.
+
+The optional package is published as [AMP Podcasts 1.0.17 Preview](https://github.com/gitwide-cloud/amp-verse/releases/tag/amp-podcasts-v1.0.17). Public release-list discovery, package download, SHA-256 and package schema were verified after publication. The release is deliberately a component preview; it does not replace the existing stable app release or advertise an Android update.
+
+The optimized Windows 1.0.17 Player is built. A verified `amp-player.next.exe` and the podcast package are staged in the existing installation. The current DJ session is actively mixing, so it was left running. The backed-up launcher applies the staged Player only after the old Player has closed, on the next normal launch. Existing preferences, library catalogs, analysis, stems and Smart Playlists are retained. Rollback copies of the prior Player and launcher are under `%LOCALAPPDATA%/AMPVerse/install-backups/before-podcasts-1.0.17`.
+
+Versioned local Player artifact: `test-output/releases/windows-v1.0.17-preview/amp-player-1.0.17-preview-windows-x64.exe`, with SHA256SUMS. The full cross-platform installer/APK release was not published in this task. Source changes and the release workflow are pushed to GitHub.
