@@ -733,10 +733,9 @@ impl Player {
                         let button_width =
                             ((ui.available_width() - 92. - ui.spacing().item_spacing.x * 5.) / 4.)
                                 .clamp(26., 60.);
-                        if skin::deck_button(ui, "CUE", accent(d), button_width, false).clicked() {
-                            self.recue_deck(d);
+                        if !d.is_multiple_of(2) {
+                            self.deck_monitor_controls(ui, d, accent(d), button_width);
                         }
-                        self.deck_headphones_button(ui, d);
                         if transport_button(ui, d, self.playing[d], egui::vec2(button_width, 38.))
                             .clicked()
                         {
@@ -755,6 +754,16 @@ impl Player {
                         .on_hover_text(
                             "Deck volume, filter, EQ, stems, headphone cue and Key Lock",
                         );
+                        if d.is_multiple_of(2) {
+                            ui.add_space(
+                                (ui.available_width()
+                                    - button_width
+                                    - 32.
+                                    - ui.spacing().item_spacing.x)
+                                    .max(0.),
+                            );
+                            self.deck_monitor_controls(ui, d, accent(d), button_width);
+                        }
                     });
                 });
                 ui.horizontal(|ui| {
@@ -1400,6 +1409,27 @@ mod tests {
                 library <= size.y - 140.,
                 "The music browser was pushed out at {size:?}: {library}"
             );
+            for deck in [0usize, 1] {
+                let rect = |name| {
+                    ctx.data(|data| data.get_temp::<egui::Rect>(egui::Id::unique((name, deck))))
+                        .unwrap()
+                };
+                let cue = rect("deck-cue-bounds");
+                let phones = rect("deck-phones-bounds");
+                let play = rect("rack-main-play");
+                if deck == 0 {
+                    assert!(
+                        play.right() <= cue.left() && cue.right() <= phones.left(),
+                        "A monitoring belongs on the mixer edge at {size:?}"
+                    );
+                } else {
+                    assert!(
+                        phones.right() <= cue.left() && cue.right() <= play.left(),
+                        "B monitoring belongs on the mixer edge at {size:?}"
+                    );
+                }
+                assert!(phones.right() <= size.x && phones.bottom() <= size.y);
+            }
         }
     }
     #[test]

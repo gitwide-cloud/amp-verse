@@ -202,9 +202,50 @@ impl Player {
             }
         }
     }
+    pub(super) fn deck_monitor_controls(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        accent: egui::Color32,
+        width: f32,
+    ) {
+        if !deck.is_multiple_of(2) {
+            self.deck_headphones_button(ui, deck);
+        }
+        let cue = skin::deck_button(ui, "CUE", accent, width, false)
+            .on_hover_text("Return to the prepared cue IN and pause");
+        #[cfg(test)]
+        {
+            let rect = ui
+                .ctx()
+                .layer_transform_to_global(ui.layer_id())
+                .unwrap_or_default()
+                * cue.rect;
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(egui::Id::unique(("deck-cue-bounds", deck)), rect)
+            });
+        }
+        if cue.clicked() {
+            self.recue_deck(deck);
+        }
+        if deck.is_multiple_of(2) {
+            self.deck_headphones_button(ui, deck);
+        }
+    }
     pub(super) fn deck_headphones_button(&mut self, ui: &mut egui::Ui, deck: usize) {
         let selected = self.mixer_panel.phones_only[deck];
         let (rect, button) = ui.allocate_exact_size(egui::vec2(32., 38.), egui::Sense::click());
+        #[cfg(test)]
+        {
+            let rect = ui
+                .ctx()
+                .layer_transform_to_global(ui.layer_id())
+                .unwrap_or_default()
+                * rect;
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(egui::Id::unique(("deck-phones-bounds", deck)), rect)
+            });
+        }
         let color = if selected {
             if deck.is_multiple_of(2) {
                 skin::ORANGE

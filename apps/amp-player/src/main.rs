@@ -3064,11 +3064,11 @@ impl Player {
                 }
                 let transport_width=(ui.available_width()-32.-ui.spacing().item_spacing.x*4.)/4.;
                 let transport=ui.horizontal(|ui|{
-                    if skin::deck_button(ui,"CUE",accent,transport_width,false).on_hover_text("Return to the prepared cue IN and pause").clicked(){self.recue_deck(deck);}
-                    self.deck_headphones_button(ui, deck);
+                    if !deck.is_multiple_of(2) { self.deck_monitor_controls(ui,deck,accent,transport_width); }
                     if skin::deck_button(ui,if self.playing[deck]{"PAUSE"}else{"PLAY"},accent,transport_width,true).clicked(){if deck==0{self.auto=false;}self.toggle_deck(deck);}
                     if skin::deck_button(ui,"SYNC",accent,transport_width,false).on_hover_text("Match prepared BPM to the other deck. Changes pitch with speed; beat-phase sync/key lock are not available.").clicked(){self.sync_deck(deck);}
                     if skin::deck_button(ui,"STOP",accent,transport_width,false).clicked(){self.stop(deck);}
+                    if deck.is_multiple_of(2) { self.deck_monitor_controls(ui,deck,accent,transport_width); }
                 });
                 ui.ctx().data_mut(|d|{d.insert_temp(egui::Id::unique(("dj-transport",deck)),transport.response.rect);d.insert_temp(egui::Id::unique(("dj-transport",deck)).with("screen"),(transport.response.rect,ui.layer_id()));});
                 ui.horizontal(|ui| {
