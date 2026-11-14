@@ -736,24 +736,15 @@ impl Player {
                         if !d.is_multiple_of(2) {
                             self.deck_monitor_controls(ui, d, accent(d), button_width);
                         }
-                        if transport_button(ui, d, self.playing[d], egui::vec2(button_width, 38.))
-                            .clicked()
-                        {
-                            self.toggle_deck(d);
+                        let order=if d.is_multiple_of(2) {[0,1,2,3]} else {[3,2,1,0]};
+                        for control in order {
+                            match control {
+                                0 => { ui.menu_button(if width <= 335. { "..." } else { "Controls" }, |ui| self.rack_deck_controls(ui,d,width)).response.on_hover_text("Deck volume, filter, EQ, stems, headphone cue and Key Lock"); }
+                                1 => {if skin::deck_button(ui,"LOOP",accent(d),button_width,false).clicked(){self.rack_loop(d);}}
+                                2 => {if skin::deck_button(ui,"SYNC",accent(d),button_width,false).clicked(){self.sync_deck(d);}}
+                                _ => {if transport_button(ui,d,self.playing[d],egui::vec2(button_width,38.)).clicked(){self.toggle_deck(d);}}
+                            }
                         }
-                        if skin::deck_button(ui, "SYNC", accent(d), button_width, false).clicked() {
-                            self.sync_deck(d);
-                        }
-                        if skin::deck_button(ui, "LOOP", accent(d), button_width, false).clicked() {
-                            self.rack_loop(d);
-                        }
-                        ui.menu_button(if width <= 335. { "..." } else { "Controls" }, |ui| {
-                            self.rack_deck_controls(ui, d, width)
-                        })
-                        .response
-                        .on_hover_text(
-                            "Deck volume, filter, EQ, stems, headphone cue and Key Lock",
-                        );
                         if d.is_multiple_of(2) {
                             ui.add_space(
                                 (ui.available_width()
