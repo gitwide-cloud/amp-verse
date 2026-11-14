@@ -80,11 +80,20 @@ impl Editor {
                 && cache.draft.validate().is_ok()
                 && cache.baseline.validate().is_ok()
             {
-                self.draft = Some(cache.draft);
-                self.baseline = Some(cache.baseline);
-                self.source_labels = cache.labels;
-                self.status =
-                    "Restored your local editing draft. Save Playlist publishes changes.".into();
+                match merge_rules(&cache.baseline, &cache.draft, saved, false) {
+                    Ok(restored) => {
+                        self.draft = Some(restored);
+                        self.baseline = Some(saved.clone());
+                        self.source_labels = cache.labels;
+                        self.status = "Restored local edits alongside your saved playlists. Save Playlist publishes changes.".into();
+                    }
+                    Err(error) => {
+                        self.status = format!(
+                            "Showing saved playlists. Your local draft is retained for conflict review: {error}"
+                        );
+                        self.conflict_review = Some((cache.draft, saved.clone()));
+                    }
+                }
             }
         }
         self.draft.as_mut().unwrap().resolve_sources(root);
@@ -1555,6 +1564,17 @@ mod tests {
         assert_eq!(restored.draft.playlists[0].style, Style::Chill);
         assert_eq!(restored.draft.playlists[0].target_energy, Some(3.));
         assert!(!dir.path().join("ampdj/smart-playlists.json").exists());
+    }
+    #[test]
+    fn recovered_demo_draft_keeps_existing_shared_playlists_visible() {
+        let base = Settings::default();
+        let mut draft = base.clone();
+        draft.playlists[0].restrict_folders = true;
+        let current = test_settings();
+        let restored = merge_rules(&base, &draft, &current, false).unwrap();
+        for playlist in &current.playlists {
+            assert!(restored.playlists.iter().any(|p| p.id == playlist.id));
+        }
     }
     #[test]
     fn empty_source_selection_never_expands_to_entire_library() {
