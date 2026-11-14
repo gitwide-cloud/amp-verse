@@ -682,59 +682,6 @@ pub fn bolt(painter: &egui::Painter, rect: Rect, color: C) {
     ));
 }
 
-/// Decorative vinyl grooves; no fabricated meter or waveform data.
-pub fn platter(
-    ui: &mut egui::Ui,
-    size: f32,
-    accent: C,
-    _playing: bool,
-    phase: f32,
-) -> egui::Response {
-    let (rect, response) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::drag());
-    let center = rect.center();
-    let radius = size * 0.46;
-    ui.painter()
-        .circle_filled(center, radius + 5., C::from_rgb(9, 9, 16));
-    ui.painter().circle_stroke(
-        center,
-        radius + 5.,
-        Stroke::new(3., C::from_rgb(151, 145, 166)),
-    );
-    ui.painter()
-        .circle_filled(center, radius, accent.gamma_multiply(0.76));
-    for ring in 10..50 {
-        ui.painter().circle_stroke(
-            center,
-            radius * ring as f32 / 50.,
-            Stroke::new(
-                0.65,
-                accent.gamma_multiply(if ring % 2 == 0 { 0.5 } else { 0.9 }),
-            ),
-        );
-    }
-    let angle = phase * std::f32::consts::TAU / 1.8;
-    ui.painter().line_segment(
-        [
-            center,
-            center + egui::vec2(angle.cos(), angle.sin()) * radius,
-        ],
-        Stroke::new(6., C::from_rgb(27, 26, 40)),
-    );
-    ui.painter()
-        .circle_filled(center, radius * 0.29, C::from_rgb(23, 21, 36));
-    ui.painter().circle_stroke(
-        center,
-        radius * 0.29,
-        Stroke::new(2., C::from_rgb(124, 116, 145)),
-    );
-    bolt(
-        ui.painter(),
-        Rect::from_center_size(center, egui::vec2(size * 0.08, size * 0.13)),
-        GOLD,
-    );
-    response.on_hover_cursor(egui::CursorIcon::Grab)
-}
-
 pub fn vinyl_platter(
     ui: &mut egui::Ui,
     size: f32,

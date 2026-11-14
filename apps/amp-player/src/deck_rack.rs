@@ -112,8 +112,23 @@ fn transport_button(
     response
 }
 impl Player {
-    pub(super) fn six_deck_ui(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn deck_workspace_ui(&mut self, ui: &mut egui::Ui) {
         let compact = ui.available_width() < 1280. || ui.available_height() < 900.;
+        let wave_id = egui::Id::unique("dj-wave-height");
+        let mut wave_height = if self.rack.six {
+            if compact {
+                24.
+            } else if self.rack.expanded {
+                38.
+            } else {
+                30.
+            }
+        } else {
+            ui.ctx()
+                .data_mut(|data| data.get_persisted::<f32>(wave_id))
+                .unwrap_or(if compact { 40. } else { 56. })
+                .clamp(28., 96.)
+        };
         ui.spacing_mut().item_spacing.y = if compact { 3. } else { 5. };
         let scope = self
             .audio
@@ -219,13 +234,7 @@ impl Player {
                 .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
             self.waveforms[d].hide_caption = true;
             self.waveforms[d].overview = false;
-            self.waveforms[d].height = Some(if compact {
-                24.
-            } else if self.rack.expanded {
-                38.
-            } else {
-                30.
-            });
+            self.waveforms[d].height = Some(wave_height);
             self.waveforms[d].show(
                 ui,
                 self.loaded_origin[d].as_deref().unwrap_or(&self.root),
@@ -242,13 +251,7 @@ impl Player {
             }
         }
         if self.rack.overlay_waveforms {
-            let height = if compact {
-                48.
-            } else if self.rack.expanded {
-                76.
-            } else {
-                60.
-            };
+            let height = wave_height * 2.;
             let (rect, response) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), height),
                 egui::Sense::click(),
@@ -307,6 +310,22 @@ impl Player {
                 }
             }
         }
+        if !self.rack.six {
+            let previous = wave_height;
+            window_layout::splitter(
+                ui,
+                "dj-wave-divider",
+                &mut wave_height,
+                28. ..=96.,
+                false,
+                0.5,
+                8.,
+            );
+            if wave_height != previous {
+                ui.ctx()
+                    .data_mut(|data| data.insert_persisted(wave_id, wave_height));
+            }
+        }
         ui.add_space(6.);
         let library_id = egui::Id::unique("dj-library-height");
         let minimum_library = if compact { 112. } else { 160. };
@@ -326,7 +345,14 @@ impl Player {
         .min(if self.rack.expanded { 550. } else { 490. });
         let rack_width = ui.available_width();
         let mixer = if compact { 126. } else { 146. };
-        let half = (rack_width - mixer - 20. - ui.spacing().item_spacing.x * 6.) / 2.;
+        let half = (rack_width
+            - mixer
+            - if self.rack.six {
+                20. + ui.spacing().item_spacing.x * 6.
+            } else {
+                ui.spacing().item_spacing.x * 2.
+            })
+            / 2.;
         let minimum = if compact { 112. } else { 140. };
         let min_jog = 280f32.min((half - minimum).max(240.));
         let maximum = (half - min_jog).clamp(minimum, 400.);
@@ -338,18 +364,20 @@ impl Player {
         let saved = ui
             .ctx()
             .data_mut(|d| *d.get_temp_mut_or_insert_with(saved_id, || self.rack.strip_ratios));
-        let rendered = strips;
+        let rendered = if self.rack.six { strips } else { [0.; 2] };
         ui.horizontal_top(|ui| {
-            self.deck_strips(ui, 0, rendered[0], height, compact);
-            window_layout::splitter(
-                ui,
-                "dj-deck-left-divider",
-                &mut strips[0],
-                minimum..=maximum,
-                true,
-                1.,
-                height,
-            );
+            if self.rack.six {
+                self.deck_strips(ui, 0, rendered[0], height, compact);
+                window_layout::splitter(
+                    ui,
+                    "dj-deck-left-divider",
+                    &mut strips[0],
+                    minimum..=maximum,
+                    true,
+                    1.,
+                    height,
+                );
+            }
             ui.push_id(("live-jog", self.rack.live[0]), |ui| {
                 self.jog_section(ui, self.rack.live[0], half - rendered[0], height)
             });
@@ -357,16 +385,18 @@ impl Player {
             ui.push_id(("live-jog", self.rack.live[1]), |ui| {
                 self.jog_section(ui, self.rack.live[1], half - rendered[1], height)
             });
-            window_layout::splitter(
-                ui,
-                "dj-deck-right-divider",
-                &mut strips[1],
-                minimum..=maximum,
-                true,
-                -1.,
-                height,
-            );
-            self.deck_strips(ui, 1, rendered[1], height, compact);
+            if self.rack.six {
+                window_layout::splitter(
+                    ui,
+                    "dj-deck-right-divider",
+                    &mut strips[1],
+                    minimum..=maximum,
+                    true,
+                    -1.,
+                    height,
+                );
+                self.deck_strips(ui, 1, rendered[1], height, compact);
+            }
         });
         // Only deliberate drags change the stored ratios; ordinary window resizing must not clamp them permanently.
         for (side, width) in strips.into_iter().enumerate() {
@@ -408,8 +438,16 @@ impl Player {
             ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Master"));
             let pair = self.pair();
             ui.label(format!(
-                "3+3 decks · LIVE {} / {} · Crossfade {} ↔ {}",
-                NAMES[self.rack.live[0]], NAMES[self.rack.live[1]], NAMES[pair[0]], NAMES[pair[1]]
+                "{} · LIVE {} / {} · Crossfade {} ↔ {}",
+                if self.rack.six {
+                    "3+3 decks"
+                } else {
+                    "2 decks"
+                },
+                NAMES[self.rack.live[0]],
+                NAMES[self.rack.live[1]],
+                NAMES[pair[0]],
+                NAMES[pair[1]]
             ));
             ui.add(egui::Label::new(&self.status).truncate());
         });
@@ -440,6 +478,13 @@ impl Player {
                     .data_mut(|data| data.insert_temp(egui::Id::unique("rack-library-top"), top.y));
             }
             self.dj_library_ui(ui);
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::unique("dj-browser-screen").with("screen"),
+                    (ui.min_rect(), ui.layer_id()),
+                );
+            });
         }
     }
     pub(super) fn clock_settings(&mut self, ui: &mut egui::Ui) {
@@ -645,13 +690,13 @@ impl Player {
             },
         );
     }
-    fn rack_knob_bank(&mut self, ui: &mut egui::Ui, d: usize, width: f32) {
+    fn rack_knob_bank(&mut self, ui: &mut egui::Ui, d: usize, width: f32, height: f32) {
         let response = ui.allocate_ui_with_layout(
             egui::vec2(width, 1.),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 ui.set_width(width);
-                ui.spacing_mut().interact_size.y = ((width - 20.) / 2.).clamp(32., 56.);
+                ui.spacing_mut().interact_size.y = ((height - 200.) / 5.).clamp(32., 44.);
                 ui.columns(2, |columns| {
                     if let Some(knobs) =
                         self.stem_panel
@@ -688,7 +733,11 @@ impl Player {
         );
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
-            data.insert_temp(egui::Id::unique(("rack-knobs", d)), response.response.rect)
+            data.insert_temp(egui::Id::unique(("rack-knobs", d)), response.response.rect);
+            data.insert_temp(
+                egui::Id::unique(("rack-knobs", d)).with("screen"),
+                (response.response.rect, ui.layer_id()),
+            )
         });
         #[cfg(not(test))]
         let _ = response;
@@ -714,25 +763,31 @@ impl Player {
                             .clamp(110., 340.);
                     ui.horizontal_top(|ui| {
                         if d.is_multiple_of(2) {
+                            let cluster = wheel_size + 34. + bank_width
+                                + ui.spacing().item_spacing.x * if bank_width > 0. { 2. } else { 1. };
+                            ui.add_space((ui.available_width() - cluster - 8.).max(0.));
                             if bank_width > 0. {
-                                self.rack_knob_bank(ui, d, bank_width);
+                                self.rack_knob_bank(ui, d, bank_width, height);
                             }
                             self.rack_pitch(ui, d, wheel_size);
-                            ui.add_space((ui.available_width() - wheel_size - 8.).max(0.));
                             self.rack_platter(ui, d, wheel_size);
                         } else {
                             self.rack_platter(ui, d, wheel_size);
-                            ui.add_space((ui.available_width() - bank_width - 42. - 24.).max(0.));
                             self.rack_pitch(ui, d, wheel_size);
                             if bank_width > 0. {
-                                self.rack_knob_bank(ui, d, bank_width);
+                                self.rack_knob_bank(ui, d, bank_width, height);
                             }
                         }
                     });
-                    ui.horizontal(|ui| {
+                    let transport = ui.horizontal(|ui| {
                         let button_width =
                             ((ui.available_width() - 92. - ui.spacing().item_spacing.x * 5.) / 4.)
                                 .clamp(26., 60.);
+                        if d.is_multiple_of(2) {
+                            let controls = if width <= 335. { 28. } else { 72. };
+                            let row = controls + button_width * 4. + 32. + ui.spacing().item_spacing.x * 5.;
+                            ui.add_space((ui.available_width() - row - 8.).max(0.));
+                        }
                         if !d.is_multiple_of(2) {
                             self.deck_monitor_controls(ui, d, accent(d), button_width);
                         }
@@ -746,17 +801,13 @@ impl Player {
                             }
                         }
                         if d.is_multiple_of(2) {
-                            ui.add_space(
-                                (ui.available_width()
-                                    - button_width
-                                    - 32.
-                                    - ui.spacing().item_spacing.x)
-                                    .max(0.),
-                            );
                             self.deck_monitor_controls(ui, d, accent(d), button_width);
                         }
                     });
+                    #[cfg(test)] ui.ctx().data_mut(|data| { data.insert_temp(egui::Id::unique(("dj-transport", d)).with("screen"), (transport.response.rect, ui.layer_id())); });
+                    #[cfg(not(test))] let _ = transport;
                 });
+                let cues = ui.scope(|ui| {
                 ui.horizontal(|ui| {
                     ui.small(if expanded_cues {
                         "Hot Cues (1–8)"
@@ -774,6 +825,9 @@ impl Player {
                     }
                 });
                 self.main_hot_cues_count(ui, d, accent(d), if expanded_cues { 8 } else { 4 });
+                });
+                #[cfg(test)] ui.ctx().data_mut(|data| { data.insert_temp(egui::Id::unique(("dj-cue-pads", d)).with("screen"), (cues.response.rect, ui.layer_id())); });
+                #[cfg(not(test))] let _ = cues;
                 ui.horizontal(|ui| {
                     ui.small(if full_bank {
                         "Sampler · full bank"
@@ -785,8 +839,16 @@ impl Player {
                     });
                 });
                 let actions = if d.is_multiple_of(2) {
+                    if !self.sampler.started {
+                        self.sampler.started = true;
+                        if self.sampler.has_saved() && self.ensure_audio().is_ok() { self.sampler.restore(); }
+                    }
                     self.sampler.inline_pads(ui, self.audio.as_ref(), full_bank)
                 } else {
+                    if !self.right_sampler.started {
+                        self.right_sampler.started = true;
+                        if self.right_sampler.has_saved() && self.ensure_right_samples().is_ok() { self.right_sampler.restore(); }
+                    }
                     self.right_sampler
                         .inline_pads(ui, self.right_sample_audio.as_ref(), full_bank)
                 };
@@ -809,6 +871,46 @@ impl Player {
         }
     }
     fn rack_deck_controls(&mut self, ui: &mut egui::Ui, d: usize, width: f32) {
+        if self.pending_load[d].is_some() {
+            ui.weak("A replacement track is staged. Pause this deck before applying it.");
+            if ui
+                .add_enabled(!self.playing[d], egui::Button::new("Apply staged track"))
+                .clicked()
+                && let Some((path, cue)) = self.pending_load[d].take()
+                && let Err(error) = self.safe_load_path(d, path, cue)
+            {
+                self.status = error;
+            }
+        }
+        self.deck_sections(ui, d);
+        egui::CollapsingHeader::new("Stem preparation / controls").show(ui, |ui| {
+            let source = self.loaded_track(d).map(|track| {
+                self.loaded_origin[d]
+                    .as_deref()
+                    .unwrap_or(&self.root)
+                    .join(&track.path)
+            });
+            if self.stem_panel.show(
+                ui,
+                d,
+                source.as_deref(),
+                self.audio.as_ref(),
+                !self.run.auto && !self.playing[d],
+            ) && let Some(path) = source
+                && let Err(error) = self.safe_load_path(d, path, None)
+            {
+                self.status = error;
+            }
+            if let Some((deck, knobs)) = self.stem_panel.manual_change.take()
+                && let Some(audio) = &self.audio
+            {
+                self.run.cancel_effects(audio);
+                for (i, gain) in stems::remix_gains(knobs).into_iter().enumerate() {
+                    audio.controls.stem_knobs[deck][i].store(knobs[i].to_bits(), Relaxed);
+                    audio.controls.stem_level[deck][i].store(gain.to_bits(), Relaxed);
+                }
+            }
+        });
         if ui.button("Fade out this deck").clicked()
             && let Err(error) = self.execute_control(control::Action::Fade {
                 deck: control::Deck::PHYSICAL[d],
@@ -908,17 +1010,22 @@ impl Player {
                             });
                         }
                     });
-                    if ui
-                        .add_sized(
-                            [width - 24., 52.],
-                            egui::Button::new(
-                                egui::RichText::new("Auto Crossfade").color(ORANGE).strong(),
-                            )
-                            .fill(egui::Color32::from_rgb(65, 48, 12))
-                            .stroke(egui::Stroke::new(1., ORANGE)),
+                    let fade = ui.add_sized(
+                        [width - 24., 52.],
+                        egui::Button::new(
+                            egui::RichText::new("Auto Crossfade").color(ORANGE).strong(),
                         )
-                        .clicked()
-                    {
+                        .fill(egui::Color32::from_rgb(65, 48, 12))
+                        .stroke(egui::Stroke::new(1., ORANGE)),
+                    );
+                    #[cfg(test)]
+                    ui.ctx().data_mut(|data| {
+                        data.insert_temp(
+                            egui::Id::unique("dj-auto-fade-bounds").with("screen"),
+                            (fade.rect, ui.layer_id()),
+                        );
+                    });
+                    if fade.clicked() {
                         self.auto_crossfade();
                     }
                     ui.spacing_mut().slider_width = 90.;
@@ -1260,9 +1367,16 @@ mod tests {
     }
     #[test]
     fn wide_rack_keeps_wheels_by_mixer_and_knobs_on_outer_sides() {
-        for size in [egui::vec2(1600., 1000.), egui::vec2(2560., 1440.)] {
+        for (size, six) in [
+            (egui::vec2(1600., 1000.), true),
+            (egui::vec2(2560., 1440.), true),
+            (egui::vec2(1000., 760.), false),
+            (egui::vec2(1280., 900.), false),
+            (egui::vec2(1920., 1080.), false),
+        ] {
             let ctx = egui::Context::default();
             let mut player = Player::default();
+            player.rack.six = six;
             for _ in 0..3 {
                 let mut output = ctx.run_ui(
                     egui::RawInput {
@@ -1292,6 +1406,16 @@ mod tests {
                 "Wheels drifted away from mixer: {a:?} {b:?}"
             );
             assert!(a.width() <= 340. && b.width() <= 340.);
+            if !six {
+                assert!(
+                    a.width() >= 140. && b.width() >= 140.,
+                    "Two-deck wheels were squeezed: {a:?} {b:?}"
+                );
+                assert!(
+                    (a.width() - b.width()).abs() < 1.,
+                    "A/B wheels must scale equally"
+                );
+            }
             assert!(a.right() < size.x && b.right() < size.x);
         }
     }

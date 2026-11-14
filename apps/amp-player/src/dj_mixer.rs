@@ -155,53 +155,6 @@ pub(super) fn dial(
     response.on_hover_text(format!("{label}: {value:.1}\nDrag up/down or scroll; double-click resets. Arrow keys adjust; Home resets."))
 }
 impl Player {
-    pub(super) fn inline_mixer(&mut self, ui: &mut egui::Ui, height: f32) {
-        ui.spacing_mut().item_spacing.y = 1.;
-        ui.strong("MIXER");
-        ui.columns(2, |columns| {
-            for (side, column) in columns.iter_mut().enumerate() {
-                let d = if self.rack.six { self.rack.live[side] } else { side };
-                let accent = if d % 2 == 0 { ORANGE } else { CYAN };
-                column.push_id(("mixer-channel", d), |ui| {
-                    ui.colored_label(accent, crate::deck_rack::NAMES[d]);
-                    ui.horizontal(|ui| { dial(ui, "Gain dB", &mut self.mixer_panel.gain[d], -12. ..=12., accent); ui.label("Gain"); });
-                    for (band, label) in [(2,"High"),(1,"Mid"),(0,"Low")] {
-                        ui.horizontal(|ui| {
-                            if dial(ui, label, &mut self.eq[d][band], -24. ..=12., accent).changed()
-                                && let Some(audio) = &self.audio { audio.set_eq(d, band, self.eq[d][band]); }
-                            ui.label(label);
-                            ui.toggle_value(&mut self.mixer_panel.kill[d][band], "X").on_hover_text(format!("Kill {label}; restores the dial setting when released"));
-                        });
-                    }
-                    ui.horizontal(|ui| { dial(ui, "Filter (left: low-pass; right: high-pass)", &mut self.mixer_panel.sweep[d], -1. ..=1., accent); ui.label("Filter"); });
-                    ui.horizontal(|ui| {
-                        let fader_height = ((height - 500.) * 0.4).clamp(70., 180.);
-                        ui.spacing_mut().slider_width = fader_height;
-                        if ui.add(egui::Slider::new(&mut self.channel_gain[d], 0. ..=1.).vertical().show_value(false)).changed()
-                            && let Some(audio) = &self.audio { audio.set_gain(d, self.channel_gain[d]); }
-                        skin::meter(ui, self.audio.as_ref().map_or(0., |a| a.peak(d)), egui::vec2(18., fader_height));
-                    });
-                    ui.toggle_value(&mut self.mixer_panel.cue[d], "CUE").on_hover_text("Listen before the channel fader and crossfader. Choose a headphone output below. The deck must be playing; this does not start or stop it.");
-                });
-            }
-        });
-        ui.separator();
-        egui::CollapsingHeader::new("Headphones / output")
-            .id_salt("dj-monitor-output")
-            .show(ui, |ui| self.headphone_output(ui));
-        if let Some(audio) = &self.audio {
-            self.mixer_panel.apply(audio);
-            let error = audio
-                .controls
-                .monitor_error
-                .lock()
-                .ok()
-                .and_then(|mut e| e.take());
-            if let Some(error) = error {
-                self.mixer_panel.status = error;
-            }
-        }
-    }
     pub(super) fn deck_monitor_controls(
         &mut self,
         ui: &mut egui::Ui,
