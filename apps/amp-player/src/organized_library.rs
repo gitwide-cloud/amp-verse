@@ -157,6 +157,13 @@ impl Player {
         match amp_core::music_sources::add(&self.root, &folder) {
             Ok(sources) => {
                 self.source_roots = sources;
+                if let Err(error) =
+                    crate::startup_index::remember(&self.root, Some(&self.source_roots))
+                {
+                    self.status = format!(
+                        "Source choices could not be backed up to the startup index: {error}"
+                    );
+                }
                 self.scan = None;
                 self.scan();
                 self.status="Music source added. Existing songs stay available while new folders scan in the background.".into();
@@ -204,6 +211,13 @@ impl Player {
             match amp_core::music_sources::remove(&self.root, &id) {
                 Ok(sources) => {
                     self.source_roots = sources;
+                    if let Err(error) =
+                        crate::startup_index::remember(&self.root, Some(&self.source_roots))
+                    {
+                        self.status = format!(
+                            "Source choices could not be backed up to the startup index: {error}"
+                        );
+                    }
                     self.scan = None;
                     self.scan();
                     self.status =
@@ -557,6 +571,9 @@ impl Player {
                 self.preparer.retry_failed();
             }
             if self.preparer.queue_enabled && ui.button("Stop analysis queue").clicked() {
+                if let Err(error) = crate::startup_index::remember(&self.root, None) {
+                    self.status = format!("Could not save startup library path: {error}");
+                }
                 self.preparer.stop_queue();
             }
             crate::preparation_speed::controls(ui);

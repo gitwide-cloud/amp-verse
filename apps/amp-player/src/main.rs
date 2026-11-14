@@ -37,6 +37,7 @@ mod live_mix;
 mod mashup;
 mod media_lookup;
 mod mix_schedule;
+mod startup_index;
 use dj_engine as mixer;
 #[path = "performance.rs"]
 mod dj_logic;
@@ -238,24 +239,27 @@ struct Player {
 }
 impl Default for Player {
     fn default() -> Self {
+        let root = std::env::args_os()
+            .nth(1)
+            .map(PathBuf::from)
+            .or_else(startup_index::main_root)
+            .or_else(|| {
+                std::fs::read_to_string(library_preference())
+                    .ok()
+                    .map(|s| PathBuf::from(s.trim()))
+            })
+            .unwrap_or_default();
+        let source_roots = startup_index::sources(&root);
         Self {
             workspace: Default::default(),
             playback_owner: Default::default(),
             player_sequence: Default::default(),
             rack: Default::default(),
             recovery: Default::default(),
-            root: std::env::args_os()
-                .nth(1)
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::fs::read_to_string(library_preference())
-                        .ok()
-                        .map(|s| PathBuf::from(s.trim()))
-                })
-                .unwrap_or_default(),
+            root,
             library: None,
             library_generation: 0,
-            source_roots: Vec::new(),
+            source_roots,
             organizer: Default::default(),
             outputs: Default::default(),
             lookup: Default::default(),
@@ -616,6 +620,13 @@ impl Player {
         }
     }
     fn accept_scan(&mut self, snapshot: library_cache::Snapshot) {
+        if let Err(error) = startup_index::remember(
+            &self.root,
+            (!snapshot.sources.is_empty()).then_some(snapshot.sources.as_slice()),
+        ) {
+            self.status =
+                format!("Library loaded, but its startup index could not be saved: {error}");
+        }
         self.source_roots = snapshot.sources;
         self.accept_library_scan(snapshot.library);
         if let Some(settings) = snapshot.settings
@@ -1216,6 +1227,10 @@ impl Player {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(pref, self.root.to_string_lossy().as_bytes());
+        if let Err(error) = startup_index::remember(&self.root, None) {
+            self.status =
+                format!("Music folder selected, but its startup index could not be saved: {error}");
+        }
         self.scan();
     }
     fn create_named_playlist(&mut self, name: &str) -> Result<(), String> {
@@ -3828,6 +3843,9 @@ fn main() -> eframe::Result {
         player.recovery = session::Recovery::open(&player.root);
     }
     if !player.root.as_os_str().is_empty() {
+        if let Err(error) = startup_index::remember(&player.root, None) {
+            player.status = format!("Could not save library startup index: {error}");
+        }
         player.scan();
     }
     if std::env::var_os("AMP_SCREENSHOT_EXPANDED").is_some() {

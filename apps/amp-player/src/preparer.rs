@@ -1177,6 +1177,60 @@ ui.add(egui::TextEdit::singleline(&mut cue.label).desired_width(220.));ui.add(eg
 mod workflow_tests {
     use super::*;
     #[test]
+    fn stop_analysis_preserves_completed_work_selection_and_saved_folder_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("index.ampdb");
+        std::fs::write(dir.path().join("done.wav"), b"completed").unwrap();
+        std::fs::write(dir.path().join("pending.wav"), b"pending").unwrap();
+        let queue = amp_core::analysis_queue::Queue::open(&index, dir.path()).unwrap();
+        queue
+            .enqueue([
+                (PathBuf::from("done.wav"), true),
+                (PathBuf::from("pending.wav"), false),
+            ])
+            .unwrap();
+        let stats = queue.stats().unwrap();
+        assert_eq!((stats.done, stats.pending), (1, 1));
+        let saved = serde_json::json!({"main_path":"music","folders":["extra"],"completed":7,"cues":[12.5]});
+        amp_core::catalog_db::save_local_record(&index, "saved-library", &saved).unwrap();
+        let mut preparer = Preparer {
+            queue_enabled: true,
+            queue: Some(queue.clone()),
+            queue_root: dir.path().into(),
+            selection_root: dir.path().into(),
+            selection_path: "song.mp3".into(),
+            done: 7,
+            total: 8,
+            ..Default::default()
+        };
+        preparer.draft.bpm = Some(128.);
+        let before = preparer.draft.clone();
+        preparer.stop_queue();
+        assert!(!preparer.queue_enabled);
+        assert!(
+            preparer
+                .stop_queue
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert_eq!(preparer.queue_root, dir.path());
+        assert_eq!(preparer.selection_path, PathBuf::from("song.mp3"));
+        assert_eq!(preparer.done, 7);
+        assert_eq!(preparer.total, 8);
+        assert_eq!(
+            serde_json::to_value(&preparer.draft).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        assert_eq!(
+            amp_core::catalog_db::local_record(&index, "saved-library").unwrap(),
+            Some(saved)
+        );
+        drop(preparer);
+        drop(queue);
+        let reopened = amp_core::analysis_queue::Queue::open(&index, dir.path()).unwrap();
+        let stats = reopened.stats().unwrap();
+        assert_eq!((stats.total, stats.done, stats.pending), (2, 1, 1));
+    }
+    #[test]
     fn preparation_uses_display_selection_and_saves_to_added_source_without_false_busy_or_reload() {
         let main = tempfile::tempdir().unwrap();
         let extra = tempfile::tempdir().unwrap();
