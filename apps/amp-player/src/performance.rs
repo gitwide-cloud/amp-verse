@@ -2344,8 +2344,16 @@ impl Player {
             }
         }
     }
-    pub(super) fn control_catalog(&self) -> Value {
-        json!({"scenes":self.scene_resources()["scenes"],"songs":self.library.as_ref().map(|l|l.tracks.iter().map(|t|json!({"id":show::song_id(t),"title":t.title,"path":t.path,"resource_id":crate::resources::stable_song_id(t),"available":true,"analyzed":t.preparation.analysis.is_some(),"artist":t.preparation.extensions.get("artist"),"cues":t.preparation.manual_cues.iter().chain(&t.preparation.cues).map(|c|json!({"number":c.number,"id":c.id,"name":c.label,"seconds":c.seconds})).collect::<Vec<_>>()})).collect::<Vec<_>>()).unwrap_or_default(),"playlists":self.run.settings.playlists,"regular_playlists":self.dj_browser.playlists.iter().map(|(path,p)|json!({"id":regular_playlist_id(path),"name":p.name})).collect::<Vec<_>>(),"resource_playlists":self.companion_playlists(),"version":1})
+    pub(super) fn control_catalog_key(&self) -> Vec<u8> {
+        serde_json::to_vec(&(
+            &self.root,
+            self.library_generation,
+            self.preparer.revision,
+            crate::music_scenes::revision(),
+            &self.run.settings,
+            &self.dj_browser.playlists,
+        ))
+        .unwrap_or_default()
     }
     pub(super) fn control_snapshot(&self) -> Value {
         let active = if self.playback_owner == crate::playback_owner::Owner::Player {

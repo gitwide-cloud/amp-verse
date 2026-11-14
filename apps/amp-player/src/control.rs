@@ -472,6 +472,16 @@ impl Control {
     pub fn publish(&self, value: Value) {
         self.shared.snapshot.send_replace(value);
     }
+    pub fn catalog_sink(&self) -> impl FnOnce(Value) + Send + 'static {
+        let shared = self.shared.clone();
+        move |value| {
+            if !shared.shutdown.load(Ordering::Relaxed)
+                && let Ok(mut catalog) = shared.catalog.lock()
+            {
+                *catalog = value;
+            }
+        }
+    }
     pub fn catalog(&self, value: Value) {
         if let Ok(mut c) = self.shared.catalog.lock() {
             *c = value;

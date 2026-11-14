@@ -94,17 +94,17 @@ pub fn page(catalog: &Value, query: &Query) -> Result<Value, String> {
         json!({"songs":songs,"total":total,"offset":offset,"limit":limit,"next_offset":if offset+songs.len()<total{Some(offset+songs.len())}else{None}}),
     )
 }
-impl Player {
-    pub(super) fn companion_playlists(&self) -> Vec<Value> {
-        let tracks = self
-            .library
-            .as_ref()
-            .map(|l| l.tracks.as_slice())
-            .unwrap_or(&[]);
-        let mut result:Vec<_>=self.run.settings.playlists.iter().map(|p|json!({"id":p.id,"name":p.name,"kind":"smart","available":p.companion_available,"tracks":tracks.iter().filter(|t|amp_core::show::eligible(p,t)).map(amp_core::show::song_id).collect::<Vec<_>>()})).collect();
-        result.extend(self.dj_browser.playlists.iter().map(|(path,p)|json!({"id":performance::regular_playlist_id(path),"name":p.name,"kind":"playlist","available":p.companion_available,"tracks":tracks.iter().filter(|t|p.tracks.contains(&t.path)).map(amp_core::show::song_id).collect::<Vec<_>>()})));
-        result
-    }
+pub(super) fn playlist_resources(
+    tracks: &[amp_core::Track],
+    settings: &amp_core::show::Settings,
+    playlists: &[(PathBuf, Playlist)],
+) -> Vec<Value> {
+    let mut result: Vec<_> = settings.playlists.iter().map(|p| json!({"id":p.id,"name":p.name,"kind":"smart","available":p.companion_available,"tracks":tracks.iter().filter(|t|amp_core::show::eligible(p,t)).map(amp_core::show::song_id).collect::<Vec<_>>()})).collect();
+    result.extend(playlists.iter().map(|(path,p)| {
+        let members: std::collections::HashSet<_> = p.tracks.iter().collect();
+        json!({"id":performance::regular_playlist_id(path),"name":p.name,"kind":"playlist","available":p.companion_available,"tracks":tracks.iter().filter(|t|members.contains(&t.path)).map(amp_core::show::song_id).collect::<Vec<_>>()})
+    }));
+    result
 }
 #[cfg(test)]
 mod tests {

@@ -14,6 +14,7 @@ struct Update {
 }
 #[derive(Default)]
 pub struct Preparer {
+    pub revision: u64,
     wave: crate::waveform::Lane,
     position: f64,
     zoom: Option<f64>,
@@ -483,6 +484,7 @@ impl Preparer {
                         .and_then(|l| l.tracks.iter_mut().find(|t| t.path == self.selection_path))
                     {
                         t.preparation = self.draft.clone();
+                        self.revision = self.revision.wrapping_add(1);
                     }
                     self.status =
                         "Preparation saved; playing decks keep their loaded snapshot.".into();
@@ -1026,7 +1028,7 @@ impl Preparer {
             if ui.button("Analyze track").clicked(){self.total=1;self.done=0;self.failures=0;let track=Track{path:self.path.clone(),title:self.title.clone(),preparation:self.draft.clone()};self.status="Analyzing decoded audio...".into();self.start(self.root.clone(),vec![track],true);}
             if ui.button("Save approved metadata").clicked(){
 self.draft.schema_version=Some(1);self.draft.manual_override=true;if let Some(a)=&mut self.draft.analysis{a.reviewed=true;}match preparation::save_if_unchanged(&self.root,&self.path,&self.draft,self.editing_revision.as_deref()){Ok(())=>{if let Ok(fresh)=preparation::load(&self.root.join(&self.path)){self.draft=fresh;}
-if let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|self.selection_root==root && t.path==self.selection_path){t.preparation=self.draft.clone();if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.editing_revision=preparation::revision(&self.root.join(&self.path));self.status="Approved metadata saved in ampdj. Original audio unchanged.".into();},Err(e)=>{
+if let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|self.selection_root==root && t.path==self.selection_path){t.preparation=self.draft.clone();self.revision=self.revision.wrapping_add(1);if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.editing_revision=preparation::revision(&self.root.join(&self.path));self.status="Approved metadata saved in ampdj. Original audio unchanged.".into();},Err(e)=>{
 let queued=(||{let base=if let Some(bytes)=&self.editing_revision{serde_json::from_slice(bytes).map_err(|e:serde_json::Error|e.to_string())?}else{Preparation::default()};amp_core::offline::Edit::new(self.library_id.clone(),self.path.clone(),base,self.draft.clone())?.queue()})();
 self.status=match queued{Ok(path)=>format!("{e}. Draft kept locally at {}. Reconnection will not publish it automatically.",path.display()),Err(_)=>format!("{e}. Unsaved draft remains open; local queue unavailable.")};}}}
         });});

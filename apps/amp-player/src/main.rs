@@ -54,6 +54,7 @@ mod podcasts;
 mod preparation_speed;
 mod preparer;
 mod remote_access;
+mod remote_catalog;
 mod resources;
 mod sample_editor;
 mod sample_library;
@@ -186,11 +187,14 @@ struct Player {
     smart_preview: smart_preview::Preview,
     control: Option<control::Control>,
     control_attempted: bool,
+    control_start: Option<mpsc::Receiver<remote_catalog::Startup>>,
     control_restart: Option<std::time::Instant>,
     control_status: String,
     control_bind: String,
     control_password: String,
     catalog_updated: std::time::Instant,
+    remote_catalog: remote_catalog::Cache,
+    control_published: std::time::Instant,
     last_master: u8,
     waveforms: [waveform::Lane; 6],
     wave_span: f64,
@@ -294,12 +298,15 @@ impl Default for Player {
             smart_preview: Default::default(),
             control: None,
             control_attempted: false,
+            control_start: None,
             control_restart: None,
             control_status: "Show control starting…".into(),
             control_bind: std::env::var("AMP_CONTROL_BIND")
                 .unwrap_or_else(|_| "0.0.0.0:8790".into()),
             control_password: std::env::var("AMP_CONTROL_PASSWORD").unwrap_or_default(),
             catalog_updated: std::time::Instant::now() - std::time::Duration::from_secs(3),
+            remote_catalog: Default::default(),
+            control_published: std::time::Instant::now() - Duration::from_secs(1),
             last_master: 75,
             waveforms: Default::default(),
             wave_span: 16.,
@@ -2088,23 +2095,59 @@ impl Player {
             self.control_status = "Restarting show control; audio continues".into();
             return;
         }
+        if self.control_start.is_some() {
+            return;
+        }
         self.control_restart = None;
-        self.control = None;
-        match control::Control::start(
-            ctx,
-            &self.control_bind,
-            if self.control_password.is_empty() {
-                None
-            } else {
-                Some(self.control_password.clone())
-            },
-        ) {
+        let input = remote_catalog::Input {
+            library: self.library.clone(),
+            settings: self.run.settings.clone(),
+            playlists: self.dj_browser.playlists.clone(),
+        };
+        let key = self.control_catalog_key();
+        let address = self.control_bind.clone();
+        let password = (!self.control_password.is_empty()).then(|| self.control_password.clone());
+        let (tx, rx) = mpsc::channel();
+        self.control_start = Some(rx);
+        self.control_status = "Preparing Remote / Web UI library... Playback continues.".into();
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let value =
+                remote_catalog::build(input.library.as_ref(), &input.settings, &input.playlists);
+            let _ = tx.send(remote_catalog::Startup {
+                key,
+                value,
+                address,
+                password,
+            });
+            context.request_repaint();
+        });
+    }
+    fn poll_control_start(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.control_start else {
+            return;
+        };
+        let startup = match rx.try_recv() {
+            Ok(value) => value,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.control_start = None;
+                self.control_status =
+                    "Remote library preparation stopped. Try Start remote service again.".into();
+                return;
+            }
+        };
+        self.control_start = None;
+        match control::Control::start(ctx, &startup.address, startup.password) {
             Ok(c) => {
-                self.control_status = format!("Companion HTTP / WebSocket · {}", c.address);
-                c.catalog(self.control_catalog());
+                c.catalog(startup.value);
+                self.remote_catalog = Default::default();
+                self.remote_catalog.ready(startup.key);
+                self.control_status = format!("Companion HTTP / WebSocket - {}", c.address);
+                self.catalog_updated = std::time::Instant::now() - Duration::from_secs(3);
                 self.control = Some(c);
             }
-            Err(e) => self.control_status = format!("Show control unavailable: {e}"),
+            Err(error) => self.control_status = format!("Remote unavailable: {error}"),
         }
     }
     fn poll_control(&mut self) {
@@ -3173,6 +3216,7 @@ impl eframe::App for Player {
         self.poll();
         self.try_automatic_recovery(ui.ctx());
         self.release_jog_wheels(ui.ctx());
+        self.poll_control_start(ui.ctx());
         self.poll_control();
         self.poll_controllers();
         self.performance_tick();
@@ -3180,9 +3224,22 @@ impl eframe::App for Player {
             self.library_preview_blocked() || self.live_mix.as_ref().is_some_and(|b| b.running()),
         );
         if let Some(c) = &self.control {
-            c.publish(self.control_snapshot());
+            if self.control_published.elapsed() >= Duration::from_millis(100) {
+                c.publish(self.control_snapshot());
+                self.control_published = std::time::Instant::now();
+            }
+            self.remote_catalog.poll();
             if self.catalog_updated.elapsed() > Duration::from_secs(2) {
-                c.catalog(self.control_catalog());
+                let key = self.control_catalog_key();
+                if self.remote_catalog.needs_update(&key) {
+                    let input = remote_catalog::Input {
+                        library: self.library.clone(),
+                        settings: self.run.settings.clone(),
+                        playlists: self.dj_browser.playlists.clone(),
+                    };
+                    self.remote_catalog
+                        .start(key, input, c.catalog_sink(), ui.ctx().clone());
+                }
                 self.catalog_updated = std::time::Instant::now();
             }
         }
@@ -3205,8 +3262,10 @@ impl eframe::App for Player {
         {
             lab.stop_preview();
         }
-        if let Some(lookup) = self.lookup.get_mut() {
-            lookup.poll(ui.ctx(), &self.root, self.library.as_mut());
+        if let Some(lookup) = self.lookup.get_mut()
+            && lookup.poll(ui.ctx(), &self.root, self.library.as_mut())
+        {
+            self.library_generation = self.library_generation.wrapping_add(1);
         }
         if self.podcasts.get().is_some() || (self.workspace.enabled && self.workspace.pane == 6) {
             self.podcasts
@@ -3639,6 +3698,67 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod window_tests {
     use super::*;
+    #[test]
+    fn remote_start_prepares_catalog_before_serving_and_can_be_cancelled() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut library = amp_core::scan(directory.path()).unwrap();
+        library.tracks.push(amp_core::Track {
+            path: "song.mp3".into(),
+            title: "Fixture song".into(),
+            preparation: Default::default(),
+        });
+        let mut player = Player {
+            root: directory.path().into(),
+            library: Some(library),
+            control_bind: "127.0.0.1:0".into(),
+            ..Default::default()
+        };
+        player.start_control(&ctx);
+        assert!(
+            player.control.is_none(),
+            "Do not advertise an empty remote catalog during preparation"
+        );
+        assert!(player.control_start.is_some());
+        player.volume = 42;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while player.control.is_none() {
+            player.poll_control_start(&ctx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let address = &player.control.as_ref().unwrap().address;
+        let value: serde_json::Value = ureq::get(format!("http://{address}/api/v1/catalog"))
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_json()
+            .unwrap();
+        assert_eq!(value["songs"][0]["title"], "Fixture song");
+        assert_eq!(player.volume, 42);
+        assert!(player.audio.is_none());
+        let key = player.control_catalog_key();
+        player.volume = 56;
+        assert_eq!(
+            key,
+            player.control_catalog_key(),
+            "Transport changes must not rebuild the catalog"
+        );
+        player.preparer.revision += 1;
+        assert_ne!(
+            key,
+            player.control_catalog_key(),
+            "Saved metadata must invalidate the catalog"
+        );
+        player.control = None;
+        player.start_control(&ctx);
+        player.control_start = None;
+        player.poll_control_start(&ctx);
+        assert!(
+            player.control.is_none(),
+            "Stopping pending setup must not start a server later"
+        );
+    }
     #[test]
     fn idle_player_and_remote_status_do_not_load_unused_modules() {
         let mut player = Player {

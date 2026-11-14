@@ -10,9 +10,11 @@ enum Source {
 #[derive(Default)]
 pub struct Browser {
     source: Source,
+    path_index: std::collections::HashMap<PathBuf, usize>,
     folder: PathBuf,
     smart: String,
     search: String,
+    search_cache: Search,
     pub(super) playlists: Vec<(PathBuf, Playlist)>,
     playlist: Option<usize>,
     destination: usize,
@@ -41,6 +43,38 @@ struct MatchResult {
 struct Membership {
     cached: Option<MatchResult>,
     job: Option<std::sync::mpsc::Receiver<MatchResult>>,
+}
+#[derive(Default)]
+struct Search {
+    query: String,
+    input: Vec<usize>,
+    matching: Vec<usize>,
+}
+impl Search {
+    fn filter(&mut self, input: Vec<usize>, query: &str, library: &Library) -> Vec<usize> {
+        if query.is_empty() {
+            return input;
+        }
+        if self.query == query && self.input == input {
+            return self.matching.clone();
+        }
+        self.matching = input
+            .iter()
+            .copied()
+            .filter(|&i| {
+                library.tracks.get(i).is_some_and(|t| {
+                    t.title.to_lowercase().contains(query)
+                        || t.path.to_string_lossy().to_lowercase().contains(query)
+                        || ["artist", "album", "genre"]
+                            .iter()
+                            .any(|key| track_columns::cell(t, key).to_lowercase().contains(query))
+                })
+            })
+            .collect();
+        self.query = query.into();
+        self.input = input;
+        self.matching.clone()
+    }
 }
 impl Membership {
     fn indices(
@@ -91,12 +125,14 @@ impl Browser {
         settings: &amp_core::show::Settings,
         queue: &[usize],
     ) {
+        self.path_index = track_positions(library);
         self.snapshot_root = root.to_path_buf();
         self.snapshot = Some(std::sync::Arc::new(library.clone()));
         self.settings_snapshot = Some(std::sync::Arc::new(settings.clone()));
         self.queue_snapshot = queue.to_vec();
         self.refresh_generation = self.refresh_generation.wrapping_add(1);
         self.membership = Membership::default();
+        self.search_cache = Search::default();
         self.stem_status.clear();
         self.stem_rx = None;
     }
@@ -108,11 +144,21 @@ impl Browser {
         self.smart = id.into();
     }
 }
-fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
+fn track_positions(library: &Library) -> std::collections::HashMap<PathBuf, usize> {
+    let mut index = std::collections::HashMap::new();
+    for (i, track) in library.tracks.iter().enumerate() {
+        index.entry(track.path.clone()).or_insert(i);
+    }
+    index
+}
+fn playlist_indices(
+    index: &std::collections::HashMap<PathBuf, usize>,
+    playlist: &Playlist,
+) -> Vec<usize> {
     playlist
         .tracks
         .iter()
-        .filter_map(|path| library.tracks.iter().position(|t| &t.path == path))
+        .filter_map(|path| index.get(path).copied())
         .collect()
 }
 impl Player {
@@ -424,7 +470,7 @@ impl Player {
                         .dj_browser
                         .playlist
                         .and_then(|i| self.dj_browser.playlists.get(i))
-                        .map(|(_, p)| playlist_indices(lib, p))
+                        .map(|(_, p)| playlist_indices(&self.dj_browser.path_index, p))
                         .unwrap_or_else(|| self.dj_browser.queue_snapshot.clone()),
                     Source::Smart => {
                         if let Some(profile) = settings_snapshot.as_ref().and_then(|settings| {
@@ -483,15 +529,7 @@ impl Player {
                     }
                 };
                 let query = self.dj_browser.search.to_lowercase();
-                indices.retain(|&i| {
-                    lib.tracks.get(i).is_some_and(|t| {
-                        t.title.to_lowercase().contains(&query)
-                            || t.path.to_string_lossy().to_lowercase().contains(&query)
-                            || ["artist", "album", "genre"].iter().any(|key| {
-                                track_columns::cell(t, key).to_lowercase().contains(&query)
-                            })
-                    })
-                });
+                indices = self.dj_browser.search_cache.filter(indices, &query, lib);
                 if !matching_smart {
                     ui.weak(format!("{} tracks", indices.len()));
                 }
@@ -922,6 +960,12 @@ mod tests {
         library.tracks.push(second);
         let mut browser = Browser::default();
         browser.capture(Path::new("music"), &library, &settings, &[0]);
+        assert_eq!(
+            browser
+                .search_cache
+                .filter(vec![0, 1], "original", browser.snapshot.as_ref().unwrap()),
+            vec![0]
+        );
         let generation = browser.refresh_generation;
         let profile = settings.playlists[0].clone();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -947,6 +991,13 @@ mod tests {
             browser.settings_snapshot.as_ref().unwrap().playlists[0].name,
             settings.playlists[0].name
         );
+        assert_eq!(
+            browser
+                .search_cache
+                .filter(vec![0, 1], "original", browser.snapshot.as_ref().unwrap()),
+            vec![0],
+            "Search must remain stable until explicit refresh"
+        );
         for _ in 0..5 {
             assert!(
                 browser
@@ -957,6 +1008,19 @@ mod tests {
             assert!(browser.membership.job.is_none());
         }
         browser.capture(Path::new("music"), &library, &settings, &[]);
+        assert!(
+            browser
+                .search_cache
+                .filter(vec![0, 1], "original", browser.snapshot.as_ref().unwrap())
+                .is_empty()
+        );
+        assert_eq!(
+            browser
+                .search_cache
+                .filter(vec![0, 1], "analysis", browser.snapshot.as_ref().unwrap()),
+            vec![1]
+        );
+        assert_eq!(browser.path_index.get(Path::new("a.mp3")), Some(&1));
         assert_eq!(browser.refresh_generation, generation + 1);
         assert_eq!(
             browser.snapshot.as_ref().unwrap().tracks[1].title,
@@ -996,7 +1060,10 @@ mod tests {
             name: "Show".into(),
             tracks: vec!["b.mp3".into(), "a.mp3".into(), "b.mp3".into()],
         };
-        assert_eq!(playlist_indices(&library, &playlist), vec![1, 0, 1]);
+        assert_eq!(
+            playlist_indices(&track_positions(&library), &playlist),
+            vec![1, 0, 1]
+        );
         assert_eq!(library.tracks[0].title, "A");
     }
 }

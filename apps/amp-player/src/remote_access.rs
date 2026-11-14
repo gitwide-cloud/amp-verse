@@ -129,23 +129,27 @@ impl Player {
         ui.label("Android: open Remote → Discover, select this PC, then connect. Keep AMP Verse running on this PC.");
         ui.horizontal_wrapped(|ui| {
             if ui
-                .button(if self.control.is_some() {
-                    "Restart remote service"
-                } else {
-                    "Start remote service"
-                })
+                .add_enabled(
+                    self.control_start.is_none(),
+                    egui::Button::new(if self.control.is_some() {
+                        "Restart remote service"
+                    } else {
+                        "Start remote service"
+                    }),
+                )
                 .clicked()
             {
                 self.start_control(ui.ctx());
             }
             if ui
                 .add_enabled(
-                    self.control.is_some(),
+                    self.control.is_some() || self.control_start.is_some(),
                     egui::Button::new("Stop remote service"),
                 )
                 .clicked()
             {
                 self.control = None;
+                self.control_start = None;
                 self.control_restart = None;
                 self.control_status = "Remote service stopped; audio continues".into();
             }

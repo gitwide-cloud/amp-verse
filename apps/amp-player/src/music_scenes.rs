@@ -25,15 +25,19 @@ fn load() -> Result<Vec<Scene>, String> {
             .unwrap_or_default(),
     )
 }
-impl Player {
-    pub(super) fn scene_resources(&self) -> serde_json::Value {
-        match load() {
-            Ok(scenes) => {
-                serde_json::json!({"scenes":scenes.iter().map(|s|serde_json::json!({"id":s.id,"name":s.name})).collect::<Vec<_>>()})
-            }
-            Err(e) => serde_json::json!({"scenes":[],"error":e}),
+static REVISION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+pub(super) fn revision() -> u64 {
+    REVISION.load(std::sync::atomic::Ordering::Relaxed)
+}
+pub(super) fn resources() -> serde_json::Value {
+    match load() {
+        Ok(scenes) => {
+            serde_json::json!({"scenes":scenes.iter().map(|s|serde_json::json!({"id":s.id,"name":s.name})).collect::<Vec<_>>()})
         }
+        Err(e) => serde_json::json!({"scenes":[],"error":e}),
     }
+}
+impl Player {
     pub(super) fn save_music_scene(&self, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() || name.len() > 120 || name.chars().any(char::is_control) {
@@ -65,6 +69,9 @@ impl Player {
             "music-scenes",
             &serde_json::to_value(scenes).map_err(|e| e.to_string())?,
         )
+        .inspect(|_| {
+            REVISION.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        })
     }
     pub(super) fn recall_music_scene(
         &mut self,

@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "amp-cast"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "amp-core",
  "async-stream",
@@ -81,7 +81,7 @@ dependencies = [
 
 [[package]]
 name = "amp-core"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "amp-dj-policy",
  "libc",
@@ -96,11 +96,11 @@ dependencies = [
 
 [[package]]
 name = "amp-dj-policy"
-version = "1.0.19"
+version = "1.0.20"
 
 [[package]]
 name = "amp-engine"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "amp-core",
  "serde_json",
@@ -108,7 +108,7 @@ dependencies = [
 
 [[package]]
 name = "amp-player"
-version = "1.0.19"
+version = "1.0.20"
 dependencies = [
  "amp-cast",
  "amp-core",
