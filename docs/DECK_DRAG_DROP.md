@@ -27,3 +27,7 @@ Regression checks cover wheel consumption/fine adjustment, private monitor audio
 ## Manual DJ browser refresh
 
 DJ Library pins a catalog/rules snapshot on first use. Background scans and analysis do not replace the visible tracks, metadata, folder tree, or Smart Playlist definitions. The Refresh button follows Edit sources / rules in Library and explicitly captures the latest saved data. Search and source selection still respond immediately. The former two-second eligibility polling loop is removed; matching runs once per selected snapshot/rule set. Deck loading resolves the captured song path, avoiding stale row indexes after library reordering. Refresh does not reload or interrupt prepared/playing decks.
+
+## Playback surfaces
+
+The workspace footer playback bar is removed from every workspace. The Player and DJ decks provide the playback controls; Library, Lab, Cast, and Add-ons do not add a separate shared output strip. The released height is available to each workspace’s content. Playback ownership and remote control routing remain unchanged.
