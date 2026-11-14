@@ -314,7 +314,7 @@ impl Player {
         let mut library_height = ui
             .ctx()
             .data_mut(|d| d.get_persisted::<f32>(library_id))
-            .unwrap_or(if compact { 145. } else { 230. })
+            .unwrap_or(if compact { 200. } else { 330. })
             .clamp(minimum_library, max_library);
         let height = (ui.available_height()
             - if self.dj_library_hidden {

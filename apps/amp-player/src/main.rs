@@ -3837,8 +3837,8 @@ fn main() -> eframe::Result {
         "combined" => [1100., 900.],
         "library" | "playlists" | "analysis" | "devices" => [1280., 860.],
         "preparation" | "rules" => [1200., 830.],
-        "dj" => [1000., 920.],
-        "dj-window" => [1440., 1000.],
+        "dj" => [1000., 1100.],
+        "dj-window" => [1440., 1100.],
         "compact" => [520., 210.],
         "mini" => [620., 100.],
         "dj-library" => [1100., 430.],
@@ -3847,7 +3847,7 @@ fn main() -> eframe::Result {
         "addons" => [1120., 760.],
         "cast" => [1120., 800.],
         "player" => [1100., 170.],
-        _ => [1280., 900.],
+        _ => [1280., 1100.],
     };
     if let Ok(value) = std::env::var("AMP_SCREENSHOT_SIZE")
         && let Some((w, h)) = value.split_once('x')

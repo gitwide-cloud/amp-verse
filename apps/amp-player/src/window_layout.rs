@@ -18,7 +18,7 @@ pub fn viewport(pane: usize) -> ViewportId {
 }
 pub fn initial_size(pane: usize, monitor: Option<egui::Vec2>) -> [f32; 2] {
     let preferred = if pane == 2 {
-        egui::vec2(1440., 1000.)
+        egui::vec2(1440., 1100.)
     } else {
         egui::vec2(1100., 800.)
     };
