@@ -63,6 +63,8 @@ fn path(root: &Path) -> Option<PathBuf> {
 }
 pub fn scan(root: &Path) -> Result<Snapshot, String> {
     let library = amp_core::scan(root).map_err(|e| e.to_string())?;
+    let sources = amp_core::music_sources::list(root)?;
+    require_complete_sources(&library, &sources)?;
     let settings = amp_core::show::Settings::load(root).ok();
     let mut playlists = Vec::new();
     for path in amp_core::catalog_db::playlist_paths(root)? {
@@ -74,10 +76,37 @@ pub fn scan(root: &Path) -> Result<Snapshot, String> {
         version: 1,
         root: root.into(),
         library,
-        sources: amp_core::music_sources::list(root)?,
+        sources,
         settings,
         playlists,
     })
+}
+/// Core scans can omit offline additional roots. Never publish that partial scan
+/// over a completed startup catalog (an empty but accessible root is valid).
+fn require_complete_sources(
+    library: &Library,
+    sources: &[amp_core::music_sources::Source],
+) -> Result<(), String> {
+    let group = library
+        .tree
+        .folders
+        .iter()
+        .find(|f| f.name == amp_core::music_sources::PREFIX);
+    let missing: Vec<_> = sources
+        .iter()
+        .filter(|source| {
+            !group.is_some_and(|group| group.folders.iter().any(|f| f.name == source.id))
+        })
+        .map(|source| source.root.display().to_string())
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(format!(
+            "Music source unavailable: {}. Your saved library is retained. Reconnect the source, then rescan.",
+            missing.join(", ")
+        ))
+    }
 }
 fn relative(path: &Path) -> bool {
     !path.as_os_str().is_empty() && path.components().all(|p| matches!(p, Component::Normal(_)))
@@ -143,6 +172,39 @@ pub fn save(root: &Path, snapshot: &Snapshot) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn offline_additional_source_cannot_replace_completed_catalog_but_empty_source_can() {
+        let source = amp_core::music_sources::Source {
+            id: "plex-music".into(),
+            root: "nas/plex/music".into(),
+            library_id: "plex".into(),
+            locations: Default::default(),
+        };
+        let mut library = Library {
+            tracks: vec![],
+            tree: amp_core::Folder {
+                name: "music".into(),
+                tracks: vec![],
+                folders: vec![],
+            },
+        };
+        assert!(
+            require_complete_sources(&library, std::slice::from_ref(&source))
+                .unwrap_err()
+                .contains("saved library is retained")
+        );
+        library.tree.folders.push(amp_core::Folder {
+            name: amp_core::music_sources::PREFIX.into(),
+            tracks: vec![],
+            folders: vec![amp_core::Folder {
+                name: source.id.clone(),
+                tracks: vec![],
+                folders: vec![],
+            }],
+        });
+        assert!(require_complete_sources(&library, &[source]).is_ok());
+        assert!(require_complete_sources(&library, &[]).is_ok());
+    }
     #[test]
     fn slow_scan_preserves_new_analysis_and_manual_revisions_but_accepts_newer_shared_data() {
         let mut current = amp_core::Preparation::default();

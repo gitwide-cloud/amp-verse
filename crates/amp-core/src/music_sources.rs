@@ -6,18 +6,30 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 pub const PREFIX: &str = "__amp_sources";
-pub fn display_name(name: &str) -> &str {
+pub fn display_name(name: &str) -> String {
     if name == PREFIX {
-        "Additional music sources"
+        "Additional music sources".into()
     } else {
+        if let Ok(cached) = cache().read()
+            && let Some(source) = cached.values().flatten().find(|source| source.id == name)
+        {
+            let leaf = source
+                .root
+                .file_name()
+                .unwrap_or_default()
+                .to_string_lossy();
+            if let Some(parent) = source.root.parent().and_then(Path::file_name) {
+                return format!("{} / {leaf}", parent.to_string_lossy());
+            }
+        }
         if name.len() > 37
             && name.is_char_boundary(name.len() - 37)
             && name.as_bytes()[name.len() - 37] == b'-'
             && uuid::Uuid::parse_str(&name[name.len() - 36..]).is_ok()
         {
-            return &name[..name.len() - 37];
+            return name[..name.len() - 37].into();
         }
-        name
+        name.into()
     }
 }
 fn cache() -> &'static std::sync::RwLock<std::collections::HashMap<PathBuf, Vec<Source>>> {
