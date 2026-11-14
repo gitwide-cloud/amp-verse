@@ -78,6 +78,7 @@ impl Player {
         }
     }
     pub(super) fn workspace_ui(&mut self, ui: &mut egui::Ui) {
+        crate::dragdrop::prepare_drag(ui.ctx());
         self.header(
             ui,
             match self.workspace.pane {
@@ -99,18 +100,23 @@ impl Player {
                 (4, "Cast & Remote"),
                 (5, "Add-ons"),
             ] {
-                if ui
-                    .add_sized(
-                        [104., 36.],
-                        egui::Button::new(label).selected(self.workspace.pane == pane),
-                    )
-                    .clicked()
-                {
+                let tab = ui.add_sized(
+                    [104., 36.],
+                    egui::Button::new(label).selected(self.workspace.pane == pane),
+                );
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::unique(("workspace-tab", pane)), tab.rect)
+                });
+                let drag_to_dj = pane == 2
+                    && tab.contains_pointer()
+                    && egui::DragAndDrop::has_payload_of_type::<PathBuf>(ui.ctx());
+                if tab.clicked() || drag_to_dj {
                     self.workspace.pane = pane;
                     self.lab_open = pane == 3;
                 }
             }
-            ui.weak("1.0.13 Preview");
+            ui.weak("1.0.14 Preview");
             if ui
                 .button("Classic windows")
                 .on_hover_text("Return to the separate player and dockable windows")
@@ -292,6 +298,154 @@ mod tests {
                 );
                 output.textures_delta.clear();
             }
+        }
+    }
+    #[test]
+    fn library_song_can_be_carried_over_dj_tab_and_dropped_on_main_deck() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join("song.mp3"), b"fixture").unwrap();
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            root: folder.path().into(),
+            library: Some(amp_core::scan(folder.path()).unwrap()),
+            workspace: Workspace {
+                enabled: true,
+                pane: 1,
+                rendering: false,
+            },
+            ..Default::default()
+        };
+        player.run.auto = true;
+        player.run.preloaded = Some((0, 0));
+        let mut source = egui::Pos2::ZERO;
+        let mut tab = source;
+        let mut destination = source;
+        for frame in 0..9 {
+            let point = if frame < 3 {
+                source
+            } else if frame < 5 {
+                tab
+            } else {
+                destination
+            };
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280., 1000.),
+                )),
+                ..Default::default()
+            };
+            raw.events.push(egui::Event::PointerMoved(point));
+            if frame == 2 || frame == 7 {
+                raw.events.push(egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: frame == 2,
+                    modifiers: Default::default(),
+                });
+            }
+            let mut output = ctx.run_ui(raw, |ui| {
+                player.workspace_ui(ui);
+                if let Some(rect) = ctx.data(|data| {
+                    data.get_temp::<egui::Rect>(egui::Id::unique("library-first-track"))
+                }) {
+                    source = rect.center();
+                }
+                tab = ctx
+                    .data(|data| {
+                        data.get_temp::<egui::Rect>(egui::Id::unique(("workspace-tab", 2)))
+                    })
+                    .unwrap()
+                    .center();
+                if let Some((rect, layer)) = ctx.data(|data| {
+                    data.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
+                        "rack-jog-drop",
+                        0,
+                    )))
+                }) {
+                    destination =
+                        ctx.layer_transform_to_global(layer).unwrap_or_default() * rect.center();
+                }
+            });
+            output.textures_delta.clear();
+        }
+        assert_eq!(player.workspace.pane, 2);
+        assert_eq!(
+            player.pending_load[0].as_ref().map(|(path, _)| path),
+            Some(&folder.path().join("song.mp3"))
+        );
+        assert!(player.run.auto);
+    }
+    #[test]
+    fn actual_dj_browser_row_drags_to_b3_in_scaled_workspace() {
+        for size in [egui::vec2(1280., 900.), egui::vec2(2560., 1552.)] {
+            let folder = tempfile::tempdir().unwrap();
+            std::fs::write(folder.path().join("song.mp3"), b"fixture").unwrap();
+            let ctx = egui::Context::default();
+            let mut player = Player {
+                root: folder.path().into(),
+                library: Some(amp_core::scan(folder.path()).unwrap()),
+                workspace: Workspace {
+                    enabled: true,
+                    pane: 2,
+                    rendering: false,
+                },
+                ..Default::default()
+            };
+            player.run.auto = true;
+            player.run.preloaded = Some((5, 0));
+            let mut source = egui::Pos2::ZERO;
+            let mut destination = source;
+            for frame in 0..8 {
+                let point = if frame < 3 { source } else { destination };
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                };
+                raw.events.push(egui::Event::PointerMoved(point));
+                if frame == 2 || frame == 6 {
+                    raw.events.push(egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Primary,
+                        pressed: frame == 2,
+                        modifiers: Default::default(),
+                    });
+                }
+                let mut output = ctx.run_ui(raw, |ui| {
+                    player.workspace_ui(ui);
+                    let (rect, layer) = ctx
+                        .data(|data| {
+                            data.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique(
+                                "dj-browser-first-track",
+                            ))
+                        })
+                        .unwrap();
+                    source =
+                        ctx.layer_transform_to_global(layer).unwrap_or_default() * rect.center();
+                    let (rect, layer) = ctx
+                        .data(|data| {
+                            data.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
+                                "rack-strip-drop",
+                                5,
+                            )))
+                        })
+                        .unwrap();
+                    destination =
+                        ctx.layer_transform_to_global(layer).unwrap_or_default() * rect.center();
+                });
+                output.textures_delta.clear();
+                if frame == 4 {
+                    assert!(
+                        egui::DragAndDrop::has_payload_of_type::<PathBuf>(&ctx),
+                        "DJ browser failed to start drag at {size:?}, {source:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                player.pending_load[5].as_ref().map(|(path, _)| path),
+                Some(&folder.path().join("song.mp3")),
+                "{size:?}"
+            );
         }
     }
 }

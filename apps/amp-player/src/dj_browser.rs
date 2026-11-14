@@ -233,7 +233,7 @@ impl Player {
                         ))
                         .weak(),
                     )
-                    .sense(egui::Sense::click()),
+                    .sense(egui::Sense::click_and_drag()),
                 )
             })
             .inner;
@@ -583,11 +583,20 @@ impl Player {
                                                     [column.width, 30.],
                                                     egui::Label::new(&value)
                                                         .truncate()
-                                                        .sense(egui::Sense::click()),
+                                                        .sense(egui::Sense::click_and_drag()),
                                                 )
                                             };
                                             let response = response.on_hover_text(&value);
-                                            if column.key == "title" {
+                                            #[cfg(test)]
+                                            if row == 0 && column.key == "title" {
+                                                ui.ctx().data_mut(|data| {
+                                                    data.insert_temp(
+                                                        egui::Id::unique("dj-browser-first-track"),
+                                                        (response.interact_rect, response.layer_id),
+                                                    )
+                                                });
+                                            }
+                                            {
                                                 crate::dragdrop::source(
                                                     &response,
                                                     amp_core::music_sources::audio_path(

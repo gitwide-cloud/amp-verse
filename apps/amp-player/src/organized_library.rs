@@ -708,8 +708,7 @@ if ui.checkbox(&mut included, "").changed() {
         self.queue_selected = None;
     }
 }
-let row = ui.add_sized([title_width,24.],egui::Button::selectable(self.selected==Some(index), &track.title).truncate());
-let row = row.interact(egui::Sense::click_and_drag());
+let row = ui.add_sized([title_width,24.],egui::Button::selectable(self.selected==Some(index), &track.title).truncate().sense(egui::Sense::click_and_drag()));
 #[cfg(test)]if position==0 {ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique("library-first-track"),row.rect));}
 dragdrop::source(&row, amp_core::music_sources::audio_path(&self.root, &track.path));
 if row.clicked() {

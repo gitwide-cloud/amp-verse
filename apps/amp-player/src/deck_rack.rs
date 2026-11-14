@@ -518,6 +518,7 @@ impl Player {
                             && let Some(a)=&self.audio { a.set_gain(d,self.channel_gain[d]); }
                         }
                     });
+                    #[cfg(test)] ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique(("rack-strip-drop",d)),(frame.response.interact_rect,frame.response.layer_id)));
                     if let Some(path)=dragdrop::target(&frame.response,accent(d)) && let Err(e)=self.safe_load_path(d,path,None) {self.status=e;}
                 });
             }
@@ -688,7 +689,7 @@ impl Player {
     fn jog_section(&mut self, ui: &mut egui::Ui, d: usize, width: f32, height: f32) {
         let expanded_cues = (self.rack.expanded || self.dj_cues[d]) && height >= 440.;
         let full_bank = self.rack.expanded && width >= 380.;
-        ui.allocate_ui_with_layout(
+        let area = ui.allocate_ui_with_layout(
             egui::vec2(width, height),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
@@ -806,6 +807,18 @@ impl Player {
                 }
             },
         );
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::unique(("rack-jog-drop", d)),
+                (area.response.interact_rect, area.response.layer_id),
+            )
+        });
+        if let Some(path) = dragdrop::target(&area.response, accent(d))
+            && let Err(error) = self.safe_load_path(d, path, None)
+        {
+            self.status = error;
+        }
     }
     fn rack_deck_controls(&mut self, ui: &mut egui::Ui, d: usize, width: f32) {
         if ui.button("Fade out this deck").clicked()
@@ -1399,6 +1412,97 @@ mod tests {
                 library <= size.y - 140.,
                 "The music browser was pushed out at {size:?}: {library}"
             );
+        }
+    }
+    #[test]
+    fn every_jog_deck_accepts_drag_over_platter_without_interrupting_reserved_audio() {
+        for (deck, name) in NAMES.iter().enumerate() {
+            for strip in [false, true] {
+                for scale in [1., 0.65] {
+                    let ctx = egui::Context::default();
+                    let mut player = Player::default();
+                    player.run.auto = true;
+                    player.run.preloaded = Some((deck, 0));
+                    let mut source = egui::Pos2::ZERO;
+                    let mut destination = egui::Pos2::ZERO;
+                    let path = PathBuf::from("drop-fixture.mp3");
+                    for frame in 0..7 {
+                        let position = if frame < 3 { source } else { destination };
+                        let mut raw = egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(900., 700.),
+                            )),
+                            ..Default::default()
+                        };
+                        raw.events.push(egui::Event::PointerMoved(position));
+                        if frame == 2 || frame == 5 {
+                            raw.events.push(egui::Event::PointerButton {
+                                pos: position,
+                                button: egui::PointerButton::Primary,
+                                pressed: frame == 2,
+                                modifiers: Default::default(),
+                            });
+                        }
+                        let mut output = ctx.run_ui(raw, |ui| {
+                            let row = ui.add(
+                                egui::Button::new("Library song")
+                                    .sense(egui::Sense::click_and_drag()),
+                            );
+                            source = row.rect.center();
+                            crate::dragdrop::source(&row, path.clone());
+                            crate::window_layout::fitted_content(
+                                ui,
+                                "drop-deck",
+                                egui::vec2(600., 600.),
+                                scale,
+                                |ui| {
+                                    if strip {
+                                        player.deck_strips(ui, deck % 2, 170., 430., true);
+                                    } else {
+                                        player.jog_section(ui, deck, 470., 430.);
+                                    }
+                                    if !strip {
+                                        let wheel = ctx
+                                            .data(|data| {
+                                                data.get_temp::<egui::Rect>(egui::Id::unique((
+                                                    "rack-wheel",
+                                                    deck,
+                                                )))
+                                            })
+                                            .unwrap();
+                                        destination = ctx
+                                            .layer_transform_to_global(ui.layer_id())
+                                            .unwrap_or_default()
+                                            * wheel.center();
+                                    }
+                                    if strip {
+                                        let (rect, layer) = ctx
+                                            .data(|data| {
+                                                data.get_temp::<(egui::Rect, egui::LayerId)>(
+                                                    egui::Id::unique(("rack-strip-drop", deck)),
+                                                )
+                                            })
+                                            .unwrap();
+                                        destination = ctx
+                                            .layer_transform_to_global(layer)
+                                            .unwrap_or_default()
+                                            * rect.center();
+                                    }
+                                },
+                            );
+                        });
+                        output.textures_delta.clear();
+                    }
+                    assert_eq!(
+                        player.pending_load[deck],
+                        Some((path, None)),
+                        "{} at scale {scale}",
+                        name
+                    );
+                    assert!(player.run.auto);
+                }
+            }
         }
     }
 }
