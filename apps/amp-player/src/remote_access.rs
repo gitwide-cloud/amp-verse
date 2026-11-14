@@ -1,5 +1,26 @@
 use super::*;
 
+pub(super) fn autostart() -> bool {
+    std::env::var("AMP_CONTROL_AUTOSTART").as_deref() == Ok("1")
+        || theme::settings_path()
+            .and_then(|p| std::fs::read_to_string(p.with_file_name("remote-autostart.txt")).ok())
+            .is_some_and(|v| v.trim() == "true")
+}
+fn save_autostart(enabled: bool) -> Result<(), String> {
+    use std::io::Write;
+    let path = theme::settings_path()
+        .ok_or("Settings folder unavailable")?
+        .with_file_name("remote-autostart.txt");
+    let parent = path.parent().ok_or("Settings folder unavailable")?;
+    std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
+    let mut file = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    file.write_all(if enabled { b"true" } else { b"false" })
+        .map_err(|e| e.to_string())?;
+    file.as_file().sync_all().map_err(|e| e.to_string())?;
+    file.persist(path).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
 fn browser_base(address: &str) -> Option<String> {
     let mut socket: std::net::SocketAddr = address.parse().ok()?;
     if socket.ip().is_unspecified() {
@@ -64,6 +85,14 @@ impl Player {
     }
     pub(super) fn remote_access_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("Control this Player / DJ");
+        let mut enabled = autostart();
+        if ui
+            .checkbox(&mut enabled, "Start Remote when AMP Verse opens")
+            .changed()
+            && let Err(error) = save_autostart(enabled)
+        {
+            self.control_status = error;
+        }
         ui.label(&self.control_status);
         if let Some(control) = &self.control {
             if let Some(base) = browser_base(&control.address) {

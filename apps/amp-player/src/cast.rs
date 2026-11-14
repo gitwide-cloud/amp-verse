@@ -199,8 +199,8 @@ pub struct Dashboard {
     address: String,
     password: String,
     connected_address: String,
-    tx: mpsc::Sender<Command>,
-    rx: mpsc::Receiver<Update>,
+    tx: Option<mpsc::Sender<Command>>,
+    rx: Option<mpsc::Receiver<Update>>,
     snapshot: Option<Snapshot>,
     busy: bool,
     message: String,
@@ -218,69 +218,6 @@ pub struct Dashboard {
 }
 impl Default for Dashboard {
     fn default() -> Self {
-        let (tx, commands) = mpsc::channel();
-        let (updates, rx) = mpsc::channel();
-        std::thread::spawn(move || {
-            let mut client: Option<Client> = None;
-            loop {
-                let command = match commands.recv_timeout(Duration::from_secs(2)) {
-                    Ok(command) => command,
-                    Err(mpsc::RecvTimeoutError::Timeout) if client.is_some() => Command::Refresh,
-                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
-                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
-                };
-                let mut control_error = None;
-                if let Command::Connect(address, password) = command {
-                    match Client::new(&address, password) {
-                        Ok(value) => client = Some(value),
-                        Err(error) => {
-                            client = None;
-                            if updates
-                                .send(Update {
-                                    snapshot: Err(error),
-                                    control_error: None,
-                                })
-                                .is_err()
-                            {
-                                break;
-                            }
-                            continue;
-                        }
-                    }
-                } else if let Some(client) = &client {
-                    let outcome = match command {
-                        Command::Start => client.control("start"),
-                        Command::Stop => client.control("stop"),
-                        Command::Play(ref id) => {
-                            let id = id
-                                .bytes()
-                                .map(|b| {
-                                    if b.is_ascii_alphanumeric() || b"-_.".contains(&b) {
-                                        (b as char).to_string()
-                                    } else {
-                                        format!("%{b:02X}")
-                                    }
-                                })
-                                .collect::<String>();
-                            client.control(&format!("smart/playlists/{id}/play"))
-                        }
-                        Command::Share => client.control("smart/enable"),
-                        _ => Ok(()),
-                    };
-                    control_error = outcome.err();
-                }
-                if let Some(client) = &client
-                    && updates
-                        .send(Update {
-                            snapshot: client.read(),
-                            control_error,
-                        })
-                        .is_err()
-                {
-                    break;
-                }
-            }
-        });
         let mut dashboard = Self {
             dlna: Default::default(),
             normalize: !cfg!(test)
@@ -306,8 +243,8 @@ impl Default for Dashboard {
             address: std::env::var("AMP_CAST_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8787".into()),
             password: String::new(),
             connected_address: String::new(),
-            tx,
-            rx,
+            tx: None,
+            rx: None,
             snapshot: None,
             busy: false,
             message:
@@ -436,8 +373,79 @@ impl Dashboard {
             self.password.clone(),
         )
     }
+    fn ensure_worker(&mut self) {
+        if self.tx.is_some() {
+            return;
+        }
+        let (tx, commands) = mpsc::channel();
+        let (updates, rx) = mpsc::channel();
+        std::thread::spawn(move || {
+            let mut client: Option<Client> = None;
+            loop {
+                let command = match commands.recv_timeout(Duration::from_secs(2)) {
+                    Ok(command) => command,
+                    Err(mpsc::RecvTimeoutError::Timeout) if client.is_some() => Command::Refresh,
+                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
+                    Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                };
+                let mut control_error = None;
+                if let Command::Connect(address, password) = command {
+                    match Client::new(&address, password) {
+                        Ok(value) => client = Some(value),
+                        Err(error) => {
+                            client = None;
+                            if updates
+                                .send(Update {
+                                    snapshot: Err(error),
+                                    control_error: None,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                            continue;
+                        }
+                    }
+                } else if let Some(client) = &client {
+                    let outcome = match command {
+                        Command::Start => client.control("start"),
+                        Command::Stop => client.control("stop"),
+                        Command::Play(ref id) => {
+                            let id = id
+                                .bytes()
+                                .map(|b| {
+                                    if b.is_ascii_alphanumeric() || b"-_.".contains(&b) {
+                                        (b as char).to_string()
+                                    } else {
+                                        format!("%{b:02X}")
+                                    }
+                                })
+                                .collect::<String>();
+                            client.control(&format!("smart/playlists/{id}/play"))
+                        }
+                        Command::Share => client.control("smart/enable"),
+                        _ => Ok(()),
+                    };
+                    control_error = outcome.err();
+                }
+                if let Some(client) = &client
+                    && updates
+                        .send(Update {
+                            snapshot: client.read(),
+                            control_error,
+                        })
+                        .is_err()
+                {
+                    break;
+                }
+            }
+        });
+        self.tx = Some(tx);
+        self.rx = Some(rx);
+    }
     fn send(&mut self, command: Command) {
-        match self.tx.send(command) {
+        self.ensure_worker();
+        match self.tx.as_ref().unwrap().send(command) {
             Ok(()) => {
                 self.busy = true;
                 self.message.clear();
@@ -467,7 +475,7 @@ impl Dashboard {
             self.discovery = None;
         }
 
-        while let Ok(update) = self.rx.try_recv() {
+        while let Some(update) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
             self.busy = false;
             match update.snapshot {
                 Ok(snapshot) => {
@@ -1017,6 +1025,25 @@ mod tests {
             });
         });
         let address = rx.recv().unwrap().to_string();
+        let mut dashboard = Dashboard::default();
+        assert!(
+            dashboard.tx.is_none(),
+            "Opening Cast must not start a connection worker"
+        );
+        dashboard.poll();
+        assert!(dashboard.tx.is_none(), "Passive polling must stay dormant");
+        dashboard.send(Command::Connect(address.clone(), "test-password".into()));
+        assert!(dashboard.tx.is_some());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while dashboard.snapshot.is_none() && std::time::Instant::now() < deadline {
+            dashboard.poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            dashboard.snapshot.is_some(),
+            "The first on-demand connection must work"
+        );
+        drop(dashboard);
         let client = Client::new(&address, "wrong".into()).unwrap();
         let state = client.read().unwrap();
         assert!(!state.status.running);

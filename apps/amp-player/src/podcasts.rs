@@ -613,7 +613,10 @@ impl Podcasts {
             self.status = format!("Could not save subscriptions: {e}");
         }
     }
-    pub fn poll(&mut self, ctx: &egui::Context) {
+    pub fn poll(&mut self, ctx: &egui::Context, visible: bool) {
+        if !visible {
+            self.artwork.clear();
+        }
         if !self.loaded {
             self.loaded = true;
             if let Ok(Some(value)) = settings_file()
@@ -775,7 +778,7 @@ impl Podcasts {
         if save {
             self.save();
         }
-        if self.job.is_none() && crate::podcast_plugin::enabled() {
+        if visible && self.job.is_none() && crate::podcast_plugin::enabled() {
             if let Some(episode) = self.auto_pending.take() {
                 self.preview = false;
                 self.download(episode, false);
@@ -1111,7 +1114,7 @@ impl Podcasts {
         });
     }
     pub fn show(&mut self, ui: &mut egui::Ui) {
-        self.poll(ui.ctx());
+        self.poll(ui.ctx(), true);
         if !crate::podcast_plugin::enabled() {
             ui.heading("AMP Podcasts");
             ui.label("Install or enable AMP Podcasts in Plugin Manager to browse and listen.");

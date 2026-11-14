@@ -675,6 +675,9 @@ impl Panel {
 }
 impl Player {
     pub(super) fn poll_controllers(&mut self) {
+        if self.controllers.get().is_none() {
+            return;
+        }
         let messages: Vec<_> = self
             .controllers
             .receiver

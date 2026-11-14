@@ -28,10 +28,12 @@ if (Test-Path -LiteralPath $installedEngine) {
     Copy-Item -LiteralPath $builtEngine -Destination $installedEngine -Force
 }
 Copy-Item -LiteralPath (Join-Path $repo 'assets/amp-verse.ico') -Destination $Destination -Force
+Copy-Item -LiteralPath (Join-Path $repo 'tools/launch-desktop.vbs') -Destination (Join-Path $Destination 'Launch AMP Verse.vbs') -Force
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in @([Environment]::GetFolderPath('Desktop'),[Environment]::GetFolderPath('Programs'))) {
     $shortcut = $shell.CreateShortcut((Join-Path $folder 'AMP Verse 1 Preview.lnk'))
-    $shortcut.TargetPath = Join-Path $Destination 'amp-player.exe'
+    $shortcut.TargetPath = Join-Path $env:WINDIR 'System32/wscript.exe'
+    $shortcut.Arguments = '"' + (Join-Path $Destination 'Launch AMP Verse.vbs') + '"'
     $shortcut.WorkingDirectory = $Destination
     $shortcut.IconLocation = (Join-Path $Destination 'amp-verse.ico') + ',0'
     $shortcut.Description = 'AMP Verse 1.0 preview — separate settings; version 0 remains installed'

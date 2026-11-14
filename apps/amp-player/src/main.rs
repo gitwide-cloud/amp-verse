@@ -41,6 +41,7 @@ mod startup_index;
 use dj_engine as mixer;
 #[path = "performance.rs"]
 mod dj_logic;
+mod module_runtime;
 mod monitor;
 mod music_scenes;
 mod organized_library;
@@ -153,10 +154,10 @@ struct Player {
     library_generation: u64,
     source_roots: Vec<amp_core::music_sources::Source>,
     organizer: library_organizer::Organizer,
-    outputs: audio_output::Panel,
-    lookup: media_lookup::Lookup,
-    podcasts: podcasts::Podcasts,
-    transcription: transcription::Panel,
+    outputs: module_runtime::Module<audio_output::Panel>,
+    lookup: module_runtime::Module<media_lookup::Lookup>,
+    podcasts: module_runtime::Module<podcasts::Podcasts>,
+    transcription: module_runtime::Module<transcription::Panel>,
     auto_dj_controls: bool,
     scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
     last_scan: std::time::Instant,
@@ -202,7 +203,7 @@ struct Player {
     jog_target: [f64; 6],
     jog_auto: [bool; 6],
     mixer_panel: dj_mixer::Panel,
-    controllers: controllers::Panel,
+    controllers: module_runtime::Module<controllers::Panel>,
     stem_panel: stems::Panel,
     eq_open: bool,
     fx_open: bool,
@@ -226,11 +227,11 @@ struct Player {
     preview_wave: waveform::Lane,
     dj_open: bool,
     lab_open: bool,
-    lab: lab::Arrangement,
+    lab: module_runtime::Module<lab::Arrangement>,
     preparer: preparer::Preparer,
     addons_open: bool,
     cast_open: bool,
-    cast: cast::Dashboard,
+    cast: module_runtime::Module<cast::Dashboard>,
     addons: addons::Manager,
     status: String,
     screenshot_frames: u32,
@@ -341,11 +342,11 @@ impl Default for Player {
                 || std::env::var("AMP_SCREENSHOT_VIEW").is_ok_and(|s| s == "combined"),
             dj_open: false,
             lab_open: false,
-            lab: lab::Arrangement::default(),
+            lab: Default::default(),
             preparer: preparer::Preparer::default(),
             addons_open: false,
             cast_open: false,
-            cast: cast::Dashboard::default(),
+            cast: Default::default(),
             addons: addons::Manager::default(),
             status: "Choose your music folder in Library".into(),
             screenshot_frames: 0,
@@ -751,7 +752,7 @@ impl Player {
         self.preparer.guard_preview(
             !self.library_open || self.smart_preview.active() || self.library_preview_blocked(),
         );
-        if let Some(sample) = self.lab.take_sample() {
+        if let Some(sample) = self.lab.get_mut().and_then(lab::Arrangement::take_sample) {
             let result = self.ensure_audio();
             if let Err(error) = result {
                 self.status = error;
@@ -769,6 +770,12 @@ impl Player {
         if !self.root.as_os_str().is_empty()
             && self.scan.is_none()
             && self.last_scan.elapsed() >= Duration::from_secs(120)
+            && (self.preparer.queue_enabled
+                || if self.workspace.enabled {
+                    self.workspace.pane == 1
+                } else {
+                    self.library_open
+                })
         {
             if self.preparer.queue_enabled {
                 if self.analysis_scan.is_none() {
@@ -807,7 +814,9 @@ impl Player {
         }
         let analysis_progress = self.preparer.progress();
         self.preparer.poll(&self.root, self.library.as_mut());
-        self.transcription.poll();
+        if let Some(transcription) = self.transcription.get_mut() {
+            transcription.poll();
+        }
         if self.preparer.progress() != analysis_progress {
             self.library_generation = self.library_generation.wrapping_add(1);
         }
@@ -909,7 +918,7 @@ impl Player {
         }
     }
     fn ensure_audio(&mut self) -> Result<(), String> {
-        if self.podcasts.cache.purging() {
+        if self.podcasts.get().is_some_and(|p| p.cache.purging()) {
             return Err("Podcast cleanup is finishing; try playback again in a moment.".into());
         }
         if self.audio.is_none() {
@@ -3523,6 +3532,9 @@ impl Player {
         });
     }
     fn update_live_broadcast(&mut self) {
+        if self.cast.get().is_none() {
+            return;
+        }
         self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
         if let Some(broadcast) = &self.live_mix {
             self.cast.live_status = broadcast.status.lock().unwrap().clone();
@@ -3591,7 +3603,7 @@ impl eframe::App for Player {
 
         if !self.control_attempted && self.screenshot_view.is_empty() {
             self.control_attempted = true;
-            if std::env::var_os("AMP_CONTROL_DISABLE").is_none() {
+            if std::env::var_os("AMP_CONTROL_DISABLE").is_none() && remote_access::autostart() {
                 self.start_control(ui.ctx());
             }
         }
@@ -3631,149 +3643,160 @@ impl eframe::App for Player {
                 self.play_cue(0, i, seconds);
             }
         }
-        if !self.lab_open {
-            self.lab.stop_preview();
-        }
-        self.lookup
-            .poll(ui.ctx(), &self.root, self.library.as_mut());
-        self.podcasts.poll(ui.ctx());
-        if self.podcasts.open_player {
-            self.podcasts.open_player = false;
-            self.workspace.enabled = true;
-            self.workspace.pane = 0;
-        }
-
-        let mut protected: Vec<_> = self
-            .loaded_snapshot
-            .iter()
-            .zip(&self.loaded_origin)
-            .filter_map(|(track, root)| {
-                Some(amp_core::music_sources::audio_path(
-                    root.as_ref()?,
-                    &track.as_ref()?.path,
-                ))
-            })
-            .collect();
-        protected.extend(self.sides.iter().filter_map(|s| s.config.path.clone()));
-        protected.extend(self.sampler.protected_paths());
-        protected.extend(self.right_sampler.protected_paths());
-        let idle = self.scan.is_none()
-            && self.recovery.pending.is_none()
-            && !self.lab_open
-            && !self.preparer.busy()
-            && !self.stem_panel.busy()
-            && !self.run.auto
-            && !self.auxiliary_playing()
-            && !self
-                .audio
-                .as_ref()
-                .is_some_and(|a| (0..6).any(|d| a.playing(d)));
-        self.podcasts.cache.tick(ui.ctx(), protected, idle);
-        if self.podcasts.cache.changed {
-            self.podcasts.cache.changed = false;
-            self.scan();
-        }
-        let podcast_path = self.loaded_track(0).and_then(|t| {
-            self.loaded_origin[0]
-                .as_ref()
-                .map(|root| root.join(&t.path))
-        });
-        let podcast_position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
-        let podcast_finished = self.podcasts.is_active()
-            && self
-                .audio
-                .as_ref()
-                .is_some_and(|a| a.controls.finished[0].load(std::sync::atomic::Ordering::Relaxed));
-        self.podcasts
-            .record_progress(podcast_path.as_deref(), podcast_position, podcast_finished);
-        if podcast_finished {
-            self.podcasts.finished();
-        }
-        if let Some((path, id)) = self.podcasts.delete_request.take() {
-            let loaded = (0..6).any(|d| {
-                self.loaded_track(d).is_some_and(|t| {
-                    self.loaded_origin[d]
-                        .as_ref()
-                        .is_some_and(|root| root.join(&t.path) == path)
-                })
-            });
-            let result = if loaded {
-                Err("Unload this episode from Player / DJ before deleting its download.".into())
-            } else {
-                self.podcasts.cache.delete(&path, &id)
-            };
-            self.podcasts.report(result.map_or_else(
-                |e| e,
-                |_| "Downloaded audio removed; subscription kept.".into(),
-            ));
-        }
-        if let Some(episode) = self.podcasts.stream_request.take() {
-            let mut preparation = amp_core::Preparation {
-                cue_in: self.podcasts.resume_position(),
-                ..Default::default()
-            };
-            preparation
-                .extensions
-                .insert("podcast_stream_url".into(), serde_json::json!(episode.url));
-            preparation
-                .extensions
-                .insert("media_kind".into(), serde_json::json!("podcast"));
-            preparation.extensions.insert(
-                "duration_seconds".into(),
-                serde_json::json!(podcasts::duration_seconds(&episode.duration)),
-            );
-            let track = amp_core::Track {
-                path: PathBuf::from(format!("{}.mp3", episode.id)),
-                title: episode.title,
-                preparation,
-            };
-            self.claim_playback(playback_owner::Owner::Player, 0, false);
-            self.auto = false;
-            self.player_sequence.resume_auto = false;
-            let root = podcasts::downloads().unwrap_or_default();
-            let result = self
-                .ensure_audio()
-                .and_then(|()| self.audio.as_mut().unwrap().load(0, &root, &track, true));
-            match result {
-                Ok(()) => {
-                    self.loaded[0] = None;
-                    self.loaded_snapshot[0] = Some(track);
-                    self.loaded_origin[0] = Some(root);
-                    self.podcasts
-                        .report("Episode ready in AMP Player. Use Player to pause or seek.".into());
-                }
-                Err(error) => {
-                    self.status = error;
-                    self.podcasts.report(self.status.clone());
-                }
-            }
-        }
-        if let Some((path, play)) = self.podcasts.downloaded.take()
-            && play
+        if !self.lab_open
+            && let Some(lab) = self.lab.get_mut()
         {
-            self.claim_playback(playback_owner::Owner::Player, 0, false);
-            if let Some(audio) = &mut self.audio {
-                audio.stop(0);
+            lab.stop_preview();
+        }
+        if let Some(lookup) = self.lookup.get_mut() {
+            lookup.poll(ui.ctx(), &self.root, self.library.as_mut());
+        }
+        if self.podcasts.get().is_some() || (self.workspace.enabled && self.workspace.pane == 6) {
+            self.podcasts
+                .poll(ui.ctx(), self.workspace.enabled && self.workspace.pane == 6);
+            if self.podcasts.open_player {
+                self.podcasts.open_player = false;
+                self.workspace.enabled = true;
+                self.workspace.pane = 0;
             }
-            let position = self.podcasts.resume_position();
-            match self.safe_load_path(0, path, Some(position)) {
-                Ok(()) => {
-                    if let Some(audio) = &self.audio
-                        && let Err(error) = audio.play(0)
-                    {
+
+            let mut protected: Vec<_> = self
+                .loaded_snapshot
+                .iter()
+                .zip(&self.loaded_origin)
+                .filter_map(|(track, root)| {
+                    Some(amp_core::music_sources::audio_path(
+                        root.as_ref()?,
+                        &track.as_ref()?.path,
+                    ))
+                })
+                .collect();
+            protected.extend(self.sides.iter().filter_map(|s| s.config.path.clone()));
+            protected.extend(self.sampler.protected_paths());
+            protected.extend(self.right_sampler.protected_paths());
+            let idle = self.scan.is_none()
+                && self.recovery.pending.is_none()
+                && !self.lab_open
+                && !self.preparer.busy()
+                && !self.stem_panel.busy()
+                && !self.run.auto
+                && !self.auxiliary_playing()
+                && !self
+                    .audio
+                    .as_ref()
+                    .is_some_and(|a| (0..6).any(|d| a.playing(d)));
+            self.podcasts.cache.tick(ui.ctx(), protected, idle);
+            if self.podcasts.cache.changed {
+                self.podcasts.cache.changed = false;
+                self.scan();
+            }
+            let podcast_path = self.loaded_track(0).and_then(|t| {
+                self.loaded_origin[0]
+                    .as_ref()
+                    .map(|root| root.join(&t.path))
+            });
+            let podcast_position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
+            let podcast_finished = self.podcasts.is_active()
+                && self.audio.as_ref().is_some_and(|a| {
+                    a.controls.finished[0].load(std::sync::atomic::Ordering::Relaxed)
+                });
+            self.podcasts.record_progress(
+                podcast_path.as_deref(),
+                podcast_position,
+                podcast_finished,
+            );
+            if podcast_finished {
+                self.podcasts.finished();
+            }
+            if let Some((path, id)) = self.podcasts.delete_request.take() {
+                let loaded = (0..6).any(|d| {
+                    self.loaded_track(d).is_some_and(|t| {
+                        self.loaded_origin[d]
+                            .as_ref()
+                            .is_some_and(|root| root.join(&t.path) == path)
+                    })
+                });
+                let result = if loaded {
+                    Err("Unload this episode from Player / DJ before deleting its download.".into())
+                } else {
+                    self.podcasts.cache.delete(&path, &id)
+                };
+                self.podcasts.report(result.map_or_else(
+                    |e| e,
+                    |_| "Downloaded audio removed; subscription kept.".into(),
+                ));
+            }
+            if let Some(episode) = self.podcasts.stream_request.take() {
+                let mut preparation = amp_core::Preparation {
+                    cue_in: self.podcasts.resume_position(),
+                    ..Default::default()
+                };
+                preparation
+                    .extensions
+                    .insert("podcast_stream_url".into(), serde_json::json!(episode.url));
+                preparation
+                    .extensions
+                    .insert("media_kind".into(), serde_json::json!("podcast"));
+                preparation.extensions.insert(
+                    "duration_seconds".into(),
+                    serde_json::json!(podcasts::duration_seconds(&episode.duration)),
+                );
+                let track = amp_core::Track {
+                    path: PathBuf::from(format!("{}.mp3", episode.id)),
+                    title: episode.title,
+                    preparation,
+                };
+                self.claim_playback(playback_owner::Owner::Player, 0, false);
+                self.auto = false;
+                self.player_sequence.resume_auto = false;
+                let root = podcasts::downloads().unwrap_or_default();
+                let result = self
+                    .ensure_audio()
+                    .and_then(|()| self.audio.as_mut().unwrap().load(0, &root, &track, true));
+                match result {
+                    Ok(()) => {
+                        self.loaded[0] = None;
+                        self.loaded_snapshot[0] = Some(track);
+                        self.loaded_origin[0] = Some(root);
+                        self.podcasts.report(
+                            "Episode ready in AMP Player. Use Player to pause or seek.".into(),
+                        );
+                    }
+                    Err(error) => {
                         self.status = error;
+                        self.podcasts.report(self.status.clone());
                     }
                 }
-                Err(error) => self.status = error,
+            }
+            if let Some((path, play)) = self.podcasts.downloaded.take()
+                && play
+            {
+                self.claim_playback(playback_owner::Owner::Player, 0, false);
+                if let Some(audio) = &mut self.audio {
+                    audio.stop(0);
+                }
+                let position = self.podcasts.resume_position();
+                match self.safe_load_path(0, path, Some(position)) {
+                    Ok(()) => {
+                        if let Some(audio) = &self.audio
+                            && let Err(error) = audio.play(0)
+                        {
+                            self.status = error;
+                        }
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
+            if self.podcasts.resume_music {
+                self.podcasts.resume_music = false;
+                if let Some(index) = self.queue.first().copied() {
+                    self.play(0, index);
+                }
             }
         }
-        if self.podcasts.resume_music {
-            self.podcasts.resume_music = false;
-            if let Some(index) = self.queue.first().copied() {
-                self.play(0, index);
-            }
+        if let Some(cast) = self.cast.get_mut() {
+            cast.poll();
         }
-        self.cast.poll();
         self.update_live_broadcast();
         self.dj_effects(ui.ctx());
         let ctx = ui.ctx().clone();
@@ -3960,11 +3983,16 @@ impl eframe::App for Player {
         }
         self.capture_session_layout(&ctx);
         self.checkpoint(false);
-        ctx.request_repaint_after(Duration::from_millis(if self.playing.iter().any(|p| *p) {
-            33
-        } else {
-            120
-        }));
+        ctx.request_repaint_after(Duration::from_millis(
+            if self.playing.iter().any(|p| *p)
+                || self.auxiliary_playing()
+                || self.smart_preview.active()
+            {
+                33
+            } else {
+                1000
+            },
+        ));
     }
 }
 fn main() -> eframe::Result {
@@ -4049,6 +4077,40 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod window_tests {
     use super::*;
+    #[test]
+    fn idle_player_and_remote_status_do_not_load_unused_modules() {
+        let mut player = Player {
+            root: PathBuf::new(),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            player.poll();
+            player.update_live_broadcast();
+            let snapshot = player.control_snapshot();
+            assert_eq!(snapshot["google_cast"]["discovering"], false);
+            assert!(!player.podcasts.is_active());
+            assert!(!player.podcasts.next_episode());
+        }
+        assert!(
+            player.cast.get().is_none(),
+            "Status must not start Cast workers"
+        );
+        assert!(player.lab.get().is_none(), "Polling must not open Lab");
+        assert!(
+            player.podcasts.get().is_none(),
+            "Music playback must not load Podcasts"
+        );
+        assert!(
+            player.audio.is_none(),
+            "Idle Player must not open an audio device"
+        );
+        assert!(player.right_sample_audio.is_none());
+        assert!(player.control.is_none());
+        assert!(player.lookup.get().is_none());
+        assert!(player.transcription.get().is_none());
+        assert!(player.controllers.get().is_none());
+        assert!(player.outputs.get().is_none());
+    }
     #[test]
     fn analysis_job_inputs_publish_added_subfolders_while_preserving_existing_metadata() {
         let main = tempfile::tempdir().unwrap();
