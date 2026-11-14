@@ -93,15 +93,6 @@ impl Browser {
         self.smart = id.into();
     }
 }
-fn auto_mix_toggle(ui: &mut egui::Ui, enabled: &mut bool) -> egui::Response {
-    let label = if *enabled {
-        "Auto Mix: ON"
-    } else {
-        "Auto Mix: OFF"
-    };
-    ui.toggle_value(enabled, label)
-        .on_hover_text("Start or stop automatic mixing from the selected source")
-}
 fn playlist_indices(library: &Library, playlist: &Playlist) -> Vec<usize> {
     playlist
         .tracks
@@ -202,8 +193,6 @@ impl Player {
             .unwrap_or(195.)
             .clamp(150., sidebar_max);
 
-        let mut auto = self.run.auto;
-        let mut toggle = false;
         let mut queue_drop = None;
         let mut open_playlist = false;
         let mut load = None;
@@ -294,8 +283,6 @@ impl Player {
                 |ui| {
                     ui.set_width(sidebar_width);
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
-                    toggle = auto_mix_toggle(ui, &mut auto).changed();
-                    ui.separator();
                     ui.selectable_value(
                         &mut self.dj_browser.source,
                         Source::Smart,
@@ -743,54 +730,6 @@ impl Player {
                 self.status = e;
             }
         }
-        if toggle {
-            if auto && self.dj_browser.source != Source::Smart {
-                // Snapshot the chosen browser source for this session only. Never
-                // silently fall back to a different Smart Playlist or all folders.
-                if let Some(library) = &self.library {
-                    let mut profile = amp_core::show::Settings::default().playlists.remove(0);
-                    profile.id = "browser-session".into();
-                    profile.name = "DJ browser source".into();
-                    if self.dj_browser.source == Source::Folders {
-                        profile.restrict_folders = true;
-                        profile.folders = vec![self.dj_browser.folder.clone()];
-                    } else {
-                        let indices = self
-                            .dj_browser
-                            .playlist
-                            .and_then(|i| self.dj_browser.playlists.get(i))
-                            .map(|(_, list)| playlist_indices(library, list))
-                            .unwrap_or_else(|| self.queue.clone());
-                        profile.restrict_allowed = true;
-                        profile.allowed = indices
-                            .iter()
-                            .filter_map(|&i| library.tracks.get(i))
-                            .map(amp_core::show::song_id)
-                            .collect();
-                    }
-                    self.run.playlist = Some(profile.id.clone());
-                    self.run.profile = Some(profile);
-                    self.run.preloaded = None;
-                }
-            }
-            let action = if auto
-                && self.dj_browser.source == Source::Smart
-                && !self.dj_browser.smart.is_empty()
-            {
-                self.run.choice = self.dj_browser.smart.clone();
-                control::Action::LoadSmartPlaylist {
-                    playlist: self.dj_browser.smart.clone(),
-                    execution: control::Execution::PlayNow,
-                    style: None,
-                    energy: None,
-                }
-            } else {
-                control::Action::AutoDj { enabled: auto }
-            };
-            if let Err(e) = self.execute_control(action) {
-                self.status = format!("Auto Mix could not start: {e}");
-            }
-        }
         if let Some((song, within)) = request
             && let Err(error) = self.execute_control(control::Action::RequestSong { song, within })
         {
@@ -884,49 +823,6 @@ mod tests {
         assert_eq!(wait(&mut cache, &profile, &library, 2).len(), 7001);
     }
 
-    #[test]
-    fn auto_mix_button_can_be_clicked_on_and_off() {
-        let ctx = egui::Context::default();
-        let mut enabled = false;
-        let mut rect = egui::Rect::NOTHING;
-        let mut changed = false;
-        let mut frame = |events| {
-            let mut output = ctx.run_ui(
-                egui::RawInput {
-                    events,
-                    ..Default::default()
-                },
-                |ui| {
-                    let response = auto_mix_toggle(ui, &mut enabled);
-                    rect = response.rect;
-                    changed = response.changed();
-                },
-            );
-            output.textures_delta.clear();
-            (rect, enabled, changed)
-        };
-        let (rect, _, _) = frame(vec![]);
-        for expected in [true, false] {
-            let position = rect.center();
-            frame(vec![
-                egui::Event::PointerMoved(position),
-                egui::Event::PointerButton {
-                    pos: position,
-                    button: egui::PointerButton::Primary,
-                    pressed: true,
-                    modifiers: Default::default(),
-                },
-            ]);
-            let (_, enabled, changed) = frame(vec![egui::Event::PointerButton {
-                pos: position,
-                button: egui::PointerButton::Primary,
-                pressed: false,
-                modifiers: Default::default(),
-            }]);
-            assert_eq!(enabled, expected);
-            assert!(changed);
-        }
-    }
     #[test]
     fn saved_playlist_keeps_order_and_duplicates_without_changing_library() {
         let library = Library {

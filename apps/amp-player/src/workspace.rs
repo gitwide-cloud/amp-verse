@@ -128,7 +128,12 @@ impl Player {
             }
         });
         ui.separator();
-        let content_height = (ui.available_height() - 70.).max(60.);
+        let show_transport = self.workspace.pane != 2;
+        #[cfg(test)]
+        ui.ctx()
+            .data_mut(|d| d.remove::<egui::Rect>(egui::Id::unique("v1-transport-bounds")));
+        let content_height =
+            (ui.available_height() - if show_transport { 70. } else { 0. }).max(60.);
         let content = egui::Rect::from_min_size(
             ui.cursor().min,
             egui::vec2(ui.available_width(), content_height),
@@ -163,72 +168,74 @@ impl Player {
         ui.ctx()
             .data_mut(|d| d.insert_temp(egui::Id::unique("v1-workspace-content"), false));
         ui.advance_cursor_after_rect(content);
-        ui.separator();
-        ui.horizontal(|ui| {
-            let owner = self.playback_owner;
-            ui.label(
-                RichText::new(if owner == playback_owner::Owner::Dj {
-                    "DJ OUTPUT"
-                } else {
-                    "PLAYER OUTPUT"
-                })
-                .color(GOLD),
-            );
-            for (label, action) in [
-                (
-                    "Play",
-                    control::Action::Play {
-                        deck: control::Deck::Auto,
-                    },
-                ),
-                (
-                    "Pause",
-                    control::Action::Pause {
-                        deck: control::Deck::Auto,
-                    },
-                ),
-                (
-                    "Stop",
-                    control::Action::Stop {
-                        deck: control::Deck::Auto,
-                    },
-                ),
-            ] {
-                if ui.add_sized([80., 32.], egui::Button::new(label)).clicked()
-                    && let Err(error) = self.execute_control(action)
+        if show_transport {
+            ui.separator();
+            ui.horizontal(|ui| {
+                let owner = self.playback_owner;
+                ui.label(
+                    RichText::new(if owner == playback_owner::Owner::Dj {
+                        "DJ OUTPUT"
+                    } else {
+                        "PLAYER OUTPUT"
+                    })
+                    .color(GOLD),
+                );
+                for (label, action) in [
+                    (
+                        "Play",
+                        control::Action::Play {
+                            deck: control::Deck::Auto,
+                        },
+                    ),
+                    (
+                        "Pause",
+                        control::Action::Pause {
+                            deck: control::Deck::Auto,
+                        },
+                    ),
+                    (
+                        "Stop",
+                        control::Action::Stop {
+                            deck: control::Deck::Auto,
+                        },
+                    ),
+                ] {
+                    if ui.add_sized([80., 32.], egui::Button::new(label)).clicked()
+                        && let Err(error) = self.execute_control(action)
+                    {
+                        self.status = error;
+                    }
+                }
+                if ui
+                    .add_sized([90., 32.], egui::Button::new("Next"))
+                    .clicked()
                 {
-                    self.status = error;
+                    let action = if owner == playback_owner::Owner::Dj {
+                        control::Action::MixNext { immediate: true }
+                    } else {
+                        control::Action::PlayerNext
+                    };
+                    if let Err(error) = self.execute_control(action) {
+                        self.status = error;
+                    }
                 }
-            }
-            if ui
-                .add_sized([90., 32.], egui::Button::new("Next"))
-                .clicked()
-            {
-                let action = if owner == playback_owner::Owner::Dj {
-                    control::Action::MixNext { immediate: true }
+                let deck = if owner == playback_owner::Owner::Player {
+                    0
                 } else {
-                    control::Action::PlayerNext
+                    self.pair()[usize::from(self.fader > 0.5)]
                 };
-                if let Err(error) = self.execute_control(action) {
-                    self.status = error;
-                }
-            }
-            let deck = if owner == playback_owner::Owner::Player {
-                0
-            } else {
-                self.pair()[usize::from(self.fader > 0.5)]
-            };
-            let title = self
-                .loaded_track(deck)
-                .map(|track| track.title.as_str())
-                .unwrap_or("No track loaded");
-            ui.add(egui::Label::new(title).truncate())
-                .on_hover_text(&self.status);
-            #[cfg(test)]
-            ui.ctx().data_mut(|d| {
-                d.insert_temp(egui::Id::unique("v1-transport-bounds"), ui.min_rect())
+                let title = self
+                    .loaded_track(deck)
+                    .map(|track| track.title.as_str())
+                    .unwrap_or("No track loaded");
+                ui.add(egui::Label::new(title).truncate())
+                    .on_hover_text(&self.status);
+                #[cfg(test)]
+                ui.ctx().data_mut(|d| {
+                    d.insert_temp(egui::Id::unique("v1-transport-bounds"), ui.min_rect())
+                });
             });
-        });
+        }
         window_layout::resize_edges(ui);
         let id = egui::Id::unique("quick-cast-open");
         let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
@@ -282,13 +289,17 @@ mod tests {
                 });
                 assert_eq!(player.workspace.pane, pane);
                 assert_eq!(player.playback_owner, playback_owner::Owner::Dj);
-                let bounds = ctx
-                    .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("v1-transport-bounds")))
-                    .unwrap();
-                assert!(
-                    bounds.bottom() <= size.y && bounds.right() <= size.x,
-                    "{pane} at {size:?}: {bounds:?}"
-                );
+                let bounds =
+                    ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("v1-transport-bounds")));
+                if pane == 2 {
+                    assert!(bounds.is_none(), "DJ must use deck transports only");
+                } else {
+                    let bounds = bounds.expect("Other workspaces retain shared playback controls");
+                    assert!(
+                        bounds.bottom() <= size.y && bounds.right() <= size.x,
+                        "{pane} at {size:?}: {bounds:?}"
+                    );
+                }
                 assert!(
                     !output.viewport_output[&egui::ViewportId::ROOT]
                         .commands
