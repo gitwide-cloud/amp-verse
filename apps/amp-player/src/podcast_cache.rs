@@ -15,6 +15,8 @@ struct Download {
     modified: u64,
     bytes: u64,
     pinned: bool,
+    #[serde(default)]
+    directory: Option<PathBuf>,
 }
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -66,6 +68,10 @@ fn purge(
     for record in &settings.files {
         if record.pinned
             || time.saturating_sub(record.saved) < u64::from(settings.days.clamp(1, 3650)) * 86400
+            || record
+                .directory
+                .as_ref()
+                .is_some_and(|d| d.canonicalize().ok().as_ref() != Some(&root))
             || record.file.components().count() != 1
             || !record
                 .file
@@ -160,8 +166,37 @@ impl Cache {
             modified: modified(&meta),
             bytes: meta.len(),
             pinned: false,
+            directory: path.parent().map(Path::to_owned),
         });
         self.save();
+    }
+    pub fn delete(&mut self, path: &Path, id: &str) -> Result<(), String> {
+        self.load();
+        let record = self
+            .settings
+            .files
+            .iter()
+            .find(|r| r.id == id && Some(r.file.as_os_str()) == path.file_name())
+            .ok_or("This file is not a managed podcast download")?;
+        let meta = std::fs::symlink_metadata(path).map_err(|e| e.to_string())?;
+        if !meta.is_file()
+            || meta.file_type().is_symlink()
+            || meta.len() != record.bytes
+            || modified(&meta) != record.modified
+        {
+            return Err("The file has changed; it was kept.".into());
+        }
+        if record
+            .directory
+            .as_ref()
+            .is_some_and(|d| d != path.parent().unwrap_or(Path::new("")))
+        {
+            return Err("Download location changed; file kept".into());
+        }
+        std::fs::remove_file(path).map_err(|e| e.to_string())?;
+        self.settings.files.retain(|r| r.id != id);
+        self.save();
+        Ok(())
     }
     pub fn tick(&mut self, ctx: &egui::Context, protected: Vec<PathBuf>, idle: bool) {
         self.load();
@@ -183,6 +218,7 @@ impl Cache {
             self.job = None;
         }
         if self.settings.enabled
+            && crate::podcast_plugin::enabled()
             && idle
             && self.job.is_none()
             && self
@@ -202,6 +238,25 @@ impl Cache {
         if self.job.is_some() {
             ctx.request_repaint_after(Duration::from_millis(100));
         }
+    }
+    pub fn count(&mut self) -> usize {
+        self.load();
+        self.settings.files.len()
+    }
+    pub fn expiring_count(&mut self) -> usize {
+        self.load();
+        if !self.settings.enabled {
+            return 0;
+        }
+        self.settings
+            .files
+            .iter()
+            .filter(|f| {
+                !f.pinned
+                    && now().saturating_sub(f.saved) + 7 * 86400
+                        >= u64::from(self.settings.days) * 86400
+            })
+            .count()
     }
     pub fn show(&mut self, ui: &mut egui::Ui) {
         self.load();
@@ -228,12 +283,13 @@ impl Cache {
         egui::ScrollArea::vertical()
             .id_salt("podcast-pins")
             .max_height(100.)
-            .show_rows(ui, 24., self.settings.files.len(), |ui, range| {
+            .show_rows(ui, 44., self.settings.files.len(), |ui, range| {
                 for i in range {
                     let record = &mut self.settings.files[i];
                     changed |= ui
                         .checkbox(&mut record.pinned, format!("Keep: {}", record.title))
                         .changed();
+                    if self.settings.enabled && !record.pinned {ui.weak(format!("Local retention due in {} days",(record.saved+u64::from(self.settings.days)*86400).saturating_sub(now()).div_ceil(86400)));}
                 }
             });
         if changed {
@@ -269,6 +325,7 @@ mod tests {
                 modified: modified(&meta),
                 bytes: meta.len(),
                 pinned: i == 1,
+                directory: Some(root.path().to_owned()),
             });
         }
         std::fs::write(

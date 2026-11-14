@@ -86,7 +86,7 @@ impl Player {
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(egui::vec2(176.,height - 70.),egui::Layout::top_down(egui::Align::Min),|ui| {
                 egui::ScrollArea::vertical().id_salt("library-navigation").max_height((height-180.).max(160.)).show(ui,|ui|{
-                for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(11,icons::Icon::List,"Transcribe"),(7,icons::Icon::Analyze,"Equalizer"),(8,icons::Icon::Folder,"Organise library"),(9,icons::Icon::List,"Tags & artwork"),(10,icons::Icon::List,"Podcasts")] {
+                for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(11,icons::Icon::List,"Transcribe"),(7,icons::Icon::Analyze,"Equalizer"),(8,icons::Icon::Folder,"Organise library"),(9,icons::Icon::List,"Tags & artwork")] {
                     if icons::button(ui,icon,title,self.library_page==page,egui::vec2(172.,46.)).clicked(){self.library_page=page;}
                 }
                 });
@@ -116,7 +116,7 @@ impl Player {
                         if let Some(path)=self.lookup.review_song.take(){self.selected=self.library.as_ref().and_then(|l|l.tracks.iter().position(|t|t.path==path));}
                         let track=self.selected.and_then(|i|self.library.as_ref()?.tracks.get(i));self.lookup.show(ui,&self.root,track);
                     });},
-                    10 => self.podcasts.show(ui),
+                    10 => {if ui.button("Open AMP Podcasts").clicked(){self.workspace.enabled=true;self.workspace.pane=6;}ui.weak("Podcast discovery, subscriptions and downloads live in AMP Podcasts.");},
                     11 => {let track=self.selected.and_then(|i|self.library.as_ref()?.tracks.get(i));self.transcription.show(ui,&self.root,track);},
                     8 => {
                         let audio=&mut self.audio;

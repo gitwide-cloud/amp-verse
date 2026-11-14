@@ -106,7 +106,20 @@ impl Player {
         self.resume_player_sequence();
         Ok(())
     }
+    pub(super) fn flush_podcast_progress(&mut self) {
+        if !self.podcasts.is_active() {
+            return;
+        }
+        let path = self.loaded_track(0).and_then(|t| {
+            self.loaded_origin[0]
+                .as_ref()
+                .map(|root| root.join(&t.path))
+        });
+        let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
+        self.podcasts.flush_progress(path.as_deref(), position);
+    }
     pub(super) fn pause_playback(&mut self) {
+        self.flush_podcast_progress();
         if self.playback_owner == Owner::Dj {
             let was_auto = self.run.auto;
             if let Some(audio) = &mut self.audio {
@@ -125,6 +138,7 @@ impl Player {
         }
     }
     pub(super) fn toggle_player(&mut self) {
+        self.flush_podcast_progress();
         if self.playback_owner == Owner::Dj {
             if let Err(error) = self.switch_dj_song_to_player() {
                 self.status = error;
@@ -142,6 +156,7 @@ impl Player {
         }
     }
     pub(super) fn stop_player(&mut self) {
+        self.flush_podcast_progress();
         if self.playback_owner == Owner::Player {
             self.player_sequence.resume_auto = self.auto;
             self.stop(0);

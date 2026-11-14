@@ -13,6 +13,7 @@ impl Default for Workspace {
             .and_then(|view| match view.as_str() {
                 "v1-dj" => Some(2),
                 "v1-player" => Some(0),
+                "v1-podcasts" => Some(6),
                 _ => None,
             })
             .unwrap_or(1);
@@ -26,21 +27,63 @@ impl Default for Workspace {
 impl Player {
     fn workspace_player(&mut self, ui: &mut egui::Ui) {
         self.player_ui(ui);
+        if self.podcasts.is_active() {
+            let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
+            let duration = self
+                .loaded_track(0)
+                .and_then(|t| t.preparation.extensions.get("duration_seconds"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.);
+            let mut seek = position;
+            ui.horizontal(|ui| {
+                ui.label("Episode");
+                if ui.button("−30 sec").clicked() {
+                    self.seek_deck_relative(0, -30.);
+                }
+                if duration > 0. {
+                    if ui
+                        .add(egui::Slider::new(&mut seek, 0.0..=duration).suffix(" sec"))
+                        .drag_stopped()
+                    {
+                        self.seek_deck_relative(0, seek - position);
+                    }
+                } else {
+                    ui.add(
+                        egui::DragValue::new(&mut seek)
+                            .range(0.0..=604800.)
+                            .suffix(" sec"),
+                    );
+                    if ui.button("Seek").clicked() {
+                        self.seek_deck_relative(0, seek - position);
+                    }
+                }
+                if ui.button("+30 sec").clicked() {
+                    self.seek_deck_relative(0, 30.);
+                }
+            });
+        }
         ui.add_space(12.);
         let track = self.loaded_track(0).cloned();
         let position = self
             .audio
             .as_ref()
             .map_or(0., |audio| audio.source_position(0));
-        self.waveforms[0].height = Some(110.);
-        self.waveforms[0].show(
-            ui,
-            self.loaded_origin[0].as_deref().unwrap_or(&self.root),
-            track.as_ref(),
-            position,
-            self.wave_span,
-            0,
-        );
+        if track
+            .as_ref()
+            .is_some_and(|t| t.preparation.extensions.contains_key("podcast_stream_url"))
+        {
+            ui.weak("Publisher audio stream. Download this episode for local offline playback.");
+        } else {
+            self.waveforms[0].height = Some(110.);
+            self.waveforms[0].show(
+                ui,
+                self.loaded_origin[0].as_deref().unwrap_or(&self.root),
+                track.as_ref(),
+                position,
+                self.wave_span,
+                0,
+            );
+        }
         ui.add_space(12.);
         ui.horizontal(|ui| {
             ui.heading("Play queue");
@@ -78,6 +121,11 @@ impl Player {
         }
     }
     pub(super) fn workspace_ui(&mut self, ui: &mut egui::Ui) {
+        ui.painter().rect_filled(
+            ui.max_rect(),
+            0.,
+            theme::current(ui.ctx()).palette().background,
+        );
         crate::dragdrop::prepare_drag(ui.ctx());
         self.header(
             ui,
@@ -87,6 +135,7 @@ impl Player {
                 2 => "AMP DJ",
                 3 => "AMP Lab",
                 4 => "AMP Cast",
+                6 => "AMP Podcasts",
                 _ => "Plugin Manager",
             },
             false,
@@ -99,6 +148,7 @@ impl Player {
                 (3, "Lab"),
                 (4, "Cast & Remote"),
                 (5, "Add-ons"),
+                (6, "Podcasts"),
             ] {
                 let tab = ui.add_sized(
                     [104., 36.],
@@ -116,7 +166,7 @@ impl Player {
                     self.lab_open = pane == 3;
                 }
             }
-            ui.weak("1.0.16 Preview");
+            ui.weak(format!("{} Preview", env!("CARGO_PKG_VERSION")));
             if ui
                 .button("Classic windows")
                 .on_hover_text("Return to the separate player and dockable windows")

@@ -12,7 +12,7 @@ struct Entry {
     summary: &'static str,
     features: &'static [&'static str],
 }
-const ENTRIES: [Entry; 7] = [
+const ENTRIES: [Entry; 8] = [
     Entry {
         name: "AMP VERSE",
         kind: "Included",
@@ -88,12 +88,23 @@ const ENTRIES: [Entry; 7] = [
             "Original audio and saved cues remain unchanged",
         ],
     },
+    Entry {
+        name: "AMP Podcasts",
+        kind: "Optional",
+        summary: "Discover, browse, follow and download public podcasts.",
+        features: &[
+            "Listen before subscribing through AMP Player",
+            "Persistent subscriptions, progress and offline episodes",
+            "Uninstall keeps your podcast data",
+        ],
+    },
 ];
 
 pub struct Manager {
     updater: crate::app_update::Updater,
     pub selected: usize,
     download: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
+    podcast_download: Option<std::sync::mpsc::Receiver<Result<(), String>>>,
     search: String,
     filter: usize,
     lab: Option<PathBuf>,
@@ -107,6 +118,7 @@ impl Default for Manager {
             selected: 5,
             download: None,
             search: String::new(),
+            podcast_download: None,
             filter: 0,
             lab: std::env::var_os("AMP_LAB_EXE")
                 .map(PathBuf::from)
@@ -132,6 +144,19 @@ impl Manager {
     }
     pub fn show(&mut self, ui: &mut egui::Ui) -> Option<Module> {
         self.updater.show(ui);
+        if let Some(rx) = &self.podcast_download {
+            if let Ok(result) = rx.try_recv() {
+                self.status = result.map_or_else(
+                    |e| e,
+                    |_| "AMP Podcasts installed; user data preserved.".into(),
+                );
+                self.podcast_download = None;
+            } else {
+                ui.ctx()
+                    .request_repaint_after(std::time::Duration::from_millis(100));
+            }
+        }
+
         if let Some(receiver) = &self.download {
             match receiver.try_recv() {
                 Ok(result) => {
@@ -241,6 +266,16 @@ impl Manager {
                         if let Some(path)=&self.lab {ui.add(egui::Label::new(path.display().to_string()).truncate());}
                         if ui.add_enabled(self.lab.as_ref().is_some_and(|p|p.is_file()),egui::Button::new("Open editor")).clicked() {self.launch_lab();}
                         ui.weak("The connected executable stays separate. Use AMP_LAB_EXE to configure it at startup; picker connections last for this session.");
+                    },
+                    7=>{
+                        ui.label(if crate::podcast_plugin::installed(){"AMP Podcasts installed"}else{"Not installed"});
+                        let mut enabled=crate::podcast_plugin::enabled();
+                        if ui.checkbox(&mut enabled,"Enable AMP Podcasts").changed(){self.status=crate::podcast_plugin::set_enabled(enabled).err().unwrap_or_default();}
+                        if ui.add_enabled(self.podcast_download.is_none(),egui::Button::new("Install / Check for updates from GitHub")).clicked(){let(tx,rx)=std::sync::mpsc::channel();self.podcast_download=Some(rx);std::thread::spawn(move||{let _=tx.send(crate::podcast_plugin::download());});}
+                        if ui.button("Install downloaded podcast package...").clicked()&&let Some(path)=rfd::FileDialog::new().add_filter("AMP Podcasts",&["ampplugin"]).pick_file(){self.status=std::fs::read(path).map_err(|e|e.to_string()).and_then(|b|crate::podcast_plugin::install(&b)).map_or_else(|e|e,|_|"AMP Podcasts installed".into());}
+                        if ui.add_enabled(crate::podcast_plugin::enabled(),egui::Button::new("Open AMP Podcasts")).clicked(){action=Some(Module::Podcasts);}
+                        if ui.button("Uninstall (keep all podcast data)").clicked(){self.status=crate::podcast_plugin::uninstall().map_or_else(|e|e,|_|"Uninstalled; subscriptions and downloads retained".into());}
+                        ui.hyperlink_to("GitHub releases","https://github.com/gitwide-cloud/amp-verse/releases");
                     },
                     6=>{
                         ui.label(if crate::stems::runtime().is_some() { "Stem add-on installed" } else { "Stem add-on not installed" });

@@ -48,6 +48,7 @@ use dj_logic as performance;
 mod playback_owner;
 mod player_sequence;
 mod podcast_cache;
+mod podcast_plugin;
 mod podcasts;
 mod preparation_speed;
 mod preparer;
@@ -156,7 +157,6 @@ struct Player {
     lookup: media_lookup::Lookup,
     podcasts: podcasts::Podcasts,
     transcription: transcription::Panel,
-    podcast_play: Option<PathBuf>,
     auto_dj_controls: bool,
     scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
     last_scan: std::time::Instant,
@@ -265,7 +265,6 @@ impl Default for Player {
             lookup: Default::default(),
             podcasts: Default::default(),
             transcription: Default::default(),
-            podcast_play: None,
             auto_dj_controls: false,
             scan: None,
             last_scan: std::time::Instant::now(),
@@ -404,6 +403,11 @@ impl Player {
         }
     }
     fn activate(&mut self, ui: &mut egui::Ui, module: Option<skin::Module>) {
+        if matches!(module, Some(skin::Module::Podcasts)) {
+            self.workspace.enabled = true;
+            self.workspace.pane = 6;
+            return;
+        }
         if matches!(module, Some(skin::Module::Workspace)) {
             self.workspace.enabled = true;
             ui.ctx()
@@ -421,6 +425,7 @@ impl Player {
                     skin::Module::Cast => 4,
                     skin::Module::Addons => 5,
                     skin::Module::Workspace => 1,
+                    skin::Module::Podcasts => 6,
                 };
                 self.lab_open = self.workspace.pane == 3;
             }
@@ -490,7 +495,7 @@ impl Player {
             Some(skin::Module::LabSetup) => {
                 self.lab_open = true;
             }
-            Some(skin::Module::Workspace) | None => (),
+            Some(skin::Module::Workspace) | Some(skin::Module::Podcasts) | None => (),
         }
         if pane.is_some() && self.player_mode != 0 {
             self.set_player_mode(ui.ctx(), 0);
@@ -884,7 +889,12 @@ impl Player {
             .map(|audio| audio.take_decode_errors())
             .unwrap_or_default();
         for (deck, error) in decode_errors {
-            self.recover_failed_song(deck, &error);
+            if deck == 0 && self.podcasts.is_active() {
+                self.status = format!("Podcast playback: {error}");
+                self.podcasts.report(self.status.clone());
+            } else {
+                self.recover_failed_song(deck, &error);
+            }
         }
         self.player_sequence_tick();
         if self.playback_owner == playback_owner::Owner::Player
@@ -1007,6 +1017,8 @@ impl Player {
         }
     }
     fn play(&mut self, deck: usize, index: usize) {
+        self.flush_podcast_progress();
+        self.podcasts.leave_playback();
         self.load_deck_owned(deck, index, true, playback_owner::Owner::Player);
     }
     fn play_cue(&mut self, deck: usize, index: usize, seconds: f64) {
@@ -1112,6 +1124,9 @@ impl Player {
         }
     }
     fn next(&mut self) {
+        if self.podcasts.next_episode() {
+            return;
+        }
         self.player_sequence.advance = false;
         if self.repeat_one
             && let Some(i) = self.loaded[0]
@@ -1440,6 +1455,7 @@ impl Player {
                 self.activate(ui, action);
             }
             4 => self.cast_ui(ui),
+            6 => self.podcasts.show(ui),
             _ => self.addons_ui(ui),
         }
         let id = egui::Id::unique("quick-cast-open");
@@ -1651,7 +1667,9 @@ impl Player {
                                 }
                             }
                             1 => {
-                                if let Some(i) =
+                                if self.podcasts.is_active() {
+                                    self.toggle_player();
+                                } else if let Some(i) =
                                     self.selected.filter(|i| Some(*i) != self.loaded[0])
                                 {
                                     self.play(0, i);
@@ -1666,9 +1684,19 @@ impl Player {
                 }
                 skin::display(ui, |ui| {
                     let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
-                    let duration = self
-                        .loaded_track(0)
-                        .and_then(|t| t.preparation.analysis.as_ref().map(|a| a.duration));
+                    let duration = self.loaded_track(0).and_then(|t| {
+                        t.preparation
+                            .analysis
+                            .as_ref()
+                            .map(|a| a.duration)
+                            .or_else(|| {
+                                t.preparation
+                                    .extensions
+                                    .get("duration_seconds")
+                                    .and_then(|v| v.as_f64())
+                                    .filter(|d| *d > 0.)
+                            })
+                    });
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!(
@@ -3542,6 +3570,15 @@ impl Player {
 }
 impl eframe::App for Player {
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        let path = self.loaded_track(0).and_then(|t| {
+            self.loaded_origin[0]
+                .as_ref()
+                .map(|root| root.join(&t.path))
+        });
+        self.podcasts.flush_progress(
+            path.as_deref(),
+            self.audio.as_ref().map_or(0., |a| a.source_position(0)),
+        );
         self.checkpoint(true);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
@@ -3600,6 +3637,12 @@ impl eframe::App for Player {
         self.lookup
             .poll(ui.ctx(), &self.root, self.library.as_mut());
         self.podcasts.poll(ui.ctx());
+        if self.podcasts.open_player {
+            self.podcasts.open_player = false;
+            self.workspace.enabled = true;
+            self.workspace.pane = 0;
+        }
+
         let mut protected: Vec<_> = self
             .loaded_snapshot
             .iter()
@@ -3630,33 +3673,105 @@ impl eframe::App for Player {
             self.podcasts.cache.changed = false;
             self.scan();
         }
-        if let Some((path, play)) = self.podcasts.downloaded.take() {
-            if let Some(folder) = path.parent() {
-                let present = amp_core::folder_contains(folder, &self.root)
-                    || self
-                        .source_roots
-                        .iter()
-                        .any(|s| amp_core::folder_contains(folder, &s.root));
-                if present {
-                    self.scan();
-                } else {
-                    self.add_music_source(folder.to_owned());
+        let podcast_path = self.loaded_track(0).and_then(|t| {
+            self.loaded_origin[0]
+                .as_ref()
+                .map(|root| root.join(&t.path))
+        });
+        let podcast_position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
+        let podcast_finished = self.podcasts.is_active()
+            && self
+                .audio
+                .as_ref()
+                .is_some_and(|a| a.controls.finished[0].load(std::sync::atomic::Ordering::Relaxed));
+        self.podcasts
+            .record_progress(podcast_path.as_deref(), podcast_position, podcast_finished);
+        if podcast_finished {
+            self.podcasts.finished();
+        }
+        if let Some((path, id)) = self.podcasts.delete_request.take() {
+            let loaded = (0..6).any(|d| {
+                self.loaded_track(d).is_some_and(|t| {
+                    self.loaded_origin[d]
+                        .as_ref()
+                        .is_some_and(|root| root.join(&t.path) == path)
+                })
+            });
+            let result = if loaded {
+                Err("Unload this episode from Player / DJ before deleting its download.".into())
+            } else {
+                self.podcasts.cache.delete(&path, &id)
+            };
+            self.podcasts.report(result.map_or_else(
+                |e| e,
+                |_| "Downloaded audio removed; subscription kept.".into(),
+            ));
+        }
+        if let Some(episode) = self.podcasts.stream_request.take() {
+            let mut preparation = amp_core::Preparation {
+                cue_in: self.podcasts.resume_position(),
+                ..Default::default()
+            };
+            preparation
+                .extensions
+                .insert("podcast_stream_url".into(), serde_json::json!(episode.url));
+            preparation
+                .extensions
+                .insert("media_kind".into(), serde_json::json!("podcast"));
+            preparation.extensions.insert(
+                "duration_seconds".into(),
+                serde_json::json!(podcasts::duration_seconds(&episode.duration)),
+            );
+            let track = amp_core::Track {
+                path: PathBuf::from(format!("{}.mp3", episode.id)),
+                title: episode.title,
+                preparation,
+            };
+            self.claim_playback(playback_owner::Owner::Player, 0, false);
+            self.auto = false;
+            self.player_sequence.resume_auto = false;
+            let root = podcasts::downloads().unwrap_or_default();
+            let result = self
+                .ensure_audio()
+                .and_then(|()| self.audio.as_mut().unwrap().load(0, &root, &track, true));
+            match result {
+                Ok(()) => {
+                    self.loaded[0] = None;
+                    self.loaded_snapshot[0] = Some(track);
+                    self.loaded_origin[0] = Some(root);
+                    self.podcasts
+                        .report("Episode ready in AMP Player. Use Player to pause or seek.".into());
+                }
+                Err(error) => {
+                    self.status = error;
+                    self.podcasts.report(self.status.clone());
                 }
             }
-            if play {
-                self.podcast_play = Some(path);
+        }
+        if let Some((path, play)) = self.podcasts.downloaded.take()
+            && play
+        {
+            self.claim_playback(playback_owner::Owner::Player, 0, false);
+            if let Some(audio) = &mut self.audio {
+                audio.stop(0);
+            }
+            let position = self.podcasts.resume_position();
+            match self.safe_load_path(0, path, Some(position)) {
+                Ok(()) => {
+                    if let Some(audio) = &self.audio
+                        && let Err(error) = audio.play(0)
+                    {
+                        self.status = error;
+                    }
+                }
+                Err(error) => self.status = error,
             }
         }
-        if self.scan.is_none()
-            && let Some(path) = self.podcast_play.as_ref()
-            && let Some(index) = self.library.as_ref().and_then(|l| {
-                l.tracks
-                    .iter()
-                    .position(|t| amp_core::music_sources::audio_path(&self.root, &t.path) == *path)
-            })
-        {
-            self.podcast_play = None;
-            self.play(0, index);
+        if self.podcasts.resume_music {
+            self.podcasts.resume_music = false;
+            if let Some(index) = self.queue.first().copied() {
+                self.play(0, index);
+            }
         }
         self.cast.poll();
         self.update_live_broadcast();
@@ -3777,6 +3892,28 @@ impl eframe::App for Player {
         if let Some(path) = std::env::var_os("AMP_DOCK_SMOKE") {
             self.dock_frames += 1;
             docking::smoke(&ctx, self.dock_frames, &PathBuf::from(path));
+        }
+        if let Some(directory) = std::env::var_os("AMP_UI_CAPTURE_DIR")
+            && ui.input(|i| i.key_pressed(egui::Key::F12))
+        {
+            let directory = PathBuf::from(directory);
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join(format!(
+                "podcasts-{}-{}.png",
+                self.podcasts.page_name(),
+                theme::current(&ctx).id()
+            ));
+            ctx.request_screenshot(move |image| {
+                use eframe::icon_data::IconDataExt;
+                let icon = egui::IconData {
+                    width: image.size[0] as u32,
+                    height: image.size[1] as u32,
+                    rgba: image.pixels.iter().flat_map(|c| c.to_array()).collect(),
+                };
+                if let Ok(data) = icon.to_png_bytes() {
+                    let _ = std::fs::write(path, data);
+                }
+            });
         }
         if let Some(path) = std::env::var_os("AMP_SCREENSHOT")
             && self.scan.is_none()

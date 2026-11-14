@@ -187,6 +187,7 @@ pub struct Magnet {
 }
 
 pub enum Module {
+    Podcasts,
     Workspace,
     Verse,
     Library,
@@ -345,6 +346,7 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
                     ("AMP DJ", Module::Dj),
                     ("AMP Cast", Module::Cast),
                     ("AMP Lab", Module::LabSetup),
+                    ("AMP Podcasts", Module::Podcasts),
                     ("Plugin Manager", Module::Addons),
                 ] {
                     let button = ui.button(label);

@@ -241,6 +241,8 @@ jobs:
           path: packages
       - name: Generate verified cross-platform update manifest
         run: python tools/update_manifest.py --version "${GITHUB_REF_NAME#v}" --directory packages --apk "$(find packages -maxdepth 1 -name '*.apk' -print -quit)" --version-code "$(cat packages/version-code.txt)"
+      - name: Package optional AMP Podcasts
+        run: python tools/package_podcasts.py --version "${GITHUB_REF_NAME#v}" --destination packages
       - uses: softprops/action-gh-release@v2
         with:
           prerelease: false
@@ -251,3 +253,4 @@ jobs:
             packages/SHA256SUMS.txt
             packages/amp-update.json
             packages/amp-engine-*
+            packages/*.ampplugin*

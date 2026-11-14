@@ -1445,6 +1445,13 @@ impl Engine {
         track: &amp_core::Track,
         play: bool,
     ) -> Result<(), String> {
+        if track
+            .preparation
+            .extensions
+            .contains_key("podcast_stream_url")
+        {
+            return self.load_decoded(deck, root, track, play, None, None);
+        }
         let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
         self.load_with_stems(deck, root, track, play, crate::stems::ready(&path))
     }
@@ -1475,7 +1482,19 @@ impl Engine {
                     .into(),
             );
         }
-        let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
+        let stream = track
+            .preparation
+            .extensions
+            .get("podcast_stream_url")
+            .and_then(|v| v.as_str());
+        let network = stream.is_some();
+        let path = if let Some(url) = stream {
+            crate::media_lookup::http_url(url)?;
+            std::path::PathBuf::from(url)
+        } else {
+            amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?
+        };
+
         if section.is_none() {
             self.cancel_section(deck);
             self.controls.source_origin[deck].store(track.preparation.cue_in.to_bits(), Relaxed);
@@ -1521,7 +1540,8 @@ impl Engine {
         let worker_failed = failed.clone();
         std::thread::spawn(move || {
             let result = (|| {
-                if duration_worker.load(Relaxed) == 0
+                if !network
+                    && duration_worker.load(Relaxed) == 0
                     && let Ok(probe) = amp_core::command("ffprobe")
                         .args([
                             "-v",
@@ -1545,13 +1565,25 @@ impl Engine {
                 }
                 let mut command = amp_core::command("ffmpeg");
                 command.args(["-v", "error"]);
+                if network {
+                    command.args(["-protocol_whitelist", "pipe"]);
+                }
                 if let Some([vocals, instruments, drums]) = stems {
                     command.args(amp_core::cue_args(&prep)?).arg("-i").arg(vocals)
                         .args(amp_core::cue_args(&prep)?).arg("-i").arg(instruments)
                         .args(amp_core::cue_args(&prep)?).arg("-i").arg(drums)
                         .args(["-filter_complex", "[0:a][1:a][2:a]join=inputs=3:channel_layout=5.1:map=0.0-FL|0.1-FR|1.0-FC|1.1-LFE|2.0-BL|2.1-BR[out]", "-map", "[out]"]);
                 } else {
-                    command.args(amp_core::cue_args(&prep)?).arg("-i").arg(path);
+                    if network {
+                        command
+                            .args(["-i", "pipe:0"])
+                            .args(amp_core::cue_args(&prep)?);
+                    } else {
+                        command
+                            .args(amp_core::cue_args(&prep)?)
+                            .arg("-i")
+                            .arg(path.clone());
+                    }
                 }
                 let mut child = command
                     .args([
@@ -1564,11 +1596,65 @@ impl Engine {
                         "f32le",
                         "pipe:1",
                     ])
-                    .stdin(Stdio::null())
+                    .stdin(if network {
+                        Stdio::piped()
+                    } else {
+                        Stdio::null()
+                    })
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())
                     .spawn()
                     .map_err(|e| e.to_string())?;
+                let network_worker = if network {
+                    let mut input = child.stdin.take().ok_or("Decoder input missing")?;
+                    let stopped = stopped.clone();
+                    let url = path.to_string_lossy().into_owned();
+                    Some(std::thread::spawn(move || -> Result<(), String> {
+                        use std::io::Write;
+                        let agent: ureq::Agent = ureq::Agent::config_builder()
+                            .timeout_connect(Some(std::time::Duration::from_secs(10)))
+                            .timeout_per_read(Some(std::time::Duration::from_secs(5)))
+                            .timeout_recv_response(Some(std::time::Duration::from_secs(20)))
+                            .max_redirects(8)
+                            .build()
+                            .into();
+                        let mut response = agent
+                            .get(&url)
+                            .header("User-Agent", crate::media_lookup::USER_AGENT)
+                            .call()
+                            .map_err(|e| format!("Publisher audio unavailable: {e}"))?;
+                        if response
+                            .headers()
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .is_some_and(|t| t.starts_with("text/") || t.starts_with("video/"))
+                        {
+                            return Err(
+                                "Publisher returned a page or video instead of podcast audio"
+                                    .into(),
+                            );
+                        }
+                        let mut reader = response.body_mut().as_reader();
+                        let mut buffer = [0u8; 65536];
+                        loop {
+                            if stopped.load(Relaxed) {
+                                return Ok(());
+                            }
+                            let n = reader
+                                .read(&mut buffer)
+                                .map_err(|e| format!("Podcast connection interrupted: {e}"))?;
+                            if n == 0 {
+                                break;
+                            }
+                            if input.write_all(&buffer[..n]).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    }))
+                } else {
+                    None
+                };
                 let decoded: Result<(), String> = (|| {
                     let mut input = std::io::BufReader::new(
                         child.stdout.take().ok_or("Decoder output missing")?,
@@ -1627,6 +1713,11 @@ impl Engine {
                     let _ = child.kill();
                 }
                 let status = child.wait().map_err(|e| e.to_string())?;
+                if let Some(worker) = network_worker {
+                    worker
+                        .join()
+                        .map_err(|_| "Podcast connection worker stopped")??;
+                }
                 decoded?;
                 if !status.success() && !stopped.load(Relaxed) && !producer.is_abandoned() {
                     return Err("Audio decoder failed".into());
@@ -2321,6 +2412,64 @@ mod tests {
         }
     }
 
+    #[test]
+    #[ignore = "Requires FFmpeg and native audio; generated HTTP fixture, master muted"]
+    fn podcast_http_stream_uses_existing_decoder() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("episode.wav");
+        assert!(
+            amp_core::command("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=220:duration=3"
+                ])
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let data = std::fs::read(file).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/episode.wav", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                data.len()
+            );
+            let _ = stream.write_all(&data);
+        });
+        let mut engine = Engine::new().unwrap();
+        engine.set_master(0.);
+        let mut prep = amp_core::Preparation::default();
+        prep.extensions
+            .insert("podcast_stream_url".into(), serde_json::json!(url));
+        let track = amp_core::Track {
+            path: "episode.wav".into(),
+            title: "Podcast fixture".into(),
+            preparation: prep,
+        };
+        engine.load(0, dir.path(), &track, true).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while engine.source_position(0) < 0.25 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            engine.source_position(0) > 0.2,
+            "stream did not decode: {:?}",
+            engine.take_decode_errors()
+        );
+        engine.stop(0);
+        worker.join().unwrap();
+    }
     #[test]
     #[ignore = "requires FFmpeg and native output; generated stem fixtures, master muted"]
     fn native_phrase_mashup_launches_two_stem_decoders_and_completes() {

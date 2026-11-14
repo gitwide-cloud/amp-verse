@@ -21,6 +21,10 @@ fn envelope(position: f64, remaining: Option<f32>, seconds: f32) -> f32 {
 }
 impl Player {
     pub(super) fn resume_player_sequence(&mut self) {
+        if self.podcasts.is_active() {
+            self.auto = false;
+            return;
+        }
         if self.playback_owner == playback_owner::Owner::Player && self.player_sequence.resume_auto
         {
             self.auto = true;
@@ -87,6 +91,10 @@ impl Player {
         let Some(audio) = &self.audio else {
             return;
         };
+        if self.podcasts.is_active() {
+            audio.set_player_envelope(1.);
+            return;
+        }
         if self.playback_owner != playback_owner::Owner::Player {
             audio.set_player_envelope(1.);
             return;
