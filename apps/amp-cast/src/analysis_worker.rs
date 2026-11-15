@@ -70,7 +70,7 @@ impl Worker {
                     return;
                 }
             };
-            if let Err(e) = queue.seed_known(&host.tracks) {
+            if let Err(e) = queue.seed_known(&host.tracks()) {
                 state.progress.lock().unwrap().error = Some(e);
             }
             drop(host);

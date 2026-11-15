@@ -56,7 +56,9 @@ pub struct Cast {
     pub analysis: Arc<analysis_worker::Worker>,
     pub sharing: std::sync::atomic::AtomicBool,
     root: PathBuf,
-    tracks: Vec<Track>,
+    /// An `Arc` snapshot so readers (including a whole in-flight broadcast session)
+    /// keep a consistent view while a refresh swaps in a new catalog underneath them.
+    tracks: std::sync::Mutex<Arc<Vec<Track>>>,
     password: Option<String>,
     station: Mutex<Station>,
     audio: broadcast::Sender<Bytes>,
@@ -97,7 +99,7 @@ impl Cast {
             analysis: analysis_worker::Worker::new(),
             sharing: std::sync::atomic::AtomicBool::new(false),
             root,
-            tracks: library.tracks,
+            tracks: std::sync::Mutex::new(Arc::new(library.tracks)),
             password,
             station: Mutex::new(Station::default()),
             audio,
@@ -122,6 +124,26 @@ impl Cast {
             let _ = worker.await;
         }
         self.recovery.reset();
+    }
+    /// Current catalog snapshot. Cheap: an `Arc` pointer clone, not a deep copy.
+    pub fn tracks(&self) -> Arc<Vec<Track>> {
+        self.tracks.lock().unwrap().clone()
+    }
+    /// Incrementally reconcile the catalog against disk and swap it in. Unchanged
+    /// files are not reopened/retagged; a session already holding an older `tracks()`
+    /// snapshot (e.g. an in-flight broadcast) keeps using it until it asks again.
+    pub fn refresh(&self) -> std::io::Result<amp_core::RefreshStats> {
+        let previous = amp_core::Library {
+            tracks: (*self.tracks()).clone(),
+            tree: amp_core::Folder {
+                name: String::new(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        };
+        let (fresh, stats) = amp_core::refresh(&previous, &self.root)?;
+        *self.tracks.lock().unwrap() = Arc::new(fresh.tracks);
+        Ok(stats)
     }
     fn authorized(&self, headers: &HeaderMap) -> bool {
         if headers
@@ -186,6 +208,7 @@ pub fn router(cast: Arc<Cast>) -> Router {
         .route("/api/analysis/resume", post(resume_analysis))
         .route("/health", get(|| async { "ok" }))
         .route("/api/playlist", get(playlist))
+        .route("/api/studio/library/refresh", post(refresh_catalog))
         .route("/api/start", post(start))
         .route("/api/stop", post(stop))
         .route("/listen.mp3", get(listen))
@@ -201,7 +224,7 @@ async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
             .pause_for_radio
             .load(std::sync::atomic::Ordering::Relaxed);
     Json(
-        serde_json::json!({"mix_requested":cast.mix.lock().unwrap().clone(),"mix_applied_revision":station.mix_revision,"library_id":cast.library_id,"source":station.source,"current_source":if station.source=="live_dj" {serde_json::json!("Player/DJ master")} else {cast.selection.lock().unwrap().as_ref().map_or(serde_json::Value::Null,|v|v["name"].clone())},"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"playlist_playback":true,"google_cast":false,"hls":false,"reliable_audio":1,"dual_path":true,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":station.name.as_ref().unwrap_or(&cast.station_name),"analysis":analysis,"running":station.running && (station.source!="live_dj" || station.audio_ready),"on_air":station.running && station.audio_ready,"preparing":station.running && !station.audio_ready,"server_output":station_control::output_running(&cast),"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count()+cast.recovery.listeners(),"password_required":cast.password.is_some()}),
+        serde_json::json!({"mix_requested":cast.mix.lock().unwrap().clone(),"mix_applied_revision":station.mix_revision,"library_id":cast.library_id,"source":station.source,"current_source":if station.source=="live_dj" {serde_json::json!("Player/DJ master")} else {cast.selection.lock().unwrap().as_ref().map_or(serde_json::Value::Null,|v|v["name"].clone())},"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"playlist_playback":true,"google_cast":false,"hls":false,"reliable_audio":1,"dual_path":true,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":station.name.as_ref().unwrap_or(&cast.station_name),"analysis":analysis,"running":station.running && (station.source!="live_dj" || station.audio_ready),"on_air":station.running && station.audio_ready,"preparing":station.running && !station.audio_ready,"server_output":station_control::output_running(&cast),"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks().len(),"listeners":cast.audio.receiver_count()+cast.recovery.listeners(),"password_required":cast.password.is_some()}),
     )
 }
 async fn pause_analysis(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
@@ -236,9 +259,30 @@ async fn playlist(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
     let live = cast.station.lock().await.source == "live_dj";
     let selection = cast.selection.lock().unwrap().clone();
     let selected = selection.as_ref().and_then(|v| v["tracks"].as_array());
+    let tracks = cast.tracks();
     Json(
-        serde_json::json!({"tracks":cast.tracks.iter().enumerate().filter(|(i,_)|!live&&selected.is_none_or(|list|list.iter().any(|v|v.as_u64()==Some(*i as u64)))).map(|(index,track)|serde_json::json!({"index":index,"title":track.title,"cue_in":track.preparation.cue_in,"cue_out":track.preparation.cue_out,"bpm":track.preparation.bpm})).collect::<Vec<_>>()}),
+        serde_json::json!({"tracks":tracks.iter().enumerate().filter(|(i,_)|!live&&selected.is_none_or(|list|list.iter().any(|v|v.as_u64()==Some(*i as u64)))).map(|(index,track)|serde_json::json!({"index":index,"title":track.title,"cue_in":track.preparation.cue_in,"cue_out":track.preparation.cue_out,"bpm":track.preparation.bpm})).collect::<Vec<_>>()}),
     )
+}
+async fn refresh_catalog(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
+    if !cast.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let _operation = cast.operation.lock().await;
+    let worker = cast.clone();
+    let result = tokio::task::spawn_blocking(move || worker.refresh()).await;
+    match result {
+        Ok(Ok(stats)) => Json(serde_json::json!({
+            "tracks": cast.tracks().len(),
+            "considered": stats.considered,
+            "reused": stats.reused,
+            "tagged": stats.tagged,
+            "removed": stats.removed,
+        }))
+        .into_response(),
+        Ok(Err(error)) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+        Err(error) => (StatusCode::SERVICE_UNAVAILABLE, error.to_string()).into_response(),
+    }
 }
 async fn start(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     let _operation = cast.operation.lock().await;
@@ -256,7 +300,7 @@ async fn start_unlocked(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Re
     if station.running {
         return StatusCode::NO_CONTENT.into_response();
     }
-    if cast.tracks.is_empty() {
+    if cast.tracks().is_empty() {
         return (StatusCode::CONFLICT, "Music folder is empty").into_response();
     }
     station.running = true;
@@ -330,6 +374,42 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let library = amp_core::scan(root.path()).unwrap();
         router(Cast::new(root.path().into(), library, password))
+    }
+    #[tokio::test]
+    async fn refresh_endpoint_is_incremental_and_does_not_disturb_an_already_held_snapshot() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("a.mp3"), []).unwrap();
+        let cast = Cast::new(root.path().into(), amp_core::scan(root.path()).unwrap(), None);
+        // Simulates a session (e.g. an in-flight broadcast) that already grabbed a
+        // catalog snapshot before the refresh below runs underneath it.
+        let held = cast.tracks();
+        assert_eq!(held.len(), 1);
+
+        std::fs::write(root.path().join("b.mp3"), []).unwrap();
+        let response = router(cast.clone())
+            .oneshot(
+                Request::post("/api/studio/library/refresh")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let body: serde_json::Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(body["tracks"], 2);
+        assert_eq!(body["tagged"], 1);
+        assert_eq!(body["reused"], 1);
+        assert_eq!(body["removed"], 0);
+
+        // The snapshot grabbed before the refresh is untouched by the swap...
+        assert_eq!(held.len(), 1);
+        // ...while a fresh read sees the refreshed catalog.
+        assert_eq!(cast.tracks().len(), 2);
     }
     #[tokio::test]
     async fn station_mix_is_revision_checked_independent_and_does_not_restart_audio() {
