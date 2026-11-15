@@ -53,7 +53,7 @@ For updates, stop the service before replacing its executable, then start it aft
 
 ## Current browser coverage and deployment status
 
-This is a browser-server preview with a generated demonstration library. A real NAS music library has not been configured.
+This is a browser-server preview. The initial demo deployment has now been validated against a real two-source NAS library: 13,963 tracks (4,405 main-library tracks plus 9,558 additional-source tracks) and nine saved Smart Playlists. Personal music and catalogs are not included in release packages.
 
 The browser provides a local Player and DJ decks with manual tempo adjustment and crossfade, plus a nine-pad sampler. Server Lab supports MP3 export and saved track preparation. Smart Radio uses the shared core. Podcasts supports search, RSS feeds, subscriptions, and streamed playback.
 
@@ -73,3 +73,11 @@ AMP_CAST_SOURCE_LOCATIONS='{"additional-library-id":"/mnt/media/extra-music"}'
 ```
 
 Configure `AMP_CAST_PASSWORD` privately before connecting personal media. The browser Access panel accepts it for the current page session. Neither passwords, personal catalog snapshots nor music belong in release archives. This preview is intended for a trusted LAN; use an authenticated TLS reverse proxy before remote access. No internet forwarding is configured by the deployment unit.
+
+## Real-library acceptance check (2026-11-14)
+
+The Linux source-location regression test passed. From the exact committed source, the server suite passed 23 tests with four environment-dependent tests ignored; the browser JavaScript behavior check passed. Real-library verification covered authenticated pagination, both source audio streams decoded by FFmpeg, waveform generation, three-second MP3 export, rejected stale preparation writes, unchanged sampled original audio, and all nine saved Smart Playlists with nonempty selections. Browser QA confirmed actual Player playback advancing without a media error and an R&B Smart Playlist broadcasting to two HTTP listeners, including browser playback. The station advanced to another song automatically during verification. Test playback was stopped afterward.
+
+The first full NAS metadata scan took about eight minutes. The resulting device-local startup snapshot is approximately 95 MB; the installed service became ready with all 13,963 tracks in approximately 1.1 seconds using that snapshot. This measures API readiness on this deployment, not a universal performance guarantee. Analysis stayed disabled.
+
+Known limitations for follow-up: the current Refresh button reloads the in-memory catalog page rather than launching a new scan. Startup background scanning updates the saved snapshot for a subsequent restart; it does not hot-swap the running immutable library. Incremental scanning with explicit refresh and stable track identifiers is a priority for the next version. The browser provides only the capabilities listed above, not complete desktop/Android add-on parity.
