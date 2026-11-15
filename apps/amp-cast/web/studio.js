@@ -46,16 +46,3 @@ $('analysis-control').onclick=run(async()=>{$('analysis-control').disabled=true;
 $('player-audio').onerror=()=>message('Playback unavailable. Reconnect and select the song again.',true);$('station-audio').onerror=()=>message('Broadcast audio unavailable. Check the station is on air.',true);
 view(modules.map(x=>x.toLowerCase().replace('-','')).includes(location.hash.slice(1))?location.hash.slice(1):'player');run(connect)();(async function poll(){try{await status();}catch(e){$('connection').textContent='Server unavailable';}setTimeout(poll,5000);})();
 })();
-
-
-
-
-
-
-
-
-
-
-
-
-
