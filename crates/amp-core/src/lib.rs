@@ -89,6 +89,23 @@ pub struct Track {
     pub title: String,
     pub preparation: Preparation,
 }
+impl Track {
+    /// Stable identity for this track, derived from its library-relative path.
+    /// Two scans (full or incremental) of the same file always produce the same
+    /// ID; it is not stored, so it needs no migration and survives file moves
+    /// only if the path is unchanged. Position in `Library::tracks` is not an ID.
+    pub fn id(&self) -> String {
+        track_id(&self.path)
+    }
+}
+/// Deterministic stable ID for a library-relative track path. Not a secret: it
+/// only needs to be stable and collision-resistant for one library's track count.
+pub fn track_id(relative: &Path) -> String {
+    use sha2::{Digest, Sha256};
+    let normalized = relative.to_string_lossy().replace('\\', "/");
+    let digest = Sha256::digest(normalized.as_bytes());
+    digest[..8].iter().map(|b| format!("{b:02x}")).collect()
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Folder {
@@ -121,6 +138,66 @@ fn scan_mode(root: &Path, metadata: bool) -> io::Result<Library> {
     music_sources::append(root, &mut library, metadata)?;
     Ok(library)
 }
+/// Stat fingerprint recorded on every scanned track so a later refresh can tell,
+/// without reopening the audio file, whether its tags need rereading.
+fn source_stat(entry: &fs::DirEntry) -> Option<serde_json::Value> {
+    let stat = entry.metadata().ok()?;
+    let modified_ns = stat
+        .modified()
+        .ok()?
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()?
+        .as_nanos()
+        .to_string();
+    Some(serde_json::json!({ "size": stat.len(), "modified_ns": modified_ns }))
+}
+
+/// Build a `Track` by reading tags (when `metadata`) or deferring to defaults, then
+/// stamping the current stat fingerprint so a future refresh can detect "unchanged".
+fn tag_track(
+    entry: &fs::DirEntry,
+    path: &Path,
+    root: &Path,
+    catalog: &mut std::collections::BTreeMap<String, Preparation>,
+    metadata: bool,
+) -> io::Result<Track> {
+    let relative: PathBuf = path.strip_prefix(root).unwrap().into();
+    let key = format!("tracks/{}.json", relative.to_string_lossy().replace('\\', "/"));
+    let mut preparation = if !metadata {
+        Preparation::default()
+    } else if let Some(prep) = catalog.remove(&key) {
+        prep
+    } else {
+        preparation::load(path).map_err(io::Error::other)?
+    };
+    if metadata {
+        genres::read_embedded(path, &mut preparation);
+    }
+    if let Some(stat) = source_stat(entry) {
+        preparation
+            .extensions
+            .insert("scan_source_stat".into(), stat);
+    }
+    let content = media_kind::kind(path, &preparation);
+    if content != media_kind::Kind::Music {
+        preparation
+            .extensions
+            .insert("media_kind_detected".into(), serde_json::json!(content.id()));
+    }
+    let title = preparation
+        .extensions
+        .get("title")
+        .and_then(|v| v.as_str())
+        .filter(|v| !v.trim().is_empty())
+        .map(str::to_owned)
+        .unwrap_or_else(|| path.file_stem().unwrap_or_default().to_string_lossy().into());
+    Ok(Track {
+        path: relative,
+        title,
+        preparation,
+    })
+}
+
 fn scan_single(root: &Path, metadata: bool) -> io::Result<Library> {
     let root = root.canonicalize()?;
     storage::register(&root);
@@ -159,58 +236,146 @@ fn scan_single(root: &Path, metadata: bool) -> io::Result<Library> {
                     .folders
                     .push(visit(&path, root, tracks, catalog, metadata)?);
             } else if ty.is_file() && supported(&path) {
-                let key = format!(
-                    "tracks/{}.json",
-                    path.strip_prefix(root)
-                        .unwrap()
-                        .to_string_lossy()
-                        .replace('\\', "/")
-                );
-                let mut preparation = if !metadata {
-                    Preparation::default()
-                } else if let Some(prep) = catalog.remove(&key) {
-                    prep
-                } else {
-                    preparation::load(&path).map_err(io::Error::other)?
-                };
-                if metadata {
-                    genres::read_embedded(&path, &mut preparation);
-                } else if let Ok(stat) = entry.metadata()
-                    && let Ok(time) = stat.modified()
-                    && let Ok(time) = time.duration_since(std::time::UNIX_EPOCH)
-                {
-                    preparation.extensions.insert("scan_source_stat".into(),serde_json::json!({"size":stat.len(),"modified_ns":time.as_nanos().to_string()}));
-                }
-                let content = media_kind::kind(&path, &preparation);
-                if content != media_kind::Kind::Music {
-                    preparation.extensions.insert(
-                        "media_kind_detected".into(),
-                        serde_json::json!(content.id()),
-                    );
-                }
                 folder.tracks.push(tracks.len());
-                tracks.push(Track {
-                    path: path.strip_prefix(root).unwrap().into(),
-                    title: preparation
-                        .extensions
-                        .get("title")
-                        .and_then(|v| v.as_str())
-                        .filter(|v| !v.trim().is_empty())
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| {
-                            path.file_stem()
-                                .unwrap_or_default()
-                                .to_string_lossy()
-                                .into()
-                        }),
-                    preparation,
-                });
+                tracks.push(tag_track(&entry, &path, root, catalog, metadata)?);
             }
         }
         Ok(folder)
     }
     let tree = visit(&root, &root, &mut tracks, &mut catalog, metadata)?;
     Ok(Library { tracks, tree })
+}
+
+/// Counts from an incremental [`refresh`], distinguishing files whose tags were
+/// actually reread from files whose cached entry was reused unchanged.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct RefreshStats {
+    /// Files visited on disk during this refresh.
+    pub considered: usize,
+    /// Files reused from `previous` without reopening/retagging the audio file.
+    pub reused: usize,
+    /// Files that were new, changed, or otherwise required a fresh tag read.
+    pub tagged: usize,
+    /// Files present in `previous` that are no longer on disk.
+    pub removed: usize,
+}
+
+/// Incrementally reconcile `previous` against the current state of `root`: unchanged
+/// files (same size and modification time) are reused verbatim, including their
+/// preparation data and stable [`Track::id`]; only added/changed files are retagged,
+/// and files no longer present are dropped. Does not touch `root`'s additional
+/// configured music sources beyond the existing full-rescan behavior for those.
+pub fn refresh(previous: &Library, root: &Path) -> io::Result<(Library, RefreshStats)> {
+    refresh_mode(previous, root, true)
+}
+/// Incremental counterpart to [`scan_job_inputs`].
+pub fn refresh_job_inputs(previous: &Library, root: &Path) -> io::Result<(Library, RefreshStats)> {
+    refresh_mode(previous, root, false)
+}
+fn refresh_mode(
+    previous: &Library,
+    root: &Path,
+    metadata: bool,
+) -> io::Result<(Library, RefreshStats)> {
+    let (mut library, stats) = refresh_single(previous, root, metadata)?;
+    music_sources::append(root, &mut library, metadata)?;
+    Ok((library, stats))
+}
+fn refresh_single(
+    previous: &Library,
+    root: &Path,
+    metadata: bool,
+) -> io::Result<(Library, RefreshStats)> {
+    let root = root.canonicalize()?;
+    storage::register(&root);
+    let mut previous_by_path = std::collections::HashMap::with_capacity(previous.tracks.len());
+    for track in &previous.tracks {
+        previous_by_path.insert(track.path.as_path(), track);
+    }
+    let mut tracks = Vec::new();
+    let mut seen = std::collections::HashSet::with_capacity(previous.tracks.len());
+    let mut stats = RefreshStats::default();
+    let mut catalog = if metadata {
+        catalog_db::preparations(&root).map_err(io::Error::other)?
+    } else {
+        Default::default()
+    };
+    fn visit(
+        dir: &Path,
+        root: &Path,
+        tracks: &mut Vec<Track>,
+        catalog: &mut std::collections::BTreeMap<String, Preparation>,
+        previous_by_path: &std::collections::HashMap<&Path, &Track>,
+        seen: &mut std::collections::HashSet<PathBuf>,
+        stats: &mut RefreshStats,
+        metadata: bool,
+    ) -> io::Result<Folder> {
+        let mut folder = Folder {
+            name: dir.file_name().unwrap_or_default().to_string_lossy().into(),
+            folders: vec![],
+            tracks: vec![],
+        };
+        let mut entries = fs::read_dir(dir)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let ty = entry.file_type()?;
+            if ty.is_symlink() {
+                continue;
+            }
+            let path = entry.path();
+            if ty.is_dir() && (entry.file_name() == "ampdj" || entry.file_name() == ".ampverse") {
+                continue;
+            }
+            if ty.is_dir() {
+                folder.folders.push(visit(
+                    &path,
+                    root,
+                    tracks,
+                    catalog,
+                    previous_by_path,
+                    seen,
+                    stats,
+                    metadata,
+                )?);
+            } else if ty.is_file() && supported(&path) {
+                stats.considered += 1;
+                let relative: PathBuf = path.strip_prefix(root).unwrap().into();
+                seen.insert(relative.clone());
+                let current_stat = source_stat(&entry);
+                let previous_track = previous_by_path.get(relative.as_path()).copied();
+                let unchanged = metadata
+                    && current_stat.is_some()
+                    && previous_track.is_some_and(|prev| {
+                        prev.preparation.extensions.get("scan_source_stat") == current_stat.as_ref()
+                    });
+                folder.tracks.push(tracks.len());
+                if unchanged {
+                    stats.reused += 1;
+                    tracks.push(previous_track.unwrap().clone());
+                } else {
+                    stats.tagged += 1;
+                    tracks.push(tag_track(&entry, &path, root, catalog, metadata)?);
+                }
+            }
+        }
+        Ok(folder)
+    }
+    let tree = visit(
+        &root,
+        &root,
+        &mut tracks,
+        &mut catalog,
+        &previous_by_path,
+        &mut seen,
+        &mut stats,
+        metadata,
+    )?;
+    stats.removed = previous
+        .tracks
+        .iter()
+        .filter(|t| !seen.contains(&t.path))
+        .count();
+    Ok((Library { tracks, tree }, stats))
 }
 pub fn supported(p: &Path) -> bool {
     p.extension().is_some_and(|e| {
@@ -512,7 +677,11 @@ mod tests {
         let library = scan(root).unwrap();
         assert_eq!(library.tracks.len(), 1);
         assert_eq!(library.tree.folders[0].tracks, [0]);
-        assert_eq!(library.tracks[0].preparation, prep);
+        // A scan always stamps a stat fingerprint (used by `refresh` to detect
+        // unchanged files later); strip it before comparing sidecar fidelity.
+        let mut scanned = library.tracks[0].preparation.clone();
+        scanned.extensions.remove("scan_source_stat");
+        assert_eq!(scanned, prep);
         let list = Playlist {
             companion_available: false,
             sync: None,
@@ -529,6 +698,94 @@ mod tests {
         );
         assert!(resolve(root, Path::new("../outside.mp3")).is_err());
         assert!(resolve(root, &root.join("Albums/a.MP3")).is_err());
+    }
+    #[test]
+    fn incremental_refresh_reuses_unchanged_tags_updates_changed_and_drops_removed() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        fs::write(root.join("keep.mp3"), []).unwrap();
+        fs::write(root.join("change.mp3"), []).unwrap();
+        fs::write(root.join("remove.mp3"), []).unwrap();
+        let baseline = scan(root).unwrap();
+        assert_eq!(baseline.tracks.len(), 3);
+
+        // Nothing changed on disk: every file is reused, none is reopened/retagged.
+        let (same, stats) = refresh(&baseline, root).unwrap();
+        assert_eq!((stats.considered, stats.reused, stats.tagged, stats.removed), (3, 3, 0, 0));
+        assert_eq!(same.tracks.len(), 3);
+
+        let keep = |lib: &Library| {
+            lib.tracks
+                .iter()
+                .find(|t| t.path == Path::new("keep.mp3"))
+                .unwrap()
+                .id()
+        };
+        let keep_id_before = keep(&baseline);
+        // Stable across two consecutive no-op refreshes.
+        assert_eq!(keep_id_before, keep(&same));
+
+        fs::write(root.join("change.mp3"), b"different bytes").unwrap();
+        fs::remove_file(root.join("remove.mp3")).unwrap();
+        fs::write(root.join("added.mp3"), []).unwrap();
+        let (updated, stats) = refresh(&same, root).unwrap();
+        assert_eq!((stats.considered, stats.reused, stats.tagged, stats.removed), (3, 1, 2, 1));
+        assert_eq!(updated.tracks.len(), 3);
+        assert!(updated.tracks.iter().any(|t| t.path == Path::new("added.mp3")));
+        assert!(!updated.tracks.iter().any(|t| t.path == Path::new("remove.mp3")));
+        // The untouched track's stable ID survives the refresh that changed its siblings.
+        assert_eq!(keep_id_before, keep(&updated));
+    }
+    #[test]
+    #[ignore = "measurement fixture, not a correctness check; run with --ignored --nocapture"]
+    fn fixture_library_incremental_refresh_avoids_retagging_most_of_a_large_library() {
+        use std::time::Instant;
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        const COUNT: usize = 4000;
+        for i in 0..COUNT {
+            fs::write(root.join(format!("track_{i:05}.mp3")), []).unwrap();
+        }
+        let started = Instant::now();
+        let baseline = scan(root).unwrap();
+        let full_scan = started.elapsed();
+        assert_eq!(baseline.tracks.len(), COUNT);
+
+        // What the old refresh path did: another unconditional full scan/retag of everything.
+        let started = Instant::now();
+        let _ = scan(root).unwrap();
+        let full_rescan = started.elapsed();
+
+        // A handful of real changes: 3 added, 2 removed, 2 modified; COUNT-4 files untouched.
+        for i in 0..2 {
+            fs::remove_file(root.join(format!("track_{i:05}.mp3"))).unwrap();
+        }
+        for i in 2..4 {
+            fs::write(root.join(format!("track_{i:05}.mp3")), b"changed").unwrap();
+        }
+        for i in 0..3 {
+            fs::write(root.join(format!("new_{i:03}.mp3")), []).unwrap();
+        }
+        let started = Instant::now();
+        let (updated, stats) = refresh(&baseline, root).unwrap();
+        let incremental = started.elapsed();
+
+        assert_eq!(updated.tracks.len(), COUNT - 2 + 3);
+        assert_eq!(stats.removed, 2);
+        assert_eq!(stats.tagged, 5); // 2 modified + 3 added
+        assert_eq!(stats.reused, COUNT - 2 - 2); // everything else
+
+        println!(
+            "fixture library evidence: {COUNT} files; full scan {full_scan:?}; full rescan \
+             (old refresh path) {full_rescan:?}; incremental refresh after 2 removed/2 \
+             modified/3 added {incremental:?} (considered {}, reused {}, tagged {}, removed {})",
+            stats.considered, stats.reused, stats.tagged, stats.removed
+        );
+        assert!(
+            incremental < full_rescan,
+            "incremental refresh ({incremental:?}) should be faster than a full rescan \
+             ({full_rescan:?}) when only 5 of {COUNT} files changed"
+        );
     }
     #[test]
     fn windows_playlist_paths_enroll_as_portable_paths() {

@@ -28,9 +28,9 @@ async fn enable(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
 pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
     let mut result = Vec::new();
     let settings = amp_core::show::Settings::load(&cast.root)?;
+    let snapshot = cast.tracks();
     for p in settings.playlists {
-        let ordered: Vec<_> = cast
-            .tracks
+        let ordered: Vec<_> = snapshot
             .iter()
             .enumerate()
             .filter(|(_, t)| amp_core::show::eligible(&p, t))
@@ -55,7 +55,7 @@ pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
             let tracks: Vec<_> = p
                 .tracks
                 .iter()
-                .filter_map(|path| cast.tracks.iter().position(|t| &t.path == path))
+                .filter_map(|path| snapshot.iter().position(|t| &t.path == path))
                 .collect();
             result.push(json!({"id":format!("normal_{}",path.file_stem().unwrap_or_default().to_string_lossy()),"name":p.name,"kind":"playlist","tracks":tracks}));
         }
@@ -121,7 +121,7 @@ mod playback_tests {
             .unwrap();
         assert!(!bytes.is_empty());
         let index = cast.station.lock().await.current_index.unwrap();
-        assert!(cast.tracks[index].path.starts_with("allowed"));
+        assert!(cast.tracks()[index].path.starts_with("allowed"));
         cast.shutdown().await;
     }
 }
@@ -156,7 +156,7 @@ async fn play(
     *cast.selection.lock().unwrap() = Some(value);
     super::start_unlocked(State(cast.clone()), headers).await
 }
-fn shared_track(cast: &Cast, id: usize) -> Result<&Track, StatusCode> {
+fn shared_track(cast: &Cast, id: usize) -> Result<Track, StatusCode> {
     let lists = lists(cast).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
     if !lists.iter().any(|p| {
         p["tracks"]
@@ -165,7 +165,7 @@ fn shared_track(cast: &Cast, id: usize) -> Result<&Track, StatusCode> {
     }) {
         return Err(StatusCode::NOT_FOUND);
     }
-    cast.tracks.get(id).ok_or(StatusCode::NOT_FOUND)
+    cast.tracks().get(id).cloned().ok_or(StatusCode::NOT_FOUND)
 }
 async fn manifest(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     if !allowed(&cast, &headers) {
@@ -173,7 +173,8 @@ async fn manifest(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response
     }
     let work=tokio::task::spawn_blocking(move||lists(&cast).map(|playlists|{
         let shared:std::collections::HashSet<u64>=playlists.iter().filter_map(|p|p["tracks"].as_array()).flatten().filter_map(Value::as_u64).collect();
-        json!({"version":1,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"name":cast.station_name,"playlists":playlists,"tracks":cast.tracks.iter().enumerate().filter(|(id,_)|shared.contains(&(*id as u64))).map(|(id,t)|json!({"id":id,"title":t.title,"track_key":amp_core::show::song_id(t),"extension":t.path.extension().unwrap_or_default().to_string_lossy()})).collect::<Vec<_>>()})
+        let snapshot=cast.tracks();
+        json!({"version":1,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"name":cast.station_name,"playlists":playlists,"tracks":snapshot.iter().enumerate().filter(|(id,_)|shared.contains(&(*id as u64))).map(|(id,t)|json!({"id":id,"title":t.title,"track_key":amp_core::show::song_id(t),"extension":t.path.extension().unwrap_or_default().to_string_lossy()})).collect::<Vec<_>>()})
     })).await;
     match work {
         Ok(Ok(value)) => Json(value).into_response(),
@@ -201,7 +202,7 @@ async fn metadata(
         if before.len()!=after.len()||before.modified().ok()!=after.modified().ok(){return Err(StatusCode::CONFLICT);}
         let preparation_current=preparation.source_sha256.as_deref().is_none_or(|saved|saved==checksum);
         let metadata_revision=amp_core::coordination::revision(&serde_json::to_value(&preparation).map_err(|_|StatusCode::UNPROCESSABLE_ENTITY)?);
-        Ok(json!({"version":1,"id":id,"title":track.title,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"bytes":size,"sha256":checksum,"track_key":amp_core::show::song_id(track),"preparation_current":preparation_current,"revision":metadata_revision,"preparation":preparation}))
+        Ok(json!({"version":1,"id":id,"title":track.title,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"bytes":size,"sha256":checksum,"track_key":amp_core::show::song_id(&track),"preparation_current":preparation_current,"revision":metadata_revision,"preparation":preparation}))
     }).await;
     match work {
         Ok(Ok(value)) => Json(value).into_response(),

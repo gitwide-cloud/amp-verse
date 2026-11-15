@@ -58,7 +58,11 @@ async fn decode(
     target: Option<f64>,
     out_bpm: Option<f64>,
 ) -> Result<Decoded, String> {
-    let track = cast.tracks.get(index).ok_or("Track unavailable")?;
+    let track = cast
+        .tracks()
+        .get(index)
+        .cloned()
+        .ok_or("Track unavailable")?;
     let path = amp_core::resolve(&cast.root, &track.path).map_err(|e| e.to_string())?;
     let mut preparation = amp_core::preparation::load(&path)?;
     preparation.cue_in = entry(&preparation, profile.as_ref(), target);
@@ -178,7 +182,7 @@ async fn emit(
     Ok(())
 }
 fn pick(
-    cast: &Cast,
+    tracks: &[Track],
     profile: Option<&SmartPlaylist>,
     indices: &[usize],
     cursor: &mut usize,
@@ -187,10 +191,10 @@ fn pick(
     target: Option<f64>,
 ) -> Result<usize, String> {
     if let Some(p) = profile {
-        show::choose(p, &cast.tracks, current, recent, target, 0)
+        show::choose(p, tracks, current, recent, target, 0)
             .or_else(|| {
                 current.filter(|i| {
-                    p.fallback == show::Fallback::RelaxRecent && show::eligible(p, &cast.tracks[*i])
+                    p.fallback == show::Fallback::RelaxRecent && show::eligible(p, &tracks[*i])
                 })
             })
             .ok_or_else(|| "No eligible songs remain in Smart Playlist".into())
@@ -215,11 +219,12 @@ async fn prepare_next(
     target: Option<f64>,
     bpm: Option<f64>,
 ) -> Result<Decoded, String> {
+    let tracks = cast.tracks();
     let mut index = first;
     let mut failed = std::collections::HashSet::new();
     let mut cursor = indices.iter().position(|i| *i == first).unwrap_or(0) + 1;
     let mut errors = Vec::new();
-    for _ in 0..cast.tracks.len().min(16) {
+    for _ in 0..tracks.len().min(16) {
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(120),
             decode(cast.clone(), index, profile.clone(), target, bpm),
@@ -230,12 +235,12 @@ async fn prepare_next(
             Ok(Err(error)) => errors.push(error),
             Err(_) => errors.push(format!(
                 "Audio preparation timed out: {}",
-                cast.tracks[index].title
+                tracks[index].title
             )),
         }
         failed.insert(index);
         if let Some(rules) = &mut profile {
-            rules.excluded.push(show::song_id(&cast.tracks[index]));
+            rules.excluded.push(show::song_id(&tracks[index]));
         }
         let start = indices.iter().position(|i| *i == index).unwrap_or(0) + 1;
         let candidates: Vec<_> = indices
@@ -253,7 +258,7 @@ async fn prepare_next(
             cursor = 0;
         }
         match pick(
-            &cast,
+            &tracks,
             profile.as_ref(),
             &candidates,
             &mut cursor,
@@ -272,6 +277,9 @@ async fn prepare_next(
     ))
 }
 pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String> {
+    // Frozen for the whole session: a refresh mid-broadcast must not shift indices
+    // the running show is already using (current track, recent history, playlist).
+    let tracks = cast.tracks();
     let selection = cast.selection.lock().unwrap().clone();
     let indices: Vec<usize> = selection
         .as_ref()
@@ -281,7 +289,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
                 .filter_map(|v| v.as_u64().map(|v| v as usize))
                 .collect()
         })
-        .unwrap_or_else(|| (0..cast.tracks.len()).collect());
+        .unwrap_or_else(|| (0..tracks.len()).collect());
     let mut profile: Option<SmartPlaylist> = selection
         .as_ref()
         .and_then(|v| serde_json::from_value(v["rules"].clone()).ok());
@@ -289,7 +297,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
     let mut recent = Vec::new();
     let mut target = profile.as_ref().and_then(|p| p.target_energy);
     let first = pick(
-        &cast,
+        &tracks,
         profile.as_ref(),
         &indices,
         &mut cursor,
@@ -393,7 +401,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             if station.generation != owner {
                 return Ok(());
             }
-            station.now_playing = Some(cast.tracks[current.index].title.clone());
+            station.now_playing = Some(tracks[current.index].title.clone());
             station.current_index = Some(current.index);
         }
         let requested = cast.mix.lock().unwrap().clone();
@@ -402,7 +410,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
                 let mut rules = show::Settings::default().playlists.remove(0);
                 rules.allowed = indices
                     .iter()
-                    .map(|i| show::song_id(&cast.tracks[*i]))
+                    .map(|i| show::song_id(&tracks[*i]))
                     .collect();
                 rules.restrict_allowed = true;
                 rules.fallback = show::Fallback::RelaxRecent;
@@ -429,7 +437,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             mix_revision = requested.revision;
             cast.station.lock().await.mix_revision = mix_revision;
         }
-        recent.push(show::song_id(&cast.tracks[current.index]));
+        recent.push(show::song_id(&tracks[current.index]));
         if recent.len() > 100 {
             recent.remove(0);
         }
@@ -437,7 +445,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             target = Some(plan.next());
         }
         let next_index = match pick(
-            &cast,
+            &tracks,
             profile.as_ref(),
             &indices,
             &mut cursor,
@@ -473,7 +481,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
         let fade = (fade_seconds * RATE as f64) as u64;
         let tail = fade.min(current.frames.saturating_sub(consumed) / 2);
         let mut before = current.frames.saturating_sub(consumed + tail);
-        let incoming = &cast.tracks[next_index].preparation;
+        let incoming = &tracks[next_index].preparation;
         let mut next_entry = entry(incoming, profile.as_ref(), target);
         let in_rate = bpm
             .zip(incoming.bpm)
@@ -658,12 +666,12 @@ mod reliability_tests {
             None,
         );
         let bad = cast
-            .tracks
+            .tracks()
             .iter()
             .position(|t| t.path == std::path::Path::new("broken.wav"))
             .unwrap();
         let good = cast
-            .tracks
+            .tracks()
             .iter()
             .position(|t| t.path == std::path::Path::new("good.wav"))
             .unwrap();
