@@ -30,8 +30,9 @@ fn revision(bytes: Option<&[u8]>) -> String {
 }
 fn path(cast: &Cast, id: usize) -> Result<PathBuf, Response> {
     let t = cast
-        .tracks
+        .tracks()
         .get(id)
+        .cloned()
         .ok_or_else(|| err(StatusCode::NOT_FOUND, "Track unavailable"))?;
     amp_core::resolve(&cast.root, &t.path).map_err(|e| err(StatusCode::NOT_FOUND, e))
 }
@@ -102,7 +103,7 @@ async fn bootstrap(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respons
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({"tracks":cast.tracks.len(),"capabilities":{"library":true,"preparation":true,"waveform":true,"lab_export":true,"playlists":true,"smart_playlists":true,"dj":false,"stems":false,"arrangement":false},"modules":[{"id":"library","available":true},{"id":"preparation","available":true},{"id":"lab","available":true},{"id":"dj","available":false},{"id":"stems","available":false},{"id":"arrangement","available":false}]})).into_response()
+    Json(json!({"tracks":cast.tracks().len(),"capabilities":{"library":true,"preparation":true,"waveform":true,"lab_export":true,"playlists":true,"smart_playlists":true,"dj":false,"stems":false,"arrangement":false},"modules":[{"id":"library","available":true},{"id":"preparation","available":true},{"id":"lab","available":true},{"id":"dj","available":false},{"id":"stems","available":false},{"id":"arrangement","available":false}]})).into_response()
 }
 async fn tracks(
     State(cast): State<Arc<Cast>>,
@@ -115,8 +116,8 @@ async fn tracks(
     let q = p.q.unwrap_or_default().to_lowercase();
     let offset = p.offset.unwrap_or(0);
     let limit = p.limit.unwrap_or(100).clamp(1, 200);
-    let matches: Vec<_> = cast
-        .tracks
+    let snapshot = cast.tracks();
+    let matches: Vec<_> = snapshot
         .iter()
         .enumerate()
         .filter(|(_, t)| {
@@ -130,7 +131,10 @@ async fn tracks(
         })
         .collect();
     let saved = store().lock().unwrap();
-    let rows:Vec<_>=matches.iter().skip(offset).take(limit).map(|(id,t)|{let p=saved.edits.get(&format!("{}:{id}",cast.server_id)).unwrap_or(&t.preparation);json!({"id":id,"title":t.title,"path":t.path,"bpm":p.bpm,"key":p.key,"duration":p.analysis.as_ref().map(|a|a.duration),"cue_in":p.cue_in,"cue_out":p.cue_out,"artist":p.extensions.get("artist"),"album":p.extensions.get("album")})}).collect();
+    // "id" stays the positional index other endpoints (audio/preparation/export) already
+    // address tracks by; "stable_id" is the path-derived identity that survives a refresh
+    // even when a refresh changes positions by adding/removing other files.
+    let rows:Vec<_>=matches.iter().skip(offset).take(limit).map(|(id,t)|{let p=saved.edits.get(&format!("{}:{id}",cast.server_id)).unwrap_or(&t.preparation);json!({"id":id,"stable_id":t.id(),"title":t.title,"path":t.path,"bpm":p.bpm,"key":p.key,"duration":p.analysis.as_ref().map(|a|a.duration),"cue_in":p.cue_in,"cue_out":p.cue_out,"artist":p.extensions.get("artist"),"album":p.extensions.get("album")})}).collect();
     Json(json!({"tracks":rows,"total":matches.len(),"offset":offset,"limit":limit})).into_response()
 }
 async fn preparation(
@@ -181,7 +185,7 @@ async fn save_preparation(
         edit.preparation.validate()?;
         amp_core::preparation::save_if_unchanged(
             &cast.root,
-            &cast.tracks[id].path,
+            &cast.tracks()[id].path,
             &edit.preparation,
             current.as_deref(),
         )?;
@@ -706,6 +710,7 @@ async fn save_playlist(
             if current != e.revision {
                 return Err("Playlist changed; reload before saving".into());
             }
+            let snapshot = cast.tracks();
             let list = amp_core::Playlist {
                 version: 1,
                 name: e.name,
@@ -713,7 +718,7 @@ async fn save_playlist(
                     .tracks
                     .iter()
                     .map(|i| {
-                        cast.tracks
+                        snapshot
                             .get(*i)
                             .map(|t| t.path.clone())
                             .ok_or("Track unavailable")
