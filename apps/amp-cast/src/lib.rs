@@ -4,6 +4,8 @@ mod live;
 mod radio;
 mod recovery;
 pub mod sharing;
+pub mod studio;
+mod podcasts_web;
 mod station_control;
 use amp_core::{Library, Track};
 use axum::{
@@ -143,7 +145,7 @@ impl Cast {
                 .get("host")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            if origin.to_str().ok() != Some(&format!("http://{host}")) {
+            if ![format!("http://{host}"), format!("https://{host}")].iter().any(|allowed| origin.to_str().ok() == Some(allowed.as_str())) {
                 return false;
             }
         }
@@ -156,8 +158,13 @@ pub fn router(cast: Arc<Cast>) -> Router {
     Router::new()
         .route(
             "/",
-            get(|| async { Html(include_str!("../web/index.html")) }),
+            get(|| async { Html(include_str!("../web/studio.html")) }),
         )
+        .route("/cast", get(|| async { Html(include_str!("../web/index.html")) }))
+        .route("/studio.js", get(|| async { ([("content-type", "text/javascript; charset=utf-8"),("cache-control","no-cache")],include_str!("../web/studio.js")) }))
+        .route("/studio.css", get(|| async { ([("content-type", "text/css; charset=utf-8"),("cache-control","no-cache")],include_str!("../web/studio.css")) }))
+        .merge(studio::routes())
+        .merge(podcasts_web::routes())
         .merge(sharing::routes())
         .merge(live::routes())
         .merge(recovery::routes())

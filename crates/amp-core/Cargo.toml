@@ -9,6 +9,8 @@ default = []
 analysis = []
 
 [dependencies]
+url = "2"
+roxmltree = "=0.21.2"
 amp-dj-policy = { path = "../amp-dj-policy" }
 lofty = "0.25.5"
 rusqlite = { version = "0.37", features = ["bundled", "blob"] }

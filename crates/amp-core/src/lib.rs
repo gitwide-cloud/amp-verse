@@ -10,6 +10,7 @@ pub mod batch;
 pub(crate) use library_engine::catalog_shards;
 pub mod coordination;
 pub mod discovery;
+pub mod podcast_feed;
 pub mod energy_profile;
 pub mod engine_api;
 pub mod show;

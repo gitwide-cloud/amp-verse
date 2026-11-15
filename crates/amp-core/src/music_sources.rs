@@ -102,10 +102,27 @@ pub fn list(root: &Path) -> Result<Vec<Source>, String> {
             }
         }
     }
+    // Server-local mount locations do not modify portable Windows/device paths.
+    if let Ok(locations) = std::env::var("AMP_CAST_SOURCE_LOCATIONS") {
+        apply_server_locations(&mut sources, &locations)?;
+    }
     if let Ok(mut cache) = cache().write() {
         cache.insert(root.into(), sources.clone());
     }
     Ok(sources)
+}
+fn apply_server_locations(sources: &mut [Source], locations: &str) -> Result<(), String> {
+    let mapping: std::collections::BTreeMap<String, PathBuf> =
+        serde_json::from_str(locations).map_err(|_| "Invalid AMP_CAST_SOURCE_LOCATIONS mapping")?;
+    for source in sources {
+        if let Some(path) = mapping.get(&source.library_id) {
+            if !path.is_absolute() || !identity_matches(path, &source.library_id) {
+                return Err(format!("Server music mount unavailable or identity changed: {}", source.library_id));
+            }
+            source.root = path.clone();
+        }
+    }
+    Ok(())
 }
 fn save(root: &Path, list: &Sources) -> Result<(), String> {
     crate::storage::enroll(root)?;
@@ -313,6 +330,23 @@ pub(crate) fn append(root: &Path, library: &mut Library, metadata: bool) -> io::
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn server_mounts_preserve_portable_sources_and_check_identity() {
+        let mount = tempfile::tempdir().unwrap();
+        let id = coordination::library_id(mount.path()).unwrap();
+        let original = Source { id: "portable-source".into(), root: PathBuf::from("Windows-path"), library_id: id.clone(), locations: Default::default() };
+        let mut sources = vec![original.clone()];
+        let map = serde_json::json!({id.clone(): mount.path()}).to_string();
+        apply_server_locations(&mut sources, &map).unwrap();
+        assert_eq!(sources[0].root, mount.path());
+        assert_eq!(sources[0].locations, original.locations);
+        assert_eq!(original.root, PathBuf::from("Windows-path"));
+        let bad = serde_json::json!({id: "relative"}).to_string();
+        assert!(apply_server_locations(&mut sources, &bad).is_err());
+        let other = tempfile::tempdir().unwrap();
+        let bad = serde_json::json!({sources[0].library_id.clone(): other.path()}).to_string();
+        assert!(apply_server_locations(&mut sources, &bad).is_err());
+    }
     #[test]
     fn job_enumeration_does_not_parse_metadata_and_reports_disconnected_sources() {
         let main = tempfile::tempdir().unwrap();
