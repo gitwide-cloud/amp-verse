@@ -149,7 +149,9 @@ public final class TvActivity extends Activity {
     private void pickFolder(){try{startActivityForResult(new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION|Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION),80);}catch(ActivityNotFoundException e){message("This TV has no folder picker. Install a TV document picker or sync playlists using Remote.");}}
     @Override protected void onActivityResult(int request,int result,Intent data){
         super.onActivityResult(request,result,data);if(request!=80||result!=RESULT_OK||data==null||data.getData()==null)return;
-        Uri tree=data.getData();try{getContentResolver().takePersistableUriPermission(tree,data.getFlags()&Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(SecurityException e){message("Cannot keep access to this folder. Choose a readable media source.");return;}
+        Uri tree=data.getData();
+        if((data.getFlags()&Intent.FLAG_GRANT_READ_URI_PERMISSION)==0){message("This folder did not grant read access. Choose a readable media source.");return;}
+        try{getContentResolver().takePersistableUriPermission(tree,Intent.FLAG_GRANT_READ_URI_PERMISSION);}catch(SecurityException e){message("Cannot keep access to this folder. Choose a readable media source.");return;}
         message("Importing folder and subfolders…");
         worker.execute(()->{try{
             List<MediaItem> items=LibraryStore.read(this);Set<String> ids=new HashSet<>();for(MediaItem song:items)ids.add(song.mediaId);
