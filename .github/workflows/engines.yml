@@ -78,6 +78,11 @@ jobs:
         run: cargo test -p amp-core --features analysis,knowledge-order-check knowledge::tests --locked
       - name: Strict engine lint
         run: cargo clippy -p amp-core --features analysis -p amp-cast -p amp-engine -p amp-dj-policy --all-targets --locked -- -D warnings
+      - name: Verify integrated transition data and Cast true peak
+        run: |
+          python tests/sag65/generate_sag65_fixtures.py --out-dir target/sag65-fixtures
+          cargo test -p amp-core -p amp-cast f10 --locked -- --ignored --nocapture --test-threads=1
+          cargo test -p amp-core --test sag65_vectors --locked -- --nocapture --test-threads=1
       - name: Generated audio adaptive stream and worker lifecycle tests
         run: cargo test -p amp-cast --lib hls::tests --locked -- --include-ignored --test-threads=1
       - name: Build standalone server and analysis engine

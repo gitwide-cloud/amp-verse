@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "source_fixture_sha256": "be099adbb2ce299cb8637bfe135e9bf09bc020919f38a0ff73ba353bf3c0c7d4",
+  "resolutions": [
+    {
+      "fixture": "F04",
+      "case": "4c_plus6pct_with_keylock_stays_8A",
+      "decision": "Use the explicit confidence-weighted cost formula; preserve the legacy fixture as input provenance.",
+      "formula": "0.9*(1-c)+raw*c",
+      "confidence": 0.85,
+      "raw_cost": 0.0,
+      "expected_cost": 0.135,
+      "tolerance": 1e-12,
+      "legacy_expected_max": 0.1,
+      "scope": "Automated numerical contract only; does not establish listening acceptance."
+    }
+  ]
+}

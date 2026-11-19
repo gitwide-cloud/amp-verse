@@ -42,7 +42,16 @@ jobs:
           cache-on-failure: true
       - name: Linux dependencies
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev ffmpeg xvfb
+        timeout-minutes: 10
+        run: |
+          cat > "$RUNNER_TEMP/amp-ubuntu.list" <<'SOURCES'
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+          SOURCES
+          sources=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/amp-ubuntu.list" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0)
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" update
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev ffmpeg xvfb
       - name: Windows audio test dependencies
         if: runner.os == 'Windows'
         run: |
@@ -63,6 +72,11 @@ jobs:
       - name: Verify supervised live sender recovers after a five-second outage
         run: cargo test -p amp-player --bin amp-player live_mix::tests::supervised_sender_recovers_current_pcm_after_five_second_transport_outage --locked -- --ignored --test-threads=1
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Verify integrated transition fixtures and actual mixer/Cast true peaks
+        run: |
+          python tests/sag65/generate_sag65_fixtures.py --out-dir target/sag65-fixtures
+          cargo test -p amp-core -p amp-player -p amp-cast f10 --locked -- --ignored --nocapture --test-threads=1
+          cargo test -p amp-core --test sag65_vectors --locked -- --nocapture --test-threads=1
       - name: Verify adaptive LAN audio with real codecs and lifecycle recovery
         run: cargo test -p amp-cast --lib hls::tests --locked -- --include-ignored --test-threads=1
       - name: Test actual deck playback with silent audio device
