@@ -1,0 +1,13 @@
+# Engine release selection
+
+The automatic installer lists up to 1,000 GitHub releases, filters drafts and prereleases, and sorts stable vMAJOR.MINOR.PATCH tags numerically. It requires the target platform executable, its .sha256, and its .json metadata as uploaded assets in the same release. Download URLs must match this repository and tag. Android-only releases and legacy releases without compatibility metadata are skipped.
+
+Metadata schema 1 declares component amp-engine, release tag, platform (windows-x86_64 or linux-x86_64), asset filename, engine_id and protocol. Both engine_id and protocol must exactly match amp-core's compiled engine_api constants. Exact engine identity deliberately rejects older and newer analysis generations until the desktop contract is updated. This is a conservative compatibility policy, not an assertion that any historical release is compatible. Engine generation is the compatibility version; release tags order eligible distributions. Existing manually installed binary release tags are not discoverable, so this is not a general installed-package anti-rollback system.
+
+Future stable-tag CI builds generate metadata from the same source as the engine after binary/checksum packaging. Existing public releases are not edited. Until a compatible release includes metadata, automatic installation returns a clear no-compatible-release error and preserves the installed engine. Preview branch artifacts remain manual and are never selected automatically.
+
+Catalog/metadata transport errors fail closed. After selection, checksum or binary failures abort without trying an older release. SHA-256 validation and executable validation happen before a temporary file is written beside the destination, synced, and atomically persisted. No downloaded executable is run by the installer.
+
+Validation: tools/test_engine_release_metadata.py checks both platforms and rejected tags. Rust engine_download fixtures cover Android-only latest, absent metadata/checksum/binary, incompatible component/platform/engine/protocol, numeric ordering, unpublished releases, URL mismatch, transport failures, checksum failure, invalid executable, persist failure, and a complete successful fixture download. Run cargo test -p amp-player --bin amp-player engine_download::tests --locked under the shared build lease; CI also runs workspace tests and Clippy.
+
+For preview integration, this branch is based on SAG-41 preview commit 440a63c. Review and build this exact new head before handing off a Windows executable. Never build or install on the owner Windows PC, auto-merge, or publish a release as part of this change.
