@@ -4,7 +4,10 @@ use std::{
     process::{Child, Stdio},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering::Relaxed},
+        atomic::{
+            AtomicBool,
+            Ordering::{Acquire, Relaxed, Release},
+        },
     },
 };
 pub struct Broadcast {
@@ -144,7 +147,11 @@ impl Broadcast {
                     }
                     Ok(())
                 })();
-                stopped.store(true, Relaxed);
+                *message.lock().unwrap() = match &outcome {
+                    Err(error) => format!("Current master stream failed: {error}"),
+                    Ok(()) => "Current master stream ended".into(),
+                };
+                stopped.store(true, Release);
                 let _ = process.lock().unwrap().kill();
                 let _ = writer.join();
                 let _ = agent
@@ -154,13 +161,13 @@ impl Broadcast {
                     .send_empty();
                 outcome
             })();
-            stopped.store(true, Relaxed);
+            if let Err(error) = result {
+                *message.lock().unwrap() = format!("Current master stream failed: {error}");
+            }
+            stopped.store(true, Release);
             let mut child = process.lock().unwrap();
             let _ = child.kill();
             let _ = child.wait();
-            if let Err(error) = result {
-                *message.lock().unwrap() = format!("Live broadcast stopped: {error}");
-            }
         });
         Ok(Self {
             stop,
@@ -173,7 +180,7 @@ impl Broadcast {
         self.running() && self.ready.load(Relaxed)
     }
     pub fn running(&self) -> bool {
-        !self.stop.load(Relaxed)
+        !self.stop.load(Acquire)
     }
 }
 #[cfg(test)]

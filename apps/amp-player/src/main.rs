@@ -294,14 +294,23 @@ impl Default for Player {
 impl Player {
     fn cast_button(&mut self, ui: &mut egui::Ui) {
         if ui
-            .button(if self.cast.casting() {
-                "Casting…"
-            } else {
-                "Cast"
-            })
+            .add(
+                egui::Button::new(if self.cast.casting() {
+                    "Casting"
+                } else {
+                    "Cast"
+                })
+                .selected(self.cast.casting()),
+            )
+            .on_hover_text(self.cast.receiver_status())
             .clicked()
         {
-            self.activate(ui, Some(skin::Module::Cast));
+            if self.player_mode != 0 {
+                self.layout.parent[4] = None;
+                self.cast_open = true;
+            } else {
+                self.activate(ui, Some(skin::Module::Cast));
+            }
         }
     }
     fn header(&mut self, ui: &mut egui::Ui, title: &str, purple: bool) {
@@ -1245,7 +1254,6 @@ impl Player {
     fn player_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, true, |ui| {
             self.header(ui, "AMP VERSE", true);
-            self.cast_button(ui);
             ui.horizontal(|ui| {
                 for (caption, action) in [
                     ("|<", 0),
@@ -1384,6 +1392,7 @@ impl Player {
                 }
             });
             ui.horizontal(|ui| {
+                self.cast_button(ui);
                 self.player_view_menu(ui);
                 if ui
                     .button(if self.library_open && (self.layout.parent[1] == Some(0)) {
@@ -1758,6 +1767,7 @@ impl Player {
         let mut selected = self.run.choice.clone();
         let mut context_edit = None;
         ui.horizontal_wrapped(|ui| {
+            self.cast_button(ui);
             let selector = egui::ComboBox::from_id_salt("performance-playlist")
                 .width(180.)
                 .truncate()
@@ -1931,7 +1941,6 @@ impl Player {
         skin::panel(ui, true, |ui| {
             ui.set_min_width(ui.available_width());
             self.header(ui, "AMP DJ", true);
-            self.cast_button(ui);
             self.performance_controls(ui);
             ui.add_space(12.);
             let wave_id = egui::Id::unique("dj-wave-height");
@@ -3027,11 +3036,7 @@ impl Player {
         });
         let sampler = [&self.audio, &self.right_sample_audio]
             .iter()
-            .any(|engine| {
-                engine
-                    .as_ref()
-                    .is_some_and(|a| a.controls.sample_playing.iter().any(|v| v.load(Relaxed)))
-            });
+            .any(|engine| engine.as_ref().is_some_and(|a| a.sampler_master_active()));
         self.cast.current = cast_current::Current::resolve(decks, sampler, bypass);
         self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
         if let Some(broadcast) = &self.live_mix {
@@ -3047,7 +3052,15 @@ impl Player {
             );
         }
         if self.live_mix.as_ref().is_some_and(|b| !b.running()) {
-            self.cast.fail_current(&self.cast.live_status.clone());
+            let error = self
+                .live_mix
+                .as_ref()
+                .unwrap()
+                .status
+                .lock()
+                .unwrap()
+                .clone();
+            self.cast.fail_current(&error);
             self.cast.live_action = Some(false);
         }
         if let Some(start) = self.cast.live_action.take() {

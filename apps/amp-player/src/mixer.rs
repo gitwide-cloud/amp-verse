@@ -1224,6 +1224,15 @@ impl Engine {
         self.controls.deck_generation[d].load(std::sync::atomic::Ordering::Acquire)
             == self.requested_generation[d]
     }
+    pub fn sampler_master_active(&self) -> bool {
+        let c = &self.controls;
+        get(&c.master) > 0.
+            && get(&c.sample_master) > 0.
+            && c.sample_playing
+                .iter()
+                .enumerate()
+                .any(|(i, v)| v.load(Relaxed) && get(&c.sample_gain[i]) > 0.)
+    }
     pub fn master_channel_open(&self, deck: usize) -> bool {
         let c = &self.controls;
         let x = get(&c.crossfader);

@@ -47,14 +47,24 @@ impl Editor {
     pub fn take_sample(&mut self) -> Option<crate::sample_editor::Delivery> {
         self.sample.take()
     }
-    pub(super) fn output_active(&mut self) -> bool {
+    fn finish_preview_if_exited(&mut self) {
         if self
             .player
             .as_mut()
             .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
         {
-            self.player = None;
+            self.kill_player();
+            self.started = None;
+            self.offset = 0.0;
+            if self.repeat {
+                self.resume();
+            } else {
+                self.status = "Preview finished".into();
+            }
         }
+    }
+    pub(super) fn output_active(&mut self) -> bool {
+        self.finish_preview_if_exited();
         self.player.is_some() || self.preview_job.is_some() || self.sample.output_active()
     }
     pub(super) fn stop(&mut self) {
@@ -505,20 +515,7 @@ impl Editor {
         }
         if self.player.is_some() {
             ctx.request_repaint_after(Duration::from_millis(33));
-            let done = self
-                .player
-                .as_mut()
-                .is_some_and(|p| matches!(p.try_wait(), Ok(Some(_))));
-            if done {
-                self.kill_player();
-                self.started = None;
-                self.offset = 0.0;
-                if self.repeat {
-                    self.resume();
-                } else {
-                    self.status = "Preview finished".into();
-                }
-            }
+            self.finish_preview_if_exited();
         }
     }
 }

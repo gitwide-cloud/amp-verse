@@ -187,7 +187,12 @@ fn cast_in_process(device: Device, url: String) -> Session {
             Ok(())
         })();
         *message.lock().unwrap() = result.map_or_else(
-            |e| format!("Google Cast: {e}. Local playback continues."),
+            |e| {
+                format!(
+                    "Google Cast: {}. Local playback continues.",
+                    e.trim_end_matches('.')
+                )
+            },
             |()| "Casting stopped. Local playback continues.".into(),
         );
         ended.store(true, Relaxed);
@@ -216,8 +221,24 @@ impl Output {
     pub fn active(&self) -> bool {
         self.pending.is_some() || self.session.as_ref().is_some_and(|s| !s.done.load(Relaxed))
     }
+    pub fn status_text(&self) -> String {
+        if self.stopping() {
+            return "Stopping cast… Local playback continues.".into();
+        }
+        if let Some(session) = &self.session {
+            return session.status.lock().unwrap().clone();
+        }
+        if self.message.is_empty() {
+            "Open Cast to choose a receiver".into()
+        } else {
+            self.message.clone()
+        }
+    }
     pub fn fail(&mut self, reason: &str) {
-        self.message = format!("{reason}. Local playback continues.");
+        self.message = format!(
+            "{}. Local playback continues.",
+            reason.trim_end_matches('.')
+        );
         self.terminal_error = Some(self.message.clone());
         self.cancel();
     }
@@ -227,7 +248,9 @@ impl Output {
             .is_some_and(|s| s.stop.load(Relaxed) && !s.done.load(Relaxed))
     }
     pub fn cancel(&mut self) {
-        self.pending = None;
+        if self.pending.take().is_some() && self.terminal_error.is_none() {
+            self.message = "Casting stopped. Local playback continues.".into();
+        }
         if let Some(session) = &self.session {
             session.stop.store(true, Relaxed);
         }
@@ -309,14 +332,14 @@ impl Output {
         let busy = self.active();
         let mut selected = None;
         for device in &self.devices {
-            ui.horizontal(|ui| {
-                ui.label(&device.name);
+            ui.horizontal_wrapped(|ui| {
                 if ui
                     .add_enabled(can_start && !busy, egui::Button::new("Cast here"))
                     .clicked()
                 {
                     selected = Some(device.clone());
                 }
+                ui.add(egui::Label::new(&device.name).wrap());
             });
         }
         ui.collapsing("Speaker IP address", |ui| {
@@ -350,17 +373,8 @@ impl Output {
                 Err(e) => self.message = e,
             }
         }
-        if let Some(session) = &self.session {
-            if self.stopping() {
-                ui.label("Stopping cast… Local playback continues.");
-            } else {
-                ui.label(session.status.lock().unwrap().as_str());
-            }
-
-            if busy {
-                ui.ctx().request_repaint_after(Duration::from_millis(200));
-            }
-        }
+        let status = self.status_text();
+        ui.label(&status);
         if busy
             && ui
                 .add_enabled(!self.stopping(), egui::Button::new("Stop casting"))
@@ -368,15 +382,14 @@ impl Output {
         {
             self.stop_requested = true;
         }
-        if self.scan.is_some() || busy {
+        let waiting = self.pending.is_some()
+            || self.stopping()
+            || (self.session.is_some() && !status.contains("Receiver reports playing"));
+        if self.scan.is_some() || waiting {
             ui.spinner();
-            ui.ctx().request_repaint_after(Duration::from_millis(150));
         }
-        ui.label(&self.message);
-        if !can_start && !busy {
-            ui.weak(
-                "Play a supported source and connect to an AMP Cast server to choose a receiver.",
-            );
+        if self.scan.is_some() || busy {
+            ui.ctx().request_repaint_after(Duration::from_millis(150));
         }
         requested
     }
@@ -477,7 +490,7 @@ mod tests {
         let mut playing = false;
         while start.elapsed() < Duration::from_secs(30) {
             let status = session.status.lock().unwrap().clone();
-            if status.contains("PLAYING") {
+            if status.contains("Receiver reports playing") {
                 playing = true;
                 break;
             }

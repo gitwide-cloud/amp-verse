@@ -200,6 +200,7 @@ pub struct Dashboard {
     snapshot: Option<Snapshot>,
     busy: bool,
     message: String,
+    server_status: String,
     section: usize,
     search: String,
     discovery: Option<mpsc::Receiver<Result<Vec<amp_core::discovery::Found>, String>>>,
@@ -291,9 +292,8 @@ impl Default for Dashboard {
             rx,
             snapshot: None,
             busy: false,
-            message:
-                "Search LAN or broadcast stations, or host a Smart Station to share your playlists."
-                    .into(),
+            message: String::new(),
+            server_status: "Cast server not connected".into(),
             section: 0,
             search: String::new(),
             discovery: None,
@@ -323,6 +323,9 @@ impl Dashboard {
             self.radio = None;
         }
         self.radio.is_some()
+    }
+    pub fn receiver_status(&self) -> String {
+        self.google.status_text()
     }
     pub fn casting(&self) -> bool {
         self.google.active() || self.live_active
@@ -355,6 +358,9 @@ impl Dashboard {
         )
     }
     fn send(&mut self, command: Command) {
+        if matches!(&command, Command::Connect(..)) {
+            self.server_status = "Connecting Cast server…".into();
+        }
         match self.tx.send(command) {
             Ok(()) => {
                 self.busy = true;
@@ -362,7 +368,7 @@ impl Dashboard {
             }
             Err(_) => {
                 self.busy = false;
-                self.message = "Cast connection worker stopped. Restart AMP Verse.".into();
+                self.server_status = "Cast connection worker stopped. Restart AMP Verse.".into();
             }
         }
     }
@@ -380,8 +386,8 @@ impl Dashboard {
             self.host = None;
             self.hosting.clear();
             self.host_broadcast = false;
-            self.message = format!(
-                "Station could not stay running ({code}). Check cast-host/server.log or whether port 8787 is already in use."
+            self.server_status = format!(
+                "Cast server could not stay running ({code}). Check cast-host/server.log or whether port 8787 is already in use."
             );
         }
         if self.host.is_some()
@@ -394,7 +400,7 @@ impl Dashboard {
                 .and_then(|v| v["server_id"].as_str().map(str::to_owned));
             if expected.as_deref() != self.snapshot.as_ref().map(|s| s.status.server_id.as_str()) {
                 self.snapshot = None;
-                self.message = "Waiting for your selected station to start…".into();
+                self.server_status = "Waiting for the local Cast server to start…".into();
             }
         }
         if self.host_broadcast
@@ -447,6 +453,8 @@ impl Dashboard {
             self.busy = false;
             match update.snapshot {
                 Ok(snapshot) => {
+                    self.server_status =
+                        format!("Cast server connected · {}", self.connected_address);
                     if let Some(error) = update
                         .control_error
                         .or_else(|| snapshot.status.error.clone())
@@ -459,7 +467,7 @@ impl Dashboard {
                 Err(error) => {
                     self.listen_after_play = false;
                     self.snapshot = None;
-                    self.message = error;
+                    self.server_status = error;
                 }
             }
         }
@@ -530,9 +538,9 @@ impl Dashboard {
                     self.address.clone(),
                     self.password.clone(),
                 ));
-                self.message = "Starting your station. Reading the library…".into();
+                self.server_status = "Starting Cast server. Reading the library…".into();
             }
-            Err(e) => self.message = e,
+            Err(e) => self.server_status = e,
         }
     }
     fn listen(&mut self, url: &str) {
@@ -553,8 +561,8 @@ impl Dashboard {
     }
     pub fn show(&mut self, ui: &mut egui::Ui, root: &std::path::Path, ready: bool) {
         ui.heading("Cast current playback");
-        ui.strong(&self.current.title);
-        if self.casting() && !self.current.supported {
+        ui.add(egui::Label::new(egui::RichText::new(&self.current.title).strong()).wrap());
+        if self.casting() && !self.google.stopping() && !self.current.supported {
             ui.label("Cast remains connected while the master is paused or silent.");
         }
         ui.weak("Player, DJ / Auto Mix and sampler share the live master. Headphone cue stays private. Radio, auxiliary decks and Lab / stem / mix previews are not supported on this build.");
@@ -565,10 +573,15 @@ impl Dashboard {
         if !supported {
             ui.label("Connect a Cast server to relay the current master. Connecting does not start music.");
             ui.horizontal_wrapped(|ui| {
-                ui.text_edit_singleline(&mut self.address);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.address)
+                        .desired_width(190.)
+                        .hint_text("127.0.0.1:8787"),
+                );
                 ui.add(
                     egui::TextEdit::singleline(&mut self.password)
                         .password(true)
+                        .desired_width(130.)
                         .hint_text("Access code"),
                 );
                 if ui
@@ -593,6 +606,13 @@ impl Dashboard {
                 }
             });
         }
+        if !ready && !supported {
+            ui.weak("Choose a music folder and wait for scanning to finish before starting a local server.");
+        }
+        ui.label(&self.server_status);
+        if !self.google.active() && !self.current.supported {
+            ui.weak("Play an audible supported Player / DJ master source to cast it. Check AMP volume and channel faders if playback is silent.");
+        }
         let address = self.endpoint().0;
         if self.google.show(
             ui,
@@ -603,9 +623,6 @@ impl Dashboard {
         }
         if self.busy {
             ui.spinner();
-        }
-        if !self.message.is_empty() {
-            ui.label(&self.message);
         }
         if self.live_active {
             ui.collapsing("Stream details", |ui| {
@@ -887,11 +904,7 @@ impl Dashboard {
                 ));
             });
         }
-        if self.busy
-            || self.discovery.is_some()
-            || self.radio_job.is_some()
-            || self.download.is_some()
-        {
+        if self.discovery.is_some() || self.radio_job.is_some() || self.download.is_some() {
             ui.spinner();
         }
         if !self.message.is_empty() {
