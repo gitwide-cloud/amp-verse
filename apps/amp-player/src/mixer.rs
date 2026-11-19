@@ -1224,6 +1224,14 @@ impl Engine {
         self.controls.deck_generation[d].load(std::sync::atomic::Ordering::Acquire)
             == self.requested_generation[d]
     }
+    pub fn master_channel_open(&self, deck: usize) -> bool {
+        let c = &self.controls;
+        let x = get(&c.crossfader);
+        get(&c.master) > 0.
+            && get(&c.gain[deck]) > 0.
+            && (c.mashup_active.load(Relaxed) || if deck == 0 { x < 1. } else { x > 0. })
+            && !c.eq_kill[deck].iter().all(|v| v.load(Relaxed))
+    }
     pub fn master_level(&self) -> f32 {
         get(&self.controls.master)
     }

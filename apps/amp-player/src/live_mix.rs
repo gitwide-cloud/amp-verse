@@ -67,7 +67,7 @@ impl Broadcast {
         let stopped = stop.clone();
         let child = Arc::new(Mutex::new(child));
         let process = child.clone();
-        let status = Arc::new(Mutex::new("Connecting live DJ output…".into()));
+        let status = Arc::new(Mutex::new("Preparing current master stream…".into()));
         let message = status.clone();
         let ready = Arc::new(AtomicBool::new(false));
         let uploaded = ready.clone();
@@ -125,7 +125,8 @@ impl Broadcast {
                     }
                 });
                 *message.lock().unwrap() =
-                    "Broadcasting live DJ mix · decks, mixer, stems and sampler".into();
+                    "Uploading current master audio; receiver playback is reported separately"
+                        .into();
                 let outcome = (|| -> Result<(), String> {
                     let mut bytes = [0; 8192];
                     while !stopped.load(Relaxed) {

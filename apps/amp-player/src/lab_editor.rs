@@ -47,7 +47,14 @@ impl Editor {
     pub fn take_sample(&mut self) -> Option<crate::sample_editor::Delivery> {
         self.sample.take()
     }
-    pub(super) fn output_active(&self) -> bool {
+    pub(super) fn output_active(&mut self) -> bool {
+        if self
+            .player
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+        {
+            self.player = None;
+        }
         self.player.is_some() || self.preview_job.is_some() || self.sample.output_active()
     }
     pub(super) fn stop(&mut self) {

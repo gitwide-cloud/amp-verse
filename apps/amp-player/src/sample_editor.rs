@@ -33,7 +33,14 @@ impl Drop for Editor {
     }
 }
 impl Editor {
-    pub(super) fn output_active(&self) -> bool {
+    pub(super) fn output_active(&mut self) -> bool {
+        if self
+            .preview
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+        {
+            self.preview = None;
+        }
         self.preview.is_some()
     }
     pub fn stop(&mut self) {

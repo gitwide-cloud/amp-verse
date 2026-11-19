@@ -42,6 +42,11 @@ pub struct Preparer {
     skipped: usize,
 }
 impl Preparer {
+    pub fn output_active(&self) -> bool {
+        self.stem_preview
+            .as_ref()
+            .is_some_and(|audio| audio.playing(0) || audio.playing(1))
+    }
     fn dirty(&self) -> bool {
         self.editing_revision
             .as_deref()

@@ -36,7 +36,14 @@ impl Timeline {
         self.queued.clear();
         self.drag = None;
     }
-    pub(super) fn output_active(&self) -> bool {
+    pub(super) fn output_active(&mut self) -> bool {
+        if self
+            .player
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+        {
+            self.player = None;
+        }
         self.player.is_some() || self.preview.is_some()
     }
     pub fn stop(&mut self) {

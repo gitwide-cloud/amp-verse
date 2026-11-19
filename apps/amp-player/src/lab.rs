@@ -23,7 +23,7 @@ impl Arrangement {
     pub fn take_sample(&mut self) -> Option<crate::sample_editor::Delivery> {
         self.editor.take_sample()
     }
-    pub(super) fn output_active(&self) -> bool {
+    pub(super) fn output_active(&mut self) -> bool {
         self.editor.output_active() || self.timeline.output_active()
     }
     pub(super) fn stop_preview(&mut self) {

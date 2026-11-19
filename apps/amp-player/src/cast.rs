@@ -324,17 +324,22 @@ impl Dashboard {
         }
         self.radio.is_some()
     }
+    pub fn casting(&self) -> bool {
+        self.google.active() || self.live_active
+    }
+    pub fn fail_current(&mut self, error: &str) {
+        self.google.fail(error);
+        self.live_active = false;
+    }
     pub fn cancel_current(&mut self) {
         self.google.cancel();
         self.live_active = false;
     }
     pub fn poll_current(&mut self, ready: bool, running: bool, bypass: bool) {
-        if bypass && (running || self.google.active()) {
-            self.google.cancel();
+        if bypass && (running || (self.google.active() && !self.google.stopping())) {
+            self.google
+                .fail("This radio, auxiliary deck or preview output cannot be cast yet");
             self.live_action = Some(false);
-            self.live_status =
-                "Casting stopped: radio / preview output is unsupported. Local playback continues."
-                    .into();
         } else if self.google.poll_current(ready, running) {
             self.live_action = Some(false);
         }
@@ -362,6 +367,65 @@ impl Dashboard {
         }
     }
     pub fn poll(&mut self) {
+        if self.listen_after_play
+            && !self.busy
+            && self.snapshot.as_ref().is_some_and(|s| s.status.running)
+        {
+            self.listen_after_play = false;
+            self.listen(&format!("http://{}/listen.mp3", self.connected_address));
+        }
+        if let Some(child) = &mut self.host
+            && let Ok(Some(code)) = child.try_wait()
+        {
+            self.host = None;
+            self.hosting.clear();
+            self.host_broadcast = false;
+            self.message = format!(
+                "Station could not stay running ({code}). Check cast-host/server.log or whether port 8787 is already in use."
+            );
+        }
+        if self.host.is_some()
+            && self.connected_address == "127.0.0.1:8787"
+            && self.snapshot.is_some()
+        {
+            let expected = crate::theme::settings_path()
+                .and_then(|p| std::fs::read(p.with_file_name("cast-host").join("server.json")).ok())
+                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+                .and_then(|v| v["server_id"].as_str().map(str::to_owned));
+            if expected.as_deref() != self.snapshot.as_ref().map(|s| s.status.server_id.as_str()) {
+                self.snapshot = None;
+                self.message = "Waiting for your selected station to start…".into();
+            }
+        }
+        if self.host_broadcast
+            && self.connected_address == "127.0.0.1:8787"
+            && self.snapshot.is_some()
+        {
+            self.host_broadcast = false;
+            self.send(Command::Start);
+        }
+        if let Some(rx) = &self.download
+            && let Ok(result) = rx.try_recv()
+        {
+            self.message = result.map_or_else(
+                |e| e,
+                |p| format!("Saved offline with cues: {}", p.display()),
+            );
+            self.download = None;
+        }
+        if let Some(rx) = &self.radio_job
+            && let Ok(result) = rx.try_recv()
+        {
+            match result {
+                Ok(stations) => {
+                    self.radio_results = stations;
+                    self.message = format!("{} broadcast stations found", self.radio_results.len());
+                }
+                Err(e) => self.message = e,
+            }
+            self.radio_job = None;
+        }
+
         if let Some(rx) = &self.discovery
             && let Ok(result) = rx.try_recv()
         {
@@ -490,13 +554,44 @@ impl Dashboard {
     pub fn show(&mut self, ui: &mut egui::Ui, root: &std::path::Path, ready: bool) {
         ui.heading("Cast current playback");
         ui.strong(&self.current.title);
-        ui.weak("Player, DJ / Auto Mix and sampler share the live master. Headphone cue stays private. Radio, podcasts, auxiliary decks and Lab / mix previews are not supported on this build.");
+        if self.casting() && !self.current.supported {
+            ui.label("Cast remains connected while the master is paused or silent.");
+        }
+        ui.weak("Player, DJ / Auto Mix and sampler share the live master. Headphone cue stays private. Radio, auxiliary decks and Lab / stem / mix previews are not supported on this build.");
         let supported = self
             .snapshot
             .as_ref()
             .is_some_and(|s| s.status.capabilities["live_dj"] == true);
         if !supported {
-            ui.label("Connect to an AMP Cast server below. Connecting or opening Cast does not start audio.");
+            ui.label("Connect a Cast server to relay the current master. Connecting does not start music.");
+            ui.horizontal_wrapped(|ui| {
+                ui.text_edit_singleline(&mut self.address);
+                ui.add(
+                    egui::TextEdit::singleline(&mut self.password)
+                        .password(true)
+                        .hint_text("Access code"),
+                );
+                if ui
+                    .add_enabled(!self.busy, egui::Button::new("Connect server"))
+                    .clicked()
+                {
+                    self.connected_address = self.address.clone();
+                    self.snapshot = None;
+                    self.send(Command::Connect(
+                        self.address.clone(),
+                        self.password.clone(),
+                    ));
+                }
+                if ui
+                    .add_enabled(
+                        ready && self.host.is_none(),
+                        egui::Button::new("Start server on this computer"),
+                    )
+                    .clicked()
+                {
+                    self.host(root, true);
+                }
+            });
         }
         let address = self.endpoint().0;
         if self.google.show(
@@ -506,7 +601,17 @@ impl Dashboard {
         ) {
             self.live_action = Some(true);
         }
-        ui.label(&self.live_status);
+        if self.busy {
+            ui.spinner();
+        }
+        if !self.message.is_empty() {
+            ui.label(&self.message);
+        }
+        if self.live_active {
+            ui.collapsing("Stream details", |ui| {
+                ui.label(&self.live_status);
+            });
+        }
         ui.add_enabled_ui(!self.live_active && !self.google.active(), |ui| {
             ui.collapsing("Server connection and independent stations", |ui| {
                 self.show_stations(ui, root, ready)
@@ -514,65 +619,6 @@ impl Dashboard {
         });
     }
     fn show_stations(&mut self, ui: &mut egui::Ui, root: &std::path::Path, ready: bool) {
-        self.poll();
-        if self.listen_after_play
-            && !self.busy
-            && self.snapshot.as_ref().is_some_and(|s| s.status.running)
-        {
-            self.listen_after_play = false;
-            self.listen(&format!("http://{}/listen.mp3", self.connected_address));
-        }
-        if let Some(child) = &mut self.host
-            && let Ok(Some(code)) = child.try_wait()
-        {
-            self.host = None;
-            self.hosting.clear();
-            self.host_broadcast = false;
-            self.message = format!(
-                "Station could not stay running ({code}). Check cast-host/server.log or whether port 8787 is already in use."
-            );
-        }
-        if self.host.is_some()
-            && self.connected_address == "127.0.0.1:8787"
-            && self.snapshot.is_some()
-        {
-            let expected = crate::theme::settings_path()
-                .and_then(|p| std::fs::read(p.with_file_name("cast-host").join("server.json")).ok())
-                .and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
-                .and_then(|v| v["server_id"].as_str().map(str::to_owned));
-            if expected.as_deref() != self.snapshot.as_ref().map(|s| s.status.server_id.as_str()) {
-                self.snapshot = None;
-                self.message = "Waiting for your selected station to start…".into();
-            }
-        }
-        if self.host_broadcast
-            && self.connected_address == "127.0.0.1:8787"
-            && self.snapshot.is_some()
-        {
-            self.host_broadcast = false;
-            self.send(Command::Start);
-        }
-        if let Some(rx) = &self.download
-            && let Ok(result) = rx.try_recv()
-        {
-            self.message = result.map_or_else(
-                |e| e,
-                |p| format!("Saved offline with cues: {}", p.display()),
-            );
-            self.download = None;
-        }
-        if let Some(rx) = &self.radio_job
-            && let Ok(result) = rx.try_recv()
-        {
-            match result {
-                Ok(stations) => {
-                    self.radio_results = stations;
-                    self.message = format!("{} broadcast stations found", self.radio_results.len());
-                }
-                Err(e) => self.message = e,
-            }
-            self.radio_job = None;
-        }
         ui.heading("AMP Cast");
         ui.horizontal_wrapped(|ui| {
             for (index, title) in ["Find Stations", "Broadcast", "Host Smart Station"]

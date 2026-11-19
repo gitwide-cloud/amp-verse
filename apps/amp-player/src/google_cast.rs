@@ -4,12 +4,12 @@ use std::{
     net::{IpAddr, UdpSocket},
     sync::{
         Arc, Mutex,
-        atomic::{AtomicBool, Ordering::Relaxed},
+        atomic::{AtomicBool, AtomicU64, Ordering::Relaxed},
         mpsc,
     },
     time::{Duration, Instant},
 };
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 struct Device {
     name: String,
     host: String,
@@ -71,13 +71,24 @@ struct Session {
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<String>>,
     done: Arc<AtomicBool>,
+    accepted: Arc<AtomicBool>,
+    stop_confirmed: Arc<AtomicBool>,
+    activity: Arc<AtomicU64>,
 }
 impl Drop for Session {
     fn drop(&mut self) {
         self.stop.store(true, Relaxed);
     }
 }
+#[path = "cast_worker.rs"]
+mod worker;
+pub fn worker_main() -> bool {
+    worker::worker_main()
+}
 fn cast(device: Device, url: String) -> Session {
+    worker::start(device, url)
+}
+fn cast_in_process(device: Device, url: String) -> Session {
     let _ = rustls::crypto::ring::default_provider().install_default();
     let stop = Arc::new(AtomicBool::new(false));
     let cancel = stop.clone();
@@ -85,6 +96,12 @@ fn cast(device: Device, url: String) -> Session {
     let message = status.clone();
     let done = Arc::new(AtomicBool::new(false));
     let ended = done.clone();
+    let accepted = Arc::new(AtomicBool::new(false));
+    let connected = accepted.clone();
+    let stop_confirmed = Arc::new(AtomicBool::new(false));
+    let confirmed = stop_confirmed.clone();
+    let activity = Arc::new(AtomicU64::new(0));
+    let packets = activity.clone();
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
             let ip = device
@@ -122,10 +139,15 @@ fn cast(device: Device, url: String) -> Session {
                     },
                 )
                 .map_err(|e| e.to_string())?;
-            *message.lock().unwrap() =
-                format!("{} accepted the stream; waiting for playback", device.name);
+            connected.store(true, Relaxed);
+            *message.lock().unwrap() = format!(
+                "{} accepted the stream; buffering may take a few seconds",
+                device.name
+            );
             while !cancel.load(Relaxed) {
-                match cast.receive().map_err(|e| e.to_string())? {
+                let response = cast.receive().map_err(|e| e.to_string())?;
+                packets.fetch_add(1, Relaxed);
+                match response {
                     rust_cast::ChannelMessage::Connection(
                         rust_cast::channels::connection::ConnectionResponse::Close,
                     ) => return Err("Speaker closed the Cast session".into()),
@@ -136,13 +158,15 @@ fn cast(device: Device, url: String) -> Session {
                         rust_cast::channels::media::MediaResponse::Status(status),
                     ) => {
                         if let Some(entry) = status.entries.first() {
-                            *message.lock().unwrap() =
-                                format!("{} · {}", device.name, entry.player_state);
+                            let state = match entry.player_state.to_string().as_str() {
+                                "PLAYING" => "Receiver reports playing (audibility not measured)",
+                                "BUFFERING" => "Receiver buffering…",
+                                "PAUSED" => "Receiver paused",
+                                _ => "Receiver waiting for audio",
+                            };
+                            *message.lock().unwrap() = format!("{} · {state}", device.name);
                             if entry.idle_reason.is_some() {
-                                return Err(format!(
-                                    "Speaker stopped playback: {:?}",
-                                    entry.idle_reason
-                                ));
+                                return Err("Receiver stopped playback".into());
                             }
                         }
                     }
@@ -159,15 +183,23 @@ fn cast(device: Device, url: String) -> Session {
             cast.receiver
                 .stop_app(&app.session_id)
                 .map_err(|e| e.to_string())?;
+            confirmed.store(true, Relaxed);
             Ok(())
         })();
         *message.lock().unwrap() = result.map_or_else(
-            |e| format!("Google Cast: {e}"),
-            |()| "Google Cast stopped".into(),
+            |e| format!("Google Cast: {e}. Local playback continues."),
+            |()| "Casting stopped. Local playback continues.".into(),
         );
         ended.store(true, Relaxed);
     });
-    Session { stop, status, done }
+    Session {
+        stop,
+        status,
+        done,
+        accepted,
+        stop_confirmed,
+        activity,
+    }
 }
 #[derive(Default)]
 pub struct Output {
@@ -178,10 +210,21 @@ pub struct Output {
     message: String,
     pending: Option<(Device, String, Instant)>,
     stop_requested: bool,
+    terminal_error: Option<String>,
 }
 impl Output {
     pub fn active(&self) -> bool {
         self.pending.is_some() || self.session.as_ref().is_some_and(|s| !s.done.load(Relaxed))
+    }
+    pub fn fail(&mut self, reason: &str) {
+        self.message = format!("{reason}. Local playback continues.");
+        self.terminal_error = Some(self.message.clone());
+        self.cancel();
+    }
+    pub fn stopping(&self) -> bool {
+        self.session
+            .as_ref()
+            .is_some_and(|s| s.stop.load(Relaxed) && !s.done.load(Relaxed))
     }
     pub fn cancel(&mut self) {
         self.pending = None;
@@ -193,6 +236,13 @@ impl Output {
     pub fn poll_current(&mut self, ready: bool, running: bool) -> bool {
         if self.stop_requested {
             self.stop_requested = false;
+            self.terminal_error = None;
+            self.message = if self.session.is_some() {
+                "Stopping cast… Local playback continues."
+            } else {
+                "Casting stopped. Local playback continues."
+            }
+            .into();
             self.cancel();
             return true;
         }
@@ -209,17 +259,25 @@ impl Output {
             }
             if ready {
                 let (device, url, _) = self.pending.take().unwrap();
+                self.message.clear();
                 self.session = Some(cast(device, url));
             }
         }
         if self.session.as_ref().is_some_and(|s| s.done.load(Relaxed)) {
             let session = self.session.take().unwrap();
-            self.message = session.status.lock().unwrap().clone();
-            return true;
+            let final_status = session.status.lock().unwrap().clone();
+            self.message = match self.terminal_error.take() {
+                Some(error) if final_status.contains("did not confirm stop") => {
+                    format!("{error} {final_status}")
+                }
+                Some(error) => error,
+                None => final_status,
+            };
+            return !session.stop.load(Relaxed);
         }
         false
     }
-    pub fn show(&mut self, ui: &mut egui::Ui, address: &str, running: bool) -> bool {
+    pub fn show(&mut self, ui: &mut egui::Ui, address: &str, can_start: bool) -> bool {
         let mut requested = false;
         if let Some(rx) = &self.scan
             && let Ok(result) = rx.try_recv()
@@ -234,7 +292,7 @@ impl Output {
             self.scan = None;
         }
         ui.heading("Google Home / Chromecast");
-        ui.weak("Choose a receiver for current AMP playback. Local output stays on; receivers buffer the stream and may sound later. End-to-end delay is unmeasured.");
+        ui.weak("Choose a receiver for current AMP playback. Local output stays on; receivers buffer the stream and may sound later. End-to-end delay is unmeasured. AMP volume changes the Cast level too; use the PC speaker volume to lower only local sound.");
         if ui
             .add_enabled(
                 self.scan.is_none(),
@@ -254,7 +312,7 @@ impl Output {
             ui.horizontal(|ui| {
                 ui.label(&device.name);
                 if ui
-                    .add_enabled(running && !busy, egui::Button::new("Cast here"))
+                    .add_enabled(can_start && !busy, egui::Button::new("Cast here"))
                     .clicked()
                 {
                     selected = Some(device.clone());
@@ -264,7 +322,10 @@ impl Output {
         ui.collapsing("Speaker IP address", |ui| {
             ui.text_edit_singleline(&mut self.manual);
             if ui
-                .add_enabled(running && !busy, egui::Button::new("Cast to this speaker"))
+                .add_enabled(
+                    can_start && !busy,
+                    egui::Button::new("Cast to this speaker"),
+                )
                 .clicked()
             {
                 if self.manual.parse::<std::net::Ipv4Addr>().is_ok() {
@@ -281,6 +342,7 @@ impl Output {
         if let Some(device) = selected {
             match stream_url(address, &device.host) {
                 Ok(url) => {
+                    self.terminal_error = None;
                     self.pending = Some((device, url, Instant::now()));
                     self.message = "Preparing current playback stream…".into();
                     requested = true;
@@ -289,21 +351,29 @@ impl Output {
             }
         }
         if let Some(session) = &self.session {
-            ui.label(session.status.lock().unwrap().as_str());
+            if self.stopping() {
+                ui.label("Stopping cast… Local playback continues.");
+            } else {
+                ui.label(session.status.lock().unwrap().as_str());
+            }
 
             if busy {
                 ui.ctx().request_repaint_after(Duration::from_millis(200));
             }
         }
-        if busy && ui.button("Stop casting").clicked() {
+        if busy
+            && ui
+                .add_enabled(!self.stopping(), egui::Button::new("Stop casting"))
+                .clicked()
+        {
             self.stop_requested = true;
         }
-        if self.scan.is_some() {
+        if self.scan.is_some() || busy {
             ui.spinner();
             ui.ctx().request_repaint_after(Duration::from_millis(150));
         }
         ui.label(&self.message);
-        if !running {
+        if !can_start && !busy {
             ui.weak(
                 "Play a supported source and connect to an AMP Cast server to choose a receiver.",
             );
@@ -354,6 +424,29 @@ mod tests {
         assert!(output.poll_current(true, true));
         assert!(!output.active());
         assert!(!output.poll_current(true, true));
+    }
+    #[test]
+    fn stop_completion_is_terminal_and_does_not_wrap_status() {
+        let mut output = Output {
+            session: Some(Session {
+                stop: Arc::new(AtomicBool::new(true)),
+                done: Arc::new(AtomicBool::new(true)),
+                accepted: Arc::new(AtomicBool::new(true)),
+                stop_confirmed: Arc::new(AtomicBool::new(true)),
+                activity: Arc::new(AtomicU64::new(0)),
+                status: Arc::new(Mutex::new(
+                    "Casting stopped. Local playback continues.".into(),
+                )),
+            }),
+            message: "Stopping cast…".into(),
+            ..Default::default()
+        };
+        assert!(!output.poll_current(false, false));
+        let status = output.message.clone();
+        assert!(!output.poll_current(false, false));
+        assert_eq!(output.message, status);
+        assert!(!output.active());
+        assert!(!status.contains("Last stream status"));
     }
     #[test]
     fn remote_station_url_is_preserved() {

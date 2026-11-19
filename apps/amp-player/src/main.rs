@@ -292,6 +292,18 @@ impl Default for Player {
     }
 }
 impl Player {
+    fn cast_button(&mut self, ui: &mut egui::Ui) {
+        if ui
+            .button(if self.cast.casting() {
+                "Casting…"
+            } else {
+                "Cast"
+            })
+            .clicked()
+        {
+            self.activate(ui, Some(skin::Module::Cast));
+        }
+    }
     fn header(&mut self, ui: &mut egui::Ui, title: &str, purple: bool) {
         let action = skin::heading(ui, title, purple);
         self.activate(ui, action);
@@ -1233,6 +1245,7 @@ impl Player {
     fn player_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, true, |ui| {
             self.header(ui, "AMP VERSE", true);
+            self.cast_button(ui);
             ui.horizontal(|ui| {
                 for (caption, action) in [
                     ("|<", 0),
@@ -1498,6 +1511,7 @@ impl Player {
             skin::panel(ui, false, |ui| {
                 ui.set_min_size(design - egui::vec2(20., 20.));
                 ui.horizontal(|ui| {
+                    self.cast_button(ui);
                     let title = ui.add(
                         egui::Label::new(RichText::new("AMP VERSE").strong())
                             .sense(egui::Sense::click_and_drag()),
@@ -1917,6 +1931,7 @@ impl Player {
         skin::panel(ui, true, |ui| {
             ui.set_min_width(ui.available_width());
             self.header(ui, "AMP DJ", true);
+            self.cast_button(ui);
             self.performance_controls(ui);
             ui.add_space(12.);
             let wave_id = egui::Id::unique("dj-wave-height");
@@ -2998,12 +3013,15 @@ impl Player {
         let bypass = self.cast.bypass_active()
             || self.smart_preview.active()
             || self.lab.output_active()
+            || self.preparer.output_active()
             || self.sides.iter().any(|s| s.playing());
         let decks = std::array::from_fn(|d| {
             self.audio
                 .as_ref()
                 .filter(|a| {
-                    a.controls.play[d].load(Relaxed) && !a.controls.finished[d].load(Relaxed)
+                    a.controls.play[d].load(Relaxed)
+                        && !a.controls.finished[d].load(Relaxed)
+                        && a.master_channel_open(d)
                 })
                 .and_then(|_| self.loaded_snapshot[d].as_ref().map(|t| t.title.clone()))
         });
@@ -3029,6 +3047,7 @@ impl Player {
             );
         }
         if self.live_mix.as_ref().is_some_and(|b| !b.running()) {
+            self.cast.fail_current(&self.cast.live_status.clone());
             self.cast.live_action = Some(false);
         }
         if let Some(start) = self.cast.live_action.take() {
@@ -3047,8 +3066,13 @@ impl Player {
                 match result {
                     Ok(broadcast) => self.live_mix = Some(broadcast),
                     Err(error) => {
-                        self.cast.live_status = error;
-                        self.cast.live_action = Some(false);
+                        self.cast.fail_current(&error);
+                        if let Some(audio) = &self.audio {
+                            audio.stop_broadcast_tap();
+                        }
+                        if let Some(audio) = &self.right_sample_audio {
+                            audio.stop_broadcast_tap();
+                        }
                     }
                 }
             } else {
@@ -3060,10 +3084,7 @@ impl Player {
                     audio.stop_broadcast_tap();
                 }
                 self.cast.cancel_current();
-                self.cast.live_status = format!(
-                    "Casting stopped. Local playback continues. Last stream status: {}",
-                    self.cast.live_status
-                );
+                self.cast.live_status.clear();
             }
         }
     }
@@ -3243,6 +3264,10 @@ impl eframe::App for Player {
     }
 }
 fn main() -> eframe::Result {
+    // Receiver I/O is isolated before audio devices, UI or library initialization.
+    if google_cast::worker_main() {
+        return Ok(());
+    }
     let mut player = Player::default();
     if player.screenshot_view.is_empty() {
         player.recovery = session::Recovery::open(&player.root);
