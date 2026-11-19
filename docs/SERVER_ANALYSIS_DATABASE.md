@@ -41,6 +41,12 @@ Use one versioned command/capability/state model with the apps rather than inven
 
 This is the requested integration scope, not a claim every listed action is already implemented.
 
+## Implementation order and team roles
+
+Owner priorities: engines/analysis/stems/shared database FIRST; remaining functionality (intake/sync/stations/Cast/Remote/Companion and platform parity) SECOND; UI redesign LAST. Jarvis/Codex owns the bulk of coding and design/implementation decisions. Claude reviews architecture/code; Pochiko coordinates as available. Gemini is secretarial support for requirements, decisions, evidence/task tracking and concise reports, not the lead designer or main coder. Local general-purpose AI model hosting is outside the current scope; revisit separately if the owner chooses other hardware.
+
+Take over unfinished work when a provider usage limit blocks an agent, preserve its commits/test evidence and avoid concurrent edits. Continue through routine build/dependency problems. Required approvals, external automatic policy rejection and provider quota restrictions are not to be bypassed or mislabeled as code failures. Do not present a queued task as delivered software.
+
 ## Required platforms
 
 AMP Verse Server is a Windows AND Linux product. Both platforms require library intake/management, analysis orchestration, database/API, virtual stations, uploads/sync and physical audio output for received desktop mixes. OS-specific audio/GPU/service adapters sit behind common server semantics. Validate Windows device/path/service behavior independently from Linux; a successful Linux build is not Windows acceptance. Keep the existing Windows/Linux build matrix. Browser controls must not depend on the server OS.

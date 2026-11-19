@@ -1,0 +1,67 @@
+name: Verify AMP Rust engines
+on:
+  push:
+    branches: ['feature/rust-engine-knowledge-*']
+    paths:
+      - 'crates/**'
+      - 'apps/amp-cast/**'
+      - 'apps/amp-engine/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/engines.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'apps/amp-cast/**'
+      - 'apps/amp-engine/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/engines.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  engines:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Linux codec fixtures
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+      - name: Windows codec fixtures
+        if: runner.os == 'Windows'
+        run: choco install ffmpeg --yes --no-progress
+      - run: cargo fmt --all --check
+      - name: Core, database, analysis, server and engine tests
+        run: cargo test -p amp-core --features analysis -p amp-cast -p amp-engine -p amp-dj-policy --all-targets --locked
+      - name: Strict engine lint
+        run: cargo clippy -p amp-core --features analysis -p amp-cast -p amp-engine -p amp-dj-policy --all-targets --locked -- -D warnings
+      - name: Generated audio adaptive stream and worker lifecycle tests
+        run: cargo test -p amp-cast --lib hls::tests --locked -- --include-ignored --test-threads=1
+      - name: Build standalone server and analysis engine
+        run: cargo build -p amp-cast -p amp-engine --release --locked
+      - name: Stage source-identified engine build
+        shell: bash
+        run: |
+          mkdir -p engine-checkpoint
+          if [ "${{ runner.os }}" = "Windows" ]; then ext=.exe; else ext=; fi
+          cp target/release/amp-cast$ext target/release/amp-prepare$ext target/release/amp-engine$ext engine-checkpoint/
+          cp LICENSE THIRD_PARTY_NOTICES.md docs/SERVER_ANALYSIS_DATABASE.md engine-checkpoint/
+          python -c "import hashlib,json,pathlib; d=pathlib.Path('engine-checkpoint'); files=[{'name':p.name,'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(d.iterdir()) if p.is_file()]; (d/'build.json').write_text(json.dumps({'commit':'${{ github.sha }}','os':'${{ runner.os }}','preview':True,'deployed':False,'files':files},indent=2))"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amp-engines-${{ runner.os }}-${{ github.sha }}
+          path: engine-checkpoint/

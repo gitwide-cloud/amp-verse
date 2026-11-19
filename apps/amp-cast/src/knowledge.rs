@@ -11,6 +11,16 @@ pub fn routes() -> Router<Arc<Cast>> {
         .route("/api/knowledge/import", post(import))
         .layer(DefaultBodyLimit::max(1024))
 }
+// A disconnected HTTP handler must not release admission while its blocking work continues.
+fn background<T: Send + 'static>(
+    slot: tokio::sync::SemaphorePermit<'static>,
+    work: impl FnOnce() -> Result<T, String> + Send + 'static,
+) -> tokio::task::JoinHandle<Result<T, String>> {
+    tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        work()
+    })
+}
 fn store(cast: &Cast) -> Result<Store, String> {
     cast.config_dir
         .lock()
@@ -39,14 +49,14 @@ async fn status(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let Ok(_slot) = REQUESTS.try_acquire() else {
+    let Ok(slot) = REQUESTS.try_acquire() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
     let db = match store(&cast) {
         Ok(db) => db,
         Err(e) => return failed(e),
     };
-    match tokio::task::spawn_blocking(move || db.stats()).await {
+    match background(slot, move || db.stats()).await {
         Ok(Ok(stats))=>Json(serde_json::json!({"schema":1,"server_id":cast.server_id,"stats":stats,"automatic_reuse":false,"storage":"device_local","source_audio_stored":false})).into_response(),
         Ok(Err(e))=>failed(e),Err(e)=>failed(e),
     }
@@ -81,15 +91,14 @@ async fn lookup(
     {
         return (StatusCode::BAD_REQUEST, "Invalid identity or page bounds").into_response();
     }
-    let Ok(_slot) = REQUESTS.try_acquire() else {
+    let Ok(slot) = REQUESTS.try_acquire() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
     let db = match store(&cast) {
         Ok(db) => db,
         Err(e) => return failed(e),
     };
-    match tokio::task::spawn_blocking(move || db.lookup(&hash, page.after.as_deref(), limit)).await
-    {
+    match background(slot, move || db.lookup(&hash, page.after.as_deref(), limit)).await {
         Ok(Ok(rows)) => {
             let next = if rows.len() == limit {
                 rows.last().map(|r| r.id.clone())
@@ -121,7 +130,7 @@ async fn import(
     if !(1..=100).contains(&limit) || batch.offset > cast.tracks.len() {
         return (StatusCode::BAD_REQUEST, "Invalid import bounds").into_response();
     }
-    let Ok(_slot) = REQUESTS.try_acquire() else {
+    let Ok(slot) = REQUESTS.try_acquire() else {
         return StatusCode::TOO_MANY_REQUESTS.into_response();
     };
     let db = match store(&cast) {
@@ -136,7 +145,7 @@ async fn import(
         .map(|t| t.preparation.clone())
         .collect();
     let total = cast.tracks.len();
-    match tokio::task::spawn_blocking(move || -> Result<_,String> {
+    match background(slot, move || -> Result<_,String> {
         let mut records=Vec::new(); let mut unavailable=0; let mut invalid=0;
         for prep in preparations {
             match Observation::from_preparation(&prep) {
@@ -154,6 +163,39 @@ mod tests {
     use super::*;
     use axum::{body::to_bytes, http::Request};
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn disconnect_does_not_admit_more_work_until_blocking_job_finishes() {
+        static LIMIT: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+        let slot = LIMIT.try_acquire().unwrap();
+        let (started, ready) = tokio::sync::oneshot::channel();
+        let (release, wait) = std::sync::mpsc::channel();
+        let handler = tokio::spawn(async move {
+            background(slot, move || {
+                let _ = started.send(());
+                wait.recv().map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(2), ready)
+            .await
+            .unwrap()
+            .unwrap();
+        handler.abort();
+        let _ = handler.await;
+        assert!(LIMIT.try_acquire().is_err());
+        release.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), async {
+            loop {
+                if LIMIT.try_acquire().is_ok() {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
     #[tokio::test]
     async fn authenticated_bounded_import_reuses_data_without_changing_playback_or_music() {
         let root = tempfile::tempdir().unwrap();
