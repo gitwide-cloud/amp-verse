@@ -28,6 +28,17 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !(16..=5000).contains(&count) {
         return Err("fixture count must be 16..=5000".into());
     }
+    // Queue::for_library chooses its work file independently of the fixture root.
+    // Require explicit scratch placement rather than falling back to real app data.
+    let scratch = std::env::var_os("TMPDIR").ok_or("Set TMPDIR to isolated scratch storage")?;
+    let scratch = fs::canonicalize(scratch)?;
+    let data = std::env::var_os("LOCALAPPDATA")
+        .or_else(|| std::env::var_os("XDG_DATA_HOME"))
+        .ok_or("Set XDG_DATA_HOME (or LOCALAPPDATA) inside TMPDIR")?;
+    let data = fs::canonicalize(data)?;
+    if data == scratch || !data.starts_with(&scratch) {
+        return Err("Local queue data must be in a subdirectory of TMPDIR".into());
+    }
     // Never open a supplied or discovered production root.
     let fixture = tempfile::tempdir()?;
     let root = fixture.path().join("synthetic-library");

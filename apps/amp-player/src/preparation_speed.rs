@@ -188,16 +188,37 @@ fn admit(active: &AtomicUsize, limit: usize) -> bool {
         }
     }
 }
-pub fn analysis_permit() -> AnalysisPermit {
+/// Wait without owning a queue claim. Cancellation is checked both while waiting
+/// and after taking capacity, so a stopped worker returns its slot immediately.
+pub fn analysis_permit(cancel: Option<&AtomicBool>) -> Option<AnalysisPermit> {
+    acquire_analysis_slot(
+        &ANALYSIS_ACTIVE,
+        cancel,
+        || wait(cancel),
+        || worker_limit(mode(), amp_core::batch::cpu_count(), playing(), policy()),
+        || std::thread::sleep(Duration::from_millis(100)),
+    )
+    .then(|| AnalysisPermit)
+}
+fn acquire_analysis_slot(
+    active: &AtomicUsize,
+    cancel: Option<&AtomicBool>,
+    mut ready: impl FnMut() -> bool,
+    mut limit: impl FnMut() -> usize,
+    mut idle: impl FnMut(),
+) -> bool {
     loop {
-        wait(None);
-        if admit(
-            &ANALYSIS_ACTIVE,
-            worker_limit(mode(), amp_core::batch::cpu_count(), playing(), policy()),
-        ) {
-            return AnalysisPermit;
+        if cancel.is_some_and(|c| c.load(Relaxed)) || !ready() {
+            return false;
         }
-        std::thread::sleep(Duration::from_millis(100));
+        if admit(active, limit()) {
+            if cancel.is_some_and(|c| c.load(Relaxed)) {
+                active.fetch_sub(1, Relaxed);
+                return false;
+            }
+            return true;
+        }
+        idle();
     }
 }
 pub fn configure(command: &mut std::process::Command) {
@@ -334,5 +355,59 @@ mod tests {
     #[test]
     fn cancelled_wait_returns_without_starting_a_song() {
         assert!(!wait(Some(&AtomicBool::new(true))));
+    }
+    #[test]
+    fn cancellation_while_capacity_is_full_takes_no_slot() {
+        let active = AtomicUsize::new(1);
+        let cancel = AtomicBool::new(false);
+        assert!(!acquire_analysis_slot(
+            &active,
+            Some(&cancel),
+            || true,
+            || 1,
+            || cancel.store(true, Relaxed)
+        ));
+        assert_eq!(active.load(Relaxed), 1);
+    }
+    #[test]
+    fn cancelled_playback_wait_never_attempts_admission() {
+        let active = AtomicUsize::new(0);
+        assert!(!acquire_analysis_slot(
+            &active,
+            None,
+            || false,
+            || panic!("paused worker must not attempt admission"),
+            || {}
+        ));
+        assert_eq!(active.load(Relaxed), 0);
+    }
+    #[test]
+    fn cancellation_at_admission_returns_capacity() {
+        let active = AtomicUsize::new(0);
+        let cancel = AtomicBool::new(false);
+        assert!(!acquire_analysis_slot(
+            &active,
+            Some(&cancel),
+            || true,
+            || {
+                cancel.store(true, Relaxed);
+                1
+            },
+            || {}
+        ));
+        assert_eq!(active.load(Relaxed), 0);
+    }
+    #[test]
+    fn waiting_worker_observes_new_mode_limit() {
+        let active = AtomicUsize::new(1);
+        let current_limit = AtomicUsize::new(1);
+        assert!(acquire_analysis_slot(
+            &active,
+            None,
+            || true,
+            || current_limit.load(Relaxed),
+            || current_limit.store(2, Relaxed)
+        ));
+        assert_eq!(active.load(Relaxed), 2);
     }
 }

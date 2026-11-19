@@ -723,6 +723,14 @@ impl Preparer {
                             if stop.load(std::sync::atomic::Ordering::Relaxed) {
                                 break;
                             }
+                            let Some(_permit) =
+                                crate::preparation_speed::analysis_permit(Some(stop))
+                            else {
+                                break;
+                            };
+                            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
                             let job = match q.next() {
                                 Ok(Some(job)) => job,
                                 Ok(None) => break,
@@ -744,7 +752,6 @@ impl Preparer {
                                 }
                             };
                             let _heartbeat = q.keep_alive(&job);
-                            let _permit = crate::preparation_speed::analysis_permit();
                             let mut skipped = false;
                             let result = match crate::engine::analyze(root, &job.path, None) {
                                 Ok(Some(p)) => Ok(p),
@@ -821,7 +828,9 @@ impl Preparer {
         );
         std::thread::spawn(move || {
             amp_core::batch::for_each(&tracks, workers, |track| {
-                let _permit = crate::preparation_speed::analysis_permit();
+                let Some(_permit) = crate::preparation_speed::analysis_permit(None) else {
+                    return false;
+                };
                 let mut skipped = false;
                 let result = match crate::engine::analyze(
                     &root,
