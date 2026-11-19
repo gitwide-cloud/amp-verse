@@ -11,6 +11,7 @@ pub struct Broadcast {
     stop: Arc<AtomicBool>,
     child: Arc<Mutex<Child>>,
     pub status: Arc<Mutex<String>>,
+    ready: Arc<AtomicBool>,
 }
 impl Drop for Broadcast {
     fn drop(&mut self) {
@@ -32,6 +33,7 @@ impl Broadcast {
                 "Sampler and DJ outputs need the same sample rate for live broadcast".into(),
             );
         }
+        let discard_limit = audio.sample_rate as usize;
         let mut main = audio.broadcast_tap()?;
         let mut samples = aux.broadcast_tap()?;
         let mut child = amp_core::command("ffmpeg")
@@ -67,6 +69,8 @@ impl Broadcast {
         let process = child.clone();
         let status = Arc::new(Mutex::new("Connecting live DJ output…".into()));
         let message = status.clone();
+        let ready = Arc::new(AtomicBool::new(false));
+        let uploaded = ready.clone();
         std::thread::spawn(move || {
             let agent: ureq::Agent = ureq::Agent::config_builder()
                 .timeout_global(Some(std::time::Duration::from_secs(5)))
@@ -87,6 +91,18 @@ impl Broadcast {
                     .as_str()
                     .ok_or("Server does not support live DJ broadcast")?
                     .to_owned();
+                // The tap may have filled while /live/start connected. Discard
+                // that bounded startup backlog so receivers join the current head.
+                for _ in 0..discard_limit {
+                    if main.pop().is_err() {
+                        break;
+                    }
+                }
+                for _ in 0..discard_limit {
+                    if samples.pop().is_err() {
+                        break;
+                    }
+                }
                 let writer_stop = stopped.clone();
                 let writer = std::thread::spawn(move || {
                     let mut bytes = Vec::with_capacity(8192);
@@ -123,6 +139,7 @@ impl Broadcast {
                             .header("x-amp-live-session", &token)
                             .send(&bytes[..n])
                             .map_err(|e| e.to_string())?;
+                        uploaded.store(true, Relaxed);
                     }
                     Ok(())
                 })();
@@ -148,7 +165,11 @@ impl Broadcast {
             stop,
             child,
             status,
+            ready,
         })
+    }
+    pub fn ready(&self) -> bool {
+        self.running() && self.ready.load(Relaxed)
     }
     pub fn running(&self) -> bool {
         !self.stop.load(Relaxed)

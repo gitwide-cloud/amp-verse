@@ -36,6 +36,9 @@ impl Timeline {
         self.queued.clear();
         self.drag = None;
     }
+    pub(super) fn output_active(&self) -> bool {
+        self.player.is_some() || self.preview.is_some()
+    }
     pub fn stop(&mut self) {
         if let Some(mut p) = self.player.take() {
             let _ = p.kill();

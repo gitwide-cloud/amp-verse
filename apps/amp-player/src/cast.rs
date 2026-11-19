@@ -191,6 +191,7 @@ pub struct Dashboard {
     pub live_action: Option<bool>,
     pub live_active: bool,
     pub live_status: String,
+    pub current: crate::cast_current::Current,
     address: String,
     password: String,
     connected_address: String,
@@ -282,6 +283,7 @@ impl Default for Dashboard {
             live_action: None,
             live_active: false,
             live_status: String::new(),
+            current: Default::default(),
             address: std::env::var("AMP_CAST_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8787".into()),
             password: String::new(),
             connected_address: String::new(),
@@ -312,6 +314,31 @@ impl Default for Dashboard {
     }
 }
 impl Dashboard {
+    pub fn bypass_active(&mut self) -> bool {
+        if self
+            .radio
+            .as_mut()
+            .is_some_and(|child| matches!(child.try_wait(), Ok(Some(_))))
+        {
+            self.radio = None;
+        }
+        self.radio.is_some()
+    }
+    pub fn cancel_current(&mut self) {
+        self.google.cancel();
+        self.live_active = false;
+    }
+    pub fn poll_current(&mut self, ready: bool, running: bool, bypass: bool) {
+        if bypass && (running || self.google.active()) {
+            self.google.cancel();
+            self.live_action = Some(false);
+            self.live_status =
+                "Casting stopped: radio / preview output is unsupported. Local playback continues."
+                    .into();
+        } else if self.google.poll_current(ready, running) {
+            self.live_action = Some(false);
+        }
+    }
     pub fn endpoint(&self) -> (String, String) {
         (
             if self.connected_address.is_empty() {
@@ -461,6 +488,32 @@ impl Dashboard {
         }
     }
     pub fn show(&mut self, ui: &mut egui::Ui, root: &std::path::Path, ready: bool) {
+        ui.heading("Cast current playback");
+        ui.strong(&self.current.title);
+        ui.weak("Player, DJ / Auto Mix and sampler share the live master. Headphone cue stays private. Radio, podcasts, auxiliary decks and Lab / mix previews are not supported on this build.");
+        let supported = self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.status.capabilities["live_dj"] == true);
+        if !supported {
+            ui.label("Connect to an AMP Cast server below. Connecting or opening Cast does not start audio.");
+        }
+        let address = self.endpoint().0;
+        if self.google.show(
+            ui,
+            &address,
+            self.current.supported && supported && !self.live_active,
+        ) {
+            self.live_action = Some(true);
+        }
+        ui.label(&self.live_status);
+        ui.add_enabled_ui(!self.live_active && !self.google.active(), |ui| {
+            ui.collapsing("Server connection and independent stations", |ui| {
+                self.show_stations(ui, root, ready)
+            });
+        });
+    }
+    fn show_stations(&mut self, ui: &mut egui::Ui, root: &std::path::Path, ready: bool) {
         self.poll();
         if self.listen_after_play
             && !self.busy
@@ -614,25 +667,11 @@ impl Dashboard {
                 });
             });
         } else if self.section == 1 {
-            ui.heading("Broadcast my live DJ mix");
-            ui.label("Send the actual master mix: both decks, crossfader, EQ, stems and sampler. Headphone cue stays private.");
+            ui.heading("Live master server setup");
             let supported = self
                 .snapshot
                 .as_ref()
                 .is_some_and(|s| s.status.capabilities["live_dj"] == true);
-            if ui
-                .add_enabled(
-                    supported && !self.live_active,
-                    egui::Button::new("Start live DJ broadcast"),
-                )
-                .clicked()
-            {
-                self.live_action = Some(true);
-            }
-            if self.live_active && ui.button("Stop my live DJ broadcast").clicked() {
-                self.live_action = Some(false);
-            }
-            ui.label(&self.live_status);
             if !supported {
                 ui.weak("Connect to an updated AMP Cast server first, or start one below.");
                 if ui.button("Connect to Cast on this computer").clicked() {
@@ -776,11 +815,6 @@ impl Dashboard {
             self.listen(&url);
         }
         ui.separator();
-        self.google.show(
-            ui,
-            &self.connected_address,
-            self.snapshot.as_ref().is_some_and(|s| s.status.running),
-        );
         if self.radio.is_some()
             && ui.button("Stop listening").clicked()
             && let Some(mut child) = self.radio.take()

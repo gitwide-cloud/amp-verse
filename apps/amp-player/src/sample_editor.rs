@@ -33,6 +33,9 @@ impl Drop for Editor {
     }
 }
 impl Editor {
+    pub(super) fn output_active(&self) -> bool {
+        self.preview.is_some()
+    }
     pub fn stop(&mut self) {
         if let Some(mut child) = self.preview.take() {
             let _ = child.kill();

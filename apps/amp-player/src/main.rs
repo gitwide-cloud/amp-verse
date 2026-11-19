@@ -8,6 +8,7 @@ use std::{
 };
 mod addons;
 mod cast;
+mod cast_current;
 mod control;
 mod controllers;
 mod crossfade_settings;
@@ -2977,10 +2978,6 @@ impl Player {
         }
     }
     fn cast_ui(&mut self, ui: &mut egui::Ui) {
-        self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
-        if let Some(broadcast) = &self.live_mix {
-            self.cast.live_status = broadcast.status.lock().unwrap().clone();
-        }
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
             self.header(ui, "AMP Cast", true);
@@ -2995,8 +2992,47 @@ impl Player {
                     );
                 });
         });
+    }
+    fn poll_current_cast(&mut self) {
+        use std::sync::atomic::Ordering::Relaxed;
+        let bypass = self.cast.bypass_active()
+            || self.smart_preview.active()
+            || self.lab.output_active()
+            || self.sides.iter().any(|s| s.playing());
+        let decks = std::array::from_fn(|d| {
+            self.audio
+                .as_ref()
+                .filter(|a| {
+                    a.controls.play[d].load(Relaxed) && !a.controls.finished[d].load(Relaxed)
+                })
+                .and_then(|_| self.loaded_snapshot[d].as_ref().map(|t| t.title.clone()))
+        });
+        let sampler = [&self.audio, &self.right_sample_audio]
+            .iter()
+            .any(|engine| {
+                engine
+                    .as_ref()
+                    .is_some_and(|a| a.controls.sample_playing.iter().any(|v| v.load(Relaxed)))
+            });
+        self.cast.current = cast_current::Current::resolve(decks, sampler, bypass);
+        self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
+        if let Some(broadcast) = &self.live_mix {
+            self.cast.live_status = broadcast.status.lock().unwrap().clone();
+        }
+        // Process a new selection before checking asynchronous startup. A station's
+        // old running flag must never release the receiver for a new broadcast.
+        if self.cast.live_action != Some(true) {
+            self.cast.poll_current(
+                self.live_mix.as_ref().is_some_and(|b| b.ready()),
+                self.cast.live_active,
+                bypass,
+            );
+        }
+        if self.live_mix.as_ref().is_some_and(|b| !b.running()) {
+            self.cast.live_action = Some(false);
+        }
         if let Some(start) = self.cast.live_action.take() {
-            if start {
+            if start && self.cast.current.supported && self.live_mix.is_none() {
                 let result = (|| {
                     self.ensure_audio()?;
                     self.ensure_right_samples()?;
@@ -3010,7 +3046,10 @@ impl Player {
                 })();
                 match result {
                     Ok(broadcast) => self.live_mix = Some(broadcast),
-                    Err(error) => self.cast.live_status = error,
+                    Err(error) => {
+                        self.cast.live_status = error;
+                        self.cast.live_action = Some(false);
+                    }
                 }
             } else {
                 self.live_mix = None;
@@ -3020,7 +3059,11 @@ impl Player {
                 if let Some(audio) = &self.right_sample_audio {
                     audio.stop_broadcast_tap();
                 }
-                self.cast.live_status = "Live DJ broadcast stopped".into();
+                self.cast.cancel_current();
+                self.cast.live_status = format!(
+                    "Casting stopped. Local playback continues. Last stream status: {}",
+                    self.cast.live_status
+                );
             }
         }
     }
@@ -3091,6 +3134,7 @@ impl eframe::App for Player {
             self.lab.stop_preview();
         }
         self.cast.poll();
+        self.poll_current_cast();
         self.dj_effects(ui.ctx());
         let ctx = ui.ctx().clone();
         let mut active = vec![egui::ViewportId::ROOT];

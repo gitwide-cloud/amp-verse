@@ -176,9 +176,51 @@ pub struct Output {
     session: Option<Session>,
     manual: String,
     message: String,
+    pending: Option<(Device, String, Instant)>,
+    stop_requested: bool,
 }
 impl Output {
-    pub fn show(&mut self, ui: &mut egui::Ui, address: &str, running: bool) {
+    pub fn active(&self) -> bool {
+        self.pending.is_some() || self.session.as_ref().is_some_and(|s| !s.done.load(Relaxed))
+    }
+    pub fn cancel(&mut self) {
+        self.pending = None;
+        if let Some(session) = &self.session {
+            session.stop.store(true, Relaxed);
+        }
+    }
+    /// Runs even when the Cast window is closed. Never uses station running state.
+    pub fn poll_current(&mut self, ready: bool, running: bool) -> bool {
+        if self.stop_requested {
+            self.stop_requested = false;
+            self.cancel();
+            return true;
+        }
+        if !running && self.session.as_ref().is_some_and(|s| !s.stop.load(Relaxed)) {
+            self.cancel();
+            return true;
+        }
+        if self.pending.is_some() {
+            if !running || self.pending.as_ref().unwrap().2.elapsed() > Duration::from_secs(15) {
+                self.cancel();
+                self.message =
+                    "Cast could not start the current stream. Local playback continues.".into();
+                return true;
+            }
+            if ready {
+                let (device, url, _) = self.pending.take().unwrap();
+                self.session = Some(cast(device, url));
+            }
+        }
+        if self.session.as_ref().is_some_and(|s| s.done.load(Relaxed)) {
+            let session = self.session.take().unwrap();
+            self.message = session.status.lock().unwrap().clone();
+            return true;
+        }
+        false
+    }
+    pub fn show(&mut self, ui: &mut egui::Ui, address: &str, running: bool) -> bool {
+        let mut requested = false;
         if let Some(rx) = &self.scan
             && let Ok(result) = rx.try_recv()
         {
@@ -192,7 +234,7 @@ impl Output {
             self.scan = None;
         }
         ui.heading("Google Home / Chromecast");
-        ui.weak("Play the connected station or live DJ broadcast on a speaker. The speaker must be able to reach this computer over Wi-Fi/LAN.");
+        ui.weak("Choose a receiver for current AMP playback. Local output stays on; receivers buffer the stream and may sound later. End-to-end delay is unmeasured.");
         if ui
             .add_enabled(
                 self.scan.is_none(),
@@ -206,7 +248,7 @@ impl Output {
                 let _ = tx.send(discover());
             });
         }
-        let busy = self.session.as_ref().is_some_and(|s| !s.done.load(Relaxed));
+        let busy = self.active();
         let mut selected = None;
         for device in &self.devices {
             ui.horizontal(|ui| {
@@ -238,18 +280,23 @@ impl Output {
         });
         if let Some(device) = selected {
             match stream_url(address, &device.host) {
-                Ok(url) => self.session = Some(cast(device, url)),
+                Ok(url) => {
+                    self.pending = Some((device, url, Instant::now()));
+                    self.message = "Preparing current playback stream…".into();
+                    requested = true;
+                }
                 Err(e) => self.message = e,
             }
         }
         if let Some(session) = &self.session {
             ui.label(session.status.lock().unwrap().as_str());
-            if busy && ui.button("Stop Google Cast").clicked() {
-                session.stop.store(true, Relaxed);
-            }
+
             if busy {
                 ui.ctx().request_repaint_after(Duration::from_millis(200));
             }
+        }
+        if busy && ui.button("Stop casting").clicked() {
+            self.stop_requested = true;
         }
         if self.scan.is_some() {
             ui.spinner();
@@ -257,13 +304,57 @@ impl Output {
         }
         ui.label(&self.message);
         if !running {
-            ui.weak("Start a live DJ broadcast or play a station playlist first.");
+            ui.weak(
+                "Play a supported source and connect to an AMP Cast server to choose a receiver.",
+            );
         }
+        requested
     }
 }
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn pending_output() -> Output {
+        Output {
+            pending: Some((
+                Device {
+                    name: "Fixture".into(),
+                    host: "192.0.2.1".into(),
+                    port: 8009,
+                },
+                "http://192.0.2.2:8787/listen.mp3".into(),
+                Instant::now(),
+            )),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn opening_output_does_not_start_a_session() {
+        let mut output = Output::default();
+        assert!(!output.poll_current(false, false));
+        assert!(!output.active());
+    }
+    #[test]
+    fn receiver_waits_for_current_upload_not_station_status() {
+        let mut output = pending_output();
+        assert!(!output.poll_current(false, true));
+        assert!(output.pending.is_some());
+        assert!(output.session.is_none());
+    }
+    #[test]
+    fn startup_failure_clears_pending_receiver() {
+        let mut output = pending_output();
+        assert!(output.poll_current(false, false));
+        assert!(!output.active());
+    }
+    #[test]
+    fn stop_during_startup_never_launches_receiver() {
+        let mut output = pending_output();
+        output.stop_requested = true;
+        assert!(output.poll_current(true, true));
+        assert!(!output.active());
+        assert!(!output.poll_current(true, true));
+    }
     #[test]
     fn remote_station_url_is_preserved() {
         assert_eq!(

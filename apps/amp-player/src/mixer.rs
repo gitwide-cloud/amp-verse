@@ -2505,6 +2505,40 @@ mod tests {
         engine.stop(0);
     }
     #[test]
+    fn cast_tap_preserves_position_and_matches_master_across_source_switch() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(8);
+        tx.send(Command::Load(0, source(0.2, 20000), true, 0))
+            .unwrap();
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        mixer.render(3000, |_, _| {});
+        let position = controls.position[0].load(Relaxed);
+        assert!(position > 0);
+        let (tap, mut broadcast) = RingBuffer::new(2000);
+        tx.send(Command::Broadcast(Some(tap))).unwrap();
+        let mut speaker = Vec::new();
+        mixer.render(500, |_, frame| speaker.push(frame));
+        assert!(controls.position[0].load(Relaxed) > position);
+        for frame in speaker {
+            assert_eq!(broadcast.pop().unwrap(), frame);
+        }
+        // Changing the authoritative deck feeds the existing tap, without starting
+        // an independent station queue or replaying the previously selected song.
+        tx.send(Command::Load(0, source(0.4, 20000), true, 0))
+            .unwrap();
+        let mut speaker = Vec::new();
+        mixer.render(500, |_, frame| speaker.push(frame));
+        for frame in speaker {
+            assert_eq!(broadcast.pop().unwrap(), frame);
+        }
+        let position = controls.position[0].load(Relaxed);
+        tx.send(Command::Broadcast(None)).unwrap();
+        mixer.render(500, |_, _| {});
+        assert!(controls.play[0].load(Relaxed));
+        assert!(controls.position[0].load(Relaxed) > position);
+        assert!(broadcast.pop().is_err());
+    }
+    #[test]
     fn headphone_cue_is_pre_fader_and_trim_and_kills_affect_both_buses() {
         let controls = Arc::new(Controls::default());
         set(&controls.master, 0.);
