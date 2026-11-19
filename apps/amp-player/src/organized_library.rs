@@ -369,7 +369,11 @@ impl Player {
             }) {
                 Ok(()) => {
                     self.smart_preview.stop();
-                    self.dj_browser.select_smart(&playlist);
+                    if let Some(library) = &self.library {
+                        self.dj_browser.select_saved_smart(
+                            &playlist, &self.root, library, &self.run.settings, &self.queue,
+                        );
+                    }
                     self.activate(ui, Some(skin::Module::Dj));
                     self.status = "Smart Playlist sent to DJ · Auto Mix enabled".into();
                 }

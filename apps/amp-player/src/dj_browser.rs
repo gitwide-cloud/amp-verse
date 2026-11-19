@@ -136,6 +136,15 @@ impl Browser {
         self.stem_status.clear();
         self.stem_rx = None;
     }
+    // Explicit handoff refreshes the browser only; the performance owns its
+    // separate rule snapshot and loaded decks.
+    pub(super) fn select_saved_smart(
+        &mut self, id: &str, root: &Path, library: &Library,
+        settings: &amp_core::show::Settings, queue: &[usize],
+    ) {
+        self.capture(root, library, settings, queue);
+        self.select_smart(id);
+    }
     pub(super) fn selected_smart(&self) -> Option<&str> {
         (self.source == Source::Smart && !self.smart.is_empty()).then_some(self.smart.as_str())
     }
@@ -143,6 +152,13 @@ impl Browser {
         self.source = Source::Smart;
         self.smart = id.into();
     }
+}
+fn smart_playlist_name<'a>(
+    profile: &'a amp_core::show::SmartPlaylist,
+    saved: &'a amp_core::show::Settings,
+) -> &'a str {
+    saved.playlists.iter().find(|p| p.id == profile.id)
+        .map_or(profile.name.as_str(), |p| p.name.as_str())
 }
 fn track_positions(library: &Library) -> std::collections::HashMap<PathBuf, usize> {
     let mut index = std::collections::HashMap::new();
@@ -371,7 +387,7 @@ impl Player {
                                     let row = ui.selectable_value(
                                         &mut self.dj_browser.smart,
                                         profile.id.clone(),
-                                        &profile.name,
+                                        smart_playlist_name(profile, &self.run.settings),
                                     );
                                     if let Some(action) = show_editor::playlist_menu(&row) {
                                         context_edit = Some((profile.id.clone(), action));
@@ -482,7 +498,7 @@ impl Player {
                             ui.horizontal(|ui| {
                                 ui.add_sized(
                                     [(ui.available_width() - 485.).max(40.), 26.],
-                                    egui::Label::new(egui::RichText::new(&profile.name).strong())
+                                    egui::Label::new(egui::RichText::new(smart_playlist_name(profile, &self.run.settings)).strong())
                                         .truncate(),
                                 );
                                 load_smart = ui.button("Load for Auto DJ").clicked();
@@ -937,6 +953,31 @@ mod tests {
             .insert("genre".into(), serde_json::json!("R&B"));
         assert!(cache.indices(&profile, &library, 2).is_none());
         assert_eq!(wait(&mut cache, &profile, &library, 2).len(), 7001);
+    }
+
+    #[test]
+    fn saved_names_update_without_changing_frozen_rules_and_handoff_reveals_new_ids() {
+        let library = Library { tracks: vec![], tree: Folder {
+            name: "Fixture".into(), folders: vec![], tracks: vec![],
+        }};
+        let mut saved = amp_core::show::Settings::default();
+        let mut browser = Browser::default();
+        browser.capture(Path::new("fixture"), &library, &saved, &[]);
+        let frozen = browser.settings_snapshot.as_ref().unwrap().playlists[0].clone();
+        saved.playlists[0].name = "Renamed saved playlist".into();
+        saved.playlists[0].target_energy = Some(9.);
+        assert_eq!(smart_playlist_name(&frozen, &saved), "Renamed saved playlist");
+        assert_eq!(browser.settings_snapshot.as_ref().unwrap().playlists[0].target_energy,
+            frozen.target_energy);
+        let mut new = frozen.clone();
+        new.id = "brand-new-saved-id".into();
+        new.name = "New playlist".into();
+        saved.playlists.push(new.clone());
+        browser.select_saved_smart(&new.id, Path::new("fixture"), &library, &saved, &[]);
+        assert_eq!(browser.selected_smart(), Some(new.id.as_str()));
+        assert!(browser.settings_snapshot.as_ref().unwrap().playlists.iter().any(|p| p.id == new.id));
+        saved.playlists.retain(|p| p.id != frozen.id);
+        assert_eq!(smart_playlist_name(&frozen, &saved), frozen.name);
     }
 
     #[test]
