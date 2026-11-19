@@ -16,6 +16,24 @@ pub(crate) fn cost(a: &Preparation, b: &Preparation, target: Option<f64>) -> f64
             p.analysis.as_ref().map_or(0., |a| a.key_confidence)
         }
     };
+    let rate = a
+        .extensions
+        .get("runtime_rank_rate")
+        .and_then(|v| v.as_f64())
+        .filter(|r| r.is_finite() && (0.5..=2.).contains(r));
+    let in_rate = rate
+        .and_then(|r| amp_dj_policy::tempo_match(a.bpm?, r, b.bpm?, 0.16))
+        .map_or(1., |m| m.rate);
+    let out_locked = a
+        .extensions
+        .get("runtime_rank_key_lock")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let in_locked = a
+        .extensions
+        .get("runtime_rank_next_key_lock")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
     amp_dj_policy::pair_cost_with_context(
         a.bpm.unwrap_or(f64::NAN),
         b.bpm.unwrap_or(f64::NAN),
@@ -26,10 +44,10 @@ pub(crate) fn cost(a: &Preparation, b: &Preparation, target: Option<f64>) -> f64
         amp_dj_policy::key_code(b.harmonic_key.as_deref().unwrap_or("")),
         confidence(a),
         confidence(b),
-        1.,
-        1.,
-        true,
-        true,
+        rate.unwrap_or(1.),
+        in_rate,
+        out_locked,
+        in_locked,
     )
 }
 /// Keeps the first song as the anchor. Returns an exact permutation, including repeats.

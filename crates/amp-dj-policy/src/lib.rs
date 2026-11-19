@@ -154,7 +154,7 @@ pub fn pair_cost_with_context(
     al: bool,
     bl: bool,
 ) -> f64 {
-    pair_cost(a, b, ae, be, target, ak, bk) - harmonic_cost(ak, bk, 1., 1., 1., 1., true, true)
+    pair_cost(a * ar, b, ae, be, target, ak, bk) - harmonic_cost(ak, bk, 1., 1., 1., 1., true, true)
         + harmonic_cost(ak, bk, ac, bc, ar, br, al, bl)
 }
 

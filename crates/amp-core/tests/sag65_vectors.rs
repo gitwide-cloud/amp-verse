@@ -196,3 +196,46 @@ fn f07_f10_measured_energy_and_session_loudness() {
     println!("F10 gain-adjusted LUFS={adjusted:?}");
     assert!((adjusted[0] - adjusted[1]).abs() <= 1.);
 }
+
+#[test]
+fn f04_fixture_soft_harmonic_context_and_documented_threshold_conflict() {
+    let v = vectors();
+    let cases = v["fixtures"][3]["subcases"].as_array().unwrap();
+    for case in &cases[..4] {
+        let cost = harmonic_cost(
+            key_code(case["out_key"].as_str().unwrap()),
+            key_code(case["in_key"].as_str().unwrap()),
+            1.,
+            case["in_key_conf"].as_f64().unwrap(),
+            1.,
+            case["in_rate"].as_f64().unwrap(),
+            true,
+            case["key_lock"].as_bool().unwrap(),
+        );
+        if let Some(range) = case["expected_harmonic_cost_range"].as_array() {
+            assert!((range[0].as_f64().unwrap()..=range[1].as_f64().unwrap()).contains(&cost));
+        }
+        if let Some(min) = case["expected_harmonic_cost_min"].as_f64() {
+            assert!(cost >= min);
+        }
+        if case["case"] == "4c_plus6pct_with_keylock_stays_8A" {
+            // The original vector says <=0.1, but the contract explicitly requires
+            // 0.9*(1-c)+raw*c: raw=0,c=0.85 gives 0.135. Preserve and flag the conflict.
+            assert!((cost - 0.135).abs() < 1e-12);
+            assert!(cost > case["expected_harmonic_cost_max"].as_f64().unwrap());
+            println!("F04c contract=0.135; original vector max=0.1 is inconsistent");
+        }
+        if case["case"] == "4d_low_key_confidence_attenuated" {
+            assert!(cost < harmonic_cost(8, 2, 1., 1., 1., 1., true, true));
+        }
+    }
+    let mut a = prep(&v["fixtures"][0]["outgoing"]);
+    a.harmonic_key = Some("8A".into());
+    a.extensions.insert("energy".into(), serde_json::json!(0.5));
+    let mut b = a.clone();
+    b.harmonic_key = Some("2A".into());
+    assert_eq!(
+        amp_core::smart::curate(&[&a, &b], &[0], 2).unwrap(),
+        vec![0, 1]
+    );
+}

@@ -812,6 +812,20 @@ impl Player {
                 p.extensions
                     .insert("energy".into(), serde_json::json!(energy));
             }
+            if let (Some(snapshot), Some(audio)) = (&mut snapshot, &self.audio) {
+                let active = self.active_deck();
+                let available = audio.controls.key_lock_available[active].load(Relaxed);
+                snapshot
+                    .extensions
+                    .insert("runtime_rank_rate".into(), json!(self.deck_rate(active)));
+                snapshot.extensions.insert(
+                    "runtime_rank_key_lock".into(),
+                    json!(available && audio.controls.key_lock[active].load(Relaxed)),
+                );
+                snapshot
+                    .extensions
+                    .insert("runtime_rank_next_key_lock".into(), json!(available));
+            }
             let ranked =
                 show::ranked_with_snapshot(&p, tracks, current, &recent, target, snapshot.as_ref());
             let mut index=*ranked.get(alternate.min(ranked.len().saturating_sub(1))).ok_or("Auto Mix stopped: no playable next song matches this playlist's source and repeat rules")?;
