@@ -38,6 +38,11 @@ jobs:
       - name: Linux dependencies
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev ffmpeg xvfb
+      - name: Windows audio test dependencies
+        if: runner.os == 'Windows'
+        run: |
+          choco install ffmpeg --yes --no-progress
+          ffmpeg -version
       - name: Prepare verified official Lab URL-import dependencies
         env:
           GH_TOKEN: ${{ github.token }}
