@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory() as folder:
         audio.setnchannels(1);audio.setsampwidth(2);audio.setframerate(8000);audio.writeframes(bytes(8000*2))
     port_socket=socket.socket();port_socket.bind(("127.0.0.1",0));port=port_socket.getsockname()[1];port_socket.close()
     base=f"http://127.0.0.1:{port}"
-    env=os.environ.copy();env.update(AMP_CONTROL_BIND=f"127.0.0.1:{port}",AMP_CONTROL_PASSWORD="test-secret",AMP_VERSE_CONFIG_DIR=str(root/"settings"))
+    env=os.environ.copy();env.update(AMP_CONTROL_BIND=f"127.0.0.1:{port}",AMP_CONTROL_PASSWORD="test-secret",AMP_CONTROL_AUTOSTART="1",AMP_VERSE_CONFIG_DIR=str(root/"settings"))
     for name in ("AMP_CONTROL_DISABLE","AMP_SCREENSHOT","AMP_SCREENSHOT_VIEW","AMP_DOCK_SMOKE"):env.pop(name,None)
     process=subprocess.Popen([binary,str(root)],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
     try:
