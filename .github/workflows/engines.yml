@@ -22,6 +22,9 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: amp-rust-engines-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
   engines:
     strategy:
@@ -42,16 +45,18 @@ jobs:
           cache-on-failure: true
       - name: Linux codec fixtures
         if: runner.os == 'Linux'
-        timeout-minutes: 5
+        timeout-minutes: 8
         run: |
           if ! command -v ffmpeg >/dev/null; then
-            # Only Ubuntu repositories are needed; unrelated third-party feeds can stall CI.
-            sources=()
-            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
-              sources=(-o Dir::Etc::sourcelist=sources.list.d/ubuntu.sources -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0)
-            fi
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 "${sources[@]}" update
-            sudo apt-get -o Acquire::Retries=2 -o Acquire::http::Timeout=20 -o Acquire::https::Timeout=20 install -y --no-install-recommends ffmpeg
+            # CI only: bypass a slow regional HTTP mirror, retaining Ubuntu archive signatures.
+            cat > "$RUNNER_TEMP/amp-ubuntu.list" <<'SOURCES'
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+          SOURCES
+            sources=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/amp-ubuntu.list" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0)
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" update
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" install -y --no-install-recommends ffmpeg
           fi
           ffmpeg -version
       - name: Windows codec fixtures
