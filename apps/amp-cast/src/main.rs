@@ -90,18 +90,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !address.ip().is_loopback() && address.is_ipv4() && discovery_port != 0 {
         match tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, discovery_port)).await {
             Ok(socket) => {
+                let advertised_port = std::env::var("AMP_CAST_ADVERTISE_PORT")
+                    .ok()
+                    .map(|p| p.parse::<u16>())
+                    .transpose()?
+                    .filter(|p| *p != 0)
+                    .unwrap_or(listener.local_addr()?.port());
+                let paths = advertised_paths(address, advertised_port);
                 let reply = serde_json::to_vec(&amp_core::discovery::Advertisement {
                     protocol: 1,
                     service: "amp-cast".into(),
                     server_id: config.server_id.clone(),
                     station_id: config.station_id.clone(),
                     name: config.station_name.chars().take(64).collect(),
-                    port: std::env::var("AMP_CAST_ADVERTISE_PORT")
-                        .ok()
-                        .map(|p| p.parse::<u16>())
-                        .transpose()?
-                        .filter(|p| *p != 0)
-                        .unwrap_or(listener.local_addr()?.port()),
+                    port: advertised_port,
+                    paths,
                 })?;
                 tokio::spawn(async move {
                     let mut packet = [0; 256];
@@ -150,4 +153,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
     Ok(())
+}
+
+// Candidate paths are reachability hints, never authorization. Receivers verify station IDs.
+fn advertised_paths(bind: std::net::SocketAddr, port: u16) -> Vec<String> {
+    let mut paths = std::collections::BTreeSet::new();
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        for interface in interfaces {
+            let name = interface.name.to_ascii_lowercase();
+            if [
+                "loopback",
+                "tun",
+                "tap",
+                "wg",
+                "wireguard",
+                "windscribe",
+                "tailscale",
+                "zerotier",
+                "utun",
+                "ppp",
+                "vpn",
+                "docker",
+                "veth",
+                "br-",
+            ]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            {
+                continue;
+            }
+            if let std::net::IpAddr::V4(ip) = interface.ip()
+                && ip.is_private()
+                && !ip.is_loopback()
+                && (bind.ip().is_unspecified() || bind.ip() == std::net::IpAddr::V4(ip))
+            {
+                paths.insert(format!("http://{ip}:{port}"));
+            }
+        }
+    }
+    paths.into_iter().take(8).collect()
 }

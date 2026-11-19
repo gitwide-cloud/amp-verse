@@ -14,6 +14,8 @@ pub struct Advertisement {
     pub station_id: String,
     pub name: String,
     pub port: u16,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub paths: Vec<String>,
 }
 impl Advertisement {
     pub fn valid(&self) -> bool {
@@ -23,6 +25,13 @@ impl Advertisement {
             && !self.station_id.is_empty()
             && self.port > 0
             && self.name.len() <= 256
+            && self.paths.len() <= 8
+            && self.paths.iter().all(|path| {
+                path.strip_prefix("http://")
+                    .and_then(|value| value.parse::<SocketAddr>().ok())
+                    .is_some_and(|address| address.port() == self.port
+                        && matches!(address.ip(), std::net::IpAddr::V4(ip) if ip.is_private() && !ip.is_loopback()))
+            })
     }
 }
 #[derive(Clone, Debug)]
@@ -82,6 +91,32 @@ pub fn parse_reply(bytes: &[u8], peer: SocketAddr) -> Option<Found> {
 mod tests {
     use super::*;
     #[test]
+    fn legacy_replies_and_optional_private_paths_are_compatible() {
+        let bytes=br#"{"protocol":1,"service":"amp-cast","server_id":"s","station_id":"t","name":"Home","port":8787}"#;
+        let legacy = parse_reply(bytes, "192.168.1.227:18787".parse().unwrap()).unwrap();
+        assert!(legacy.info.paths.is_empty());
+        let mut info = legacy.info;
+        info.paths = vec!["http://192.168.1.93:8787".into()];
+        let parsed = parse_reply(
+            &serde_json::to_vec(&info).unwrap(),
+            "192.168.1.227:18787".parse().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed.address, "192.168.1.227:8787");
+        assert_eq!(parsed.info.paths, ["http://192.168.1.93:8787"]);
+        for invalid in [
+            "http://127.0.0.1:8787",
+            "http://0.0.0.0:8787",
+            "http://8.8.8.8:8787",
+            "http://user:pw@192.168.1.93:8787",
+            "http://192.168.1.93:80",
+            "http://192.168.1.93:8787/path",
+        ] {
+            info.paths = vec![invalid.into()];
+            assert!(!info.valid(), "accepted {invalid}");
+        }
+    }
+    #[test]
     fn discovery_uses_reply_peer_not_an_advertised_url() {
         let reply = Advertisement {
             protocol: 1,
@@ -90,6 +125,7 @@ mod tests {
             station_id: "station-a".into(),
             name: "Home radio".into(),
             port: 8787,
+            paths: vec!["http://192.168.1.93:8787".into()],
         };
         let bytes = serde_json::to_vec(&reply).unwrap();
         assert_eq!(

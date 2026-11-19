@@ -1,5 +1,6 @@
 pub mod analysis_worker;
 pub mod config;
+mod hls;
 mod live;
 mod podcasts_web;
 mod radio;
@@ -35,6 +36,12 @@ struct Station {
     #[serde(skip)]
     live_token: Option<String>,
     #[serde(skip)]
+    live_next_sequence: u64,
+    #[serde(skip)]
+    live_last_hash: Option<String>,
+    #[serde(skip)]
+    live_resume_from: Option<String>,
+    #[serde(skip)]
     live_seen: Option<std::time::Instant>,
     running: bool,
     now_playing: Option<String>,
@@ -61,6 +68,7 @@ pub struct Cast {
     station: Mutex<Station>,
     audio: broadcast::Sender<Bytes>,
     recovery: recovery::Recovery,
+    hls: hls::Hls,
     selection: std::sync::Mutex<Option<serde_json::Value>>,
     mix: std::sync::Mutex<station_control::MixSettings>,
 }
@@ -102,6 +110,7 @@ impl Cast {
             station: Mutex::new(Station::default()),
             audio,
             recovery: Default::default(),
+            hls: Default::default(),
             selection: std::sync::Mutex::new(None),
             mix: std::sync::Mutex::new(Default::default()),
         })
@@ -113,6 +122,7 @@ impl Cast {
             station.running = false;
             station.generation = station.generation.wrapping_add(1);
             station.live_token = None;
+            station.live_resume_from = None;
             station.now_playing = None;
             station.current_index = None;
             station.worker.take()
@@ -122,6 +132,7 @@ impl Cast {
             let _ = worker.await;
         }
         self.recovery.reset();
+        self.hls.reset().await;
     }
     fn authorized(&self, headers: &HeaderMap) -> bool {
         if headers
@@ -196,6 +207,7 @@ pub fn router(cast: Arc<Cast>) -> Router {
         .merge(sharing::routes())
         .merge(live::routes())
         .merge(recovery::routes())
+        .merge(hls::routes())
         .merge(station_control::routes())
         .route("/api/status", get(status))
         .route(
@@ -221,6 +233,7 @@ pub fn router(cast: Arc<Cast>) -> Router {
 }
 async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
     let station = cast.station.lock().await;
+    let hls = cast.hls.snapshot();
     let mut analysis = cast.analysis.snapshot();
     analysis.paused_for_radio = analysis.enabled
         && station.running
@@ -229,7 +242,7 @@ async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
             .pause_for_radio
             .load(std::sync::atomic::Ordering::Relaxed);
     Json(
-        serde_json::json!({"mix_requested":cast.mix.lock().unwrap().clone(),"mix_applied_revision":station.mix_revision,"library_id":cast.library_id,"source":station.source,"current_source":if station.source=="live_dj" {serde_json::json!("Player/DJ master")} else {cast.selection.lock().unwrap().as_ref().map_or(serde_json::Value::Null,|v|v["name"].clone())},"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"playlist_playback":true,"google_cast":false,"hls":false,"reliable_audio":1,"dual_path":true,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":station.name.as_ref().unwrap_or(&cast.station_name),"analysis":analysis,"running":station.running && (station.source!="live_dj" || station.audio_ready),"on_air":station.running && station.audio_ready,"preparing":station.running && !station.audio_ready,"server_output":station_control::output_running(&cast),"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count()+cast.recovery.listeners(),"password_required":cast.password.is_some()}),
+        serde_json::json!({"hls":hls,"hls_url":"/api/audio/hls/master.m3u8","mix_requested":cast.mix.lock().unwrap().clone(),"mix_applied_revision":station.mix_revision,"library_id":cast.library_id,"source":station.source,"current_source":if station.source=="live_dj" {serde_json::json!("Player/DJ master")} else {cast.selection.lock().unwrap().as_ref().map_or(serde_json::Value::Null,|v|v["name"].clone())},"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"live_upload_sequence":true,"live_guarded_resume":true,"playlist_playback":true,"google_cast":false,"hls":hls["ready"],"reliable_audio":1,"dual_path":true,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":station.name.as_ref().unwrap_or(&cast.station_name),"analysis":analysis,"running":station.running && (station.source!="live_dj" || station.audio_ready),"on_air":station.running && station.audio_ready,"preparing":station.running && !station.audio_ready,"server_output":station_control::output_running(&cast),"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count()+cast.recovery.listeners(),"password_required":cast.password.is_some()}),
     )
 }
 async fn pause_analysis(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
