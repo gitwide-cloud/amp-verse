@@ -1,11 +1,11 @@
 //! Offline-first library, preparation data and process audio adapter. No GUI or network dependency.
+pub mod dj_engine;
+pub mod dj_logic;
+pub mod library_engine;
 pub mod limiter;
 pub mod loudness;
 pub mod perceptual_energy;
 pub mod vocal_profile;
-pub mod dj_engine;
-pub mod dj_logic;
-pub mod library_engine;
 #[cfg(feature = "analysis")]
 pub use library_engine::analysis;
 pub mod arrangement;
