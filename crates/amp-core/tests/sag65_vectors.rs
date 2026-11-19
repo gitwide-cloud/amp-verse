@@ -164,10 +164,10 @@ fn f07_f10_measured_energy_and_session_loudness() {
             .output()
             .unwrap();
         assert!(pcm.status.success());
-        let samples: Vec<_> = pcm
-            .stdout
-            .chunks_exact(4)
-            .map(|v| f32::from_le_bytes(v.try_into().unwrap()) as f64)
+        let (sample_bytes, _) = pcm.stdout.as_chunks::<4>();
+        let samples: Vec<_> = sample_bytes
+            .iter()
+            .map(|&sample| f64::from(f32::from_le_bytes(sample)))
             .collect();
         let rms: Vec<_> = samples
             .chunks(110)

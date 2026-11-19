@@ -144,7 +144,8 @@ struct Clock {
     frames: u64,
 }
 fn limit_pcm(limiter: &mut amp_core::limiter::LookaheadLimiter, bytes: &mut [u8]) {
-    for frame in bytes.chunks_exact_mut(8) {
+    let (frames, _) = bytes.as_chunks_mut::<8>();
+    for frame in frames {
         let input = [
             f32::from_le_bytes(frame[..4].try_into().unwrap()),
             f32::from_le_bytes(frame[4..].try_into().unwrap()),
@@ -734,8 +735,9 @@ mod sag65_audio_tests {
         for chunk in bytes.chunks_mut(8192) {
             limit_pcm(&mut limiter, chunk);
         }
-        let frames: Vec<_> = bytes
-            .chunks_exact(8)
+        let (frames, _) = bytes.as_chunks::<8>();
+        let frames: Vec<_> = frames
+            .iter()
             .map(|b| {
                 [
                     f32::from_le_bytes(b[..4].try_into().unwrap()),
