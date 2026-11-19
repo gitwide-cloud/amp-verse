@@ -91,9 +91,11 @@ impl Player {
                 }
                 });
                 ui.add_space(20.);ui.separator();
+                egui::Frame::NONE.inner_margin(egui::Margin::symmetric(10, 6)).show(ui, |ui| {
                 let total=self.library.as_ref().map_or(0,|l|l.tracks.len());
                 ui.label(RichText::new(if self.root.as_os_str().is_empty() {"Add a music folder"} else if self.scan.is_some() && self.library.is_none() {"Finding music…"} else if self.scan.is_some() {"Library ready · refreshing"} else {"Library ready"}).color(skin::signal(ui)));ui.weak(format!("{total} tracks"));
                 ui.weak(if self.analyze_after_scan {"Finding analysis inputs…"} else if self.preparer.busy(){"Analysis running"}else{"No active analysis"});
+                });
             });
             ui.separator();
             ui.vertical(|ui| {ui.set_width(ui.available_width()-8.);
@@ -128,6 +130,7 @@ impl Player {
         });
         });
         ui.separator();
+        egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
         ui.horizontal(|ui| {
             ui.colored_label(
                 skin::accent(ui),
@@ -148,6 +151,7 @@ impl Player {
         });
         #[cfg(not(test))]
         let _ = status;
+        });
     }
     pub(super) fn add_music_source(&mut self, folder: PathBuf) {
         if self.root.as_os_str().is_empty() {
@@ -354,6 +358,22 @@ impl Player {
                 ) {
                     self.smart_preview.status = error;
                 }
+            }
+        }
+        if let Some(playlist) = self.show_editor.send_to_dj.take() {
+            match self.execute_control(control::Action::LoadSmartPlaylist {
+                playlist: playlist.clone(),
+                execution: control::Execution::PlayNow,
+                style: None,
+                energy: None,
+            }) {
+                Ok(()) => {
+                    self.smart_preview.stop();
+                    self.dj_browser.select_smart(&playlist);
+                    self.activate(ui, Some(skin::Module::Dj));
+                    self.status = "Smart Playlist sent to DJ · Auto Mix enabled".into();
+                }
+                Err(error) => self.status = error,
             }
         }
         if let Some(preview) = self.show_editor.preview.take() {

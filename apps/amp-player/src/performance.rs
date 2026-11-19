@@ -1490,7 +1490,9 @@ impl Player {
                     .settings
                     .playlists
                     .iter()
-                    .find(|p| p.id == playlist || p.name.eq_ignore_ascii_case(&playlist))
+                    .find(|p| p.id == playlist)
+                    .or_else(|| self.run.settings.playlists.iter()
+                        .find(|p| p.name.eq_ignore_ascii_case(&playlist)))
                     .ok_or("Smart Playlist not found")?
                     .clone();
                 if self.show_editor.playlist_unsaved(&p.id) {
@@ -2934,6 +2936,37 @@ mod tests {
                 .iter()
                 .all(|v| !v.load(Relaxed))
         );
+    }
+    #[test]
+    fn smart_playlist_id_wins_over_another_playlists_name() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("song.mp3"), b"fixture").unwrap();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            ..Default::default()
+        };
+        let mut target = player.run.settings.playlists[0].clone();
+        target.id = "target-id".into();
+        target.name = "Intended playlist".into();
+        target.allowed.clear();
+        target.restrict_allowed = false;
+        target.folders.clear();
+        target.restrict_folders = false;
+        let mut collision = target.clone();
+        collision.id = "wrong-id".into();
+        collision.name = target.id.clone();
+        player.run.settings.playlists = vec![collision, target];
+        player.execute_control(Action::LoadSmartPlaylist {
+            playlist: "target-id".into(), execution: Execution::LoadOnly,
+            style: None, energy: None,
+        }).unwrap();
+        assert_eq!(player.run.playlist.as_deref(), Some("target-id"));
+        assert_eq!(player.run.profile.as_ref().unwrap().name, "Intended playlist");
+        player.run.settings.playlists[1].name = "Renamed saved playlist".into();
+        assert_eq!(player.run.profile.as_ref().unwrap().name, "Intended playlist");
+        assert!(!player.run.auto);
+        assert!(player.audio.is_none());
     }
     #[test]
     fn loading_empty_smart_source_preserves_the_current_session() {

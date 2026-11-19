@@ -47,6 +47,7 @@ pub struct Editor {
     pub stop_preview: bool,
     pub refresh_sources: bool,
     pub connect_import: Option<(std::path::PathBuf, amp_core::show::SmartPlaylist)>,
+    pub send_to_dj: Option<String>,
     pub mix_request: Option<(amp_core::show::SmartPlaylist, Vec<usize>)>,
     pub preview_status: String,
     pub preview: Option<(std::path::PathBuf, f64)>,
@@ -597,7 +598,17 @@ impl Editor {
                             self.mix_request=Some((p.clone(),order));
                         }
                     }
+                    let blocked = dj_handoff_blocker(p, saved, library);
+                    if ui.add_enabled(blocked.is_none(), egui::Button::new("Send to DJ")
+                        .min_size(egui::vec2(140., 38.)))
+                        .on_hover_text(blocked.unwrap_or("Open DJ and start Auto Mix using this saved Smart Playlist"))
+                        .clicked() {
+                        self.send_to_dj = Some(p.id.clone());
+                    }
                 });
+                if let Some(reason) = dj_handoff_blocker(p, saved, library) {
+                    ui.weak(reason);
+                }
                 if !self.preview_order.is_empty() {
                     ui.separator(); ui.strong("Mix preview · suggested order");
                     for (index,title) in self.preview_order.iter().enumerate() { let row=ui.add(egui::Label::new(format!("{}. {title}",index+1)).truncate().sense(egui::Sense::click_and_drag()));if let Some(path)=self.preview_paths.get(index){crate::dragdrop::source(&row,amp_core::music_sources::audio_path(root,path));} }
@@ -636,6 +647,31 @@ impl Editor {
         self.cache_draft();
     }
 }
+// Compare the selected draft at the button, after this frame's edits. Other
+// playlists' drafts do not block a handoff and are never discarded by it.
+fn dj_handoff_blocker(
+    playlist: &amp_core::show::SmartPlaylist,
+    saved: &Settings,
+    library: Option<&amp_core::Library>,
+) -> Option<&'static str> {
+    let published = saved.playlists.iter().find(|p| p.id == playlist.id);
+    if published.is_none()
+        || serde_json::to_value(playlist).ok() != serde_json::to_value(published.unwrap()).ok()
+    {
+        return Some("Save Playlist before sending it to DJ.");
+    }
+    if playlist.source_unavailable {
+        return Some("Reconnect source library before sending to DJ.");
+    }
+    let Some(library) = library else {
+        return Some("Wait for the music library before sending to DJ.");
+    };
+    if !library.tracks.iter().any(|track| amp_core::show::eligible(playlist, track)) {
+        return Some("No matching songs — choose a Music Source and save.");
+    }
+    None
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DraftCache {
     draft: Settings,
@@ -1230,6 +1266,39 @@ fn source_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dj_handoff_requires_published_matching_sources_and_preserves_other_drafts() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("song.mp3"), b"fixture").unwrap();
+        let library = amp_core::scan(root.path()).unwrap();
+        let mut saved = test_settings();
+        let selected = &mut saved.playlists[0];
+        selected.allowed.clear();
+        selected.restrict_allowed = false;
+        selected.folders.clear();
+        selected.restrict_folders = false;
+        let mut draft = saved.clone();
+        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)), None);
+        draft.playlists.last_mut().unwrap().name = "Keep my other draft".into();
+        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)), None);
+        draft.playlists[0].name = "Unsaved rename".into();
+        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            Some("Save Playlist before sending it to DJ."));
+        draft.playlists[0] = saved.playlists[0].clone();
+        draft.playlists[0].id = "brand-new".into();
+        assert!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)).is_some());
+        saved.playlists.push(draft.playlists[0].clone());
+        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)), None);
+        assert!(dj_handoff_blocker(&draft.playlists[0], &saved, None).is_some());
+        let empty = amp_core::Library { tracks: vec![], tree: library.tree.clone() };
+        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&empty)),
+            Some("No matching songs — choose a Music Source and save."));
+        draft.playlists[0].source_unavailable = true;
+        *saved.playlists.last_mut().unwrap() = draft.playlists[0].clone();
+        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            Some("Reconnect source library before sending to DJ."));
+        assert_eq!(draft.playlists.last().unwrap().name, "Keep my other draft");
+    }
     fn test_settings() -> Settings {
         let mut settings = Settings::default();
         let mut second = settings.playlists[0].clone();
