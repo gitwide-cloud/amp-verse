@@ -1,6 +1,7 @@
 pub mod analysis_worker;
 pub mod config;
 mod hls;
+mod knowledge;
 mod live;
 mod podcasts_web;
 mod radio;
@@ -208,6 +209,7 @@ pub fn router(cast: Arc<Cast>) -> Router {
         .merge(live::routes())
         .merge(recovery::routes())
         .merge(hls::routes())
+        .merge(knowledge::routes())
         .merge(station_control::routes())
         .route("/api/status", get(status))
         .route(

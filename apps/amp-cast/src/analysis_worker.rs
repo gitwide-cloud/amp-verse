@@ -13,6 +13,8 @@ pub struct Progress {
     pub completed: usize,
     pub reused_or_claimed: usize,
     pub failed: usize,
+    pub knowledge_inserted: usize,
+    pub knowledge_error: Option<String>,
     pub workers: usize,
     pub error: Option<String>,
 }
@@ -136,6 +138,12 @@ impl Worker {
                             let _heartbeat = queue.keep_alive(&job);
                             let outcome =
                                 amp_core::library_engine::analyze_job(&host.root, &job.path, false);
+                            let knowledge = match &outcome {
+                                Ok(amp_core::coordination::AnalysisResult::Prepared(prep)) => {
+                                    Some(crate::knowledge::index_preparation(&host, prep))
+                                }
+                                _ => None,
+                            };
                             let result = match &outcome {
                                 Ok(amp_core::coordination::AnalysisResult::Skipped(
                                     amp_core::coordination::Skip::Busy,
@@ -145,6 +153,11 @@ impl Worker {
                             };
                             let mut p = state.progress.lock().unwrap();
                             p.workers = count;
+                            match knowledge {
+                                Some(Ok(inserted)) => p.knowledge_inserted += inserted,
+                                Some(Err(error)) => p.knowledge_error = Some(error),
+                                None => (),
+                            }
                             match outcome {
                                 Ok(amp_core::coordination::AnalysisResult::Prepared(_)) => {
                                     p.completed += 1

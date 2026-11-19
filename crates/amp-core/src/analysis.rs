@@ -8,79 +8,15 @@ use std::{io::Read, path::Path, process::Stdio};
 const RATE: f64 = 11025.;
 const BLOCK: usize = 110;
 const FFT: usize = 4096;
+#[path = "analysis_chroma.rs"]
+mod chroma_engine;
 #[path = "energy_cues.rs"]
 mod energy_cues;
+#[cfg(test)]
 fn chroma(samples: &[f32], sum: &mut [f64; 12]) {
-    let mut re = vec![0.; FFT];
-    let mut im = vec![0.; FFT];
-    for (i, x) in samples.iter().take(FFT).enumerate() {
-        re[i] =
-            *x as f64 * (0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / (FFT - 1) as f64).cos());
-    }
-    let mut j = 0;
-    for i in 1..FFT {
-        let mut bit = FFT >> 1;
-        while j & bit != 0 {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j ^= bit;
-        if i < j {
-            re.swap(i, j);
-            im.swap(i, j);
-        }
-    }
-    let mut size = 2;
-    while size <= FFT {
-        for start in (0..FFT).step_by(size) {
-            for k in 0..size / 2 {
-                let angle = -std::f64::consts::TAU * k as f64 / size as f64;
-                let (c, s) = (angle.cos(), angle.sin());
-                let a = start + k;
-                let b = a + size / 2;
-                let (tr, ti) = (re[b] * c - im[b] * s, re[b] * s + im[b] * c);
-                re[b] = re[a] - tr;
-                im[b] = im[a] - ti;
-                re[a] += tr;
-                im[a] += ti;
-            }
-        }
-        size *= 2;
-    }
-    let power: Vec<_> = (0..FFT / 2)
-        .map(|i| re[i] * re[i] + im[i] * im[i])
-        .collect();
-    let peak = power.iter().copied().fold(0., f64::max);
-    if peak < 1e-8 {
-        return;
-    }
-    for k in 1..FFT / 2 - 1 {
-        // Quadratic interpolation of log power reduces low-note FFT-bin bias.
-        let left = power[k - 1].max(1e-20).ln();
-        let center = power[k].max(1e-20).ln();
-        let right = power[k + 1].max(1e-20).ln();
-        let denominator = left - 2. * center + right;
-        let shift = if denominator.abs() > 1e-12 {
-            (0.5 * (left - right) / denominator).clamp(-0.5, 0.5)
-        } else {
-            0.
-        };
-        let frequency = (k as f64 + shift) * RATE / FFT as f64;
-        if !(65. ..=2500.).contains(&frequency)
-            || power[k] < peak * 0.025
-            || power[k] < power[k - 1]
-            || power[k] < power[k + 1]
-        {
-            continue;
-        }
-        let note = 69. + 12. * (frequency / 440.).log2();
-        if (note - note.round()).abs() > 0.35 {
-            continue;
-        }
-        let pc = (note.round() as i32).rem_euclid(12) as usize;
-        sum[pc] += power[k].sqrt() / frequency.sqrt();
-    }
+    chroma_engine::Analyzer::new().accumulate(samples, sum);
 }
+
 fn correlation(a: &[f64; 12], b: &[f64; 12]) -> f64 {
     let am = a.iter().sum::<f64>() / 12.;
     let bm = b.iter().sum::<f64>() / 12.;
@@ -422,6 +358,7 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
         let mut previous2 = 0.;
         let mut spectral = Vec::new();
         let mut chroma_sum = [0.; 12];
+        let mut chroma = chroma_engine::Analyzer::new();
         let mut total = 0usize;
         loop {
             crate::background::checkpoint();
@@ -467,7 +404,7 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
             rhythmic.push((transient_energy / samples.len() as f64).sqrt());
             spectral.extend(samples);
             if spectral.len() >= FFT {
-                chroma(&spectral[..FFT], &mut chroma_sum);
+                chroma.accumulate(&spectral[..FFT], &mut chroma_sum);
                 spectral.drain(..FFT);
             }
             if n < buffer.len() {
