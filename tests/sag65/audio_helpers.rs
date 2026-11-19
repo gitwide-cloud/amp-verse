@@ -4,7 +4,16 @@ fn fixture(name: &str) -> Vec<[f32;2]> {
     let output=amp_core::command("ffmpeg").args(["-nostdin","-v","error","-i"])
         .arg(root.join("wav").join(name)).args(["-ac","2","-ar","44100","-f","f32le","pipe:1"]).output().unwrap();
     assert!(output.status.success(),"generate tests/sag65 fixtures first");
-    output.stdout.chunks_exact(8).map(|b|[f32::from_le_bytes(b[..4].try_into().unwrap()),f32::from_le_bytes(b[4..].try_into().unwrap())]).collect()
+    let (frames, _) = output.stdout.as_chunks::<8>();
+    frames
+        .iter()
+        .map(|frame| {
+            [
+                f32::from_le_bytes(frame[..4].try_into().unwrap()),
+                f32::from_le_bytes(frame[4..].try_into().unwrap()),
+            ]
+        })
+        .collect()
 }
 fn verify_peak(label:&str,frames:&[[f32;2]]) {
     use std::io::Write;
