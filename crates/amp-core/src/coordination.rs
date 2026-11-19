@@ -1031,6 +1031,99 @@ mod tests {
         ));
     }
     #[test]
+    fn computed_recommendation_survives_publication_without_changing_approved_values() {
+        let root = fixture();
+        let relative = Path::new("song.wav");
+        let audio = root.path().join(relative);
+        let mut manual = crate::Preparation {
+            cue_in: 2.,
+            cue_out: Some(8.),
+            bpm: Some(127.),
+            manual_override: true,
+            ..Default::default()
+        };
+        manual.manual_cues.push(crate::preparation::Cue {
+            id: "my-drop".into(),
+            label: "My drop".into(),
+            seconds: 3.,
+            ..Default::default()
+        });
+        crate::preparation::save(root.path(), relative, &manual).unwrap();
+        let (mut automatic, bytes) = crate::preparation::load_with_revision(&audio).unwrap();
+        let suggestion = crate::Preparation {
+            cue_in: 1.,
+            cue_out: Some(9.),
+            bpm: Some(120.),
+            harmonic_key: Some("8B".into()),
+            analysis: Some(crate::preparation::AnalysisInfo {
+                engine: crate::engine_api::ENGINE_ID.into(),
+                duration: 10.,
+                tempo_confidence: 1.,
+                key_confidence: 1.,
+                reviewed: false,
+            }),
+            ..Default::default()
+        };
+        automatic.extensions.insert(
+            "analysis_recommendation".into(),
+            serde_json::to_value(suggestion).unwrap(),
+        );
+        automatic.extensions.insert(
+            "audio_properties".into(),
+            serde_json::json!({"duration":10.}),
+        );
+        automatic.source_sha256 = Some(crate::preparation::fingerprint(&audio).unwrap());
+        let lease = match Lease::claim(
+            root.path(),
+            relative,
+            crate::engine_api::JOB_TYPE,
+            "worker",
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        {
+            Claimed::Owned(lease) => lease,
+            _ => panic!("expected primary analysis lease"),
+        };
+        lease.stamp(&mut automatic);
+        crate::preparation::publish_claimed(
+            root.path(),
+            relative,
+            &automatic,
+            bytes.as_deref(),
+            &lease,
+        )
+        .unwrap();
+        let saved = crate::preparation::load(&audio).unwrap();
+        assert_eq!(
+            (saved.cue_in, saved.cue_out, saved.bpm),
+            (2., Some(8.), Some(127.))
+        );
+        assert_eq!(saved.manual_cues[0].id, "my-drop");
+        assert!(saved.manual_override);
+        assert!(saved.analysis.is_none());
+        let suggested: crate::Preparation =
+            serde_json::from_value(saved.extensions["analysis_recommendation"].clone()).unwrap();
+        assert_eq!(
+            (suggested.cue_in, suggested.cue_out, suggested.bpm),
+            (1., Some(9.), Some(120.))
+        );
+        assert_eq!(
+            suggested.analysis.unwrap().engine,
+            crate::engine_api::ENGINE_ID
+        );
+        assert_eq!(suggested.source_sha256, saved.source_sha256);
+        assert!(!suggested.manual_override);
+        assert_eq!(
+            saved.extensions["analysis_proposals"]
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(fs::read(audio).unwrap(), b"audio-fixture");
+    }
+    #[test]
     fn playlist_and_smart_rule_conflicts_preserve_both_versions() {
         let root = fixture();
         let path = root.path().join("playlist.json");

@@ -320,6 +320,31 @@ fn save_record(
                 }
             }
         }
+        // The decoder returns a fresh suggestion inside locked preparation.
+        // Stage that computed result rather than reconstructing a suggestion
+        // from the approved top-level values that the decoder deliberately kept.
+        if lease.primary_analysis()
+            && original.get("analysis_recommendation") != base.get("analysis_recommendation")
+            && let Some(suggestion) = original.get("analysis_recommendation")
+        {
+            let suggestion: Preparation =
+                serde_json::from_value(suggestion.clone()).map_err(|e| e.to_string())?;
+            suggestion.validate()?;
+            candidate = serde_json::to_value(suggestion).map_err(|e| e.to_string())?;
+            for key in automatic_fields.iter().filter(|&&key| {
+                !matches!(
+                    key,
+                    "_amp_sync" | "analysis_recommendation" | "analysis_proposals"
+                )
+            }) {
+                if let Some(value) = original.get(*key) {
+                    candidate
+                        .as_object_mut()
+                        .unwrap()
+                        .insert((*key).into(), value.clone());
+                }
+            }
+        }
         for key in ["_amp_sync", "analysis_recommendation", "analysis_proposals"] {
             candidate.as_object_mut().unwrap().remove(key);
         }
