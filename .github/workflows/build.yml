@@ -51,6 +51,9 @@ jobs:
           python tools/setup_lab_youtube.py --dest test-output/lab-tools
       - run: python tools/test_engine_release_metadata.py
       - run: cargo fmt --all --check
+      - name: Verify Windows raw and canonical metadata paths
+        if: runner.os == 'Windows'
+        run: cargo test -p amp-core raw_and_canonical_paths_share_preparation_and_catalog_keys --locked -- --nocapture
       - run: cargo test --workspace --locked
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - name: Test actual deck playback with silent audio device

@@ -271,6 +271,46 @@ fn migrate_file(root: &Path, file: &Path) -> Result<usize, String> {
 mod tests {
     use super::*;
     #[test]
+    fn raw_and_canonical_paths_share_preparation_and_catalog_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::create_dir(root.join("album")).unwrap();
+        let audio = root.join("album/song.wav");
+        fs::write(&audio, b"unchanged audio").unwrap();
+        let preparation = crate::Preparation {
+            cue_in: 3.,
+            manual_override: true,
+            ..Default::default()
+        };
+        crate::preparation::save(root, Path::new("album/song.wav"), &preparation).unwrap();
+        let canonical = audio.canonicalize().unwrap();
+        for path in [&audio, &canonical] {
+            let document = crate::preparation::portable(path);
+            eprintln!(
+                "root={root:?} audio={path:?} owner={:?} document={document:?} location={:?}",
+                root_for(path),
+                crate::catalog_db::location(&document)
+            );
+            eprintln!(
+                "document components={:?}",
+                document.components().collect::<Vec<_>>()
+            );
+        }
+        assert_eq!(crate::preparation::load(&audio).unwrap().cue_in, 3.);
+        assert_eq!(crate::preparation::load(&canonical).unwrap().cue_in, 3.);
+        assert_eq!(crate::catalog_db::compact(root).unwrap(), 1);
+        for path in [&audio, &canonical] {
+            let document = crate::preparation::portable(path);
+            assert_eq!(
+                crate::catalog_db::location(&document).unwrap().1,
+                "tracks/album/song.wav.json"
+            );
+            assert!(crate::catalog_db::read(&document).unwrap().is_some());
+            assert_eq!(crate::preparation::load(path).unwrap().cue_in, 3.);
+        }
+        assert_eq!(fs::read(audio).unwrap(), b"unchanged audio");
+    }
+    #[test]
     fn organize_nested_legacy_records_keeps_identity_cues_and_duplicate_names() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
