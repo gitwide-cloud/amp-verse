@@ -34,6 +34,16 @@ Separate protocol support from codec/container support. Prefer direct play when 
 
 Preserve the completed live master mix, one playback owner per stream, cue privacy, output selection, gain, station/session identity, loop prevention and source provenance when relaying between endpoints. Show measured versus target latency, adaptive quality, queue/buffer state and reconnect status. Receiving playback through a browser may need an explicit user Play gesture; mobile receiving must honor foreground/audio-focus/platform lifecycle requirements. High-performance native AMP transport and compatibility-oriented external-speaker streams can use different negotiated buffer/codec profiles behind one output picker.
 
+## Station hosting and endpoint ownership: owner clarification
+
+Desktop and Android are sending/receiving endpoints. Each installation may own only ONE active Cast session at a time: send OR receive, not simultaneous sending and receiving and not multiple concurrent station hosts. Replacing a session must be explicit and stop/release the old owner; reconnect must not steal a newer session. Ordinary local playback/cue routing must remain clearly distinguished from the Cast session.
+
+Desktop and Android may host LIVE stations only (their currently performed/played audio). Only the server hosts automated stations, for BOTH normal playlists and Smart Playlists. Clients receive those automated stations from the server; syncing/downloading a playlist does not grant the client an automated station-host role. Local playback and DJ use of locally available media remain separate from hosting an automated station.
+
+Normal playlists and Smart Playlists can be created/edited on desktop and Android and automatically synchronize to the server, with edits/renames/order/rules synchronized back to clients. Keep stable IDs, revision/conflict handling and offline outbox replay. The server executes playlist-backed station scheduling and automation. Playlist metadata availability on a client, offline media availability, local DJ playback and automated station hosting are separate capabilities.
+
+Server may host multiple isolated automated stations. Each connected desktop/mobile endpoint still selects just one active sending OR receiving Cast session. Do not enable endpoint relay loops, background client-hosted automated playlist stations or hidden simultaneous sessions. This clarification narrows earlier general statements about universal sending/receiving: both directions are supported as modes, never concurrently on a client installation.
+
 ## Data model
 
 - Library tracks and paths are associations, not the identity of a musical recording. Exact file identity starts with SHA-256; different encodings/retags require separately validated audio-identity mapping before reuse. Artist/title alone is never enough, especially for DJ edits and remixes.
