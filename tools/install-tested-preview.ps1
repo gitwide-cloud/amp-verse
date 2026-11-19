@@ -26,7 +26,7 @@ function Assert-PE([string]$File) {
     } finally { $stream.Dispose() }
 }
 function Verified-Files([string]$Root, $Entries) {
-    $resolved = (Resolve-Path -LiteralPath $Root).Path.TrimEnd('\')
+    $resolved = (Resolve-Path -LiteralPath $Root).ProviderPath.TrimEnd('\')
     $result = @()
     $seen = @{}
     foreach ($entry in $Entries) {
