@@ -89,23 +89,6 @@ impl DiscoveryProvider for AppleDirectory {
             .collect())
     }
 }
-fn plain(text: &str) -> String {
-    let mut inside = false;
-    text.chars()
-        .filter(|c| {
-            if *c == '<' {
-                inside = true;
-                false
-            } else if *c == '>' {
-                inside = false;
-                false
-            } else {
-                !inside
-            }
-        })
-        .take(6000)
-        .collect()
-}
 fn hash(text: &str) -> String {
     format!("{:x}", Sha256::digest(text.as_bytes()))
 }
