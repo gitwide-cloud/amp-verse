@@ -1,6 +1,9 @@
 //! Session-only pair planning. Never edits shared cues, grids or tempo metadata.
 use crate::Preparation;
-pub use amp_dj_policy::{TempoMatch, tempo_distance, tempo_match};
+pub use amp_dj_policy::{
+    FallbackReason, Handoff, RequestedTiming, TempoMatch, TrackTiming, TransitionDecision,
+    TransitionTier, plan_transition, tempo_distance, tempo_match,
+};
 pub fn tail_fade(requested: f32, remaining: Option<f32>) -> f32 {
     amp_dj_policy::tail_fade(f64::from(requested), remaining.map_or(f64::NAN, f64::from)) as f32
 }

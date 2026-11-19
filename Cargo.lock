@@ -99,6 +99,10 @@ dependencies = [
 [[package]]
 name = "amp-dj-policy"
 version = "1.0.22"
+dependencies = [
+ "serde",
+]
+
 
 [[package]]
 name = "amp-engine"

@@ -1,4 +1,6 @@
 //! Device-independent DJ decisions. No codecs, analysis, filesystem or audio devices.
+mod transition;
+pub use transition::*;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TempoMatch {
     pub rate: f64,

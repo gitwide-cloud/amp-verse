@@ -1993,12 +1993,13 @@ impl Player {
                             )
                         )
                     {
-                        let bpm = self
-                            .loaded_track(outgoing)
+                        self.loaded_track(outgoing)
+                            .filter(|t| amp_core::mix_schedule::timing_reliable(&t.preparation))
                             .and_then(|t| t.preparation.bpm)
-                            .unwrap_or(120.)
-                            * (self.deck_rate(outgoing));
-                        Some((chosen.unwrap(), (60. / bpm / 4.).clamp(0.03, 0.25) as f32))
+                            .map(|bpm| {
+                                let bpm = bpm * self.deck_rate(outgoing);
+                                (chosen.unwrap(), (60. / bpm / 4.).clamp(0.03, 0.25) as f32)
+                            })
                     } else {
                         None
                     };
