@@ -18,6 +18,7 @@ async fn start_live(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respon
         let mut station = cast.station.lock().await;
         if let Some(previous) = previous.to_str().ok()
             && station.source == "live_dj"
+            && station.running
             && station.live_resume_from.as_deref() == Some(previous)
             && station.live_token.is_some()
             && station
@@ -29,7 +30,10 @@ async fn start_live(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respon
         }
         let allowed = previous.to_str().ok().is_some_and(|previous| {
             station.source == "live_dj"
-                && station.live_token.as_deref() == Some(previous)
+                && (station.live_token.as_deref() == Some(previous)
+                    || (!station.running
+                        && station.live_token.is_some()
+                        && station.live_resume_from.as_deref() == Some(previous)))
                 && station
                     .live_seen
                     .is_some_and(|seen| seen.elapsed() <= std::time::Duration::from_secs(60))
@@ -169,6 +173,93 @@ mod tests {
     use super::*;
     use axum::http::Request;
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn lost_resume_ack_followed_by_watchdog_expiry_creates_an_active_guarded_owner() {
+        let root = tempfile::tempdir().unwrap();
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        let app = router(cast.clone());
+        async fn start(app: Router, previous: Option<&str>) -> String {
+            let mut request = Request::post("/api/live/start");
+            if let Some(previous) = previous {
+                request = request.header("x-amp-previous-session", previous);
+            }
+            let response = app
+                .oneshot(request.body(Body::empty()).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), 200);
+            let bytes = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["session"]
+                .as_str()
+                .unwrap()
+                .to_owned()
+        }
+        let first = start(app.clone(), None).await;
+        let lost_ack = start(app.clone(), Some(&first)).await;
+        assert_ne!(first, lost_ack);
+        // The producer never learns B's token, and its network remains unavailable
+        // long enough for the real B watchdog to stop that unacknowledged session.
+        cast.station.lock().await.live_seen =
+            Some(std::time::Instant::now() - std::time::Duration::from_secs(9));
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+        while cast.station.lock().await.running {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "live watchdog did not expire"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+        let recovered = start(app.clone(), Some(&first)).await;
+        assert_ne!(recovered, lost_ack, "never acknowledge an inactive session");
+        assert!(cast.station.lock().await.running);
+        // A second lost response must now acknowledge active C without restarting it.
+        assert_eq!(start(app.clone(), Some(&first)).await, recovered);
+        let mut listener = cast.audio.subscribe();
+        let upload = |token: &str| {
+            Request::post("/api/live/audio")
+                .header("x-amp-live-session", token)
+                .header("x-amp-live-sequence", "0")
+                .body(Body::from("current audio"))
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(upload(&lost_ack))
+                .await
+                .unwrap()
+                .status(),
+            409
+        );
+        assert_eq!(
+            app.clone()
+                .oneshot(upload(&recovered))
+                .await
+                .unwrap()
+                .status(),
+            204
+        );
+        assert_eq!(
+            listener.recv().await.unwrap(),
+            Bytes::from_static(b"current audio")
+        );
+        let newer = start(app.clone(), None).await;
+        let old_retry = Request::post("/api/live/start")
+            .header("x-amp-previous-session", &first)
+            .body(Body::empty())
+            .unwrap();
+        assert_eq!(app.oneshot(old_retry).await.unwrap().status(), 409);
+        assert_eq!(
+            cast.station.lock().await.live_token.as_deref(),
+            Some(newer.as_str())
+        );
+        cast.shutdown().await;
+    }
     #[tokio::test]
     async fn guarded_resume_is_idempotent_and_cannot_steal_after_stop_new_owner_or_expiry() {
         let root = tempfile::tempdir().unwrap();
