@@ -7,8 +7,8 @@ android {
         applicationId 'cloud.gitwide.ampverse'
         minSdk 28
         targetSdk 35
-        versionCode 35
-        versionName '0.3.1'
+        versionCode 36
+        versionName '0.3.2'
         ndk { abiFilters 'arm64-v8a' }
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
@@ -36,7 +36,7 @@ android {
             }
         }
     }
-    buildTypes { release { signingConfig signingConfigs.published } }
+    buildTypes { release { if (System.getenv('AMP_ANDROID_KEYSTORE')) signingConfig signingConfigs.published } }
 }
 dependencies {
     testImplementation 'junit:junit:4.13.2'
@@ -46,6 +46,8 @@ dependencies {
     fullImplementation 'dev.ffmpegkit-maintained:ffmpeg-kit-audio:8.1.9'
     fullImplementation 'io.github.junkfood02.youtubedl-android:library:0.18.1'
     implementation 'androidx.media3:media3-exoplayer:1.8.1'
+    implementation 'androidx.media3:media3-exoplayer-hls:1.8.1'
+    implementation 'androidx.media3:media3-datasource-okhttp:1.8.1'
     implementation 'androidx.media3:media3-session:1.8.1'
     androidTestImplementation 'androidx.test.uiautomator:uiautomator:2.3.0'
     androidTestImplementation 'androidx.test:runner:1.6.2'

@@ -25,6 +25,7 @@ final class ProtectedCastSource extends BaseDataSource {
     private final List<String> paths=new CopyOnWriteArrayList<>();
     private ExecutorService workers;
     private volatile boolean closed=true;
+    private volatile long generation;
     private Uri uri;
     private String server,station,epoch;
     private final String listener=UUID.randomUUID().toString();
@@ -55,13 +56,13 @@ final class ProtectedCastSource extends BaseDataSource {
         };}
     }
     @Override public long open(DataSpec spec)throws IOException {
-        transferInitializing(spec);closed=false;workers=Executors.newFixedThreadPool(3);
+        transferInitializing(spec);closed=false;final long selectedGeneration=++generation;workers=Executors.newFixedThreadPool(3);
         boolean resume=spec.uri.equals(uri)&&spec.position==offset&&spec.position>0;
         uri=spec.uri;
         if(!resume){
             paths.clear();pending=new byte[0];at=0;offset=0;
             server=uri.getQueryParameter("server");station=uri.getQueryParameter("station");
-            if(server==null||station==null||server.length()>256||station.length()>256)throw new IOException("Select an AMP Cast station again");
+            if(server==null||station==null||server.length()>256||station.length()>256){close();throw new IOException("Select an AMP Cast station again");}
             try {
                 String primary=new URI(uri.getScheme(),null,uri.getHost(),uri.getPort(),null,null,null).toString();
                 JSONObject manifest=manifest(primary);
@@ -69,19 +70,19 @@ final class ProtectedCastSource extends BaseDataSource {
                 if(epoch.length()>128||sequence<0)throw new IOException("Invalid station audio session");
                 paths.add(primary);report("Protected stream · 1 server link");
                 JSONArray alternatives=manifest.optJSONArray("paths");
-                if(alternatives!=null){final String selectedEpoch=epoch;workers.submit(()->verifyPaths(primary,selectedEpoch,alternatives));}
+                if(alternatives!=null){final String selectedEpoch=epoch;workers.submit(()->verifyPaths(primary,selectedEpoch,selectedGeneration,alternatives));}
             }catch(IOException error){close();throw error;}
             catch(Exception error){close();throw new IOException("Cannot prepare protected station audio",error);}
         }
         transferStarted(spec);started=true;return C.LENGTH_UNSET;
     }
-    private void verifyPaths(String primary,String selectedEpoch,JSONArray alternatives){
-        for(int i=0;i<Math.min(8,alternatives.length())&&!closed&&paths.size()<2;i++){
+    private void verifyPaths(String primary,String selectedEpoch,long selectedGeneration,JSONArray alternatives){
+        for(int i=0;i<Math.min(8,alternatives.length())&&!closed&&selectedGeneration==generation&&paths.size()<2;i++){
             String candidate=alternatives.optString(i);
             if(candidate.equals(primary)||!safeAlternative(primary,candidate))continue;
             try {
                 JSONObject value=manifest(candidate);
-                if(!closed&&selectedEpoch.equals(epoch)&&selectedEpoch.equals(value.optString("epoch"))){paths.add(candidate);report("DualPath protected · 2 server links");}
+                if(!closed&&selectedGeneration==generation&&selectedEpoch.equals(epoch)&&selectedEpoch.equals(value.optString("epoch"))){paths.add(candidate);report("DualPath protected · 2 server links");}
             }catch(Exception ignored){/* A down secondary must never interrupt the primary. */}
         }
     }
@@ -94,7 +95,8 @@ final class ProtectedCastSource extends BaseDataSource {
         }catch(Exception error){return false;}
     }
     private JSONObject manifest(String base)throws Exception {
-        try(Response response=execute(request(base+"/api/audio/manifest"))){
+        try(Reply reply=execute(request(base+"/api/audio/manifest"),null)){
+            Response response=reply.response;
             if(response.code()!=200)throw new IOException("Station is preparing audio (HTTP "+response.code()+")");
             JSONObject value=new JSONObject(new String(body(response,16384),java.nio.charset.StandardCharsets.UTF_8));
             if(value.optInt("protocol")!=1||!server.equals(value.optString("server_id"))||!station.equals(value.optString("station_id")))throw new IOException("Station identity changed; reconnect to the station");
@@ -102,10 +104,16 @@ final class ProtectedCastSource extends BaseDataSource {
         }
     }
     private Request request(String url){return new Request.Builder().url(url).header("x-amp-server",server).header("x-amp-station",station).header("x-amp-listener",listener).build();}
-    private Response execute(Request request)throws IOException {
+    private final class Reply implements AutoCloseable {
+        final Call call;final Response response;final Set<Call> group;
+        Reply(Call call,Response response,Set<Call> group){this.call=call;this.response=response;this.group=group;}
+        @Override public void close(){response.close();calls.remove(call);if(group!=null)group.remove(call);}
+    }
+    private Reply execute(Request request,Set<Call> group)throws IOException {
         if(closed)throw new InterruptedIOException("Listening stopped");
-        Call call=HTTP.newCall(request);calls.add(call);
-        try{return call.execute();}finally{calls.remove(call);}
+        Call call=HTTP.newCall(request);calls.add(call);if(group!=null)group.add(call);
+        try {if(closed){call.cancel();throw new InterruptedIOException("Listening stopped");}return new Reply(call,call.execute(),group);}
+        catch(IOException|RuntimeException error){calls.remove(call);if(group!=null)group.remove(call);throw error;}
     }
     private static byte[] body(Response response,int limit)throws IOException {
         if(response.body()==null)throw new IOException("Missing audio response");
@@ -123,24 +131,28 @@ final class ProtectedCastSource extends BaseDataSource {
             if(bytes.length==0||!digest.toString().equals(hash))throw new IOException("Station audio checksum failed");
         }catch(java.security.GeneralSecurityException error){throw new IOException(error);}
     }
-    private byte[] fetch(String base,long wanted)throws IOException {
-        String url=base+"/api/audio/chunks/"+wanted+"?epoch="+Uri.encode(epoch);
-        try(Response response=execute(request(url))){
+    private byte[] fetch(String base,long wanted,String selectedEpoch,long selectedGeneration,Set<Call> group)throws IOException {
+        String url=base+"/api/audio/chunks/"+wanted+"?epoch="+Uri.encode(selectedEpoch);
+        try(Reply reply=execute(request(url),group)){
+            Response response=reply.response;
+            if(closed||generation!=selectedGeneration)throw new InterruptedIOException("Listening stopped");
             if(response.code()==204)return null;
             if(response.code()==409||response.code()==410)throw new Reset("Station changed or connection exceeded its recovery window");
             if(response.code()!=200)throw new IOException("Audio link HTTP "+response.code());
             byte[] bytes=body(response,65536);
-            validate(bytes,wanted,epoch,response.header("x-amp-sequence"),response.header("x-amp-epoch"),response.header("x-amp-sha256"));
+            if(closed||generation!=selectedGeneration)throw new InterruptedIOException("Listening stopped");
+            validate(bytes,wanted,selectedEpoch,response.header("x-amp-sequence"),response.header("x-amp-epoch"),response.header("x-amp-sha256"));
             return bytes;
         }
     }
     private byte[] next()throws IOException {
-        long until=android.os.SystemClock.elapsedRealtime()+30000;
+        long until=android.os.SystemClock.elapsedRealtime()+4000;
         while(!closed){
             CompletionService<byte[]> complete=new ExecutorCompletionService<>(workers);
             List<Future<byte[]>> attempts=new ArrayList<>();
-            final long wanted=sequence;
-            for(String path:paths)attempts.add(complete.submit(()->fetch(path,wanted)));
+            final long wanted=sequence,selectedGeneration=generation;final String selectedEpoch=epoch;
+            Set<Call> group=ConcurrentHashMap.newKeySet();
+            for(String path:paths)attempts.add(complete.submit(()->fetch(path,wanted,selectedEpoch,selectedGeneration,group)));
             Reset reset=null;
             try {
                 for(int i=0;i<attempts.size();i++){
@@ -151,7 +163,7 @@ final class ProtectedCastSource extends BaseDataSource {
                 }
             }catch(InterruptedException error){Thread.currentThread().interrupt();throw new InterruptedIOException("Listening interrupted");}
             catch(CancellationException error){throw new InterruptedIOException("Listening stopped");}
-            finally{for(Future<byte[]> attempt:attempts)attempt.cancel(true);}
+            finally{for(Call call:group)call.cancel();for(Future<byte[]> attempt:attempts)attempt.cancel(true);}
             if(reset!=null)throw reset;
             if(android.os.SystemClock.elapsedRealtime()>=until)throw new IOException("Station connection unavailable; reconnecting");
             try{Thread.sleep(75);}catch(InterruptedException error){Thread.currentThread().interrupt();throw new InterruptedIOException();}
@@ -165,5 +177,5 @@ final class ProtectedCastSource extends BaseDataSource {
         int count=Math.min(length,pending.length-at);System.arraycopy(pending,at,buffer,start,count);at+=count;offset+=count;bytesTransferred(count);return count;
     }
     @Override public Uri getUri(){return uri;}
-    @Override public void close(){closed=true;if(listener.equals(statusOwner))connectionStatus="";for(Call call:calls)call.cancel();if(workers!=null)workers.shutdownNow();if(started){started=false;transferEnded();}}
+    @Override public void close(){closed=true;generation++;if(listener.equals(statusOwner))connectionStatus="";for(Call call:calls)call.cancel();if(workers!=null)workers.shutdownNow();if(started){started=false;transferEnded();}}
 }

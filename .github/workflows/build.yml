@@ -5,6 +5,11 @@ on:
     tags: ['v*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      android_preview:
+        description: Build unsigned Android preview artifacts for local signing (no release publication)
+        type: boolean
+        default: false
 permissions:
   contents: read
 jobs:
@@ -55,7 +60,11 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p amp-core raw_and_canonical_paths_share_preparation_and_catalog_keys --locked -- --nocapture
       - run: cargo test --workspace --locked
+      - name: Verify supervised live sender recovers after a five-second outage
+        run: cargo test -p amp-player --bin amp-player live_mix::tests::supervised_sender_recovers_current_pcm_after_five_second_transport_outage --locked -- --ignored --test-threads=1
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      - name: Verify adaptive LAN audio with real codecs and lifecycle recovery
+        run: cargo test -p amp-cast --lib hls::tests --locked -- --include-ignored --test-threads=1
       - name: Test actual deck playback with silent audio device
         if: runner.os == 'Linux'
         env:
@@ -188,6 +197,47 @@ jobs:
         with:
           name: ampverse-companion
           path: integrations/companion/*.tgz
+
+  android-preview:
+    if: github.event_name == 'workflow_dispatch' && inputs.android_preview
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.0.12077973
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Verify and assemble unsigned release previews
+        run: |
+          test -z "$AMP_ANDROID_KEYSTORE" || { echo 'Preview job must not receive a private signing key.'; exit 1; }
+          gradle -p android :app:assembleLiteRelease :app:assembleFullRelease :app:testFullReleaseUnitTest :app:lintFullRelease :app:lintLiteRelease :app:assembleFullDebugAndroidTest :amp-dj:assembleRelease :amp-dj:lintRelease :amp-lab:assembleRelease :amp-lab:lintRelease :amp-cast:assembleRelease :amp-cast:lintRelease :amp-podcasts:assembleRelease :amp-podcasts:lintRelease :amp-remote:assembleRelease :amp-remote:lintRelease
+      - name: Package unsigned APKs and official local-signing tool
+        run: python android/tools/package_unsigned.py --destination android-preview-dist
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amp-verse-android-unsigned-${{ github.sha }}
+          path: android-preview-dist/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-preview-test-reports-${{ github.sha }}
+          path: |
+            android/app/build/reports/
+            android/app/build/outputs/androidTest-results/
+            android/app/build/outputs/apk/androidTest/
+            android/modules/*/build/reports/
 
   android-release:
     if: startsWith(github.ref, 'refs/tags/v')

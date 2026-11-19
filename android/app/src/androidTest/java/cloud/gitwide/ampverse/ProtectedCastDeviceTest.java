@@ -25,7 +25,8 @@ public final class ProtectedCastDeviceTest {
         final ExecutorService clients=Executors.newCachedThreadPool();
         final AtomicInteger chunks=new AtomicInteger();
         final Thread thread;
-        volatile boolean closed,broken,wrongStation;
+        volatile boolean closed,broken,wrongStation,stallBody;
+        final CountDownLatch bodyStarted=new CountDownLatch(1),releaseBody=new CountDownLatch(1);
         volatile String alternate;
         Link()throws Exception{thread=new Thread(()->{while(!closed)try{Socket socket=server.accept();clients.submit(()->reply(socket));}catch(IOException ignored){}});thread.start();}
         String base(){return "http://127.0.0.1:"+server.getLocalPort();}
@@ -42,9 +43,9 @@ public final class ProtectedCastDeviceTest {
                 body=AUDIO[index];int reported=broken&&index==1?0:index;
                 extra="X-Amp-Epoch: epoch\r\nX-Amp-Sequence: "+reported+"\r\nX-Amp-Sha256: "+hash(body)+"\r\n";
             }
-            OutputStream output=connection.getOutputStream();output.write(("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: "+body.length+"\r\n"+extra+"\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));output.write(body);output.flush();
+            OutputStream output=connection.getOutputStream();output.write(("HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: "+body.length+"\r\n"+extra+"\r\n").getBytes(java.nio.charset.StandardCharsets.US_ASCII));if(stallBody&&path.startsWith("/api/audio/chunks/")){output.write(body,0,32);output.flush();bodyStarted.countDown();releaseBody.await(5,TimeUnit.SECONDS);}else{output.write(body);output.flush();}
         }catch(Exception ignored){}}
-        public void close()throws Exception{closed=true;server.close();clients.shutdownNow();thread.join(2000);}
+        public void close()throws Exception{closed=true;releaseBody.countDown();server.close();clients.shutdownNow();thread.join(2000);}
     }
     @Test public void secondary_recovers_primary_loss_and_duplicate_wrong_sequence_is_never_played()throws Exception {
         try(Link primary=new Link();Link secondary=new Link()){
@@ -57,6 +58,17 @@ public final class ProtectedCastDeviceTest {
                 for(int i=0;i<3;i++)assertArrayEquals(AUDIO[i],Arrays.copyOfRange(output,i*8192,(i+1)*8192));
                 assertTrue("Backup must supply lost/corrupt chunks",secondary.chunks.get()>0);
             }finally{source.close();}
+        }
+    }
+    @Test public void stoppingCancelsAnAlreadyStartedAudioBody()throws Exception {
+        try(Link link=new Link()){
+            link.stallBody=true;ProtectedCastSource source=new ProtectedCastSource();ExecutorService reader=Executors.newSingleThreadExecutor();
+            try{
+                source.open(new DataSpec(Uri.parse(link.base()+"/amp-protected.mp3?server=server&station=station")));
+                Future<Boolean> stopped=reader.submit(()->{try{source.read(new byte[8192],0,8192);return false;}catch(IOException expected){return true;}});
+                assertTrue("Body must already be reading",link.bodyStarted.await(2,TimeUnit.SECONDS));
+                source.close();assertTrue("Stop must cancel body reads promptly",stopped.get(1,TimeUnit.SECONDS));
+            }finally{source.close();reader.shutdownNow();}
         }
     }
     @Test public void identity_and_checksum_validation_reject_wrong_audio()throws Exception {

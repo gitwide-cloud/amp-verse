@@ -5,7 +5,7 @@ android {
     defaultConfig {
         applicationId "cloud.gitwide.ampverse.${ampModule}"
         minSdk 28; targetSdk 35
-        versionCode 35; versionName '0.3.1'
+        versionCode 36; versionName '0.3.2'
         buildConfigField 'String', 'MODULE', '"'+ampModule+'"'
         ndk { abiFilters 'arm64-v8a' }
     }
@@ -16,8 +16,8 @@ android {
         java.srcDirs += ['../../companion/java','../../app/src/main/java',"../../features/${ampModule}/java"]
         java.includes = ['**/CompanionActivity.java','**/ModuleRpc.java','**/FeatureScreen.java','**/Appearance.java','**/Chrome.java','**/UiSections.java']
         if(ampModule == 'lab') java.includes += ['**/lab/*.java']
-        if(ampModule == 'remote') java.includes += ['**/RemotePanel.java','**/ControlDiscovery.java','**/CastDiscovery.java','**/CastClient.java','**/ProtectedCastSource.java']
-        if(ampModule == 'cast') java.includes += ['**/CastClient.java','**/CastDiscovery.java','**/ProtectedCastSource.java','**/GoogleCastActivity.java','**/GoogleCastOptions.java']
+        if(ampModule == 'remote') java.includes += ['**/RemotePanel.java','**/ControlDiscovery.java','**/CastDiscovery.java','**/CastClient.java','**/StationAudioStatus.java','**/ProtectedCastSource.java']
+        if(ampModule == 'cast') java.includes += ['**/CastClient.java','**/StationAudioStatus.java','**/CastDiscovery.java','**/ProtectedCastSource.java','**/GoogleCastActivity.java','**/GoogleCastOptions.java']
         if(ampModule == 'podcasts') java.includes += ['**/PodcastsPanel.java']
         res.srcDirs += ['../../app/src/main/res']
         if(ampModule == 'lab') res.srcDirs += ['../../features/lab/res']
@@ -30,7 +30,7 @@ android {
             storePassword System.getenv('AMP_ANDROID_STORE_PASSWORD');keyAlias System.getenv('AMP_ANDROID_KEY_ALIAS');keyPassword System.getenv('AMP_ANDROID_KEY_PASSWORD')
         }
     }}
-    buildTypes { release { signingConfig signingConfigs.published } }
+    buildTypes { release { if (System.getenv('AMP_ANDROID_KEYSTORE')) signingConfig signingConfigs.published } }
 }
 dependencies {
     implementation 'androidx.appcompat:appcompat:1.7.1'

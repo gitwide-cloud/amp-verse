@@ -11,6 +11,7 @@ final class CastClient {
     private final String password;
     private String serverId="",stationId="";
     private boolean protectedAudio;
+    private boolean adaptiveAudio;
     CastClient(String address,String password)throws Exception {
         String input=address.trim();
         if(!input.contains("://"))input="http://"+input;
@@ -23,7 +24,8 @@ final class CastClient {
         JSONObject status=get("/api/status");
         String server=status.optString("server_id"),station=status.optString("station_id");
         if(server.isEmpty()||station.isEmpty())throw new IOException("This server needs an AMP Cast update before phone control is available");
-        serverId=server;stationId=station;protectedAudio=status.optJSONObject("capabilities")!=null&&status.getJSONObject("capabilities").optInt("reliable_audio")>=1;return status;
+        serverId=server;stationId=station;protectedAudio=status.optJSONObject("capabilities")!=null&&status.getJSONObject("capabilities").optInt("reliable_audio")>=1;
+        adaptiveAudio="/api/audio/hls/master.m3u8".equals(status.optString("hls_url"));return status;
     }
     JSONObject status()throws Exception {
         JSONObject status=get("/api/status");
@@ -36,9 +38,9 @@ final class CastClient {
         request(start?"/api/start":"/api/stop",true);
     }
     void playPlaylist(String id)throws Exception { if(id==null||id.isEmpty()||id.length()>512)throw new IOException("Invalid playlist"); request("/api/smart/playlists/"+android.net.Uri.encode(id)+"/play",true); }
-    String protection(){String active=ProtectedCastSource.status(serverId,stationId);return protectedAudio?(active.isEmpty()?"Phone recovery buffer ready":active):"Legacy stream · update server for recovery protection";}
+    String protection(){String active=ProtectedCastSource.status(serverId,stationId);String adaptive=StationAudioStatus.get(serverId,stationId);if(adaptiveAudio)return adaptive.isEmpty()?"Adaptive AAC · automatic quality":adaptive;return protectedAudio?(active.isEmpty()?"Phone recovery buffer ready":active):"Legacy stream · update server for recovery protection";}
     String stream(){return base+"/listen.mp3";}
-    String phoneStream(){return protectedAudio?base+"/amp-protected.mp3?server="+android.net.Uri.encode(serverId)+"&station="+android.net.Uri.encode(stationId):stream();}
+    String phoneStream(){if(adaptiveAudio)return base+"/api/audio/hls/master.m3u8?server="+android.net.Uri.encode(serverId)+"&station="+android.net.Uri.encode(stationId);return protectedAudio?base+"/amp-protected.mp3?server="+android.net.Uri.encode(serverId)+"&station="+android.net.Uri.encode(stationId):stream();}
     void download(int id,java.io.File file,long expected,String checksum)throws Exception {
         download(id,file,expected,checksum,()->false);
     }
