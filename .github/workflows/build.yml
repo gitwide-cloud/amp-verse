@@ -144,6 +144,12 @@ jobs:
         with:
           name: ${{ matrix.artifact }}-v${{ steps.package_version.outputs.version }}
           path: dist/
+      - name: Include tested preview installer
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          cp tools/install-tested-preview.ps1 tools/launch-tested-preview.ps1 dist/
+          cp docs/tested-preview-install.md dist/
       - name: Package optional analysis add-on
         shell: bash
         run: |

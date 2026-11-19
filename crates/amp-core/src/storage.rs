@@ -17,15 +17,19 @@ pub fn register(root: &Path) {
     }
 }
 pub fn root_for(audio: &Path) -> PathBuf {
-    if let Ok(roots) = roots().lock()
-        && let Some(root) = roots
+    let registered = roots().lock().ok().and_then(|roots| {
+        roots
             .iter()
-            .filter(|r| audio.starts_with(r))
-            .max_by_key(|r| r.components().count())
-    {
-        return root.clone();
-    }
+            .filter(|root| audio.starts_with(root))
+            .max_by_key(|root| root.components().count())
+            .cloned()
+    });
+    // An independently identified nested library stays its own metadata owner,
+    // including after a staged download is renamed inside a registered library.
     for parent in audio.ancestors().skip(1) {
+        if registered.as_deref() == Some(parent) {
+            return parent.into();
+        }
         if parent.join("ampdj/library.json").is_file()
             || parent.join(".ampverse/library.json").is_file()
         {
@@ -33,8 +37,9 @@ pub fn root_for(audio: &Path) -> PathBuf {
             return parent.into();
         }
     }
-    audio.parent().unwrap_or(Path::new(".")).into()
+    registered.unwrap_or_else(|| audio.parent().unwrap_or(Path::new(".")).into())
 }
+
 pub fn enroll(root: &Path) -> Result<(), String> {
     let root = root.canonicalize().map_err(|e| e.to_string())?;
     register(&root);
@@ -271,6 +276,35 @@ fn migrate_file(root: &Path, file: &Path) -> Result<usize, String> {
 mod tests {
     use super::*;
     #[test]
+    fn nested_library_identity_beats_cached_parent_after_rename() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::coordination::library_id(root).unwrap();
+        let stage = root.join("stage");
+        fs::create_dir(&stage).unwrap();
+        let identity = crate::coordination::library_id(&stage).unwrap();
+        fs::write(stage.join("song.wav"), b"unchanged audio").unwrap();
+        crate::preparation::save(
+            &stage,
+            Path::new("song.wav"),
+            &crate::Preparation {
+                cue_in: 3.,
+                manual_override: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let moved = root.join("download");
+        fs::rename(stage, &moved).unwrap();
+        let audio = moved.join("song.wav");
+        assert_eq!(root_for(&audio), moved);
+        assert_eq!(crate::coordination::library_id(&moved).unwrap(), identity);
+        assert_eq!(crate::preparation::load(&audio).unwrap().cue_in, 3.);
+        assert!(crate::preparation::portable(&audio).starts_with(moved.join("ampdj/tracks")));
+        assert!(!root.join("ampdj/tracks/stage/song.wav.json").exists());
+        assert_eq!(fs::read(audio).unwrap(), b"unchanged audio");
+    }
+    #[test]
     fn raw_and_canonical_paths_share_preparation_and_catalog_keys() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path();
@@ -284,18 +318,10 @@ mod tests {
         };
         crate::preparation::save(root, Path::new("album/song.wav"), &preparation).unwrap();
         let canonical = audio.canonicalize().unwrap();
-        for path in [&audio, &canonical] {
-            let document = crate::preparation::portable(path);
-            eprintln!(
-                "root={root:?} audio={path:?} owner={:?} document={document:?} location={:?}",
-                root_for(path),
-                crate::catalog_db::location(&document)
-            );
-            eprintln!(
-                "document components={:?}",
-                document.components().collect::<Vec<_>>()
-            );
-        }
+        // Simulate another library lookup caching the noncanonical temp parent.
+        // On Windows this can use RUNNER~1 while canonical audio uses runneradmin.
+        register(root.parent().unwrap());
+        assert_eq!(root_for(&audio), root);
         assert_eq!(crate::preparation::load(&audio).unwrap().cue_in, 3.);
         assert_eq!(crate::preparation::load(&canonical).unwrap().cue_in, 3.);
         assert_eq!(crate::catalog_db::compact(root).unwrap(), 1);
