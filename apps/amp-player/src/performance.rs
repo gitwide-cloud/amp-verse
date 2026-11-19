@@ -69,7 +69,7 @@ pub struct Run {
     effect_bridge: Option<EffectBridge>,
     effect_done: Option<Instant>,
     pub choice: String,
-    pub transition_trace: Option<String>,
+    pub transition_trace: Option<amp_core::transition_plan::TransitionDecision>,
     pub profile: Option<show::SmartPlaylist>,
     pub settings: show::Settings,
     pub playlist: Option<String>,
@@ -357,13 +357,19 @@ impl Player {
         let matched = self
             .loaded_track(outgoing)
             .zip(self.loaded_track(incoming))
-            .filter(|(a, b)| {
-                amp_core::mix_schedule::timing_reliable(&a.preparation)
-                    && amp_core::mix_schedule::timing_reliable(&b.preparation)
-            })
-            .and_then(|(a, b)| a.preparation.bpm.zip(b.preparation.bpm))
             .and_then(|(a, b)| {
-                amp_core::transition_plan::tempo_match(a, self.deck_rate(outgoing), b, 0.16)
+                use amp_core::transition_plan::*;
+                plan_transition(
+                    timing_snapshot(&a.preparation, false),
+                    timing_snapshot(&b.preparation, false),
+                    RequestedTiming::Tempo,
+                    Handoff::Fade,
+                    self.deck_rate(outgoing),
+                    0.16,
+                    3.,
+                    f64::NAN,
+                )
+                .tempo
             });
         if let Some(plan) = matched
             && let Some(audio) = &self.audio
@@ -483,6 +489,24 @@ impl Player {
                     - 2. * self.fade_seconds as f64
             })
             .unwrap_or(self.run.transitions.mashup_beats as f64 * 60. / (out.bpm? * out_rate));
+        let profile = next
+            .extensions
+            .get("vocal_profile")
+            .and_then(|v| {
+                serde_json::from_value::<amp_core::vocal_profile::VocalProfile>(v.clone()).ok()
+            })
+            .or_else(|| {
+                amp_core::resolve(&self.root, &self.loaded_track(incoming)?.path)
+                    .ok()
+                    .and_then(|path| crate::stems::vocal_profile(&path))
+            })?;
+        if !profile.active(
+            audio.source_position(incoming) + self.fade_seconds as f64 * in_rate,
+            hold * in_rate,
+            0.25,
+        ) {
+            return None;
+        }
         (hold.is_finite() && (0.1..=120.).contains(&hold)).then_some((grid, hold as f32))
     }
     fn call_track(
@@ -1181,6 +1205,7 @@ impl Player {
                     return Err("Effect frequency must be 2–12 mixes".into());
                 }
                 let settings = crate::transition_styles::Settings {
+                    tempo_recovery: self.run.transitions.tempo_recovery,
                     enabled,
                     pace: self.run.transitions.pace,
                     timing: self.run.transitions.timing,
@@ -1566,6 +1591,7 @@ impl Player {
                 if self.run.transition.is_some() {
                     self.run.progression = None;
                     self.run.planned_progression = Some(show::EnergyPlan {
+                        arc: show::ArcShape::Linear,
                         target,
                         transitions,
                         hold,
@@ -1829,7 +1855,9 @@ impl Player {
             && let Some(plan) = self.run.planned_progression.take()
         {
             self.run.progression =
-                show::Progression::new(start, plan.target, plan.transitions, plan.hold).ok();
+                show::Progression::new(start, plan.target, plan.transitions, plan.hold)
+                    .and_then(|p| p.with_arc(plan.arc))
+                    .ok();
         }
         self.run.active = self.active_deck();
         if let Some((incoming, started)) = self.run.pending {
@@ -2045,6 +2073,60 @@ impl Player {
                         || amp_core::transition_plan::tail_fade(self.fade_seconds, remaining),
                         |(_, seconds)| seconds,
                     );
+                    let seconds = self
+                        .loaded_track(outgoing)
+                        .zip(self.loaded_track(incoming))
+                        .map_or(seconds, |(out, next)| {
+                            let confidence = |p: &amp_core::Preparation| {
+                                if p.manual_override
+                                    || p.analysis.as_ref().is_some_and(|a| a.reviewed)
+                                {
+                                    1.
+                                } else {
+                                    p.analysis.as_ref().map_or(0., |a| a.key_confidence)
+                                }
+                            };
+                            let key = |p: &amp_core::Preparation| {
+                                amp_core::transition_plan::key_code(
+                                    p.harmonic_key.as_deref().unwrap_or(""),
+                                )
+                            };
+                            let clash = amp_core::transition_plan::harmonic_cost(
+                                key(&out.preparation),
+                                key(&next.preparation),
+                                confidence(&out.preparation),
+                                confidence(&next.preparation),
+                                self.deck_rate(outgoing),
+                                self.deck_rate(incoming),
+                                a.controls.key_lock[outgoing].load(Relaxed),
+                                a.controls.key_lock[incoming].load(Relaxed),
+                            ) >= 1.8;
+                            if clash { seconds.min(4.) } else { seconds }
+                        });
+                    let dual_vocals = self
+                        .loaded_track(outgoing)
+                        .zip(self.loaded_track(incoming))
+                        .is_some_and(|(out, next)| {
+                            let active = |p: &amp_core::Preparation, start| {
+                                p.extensions
+                                    .get("vocal_profile")
+                                    .and_then(|v| {
+                                        serde_json::from_value::<
+                                            amp_core::vocal_profile::VocalProfile,
+                                        >(v.clone())
+                                        .ok()
+                                    })
+                                    .is_some_and(|v| v.active(start, seconds as f64, 0.45))
+                            };
+                            !a.controls.stems_loaded[outgoing].load(Relaxed)
+                                && active(&out.preparation, a.source_position(outgoing))
+                                && active(&next.preparation, a.source_position(incoming))
+                        });
+                    let seconds = if dual_vocals {
+                        seconds.min(4.)
+                    } else {
+                        seconds
+                    };
                     let grid = self
                         .loaded_track(outgoing)
                         .zip(self.loaded_track(incoming))
@@ -2084,6 +2166,9 @@ impl Player {
                                 Handoff::Fade => 0,
                             });
                         }
+                    }
+                    if dual_vocals {
+                        a.set_handoff_mode(3);
                     }
                     let result = if let Some((build_grid, _)) = build_plan {
                         self.status =
@@ -2163,9 +2248,7 @@ impl Player {
                     };
                     match result {
                         Ok(()) => {
-                            self.run.transition_trace = decision
-                                .as_ref()
-                                .map(|d| format!("{:?}: {:?}", d.tier, d.fallback_reasons));
+                            self.run.transition_trace = decision.clone();
                             self.run.force_mashup = false;
                             if chosen == Some(crate::transition_styles::Style::Mashup)
                                 && mashup_plan.is_none()
@@ -2338,6 +2421,13 @@ impl Player {
         }
     }
     fn complete_change(&mut self, incoming: usize) {
+        if self.run.auto
+            && self.run.transitions.tempo_recovery
+            && let Some(audio) = &self.audio
+        {
+            audio.controls.tempo_recovery[incoming].store(true, Relaxed);
+        }
+
         if let Some(audio) = &self.audio {
             self.run.cancel_effects(audio);
         }
@@ -2352,7 +2442,7 @@ impl Player {
             p.completed += 1;
             if p.remaining() == 0 {
                 if p.hold {
-                    self.run.target = Some(p.target);
+                    self.run.target = Some(p.next());
                 }
                 self.run.progression = None;
             }
@@ -2379,7 +2469,7 @@ impl Player {
         let tracks:Vec<_>=(0..6).map(|d|{
             let engine_loaded=a.is_some_and(|a|a.load_current(d)&&a.loaded(d));let t=self.loaded_track(d);
             let playing=engine_loaded&&a.is_some_and(|a|a.playing(d));
-            json!({"deck":crate::deck_rack::NAMES[d],"key_lock":a.is_some_and(|a|a.controls.key_lock[d].load(Relaxed)),"key_lock_available":a.is_some_and(|a|a.controls.key_lock_available[d].load(Relaxed)),"stem_levels":std::array::from_fn::<_,3,_>(|i|a.map_or(1.,|a|f32::from_bits(a.controls.stem_level[d][i].load(Relaxed)))),"stems_ready":a.is_some_and(|a|a.controls.stems_loaded[d].load(Relaxed)),"sync":a.is_some_and(|a|a.controls.synced[d].load(Relaxed)),"looping":a.is_some_and(|a|a.controls.looping[d].load(Relaxed)),"gain":a.map_or(0.,|a|a.channel_level(d)),"underruns":a.map_or(0,|a|a.controls.underruns[d].load(Relaxed)),"loaded":engine_loaded,"ready":engine_loaded&&a.is_some_and(|a|a.controls.ready[d].load(Relaxed)),"playing":playing,"state":if playing{"playing"}else if engine_loaded{"paused"}else{"stopped"},"song_id":if engine_loaded{t.map(show::song_id)}else{None},"title":if engine_loaded{t.map(|t|t.title.as_str())}else{None},"artist":if engine_loaded{t.and_then(|t|t.preparation.extensions.get("artist")).cloned()}else{None},"position":if engine_loaded{a.map(|a|a.source_position(d))}else{None},"remaining":if engine_loaded{a.and_then(|a|a.remaining(d)).or_else(||t.and_then(|t|t.preparation.extensions.get("duration_seconds")).and_then(|v|v.as_f64()).map(|duration|(duration-a.map_or(0.,|a|a.source_position(d))).max(0.) as f32))}else{None}})
+            json!({"transition_decision": self.run.transition_trace.as_ref(),"deck":crate::deck_rack::NAMES[d],"key_lock":a.is_some_and(|a|a.controls.key_lock[d].load(Relaxed)),"key_lock_available":a.is_some_and(|a|a.controls.key_lock_available[d].load(Relaxed)),"stem_levels":std::array::from_fn::<_,3,_>(|i|a.map_or(1.,|a|f32::from_bits(a.controls.stem_level[d][i].load(Relaxed)))),"stems_ready":a.is_some_and(|a|a.controls.stems_loaded[d].load(Relaxed)),"sync":a.is_some_and(|a|a.controls.synced[d].load(Relaxed)),"looping":a.is_some_and(|a|a.controls.looping[d].load(Relaxed)),"gain":a.map_or(0.,|a|a.channel_level(d)),"underruns":a.map_or(0,|a|a.controls.underruns[d].load(Relaxed)),"loaded":engine_loaded,"ready":engine_loaded&&a.is_some_and(|a|a.controls.ready[d].load(Relaxed)),"playing":playing,"state":if playing{"playing"}else if engine_loaded{"paused"}else{"stopped"},"song_id":if engine_loaded{t.map(show::song_id)}else{None},"title":if engine_loaded{t.map(|t|t.title.as_str())}else{None},"artist":if engine_loaded{t.and_then(|t|t.preparation.extensions.get("artist")).cloned()}else{None},"position":if engine_loaded{a.map(|a|a.source_position(d))}else{None},"remaining":if engine_loaded{a.and_then(|a|a.remaining(d)).or_else(||t.and_then(|t|t.preparation.extensions.get("duration_seconds")).and_then(|v|v.as_f64()).map(|duration|(duration-a.map_or(0.,|a|a.source_position(d))).max(0.) as f32))}else{None}})
         }).collect();
         let fading = a.is_some_and(|a| a.fading() || a.controls.level_fading.load(Relaxed));
         json!({"version":1,"amp":{"playback_owner":self.playback_owner,"preparation_paused":crate::preparation_speed::paused(),"preparation_throttled":crate::preparation_speed::throttled(),"preparation_playback_policy":crate::preparation_speed::policy().label(),"preparation_speed":crate::preparation_speed::mode().label(),"connected":true,"status":self.status,"playback_state":tracks[active]["state"],"recognition_context":self.run.recognition_context,"current_song":tracks[active]["title"],"current_artist":tracks[active]["artist"],"current_cue":if tracks[active]["loaded"]==true{self.loaded_track(active).and_then(|t|a.and_then(|a|t.preparation.manual_cues.iter().chain(&t.preparation.cues).find(|c|(c.seconds-(a.source_position(active)-a.position(active))).abs()<0.001).map(|c|c.id.clone())))}else{None},"active_deck":if active.is_multiple_of(2){"A"}else{"B"},"next_song":self.run.preloaded.and_then(|(_,i)|self.library.as_ref()?.tracks.get(i)).map(|t|t.title.clone()),"remaining_time":tracks[active]["remaining"],"playlist":self.run.playlist,"mix_style":self.run.style,"target_energy":self.run.progression.as_ref().map(|p|p.target).or(self.run.planned_progression.as_ref().map(|p|p.target)).or(self.run.target),"current_energy":self.current_energy(),"progression_remaining":self.run.progression.as_ref().map_or(0,|p|p.remaining()),"auto_dj_enabled":self.run.auto,"auto_dj_paused":self.run.paused,"auto_crossfade_enabled":self.run.crossfade,"fade_state":if fading{"running"}else{"idle"},"fade_progress":a.map_or(0.,|a|f32::from_bits(a.controls.fade_progress.load(Relaxed))),"position":tracks[active]["position"],"crossfader":a.map_or(0.5,|a|a.fader()),"master_level":a.map_or(self.volume as f32/100.,|a|a.master_level()),"shuffle":self.shuffle,"repeat":self.repeat_one,"manual_dj_locked":false},"samplers":[self.sampler.snapshot(a),self.right_sampler.snapshot(self.right_sample_audio.as_ref())],"google_cast":self.cast.get().map(|c|c.google.snapshot()).unwrap_or_else(||crate::google_cast::Output::default().snapshot()),"live_broadcast":self.live_mix.as_ref().map(|b|json!({"running":b.running(),"source":if b.player_only{"player"}else{"dj"},"levels":b.levels(),"status":b.status.lock().ok().map(|s|s.clone())})),"deck_layers":tracks,"selected_decks":self.rack.live.map(|d|crate::deck_rack::NAMES[d]),"crossfade_pair":self.pair().map(|d|crate::deck_rack::NAMES[d]),"clock":{"bpm":a.map_or(120.,|a|f32::from_bits(a.controls.master_bpm.load(Relaxed))),"quantization":a.map_or(4,|a|a.controls.quantization.load(Relaxed)),"sample_frames":a.map_or(0,|a|a.controls.rendered.load(Relaxed)),"sample_rate":a.map_or(48000,|a|a.sample_rate),"beat":a.map_or(0.,|a|a.controls.beat_at(a.controls.rendered.load(Relaxed),a.sample_rate))},"decks":self.rack.live.map(|d|{let mut v=tracks[d].clone();v["deck"]=json!(if d%2==0{"A"}else{"B"});v}),"cue_decks":self.sides.iter().map(|side|side.snapshot()).collect::<Vec<_>>()})
@@ -2667,7 +2757,13 @@ mod tests {
         assert_eq!(super::blend_stems(0., original)[0], original[0]);
         assert_eq!(super::blend_stems(0., original)[1], [0.; 3]);
         let middle = super::blend_stems(0.35, original);
-        assert_eq!(middle[1], [0.8, 0., 0.]);
+        assert_eq!(
+            middle[1],
+            [0., 0., 0.],
+            "Both vocals must be silent in the guard gap"
+        );
+        let arrived = super::blend_stems(0.70, original);
+        assert_eq!(arrived[1], [0.8, 0., 0.6]);
         assert_eq!(super::blend_stems(1., original), [[0.; 3], original[1]]);
         assert_eq!(super::buildup_halves(1.9, 2., 3.), 0);
         assert_eq!(super::buildup_halves(2., 2., 3.), 1);

@@ -105,6 +105,12 @@ fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 3]> {
         dir.join("drums.wav"),
     ])
 }
+pub fn vocal_profile(source: &Path) -> Option<amp_core::vocal_profile::VocalProfile> {
+    let cache = cache_root()?;
+    let id = stamp(source).ok()?;
+    let manifest = amp_core::catalog_db::local_record(&cache.join("stems.ampdb"), &id).ok()??;
+    serde_json::from_value(manifest.get("vocal_profile")?.clone()).ok()
+}
 pub fn ready(source: &Path) -> Option<[PathBuf; 3]> {
     ready_in(&cache_root()?, source)
 }
@@ -212,7 +218,12 @@ fn prepare(
     let _lock = amp_core::coordination::Lock::acquire(&cache.join(&id))?;
     if let Some(paths) = ready_in(cache, source) {
         let archive = cache.join("stems.ampdb");
-        if !amp_core::stem_archive::contains(&archive, &id) {
+        let prior = amp_core::catalog_db::local_record(&archive, &id)?;
+        if !amp_core::stem_archive::contains(&archive, &id)
+            || prior
+                .as_ref()
+                .is_some_and(|v| v.get("vocal_profile").is_none_or(Value::is_null))
+        {
             let mut manifest = amp_core::catalog_db::local_record(&archive, &id)?.unwrap_or(
                 serde_json::from_slice(
                     &fs::read(paths[0].parent().unwrap().join("manifest.json")).unwrap_or_default(),
@@ -221,6 +232,10 @@ fn prepare(
             );
             manifest["source_name"] =
                 json!(source.file_name().unwrap_or_default().to_string_lossy());
+            if let Ok(profile) = amp_core::vocal_profile::measure(&paths[0], source) {
+                manifest["vocal_profile"] =
+                    serde_json::to_value(profile).map_err(|e| e.to_string())?;
+            }
             amp_core::stem_archive::store_with_checkpoint(
                 &archive,
                 &id,
@@ -325,7 +340,9 @@ fn prepare(
     if stamp(source)? != id || cancel.load(Relaxed) {
         return Err("Source changed or preparation canceled; result not published".into());
     }
-    let manifest = json!({"version":1,"source_stamp":id,"source_name":source.file_name().unwrap_or_default().to_string_lossy(),"source_sha256":source_hash,"audio":audio});
+    let vocal_profile =
+        amp_core::vocal_profile::measure(&stage.path().join("vocals.wav"), &input).ok();
+    let manifest = json!({"vocal_profile":vocal_profile,"version":1,"source_stamp":id,"source_name":source.file_name().unwrap_or_default().to_string_lossy(),"source_sha256":source_hash,"audio":audio});
     amp_core::stem_archive::store_with_checkpoint(
         &cache.join("stems.ampdb"),
         &id,

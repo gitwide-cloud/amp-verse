@@ -1,7 +1,10 @@
 //! Stereo-linked lookahead bus protection. All storage is allocated at construction.
-//! A conservative -1.5 dBFS ceiling leaves reconstruction headroom; acceptance must
+//! A 4x windowed-sinc detector plus a -1.5 dBFS guard leaves reconstruction headroom; acceptance must
 //! additionally measure rendered audio with an oversampled true-peak meter.
 pub struct LookaheadLimiter {
+    history: [[f32; 2]; 16],
+    history_at: usize,
+    interpolation: [[f32; 16]; 4],
     delay: Vec<[f32; 2]>,
     peaks: Vec<(u64, f32)>,
     head: usize,
@@ -13,7 +16,26 @@ pub struct LookaheadLimiter {
 impl LookaheadLimiter {
     pub fn new(sample_rate: u32) -> Self {
         let length = ((sample_rate as usize * 5) / 1000).max(1);
+        let interpolation = std::array::from_fn(|phase| {
+            let mut coefficients = std::array::from_fn(|k| {
+                let x = k as f64 - (7. + phase as f64 / 4.);
+                let sinc = if x.abs() < 1e-12 {
+                    1.
+                } else {
+                    (std::f64::consts::PI * x).sin() / (std::f64::consts::PI * x)
+                };
+                (sinc * (0.5 + 0.5 * (std::f64::consts::PI * x / 8.).cos())) as f32
+            });
+            let sum: f32 = coefficients.iter().sum();
+            for value in &mut coefficients {
+                *value /= sum;
+            }
+            coefficients
+        });
         Self {
+            history: [[0.; 2]; 16],
+            history_at: 0,
+            interpolation,
             delay: vec![[0.; 2]; length],
             peaks: vec![(0, 0.); length + 2],
             head: 0,
@@ -29,7 +51,18 @@ impl LookaheadLimiter {
     /// No locks, allocation, I/O, or per-channel gain differences.
     pub fn process(&mut self, input: [f32; 2]) -> [f32; 2] {
         let input = input.map(|v| if v.is_finite() { v } else { 0. });
-        let peak = input[0].abs().max(input[1].abs());
+        let mut peak = input[0].abs().max(input[1].abs());
+        self.history[self.history_at] = input;
+        self.history_at = (self.history_at + 1) % 16;
+        for coefficients in &self.interpolation {
+            let mut reconstructed = [0f32; 2];
+            for (k, coefficient) in coefficients.iter().enumerate() {
+                let frame = self.history[(self.history_at + k) % 16];
+                reconstructed[0] += coefficient * frame[0];
+                reconstructed[1] += coefficient * frame[1];
+            }
+            peak = peak.max(reconstructed[0].abs()).max(reconstructed[1].abs());
+        }
         let oldest = self.frame.saturating_sub(self.delay.len() as u64);
         while self.count > 0 && self.peaks[self.head].0 < oldest {
             self.head = (self.head + 1) % self.peaks.len();

@@ -454,6 +454,7 @@ impl Editor {
                         .changed()
                     {
                         p.energy_progression = progressing.then_some(EnergyPlan {
+                            arc: amp_core::show::ArcShape::Linear,
                             target: 3.,
                             transitions: 3,
                             hold: true,

@@ -60,6 +60,7 @@ pub fn show(
     egui::Window::new("Auto DJ transitions").id(egui::Id::unique("transitions-window")).open(&mut open).default_width(620.).default_height(560.).max_height((ui.ctx().viewport_rect().height()-60.).max(200.)).resizable(true).vscroll(true).show(ui.ctx(),|ui|{
         ui.label("Turn on the transitions you like. Auto DJ rotates through enabled types; clean blends fill the other mixes.");
         switch(ui,&mut settings.enabled,"Use effects","Master switch for occasional effects. Timing and your crossfade duration stay unchanged.");
+        switch(ui,&mut settings.tempo_recovery,"Recover native tempo","After Auto DJ handoffs, gently return to original speed with Key Lock. Pitch or jog touch cancels recovery.");
         ui.separator();let previous=*settings;
         for (index,label,help) in [
             (0,"Scratch","One bar of incoming drum scratches, beat-locked before the blend; needs prepared drums."),(1,"Stutter","A brief rhythmic repeat."),

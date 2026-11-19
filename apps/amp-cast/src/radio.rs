@@ -143,21 +143,24 @@ struct Clock {
     start: tokio::time::Instant,
     frames: u64,
 }
+fn limit_pcm(limiter: &mut amp_core::limiter::LookaheadLimiter, bytes: &mut [u8]) {
+    for frame in bytes.chunks_exact_mut(8) {
+        let input = [
+            f32::from_le_bytes(frame[..4].try_into().unwrap()),
+            f32::from_le_bytes(frame[4..].try_into().unwrap()),
+        ];
+        let output = limiter.process(input);
+        frame[..4].copy_from_slice(&output[0].to_le_bytes());
+        frame[4..].copy_from_slice(&output[1].to_le_bytes());
+    }
+}
 impl Clock {
     async fn write(
         &mut self,
         input: &mut tokio::process::ChildStdin,
         bytes: &mut [u8],
     ) -> Result<(), String> {
-        for frame in bytes.chunks_exact_mut(8) {
-            let input = [
-                f32::from_le_bytes(frame[..4].try_into().unwrap()),
-                f32::from_le_bytes(frame[4..].try_into().unwrap()),
-            ];
-            let output = self.limiter.process(input);
-            frame[..4].copy_from_slice(&output[0].to_le_bytes());
-            frame[4..].copy_from_slice(&output[1].to_le_bytes());
-        }
+        limit_pcm(&mut self.limiter, bytes);
         self.frames += bytes.len() as u64 / 8;
         tokio::time::timeout(std::time::Duration::from_secs(15), input.write_all(bytes))
             .await
@@ -338,6 +341,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
                 plan.transitions,
                 plan.hold,
             )
+            .and_then(|p| p.with_arc(plan.arc))
         })
         .transpose()?;
     let mut command = amp_core::command("ffmpeg");
@@ -705,5 +709,40 @@ mod reliability_tests {
             .err()
             .unwrap();
         assert!(failure.contains("No playable next song"));
+    }
+}
+
+#[cfg(test)]
+mod sag65_audio_tests {
+    use super::*;
+    include!("../../../tests/sag65/audio_helpers.rs");
+    #[test]
+    #[ignore = "requires generated SAG65 fixtures and ffmpeg true-peak meter"]
+    fn f10_radio_emit_path_true_peak() {
+        let a = fixture("f10_hot_outgoing.wav");
+        let b = fixture("f10_hot_incoming.wav");
+        let n = a.len().min(b.len());
+        let mut bytes = Vec::with_capacity((n + 221) * 8);
+        for i in 0..n {
+            let w = show::crossfade_weights(i as f32 / n as f32);
+            for ch in 0..2 {
+                bytes.extend_from_slice(&(a[i][ch] * w[0] + b[i][ch] * w[1]).to_le_bytes());
+            }
+        }
+        bytes.resize(bytes.len() + 221 * 8, 0);
+        let mut limiter = amp_core::limiter::LookaheadLimiter::new(44100);
+        for chunk in bytes.chunks_mut(8192) {
+            limit_pcm(&mut limiter, chunk);
+        }
+        let frames: Vec<_> = bytes
+            .chunks_exact(8)
+            .map(|b| {
+                [
+                    f32::from_le_bytes(b[..4].try_into().unwrap()),
+                    f32::from_le_bytes(b[4..].try_into().unwrap()),
+                ]
+            })
+            .collect();
+        verify_peak("radio F10", &frames);
     }
 }

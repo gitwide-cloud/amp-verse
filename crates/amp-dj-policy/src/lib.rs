@@ -1,7 +1,7 @@
 //! Device-independent DJ decisions. No codecs, analysis, filesystem or audio devices.
 mod transition;
 pub use transition::*;
-#[derive(Clone, Copy, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct TempoMatch {
     pub rate: f64,
     pub pulse_factor: f64,
@@ -15,16 +15,23 @@ pub fn tempo_match(a: f64, rate: f64, b: f64, limit: f64) -> Option<TempoMatch> 
     {
         return None;
     }
-    for pulse_factor in [1., 0.5, 2.] {
-        let value = a * rate / (b * pulse_factor);
-        if (1. - limit..=1. + limit).contains(&value) {
-            return Some(TempoMatch {
-                rate: value,
-                pulse_factor,
-            });
-        }
-    }
-    None
+    [1., 0.5, 2.]
+        .into_iter()
+        .filter_map(|pulse_factor| {
+            let value = a * rate / (b * pulse_factor);
+            (1. - limit..=1. + limit)
+                .contains(&value)
+                .then_some(TempoMatch {
+                    rate: value,
+                    pulse_factor,
+                })
+        })
+        .min_by(|a, b| {
+            (a.rate - 1.)
+                .abs()
+                .total_cmp(&(b.rate - 1.).abs())
+                .then_with(|| (a.pulse_factor != 1.).cmp(&(b.pulse_factor != 1.)))
+        })
 }
 pub fn tempo_distance(a: f64, b: f64) -> f64 {
     if !a.is_finite() || !b.is_finite() || a <= 0. || b <= 0. {
@@ -68,24 +75,12 @@ pub fn pair_cost(a: f64, b: f64, ae: f64, be: f64, target: f64, ak: i32, bk: i32
     } else {
         2.
     };
-    let key = if (1..=24).contains(&ak) && (1..=24).contains(&bk) {
-        let an = (ak - 1) % 12;
-        let bn = (bk - 1) % 12;
-        let same = (ak - 1) / 12 == (bk - 1) / 12;
-        let d = (an - bn).abs();
-        let d = d.min(12 - d);
-        if d == 0 {
-            if same { 0. } else { 0.25 }
-        } else if d == 1 && same {
-            0.4
-        } else {
-            2. + f64::from(d) * 0.2
-        }
-    } else {
-        1.5
-    };
+    let key = harmonic_cost(ak, bk, 1., 1., 1., 1., true, true);
+    let groove =
+        tempo_match(a, 1., b, 0.2).map_or(0., |m| if m.pulse_factor != 1. { 0.35 } else { 0. });
     let known = |e: f64| e.is_finite() && (0. ..=1.).contains(&e);
     tempo
+        + groove
         + key
         + if known(ae) && known(be) {
             (ae - be).abs() * 4.
@@ -98,6 +93,71 @@ pub fn pair_cost(a: f64, b: f64, ae: f64, be: f64, target: f64, ak: i32, bk: i32
             1.
         }
 }
+/// Effective Camelot key after varispeed; Key Lock leaves the analyzed key intact.
+pub fn sounding_key(key: i32, rate: f64, locked: bool) -> i32 {
+    if !(1..=24).contains(&key) || !rate.is_finite() || rate <= 0. {
+        return 0;
+    }
+    let semitones = if locked {
+        0
+    } else {
+        (12. * rate.log2()).round().clamp(-120., 120.) as i32
+    };
+    ((key - 1) % 12 + 7 * semitones).rem_euclid(12) + 1 + 12 * ((key - 1) / 12)
+}
+#[allow(clippy::too_many_arguments)]
+pub fn harmonic_cost(
+    a: i32,
+    b: i32,
+    ac: f64,
+    bc: f64,
+    ar: f64,
+    br: f64,
+    al: bool,
+    bl: bool,
+) -> f64 {
+    let (a, b) = (sounding_key(a, ar, al), sounding_key(b, br, bl));
+    if a == 0 || b == 0 {
+        return 0.9;
+    }
+    let same = (a - 1) / 12 == (b - 1) / 12;
+    let delta = ((a - 1) % 12 - (b - 1) % 12).abs();
+    let d = delta.min(12 - delta);
+    let raw = match (d, same) {
+        (0, true) => 0.,
+        (0, false) => 0.25,
+        (1, true) => 0.35,
+        (1, false) => 0.65,
+        (2, true) => 0.95,
+        _ => (1.4 + 0.25 * d as f64).min(2.9),
+    };
+    let confidence = if ac.is_finite() && bc.is_finite() {
+        ac.min(bc).clamp(0., 1.)
+    } else {
+        0.
+    };
+    0.9 * (1. - confidence) + raw * confidence
+}
+#[allow(clippy::too_many_arguments)]
+pub fn pair_cost_with_context(
+    a: f64,
+    b: f64,
+    ae: f64,
+    be: f64,
+    target: f64,
+    ak: i32,
+    bk: i32,
+    ac: f64,
+    bc: f64,
+    ar: f64,
+    br: f64,
+    al: bool,
+    bl: bool,
+) -> f64 {
+    pair_cost(a, b, ae, be, target, ak, bk) - harmonic_cost(ak, bk, 1., 1., 1., 1., true, true)
+        + harmonic_cost(ak, bk, ac, bc, ar, br, al, bl)
+}
+
 pub fn key_code(s: &str) -> i32 {
     harmonic(s).map_or(0, |(n, m)| n + if m == b'B' { 12 } else { 0 })
 }
@@ -223,5 +283,26 @@ mod envelope_tests {
         let start = (2000 / 484) * 484;
         assert_eq!(super::stem_handoff(start, 4000, 484)[1][2], 0.);
         assert_eq!(super::stem_handoff(start + 484, 4000, 484)[0][2], 0.);
+    }
+}
+
+#[cfg(test)]
+mod harmonic_tests {
+    use super::*;
+    #[test]
+    fn f04_confidence_and_sounding_key_are_soft_costs() {
+        assert_eq!(harmonic_cost(8, 9, 1., 1., 1., 1., true, true), 0.35);
+        assert_eq!(sounding_key(8, 1.06, false), 3);
+        assert!(harmonic_cost(8, 8, 1., 1., 1.06, 1., false, true) >= 1.8);
+        assert_eq!(harmonic_cost(8, 8, 1., 1., 1.06, 1., true, true), 0.);
+        assert!(
+            harmonic_cost(8, 3, 0.08, 1., 1., 1., true, true)
+                < harmonic_cost(8, 3, 1., 1., 1., 1., true, true)
+        );
+    }
+    #[test]
+    fn f03_half_double_adds_soft_groove_cost() {
+        let direct = pair_cost(140., 140., 0.5, 0.5, 0.5, 8, 8);
+        assert!((pair_cost(140., 70., 0.5, 0.5, 0.5, 8, 8) - direct - 0.35).abs() < 1e-10);
     }
 }

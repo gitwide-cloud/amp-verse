@@ -339,6 +339,8 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
     {
         return Err("Audio differs from saved preparation. Review or remove the stale sidecar before analyzing.".into());
     }
+    let loudness = crate::loudness::measure(input).ok();
+    let mut perceptual_energy = None;
     let mut child = crate::command("ffmpeg")
         .args(["-v", "error", "-threads", "1", "-i"])
         .arg(input)
@@ -412,6 +414,9 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
             }
         }
         crate::background::checkpoint();
+        perceptual_energy = loudness.and_then(|l| {
+            crate::perceptual_energy::from_rms(&energy, RATE / BLOCK as f64, l.integrated_lufs)
+        });
         result(
             &energy,
             &rhythmic,
@@ -432,19 +437,25 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
         return Err("Audio changed while it was being analyzed".into());
     }
     let mut p = decoded?;
-    if let Ok(loudness) = crate::loudness::measure(input) {
-        let value = serde_json::to_value(loudness).map_err(|e| e.to_string())?;
-        // Reviewed preparation keeps new analysis inside its existing proposal guard.
-        if let Some(proposal) = p.extensions.get_mut("analysis_recommendation") {
-            if let Some(fields) = proposal.as_object_mut() {
-                fields
-                    .entry("extensions")
-                    .or_insert_with(|| serde_json::json!({}))
-                    .as_object_mut()
-                    .map(|extensions| extensions.insert("loudness".into(), value));
+    for (key, value) in [
+        (
+            "loudness",
+            loudness.and_then(|l| serde_json::to_value(l).ok()),
+        ),
+        (
+            "perceptual_energy",
+            perceptual_energy.map(|e| serde_json::json!(e)),
+        ),
+    ] {
+        if let Some(value) = value {
+            if let Some(proposal) = p.extensions.get_mut("analysis_recommendation") {
+                if let Some(fields) = proposal.as_object_mut() {
+                    // Preparation.extensions is flattened in serialized proposals.
+                    fields.insert(key.into(), value);
+                }
+            } else {
+                p.extensions.insert(key.into(), value);
             }
-        } else {
-            p.extensions.insert("loudness".into(), value);
         }
     }
     p.source_sha256 = Some(fingerprint);

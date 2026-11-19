@@ -51,7 +51,7 @@ pub struct TrackTiming {
     pub bar_anchor: Option<f64>,
     pub stems_loaded: bool,
 }
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct TransitionDecision {
     pub tier: TransitionTier,
     pub tempo: Option<TempoMatch>,

@@ -36,6 +36,7 @@ impl Style {
 #[serde(default)]
 pub struct Settings {
     pub enabled: bool,
+    pub tempo_recovery: bool,
     pub pace: amp_core::dj_phrasing::Pace,
     pub timing: crate::mix_schedule::Timing,
     pub style: Style,
@@ -50,6 +51,7 @@ impl Default for Settings {
     fn default() -> Self {
         Self {
             enabled: true,
+            tempo_recovery: false,
             pace: Default::default(),
             timing: Default::default(),
             style: Style::Variety,
@@ -168,6 +170,13 @@ mod tests {
         let mut prepared = amp_core::Preparation {
             bpm: Some(120.),
             beat_offset: Some(0.),
+            analysis: Some(amp_core::preparation::AnalysisInfo {
+                engine: "test".into(),
+                duration: 120.,
+                tempo_confidence: 0.9,
+                key_confidence: 0.8,
+                reviewed: false,
+            }),
             ..Default::default()
         };
         assert_eq!(settings.pick_for_pair(1, &unknown, &prepared), None);

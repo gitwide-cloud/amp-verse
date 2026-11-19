@@ -1,10 +1,10 @@
 //! Session-only pair planning. Never edits shared cues, grids or tempo metadata.
 use crate::Preparation;
-pub use amp_dj_policy::stem_handoff;
 pub use amp_dj_policy::{
     FallbackReason, Handoff, RequestedTiming, TempoMatch, TrackTiming, TransitionDecision,
     TransitionTier, plan_transition, tempo_distance, tempo_match,
 };
+pub use amp_dj_policy::{harmonic_cost, key_code, stem_handoff};
 pub fn timing_snapshot(p: &Preparation, stems_loaded: bool) -> TrackTiming {
     let anchor = |key| p.extensions.get(key).and_then(|v| v.as_f64());
     TrackTiming {
@@ -233,7 +233,13 @@ mod tests {
             bpm: Some(120.),
             beat_offset: Some(0.),
             extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
-            manual_override: true,
+            analysis: Some(crate::preparation::AnalysisInfo {
+                engine: "test".into(),
+                duration: 90.,
+                tempo_confidence: 0.9,
+                key_confidence: 0.8,
+                reviewed: false,
+            }),
             ..Default::default()
         };
         p.cues.push(crate::preparation::Cue {

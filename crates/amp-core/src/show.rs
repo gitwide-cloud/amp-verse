@@ -24,8 +24,46 @@ pub enum Fallback {
     #[default]
     RelaxRecent,
 }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub enum ArcShape {
+    #[default]
+    Linear,
+    Wave {
+        amplitude: f64,
+        period_transitions: u32,
+    },
+    WarmupPeakCooldown {
+        peak_fraction: f64,
+        peak_energy: f64,
+        end_energy: f64,
+    },
+}
+impl ArcShape {
+    fn valid(self) -> bool {
+        match self {
+            Self::Linear => true,
+            Self::Wave {
+                amplitude,
+                period_transitions,
+            } => amplitude.is_finite() && (0. ..=9.).contains(&amplitude) && period_transitions > 0,
+            Self::WarmupPeakCooldown {
+                peak_fraction,
+                peak_energy,
+                end_energy,
+            } => {
+                peak_fraction.is_finite()
+                    && peak_fraction > 0.
+                    && peak_fraction < 1.
+                    && (1. ..=10.).contains(&peak_energy)
+                    && (1. ..=10.).contains(&end_energy)
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnergyPlan {
+    #[serde(default)]
+    pub arc: ArcShape,
     pub target: f64,
     pub transitions: u32,
     pub hold: bool,
@@ -192,7 +230,8 @@ impl Settings {
                 return Err("Invalid Smart Playlist rule".into());
             }
             if let Some(plan) = &p.energy_progression {
-                Progression::new(5., plan.target, plan.transitions, plan.hold)?;
+                Progression::new(5., plan.target, plan.transitions, plan.hold)?
+                    .with_arc(plan.arc)?;
             }
             if p.folders.iter().any(|p| {
                 p.is_absolute()
@@ -440,25 +479,17 @@ pub fn ranked_with_snapshot(
                     .insert("energy".into(), serde_json::json!(e));
             }
         }
-        let e = match (wanted, energy(&prepared)) {
-            (Some(a), Some(b)) => (a - b).abs(),
-            _ => 3.,
-        };
-        let tempo = playing
-            .and_then(|p| p.bpm)
-            .zip(t.preparation.bpm)
-            .map_or(1., |(a, b)| {
-                crate::transition_plan::tempo_distance(a, b) * 5.
-            });
-        e + tempo
-            + playing.map_or(1., |p| {
-                crate::smart::cost(p, &prepared, wanted.map(|e| (e - 1.) / 9.))
-            })
-            - if p.preferred.contains(&song_id(t)) {
-                0.25
-            } else {
-                0.
-            }
+        playing.map_or_else(
+            || match (wanted, energy(&prepared)) {
+                (Some(a), Some(b)) => (a - b).abs(),
+                _ => 3.,
+            },
+            |p| crate::smart::cost(p, &prepared, wanted.map(|e| (e - 1.) / 9.)),
+        ) - if p.preferred.contains(&song_id(t)) {
+            0.25
+        } else {
+            0.
+        }
     };
     let mut scored: Vec<_> = candidates.iter().map(|(i, t)| (score(t), *i)).collect();
     scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -466,6 +497,7 @@ pub fn ranked_with_snapshot(
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Progression {
+    pub arc: ArcShape,
     pub start: f64,
     pub target: f64,
     pub total: u32,
@@ -483,6 +515,7 @@ impl Progression {
             return Err("Energy must be 1–10 and progression 1–100 transitions".into());
         }
         Ok(Self {
+            arc: ArcShape::Linear,
             start,
             target,
             total,
@@ -490,10 +523,40 @@ impl Progression {
             hold,
         })
     }
+    pub fn with_arc(mut self, arc: ArcShape) -> Result<Self, String> {
+        if !arc.valid() {
+            return Err("Invalid energy arc".into());
+        }
+        self.arc = arc;
+        Ok(self)
+    }
     pub fn next(&self) -> f64 {
-        self.start
-            + (self.target - self.start) * (self.completed + 1).min(self.total) as f64
-                / self.total as f64
+        let step = (self.completed + 1).min(self.total) as f64;
+        let progress = step / self.total as f64;
+        let linear = self.start + (self.target - self.start) * progress;
+        match self.arc {
+            ArcShape::Linear => linear,
+            ArcShape::Wave {
+                amplitude,
+                period_transitions,
+            } => (linear
+                + amplitude
+                    * (std::f64::consts::TAU * step / period_transitions.max(1) as f64).sin())
+            .clamp(1., 10.),
+            ArcShape::WarmupPeakCooldown {
+                peak_fraction,
+                peak_energy,
+                end_energy,
+            } => {
+                if progress <= peak_fraction {
+                    self.start + (peak_energy - self.start) * progress / peak_fraction
+                } else {
+                    peak_energy
+                        + (end_energy - peak_energy) * (progress - peak_fraction)
+                            / (1. - peak_fraction)
+                }
+            }
+        }
     }
     pub fn remaining(&self) -> u32 {
         self.total.saturating_sub(self.completed)
@@ -502,6 +565,26 @@ impl Progression {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn f07_arcs_advance_only_on_completed_handoffs_and_legacy_defaults() {
+        let legacy: EnergyPlan =
+            serde_json::from_str(r#"{"target":5.0,"transitions":4,"hold":false}"#).unwrap();
+        assert!(matches!(legacy.arc, ArcShape::Linear));
+        let mut p = Progression::new(2., 5., 4, false)
+            .unwrap()
+            .with_arc(ArcShape::WarmupPeakCooldown {
+                peak_fraction: 0.5,
+                peak_energy: 9.,
+                end_energy: 3.,
+            })
+            .unwrap();
+        assert_eq!(p.next(), 5.5);
+        assert_eq!(p.next(), 5.5);
+        p.completed = 1;
+        assert_eq!(p.next(), 9.);
+        p.completed = 3;
+        assert_eq!(p.next(), 3.);
+    }
     #[test]
     fn selection_uses_entry_section_energy_instead_of_only_song_average() {
         let make = |name: &str, average: f64, local: f64| {
@@ -637,6 +720,7 @@ mod portable_playlist_tests {
         p.fallback = Fallback::Stop;
         p.use_manual_cues = false;
         p.energy_progression = Some(EnergyPlan {
+            arc: ArcShape::Linear,
             target: 9.,
             transitions: 6,
             hold: true,
