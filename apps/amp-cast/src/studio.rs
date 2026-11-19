@@ -28,12 +28,12 @@ fn err(status: StatusCode, message: impl ToString) -> Response {
 fn revision(bytes: Option<&[u8]>) -> String {
     bytes.map_or_else(|| "none".into(), |b| format!("{:x}", Sha256::digest(b)))
 }
-fn path(cast: &Cast, id: usize) -> Result<PathBuf, Response> {
+fn path(cast: &Cast, id: usize) -> Result<PathBuf, String> {
     let t = cast
         .tracks
         .get(id)
-        .ok_or_else(|| err(StatusCode::NOT_FOUND, "Track unavailable"))?;
-    amp_core::resolve(&cast.root, &t.path).map_err(|e| err(StatusCode::NOT_FOUND, e))
+        .ok_or_else(|| "Track unavailable".to_string())?;
+    amp_core::resolve(&cast.root, &t.path).map_err(|e| e.to_string())
 }
 #[derive(Default, Deserialize)]
 struct Params {
@@ -45,10 +45,10 @@ struct Params {
 fn media_allowed(cast: &Cast, headers: &HeaderMap, query: &Params) -> bool {
     // Apply the same browser-origin checks even when a media ticket replaces the password.
     let mut h = headers.clone();
-    if let Some(p) = &cast.password {
-        if let Ok(v) = p.parse() {
-            h.insert("x-amp-password", v);
-        }
+    if let Some(p) = &cast.password
+        && let Ok(v) = p.parse()
+    {
+        h.insert("x-amp-password", v);
     }
     if !cast.authorized(&h) {
         return false;
@@ -146,7 +146,7 @@ async fn preparation(
     }
     let file = match path(&cast, id) {
         Ok(p) => p,
-        Err(e) => return e,
+        Err(e) => return err(StatusCode::NOT_FOUND, e),
     };
     match tokio::task::spawn_blocking(move || amp_core::preparation::load_with_revision(&file))
         .await
@@ -173,7 +173,7 @@ async fn save_preparation(
     }
     let file = match path(&cast, id) {
         Ok(p) => p,
-        Err(e) => return e,
+        Err(e) => return err(StatusCode::NOT_FOUND, e),
     };
     let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         let (_, current) = amp_core::preparation::load_with_revision(&file)?;
@@ -313,7 +313,7 @@ async fn audio(
     }
     match path(&cast, id) {
         Ok(file) => file_response(file, headers, false).await,
-        Err(e) => e,
+        Err(e) => err(StatusCode::NOT_FOUND, e),
     }
 }
 async fn waveform(
@@ -326,7 +326,7 @@ async fn waveform(
     }
     let file = match path(&cast, id) {
         Ok(p) => p,
-        Err(e) => return e,
+        Err(e) => return err(StatusCode::NOT_FOUND, e),
     };
     let key = format!("{}:{id}", cast.server_id);
     {
@@ -345,15 +345,14 @@ async fn waveform(
         if s.waves.values().filter(|v| v["state"] == "pending").count() >= 2 {
             return err(StatusCode::TOO_MANY_REQUESTS, "Waveform workers busy");
         }
-        if s.waves.len() >= 64 {
-            if let Some(k) = s
+        if s.waves.len() >= 64
+            && let Some(k) = s
                 .waves
                 .iter()
                 .find(|(_, v)| v["state"] != "pending")
                 .map(|(k, _)| k.clone())
-            {
-                s.waves.remove(&k);
-            }
+        {
+            s.waves.remove(&k);
         }
         s.waves.insert(key.clone(), json!({"state":"pending"}));
     }
@@ -394,8 +393,10 @@ async fn waveform(
             }
             let bytes = std::fs::read(pcm.path()).map_err(|e| e.to_string())?;
             let samples: Vec<_> = bytes
-                .chunks_exact(4)
-                .map(|b| f32::from_le_bytes(b.try_into().unwrap()).abs())
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .map(|b| f32::from_le_bytes(*b).abs())
                 .collect();
             let step = samples.len().div_ceil(1200).max(1);
             let peaks: Vec<_> = samples
@@ -469,7 +470,7 @@ async fn export(
     }
     let source = match path(&cast, track) {
         Ok(p) => p,
-        Err(e) => return e,
+        Err(e) => return err(StatusCode::NOT_FOUND, e),
     };
     let Some(config) = cast.config_dir.lock().unwrap().clone() else {
         return err(
@@ -611,13 +612,11 @@ async fn playlists(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respons
             if let Some(id) = list["id"]
                 .as_str()
                 .and_then(|id| id.strip_prefix("normal_"))
+                && safe_id(id)
             {
-                if safe_id(id) {
-                    let p = cast.root.join("ampdj/playlists").join(format!("{id}.json"));
-                    if let Ok(p) = amp_core::Playlist::load(&p, &cast.root) {
-                        list["revision"] =
-                            serde_json::to_value(p.sync).map_err(|e| e.to_string())?;
-                    }
+                let p = cast.root.join("ampdj/playlists").join(format!("{id}.json"));
+                if let Ok(p) = amp_core::Playlist::load(&p, &cast.root) {
+                    list["revision"] = serde_json::to_value(p.sync).map_err(|e| e.to_string())?;
                 }
             }
         }
@@ -658,7 +657,7 @@ async fn save_playlist(
                 return Err("Smart playlists changed; reload settings revision".into());
             }
             rules.name = e.name;
-            let id = e.id.unwrap_or_else(|| amp_core::coordination::token());
+            let id = e.id.unwrap_or_else(amp_core::coordination::token);
             let id = id.strip_prefix("smart_").unwrap_or(&id);
             if !safe_id(id) {
                 return Err("Invalid playlist ID".into());
