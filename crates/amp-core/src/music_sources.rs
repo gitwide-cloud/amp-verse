@@ -117,7 +117,10 @@ fn apply_server_locations(sources: &mut [Source], locations: &str) -> Result<(),
     for source in sources {
         if let Some(path) = mapping.get(&source.library_id) {
             if !path.is_absolute() || !identity_matches(path, &source.library_id) {
-                return Err(format!("Server music mount unavailable or identity changed: {}", source.library_id));
+                return Err(format!(
+                    "Server music mount unavailable or identity changed: {}",
+                    source.library_id
+                ));
             }
             source.root = path.clone();
         }
@@ -334,7 +337,12 @@ mod tests {
     fn server_mounts_preserve_portable_sources_and_check_identity() {
         let mount = tempfile::tempdir().unwrap();
         let id = coordination::library_id(mount.path()).unwrap();
-        let original = Source { id: "portable-source".into(), root: PathBuf::from("Windows-path"), library_id: id.clone(), locations: Default::default() };
+        let original = Source {
+            id: "portable-source".into(),
+            root: PathBuf::from("Windows-path"),
+            library_id: id.clone(),
+            locations: Default::default(),
+        };
         let mut sources = vec![original.clone()];
         let map = serde_json::json!({id.clone(): mount.path()}).to_string();
         apply_server_locations(&mut sources, &map).unwrap();

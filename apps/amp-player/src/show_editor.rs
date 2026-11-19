@@ -666,7 +666,11 @@ fn dj_handoff_blocker(
     let Some(library) = library else {
         return Some("Wait for the music library before sending to DJ.");
     };
-    if !library.tracks.iter().any(|track| amp_core::show::eligible(playlist, track)) {
+    if !library
+        .tracks
+        .iter()
+        .any(|track| amp_core::show::eligible(playlist, track))
+    {
         return Some("No matching songs — choose a Music Source and save.");
     }
     None
@@ -1278,25 +1282,43 @@ mod tests {
         selected.folders.clear();
         selected.restrict_folders = false;
         let mut draft = saved.clone();
-        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)), None);
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            None
+        );
         draft.playlists.last_mut().unwrap().name = "Keep my other draft".into();
-        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)), None);
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            None
+        );
         draft.playlists[0].name = "Unsaved rename".into();
-        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
-            Some("Save Playlist before sending it to DJ."));
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            Some("Save Playlist before sending it to DJ.")
+        );
         draft.playlists[0] = saved.playlists[0].clone();
         draft.playlists[0].id = "brand-new".into();
         assert!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)).is_some());
         saved.playlists.push(draft.playlists[0].clone());
-        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)), None);
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            None
+        );
         assert!(dj_handoff_blocker(&draft.playlists[0], &saved, None).is_some());
-        let empty = amp_core::Library { tracks: vec![], tree: library.tree.clone() };
-        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&empty)),
-            Some("No matching songs — choose a Music Source and save."));
+        let empty = amp_core::Library {
+            tracks: vec![],
+            tree: library.tree.clone(),
+        };
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&empty)),
+            Some("No matching songs — choose a Music Source and save.")
+        );
         draft.playlists[0].source_unavailable = true;
         *saved.playlists.last_mut().unwrap() = draft.playlists[0].clone();
-        assert_eq!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
-            Some("Reconnect source library before sending to DJ."));
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            Some("Reconnect source library before sending to DJ.")
+        );
         assert_eq!(draft.playlists.last().unwrap().name, "Keep my other draft");
     }
     fn test_settings() -> Settings {

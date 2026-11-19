@@ -1491,8 +1491,13 @@ impl Player {
                     .playlists
                     .iter()
                     .find(|p| p.id == playlist)
-                    .or_else(|| self.run.settings.playlists.iter()
-                        .find(|p| p.name.eq_ignore_ascii_case(&playlist)))
+                    .or_else(|| {
+                        self.run
+                            .settings
+                            .playlists
+                            .iter()
+                            .find(|p| p.name.eq_ignore_ascii_case(&playlist))
+                    })
                     .ok_or("Smart Playlist not found")?
                     .clone();
                 if self.show_editor.playlist_unsaved(&p.id) {
@@ -2957,14 +2962,24 @@ mod tests {
         collision.id = "wrong-id".into();
         collision.name = target.id.clone();
         player.run.settings.playlists = vec![collision, target];
-        player.execute_control(Action::LoadSmartPlaylist {
-            playlist: "target-id".into(), execution: Execution::LoadOnly,
-            style: None, energy: None,
-        }).unwrap();
+        player
+            .execute_control(Action::LoadSmartPlaylist {
+                playlist: "target-id".into(),
+                execution: Execution::LoadOnly,
+                style: None,
+                energy: None,
+            })
+            .unwrap();
         assert_eq!(player.run.playlist.as_deref(), Some("target-id"));
-        assert_eq!(player.run.profile.as_ref().unwrap().name, "Intended playlist");
+        assert_eq!(
+            player.run.profile.as_ref().unwrap().name,
+            "Intended playlist"
+        );
         player.run.settings.playlists[1].name = "Renamed saved playlist".into();
-        assert_eq!(player.run.profile.as_ref().unwrap().name, "Intended playlist");
+        assert_eq!(
+            player.run.profile.as_ref().unwrap().name,
+            "Intended playlist"
+        );
         assert!(!player.run.auto);
         assert!(player.audio.is_none());
     }

@@ -1,5 +1,6 @@
 //! Direct RSS/Atom subscriptions and publisher downloads; no user-hosted service.
 use crate::media_lookup::{USER_AGENT, bytes, http_url};
+pub use amp_core::podcast_feed::{Episode, Feed, parse_feed};
 use eframe::egui;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -13,7 +14,6 @@ use std::{
     },
     time::Duration,
 };
-pub use amp_core::podcast_feed::{Episode, Feed, parse_feed};
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct Directory {
     url: String,

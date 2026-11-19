@@ -124,7 +124,10 @@ async fn tracks(
                 || t.title.to_lowercase().contains(&q)
                 || t.path.to_string_lossy().to_lowercase().contains(&q)
                 || ["artist", "album"].iter().any(|field| {
-                    t.preparation.extensions.get(*field).and_then(Value::as_str)
+                    t.preparation
+                        .extensions
+                        .get(*field)
+                        .and_then(Value::as_str)
                         .is_some_and(|value| value.to_lowercase().contains(&q))
                 })
         })

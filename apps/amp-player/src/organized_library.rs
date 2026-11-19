@@ -130,28 +130,30 @@ impl Player {
         });
         });
         ui.separator();
-        egui::Frame::NONE.inner_margin(egui::Margin::symmetric(12, 6)).show(ui, |ui| {
-        ui.horizontal(|ui| {
-            ui.colored_label(
-                skin::accent(ui),
-                format!(
-                    "{} files",
-                    self.library.as_ref().map_or(0, |l| l.tracks.len())
-                ),
-            );
-            ui.separator();
-            ui.add(egui::Label::new(self.root.display().to_string()).truncate());
-        });
-        let status = ui
-            .add(egui::Label::new(&self.status).truncate())
-            .on_hover_text(&self.status);
-        #[cfg(test)]
-        ui.ctx().data_mut(|data| {
-            data.insert_temp(egui::Id::unique("library-workflow-status"), status.rect)
-        });
-        #[cfg(not(test))]
-        let _ = status;
-        });
+        egui::Frame::NONE
+            .inner_margin(egui::Margin::symmetric(12, 6))
+            .show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.colored_label(
+                        skin::accent(ui),
+                        format!(
+                            "{} files",
+                            self.library.as_ref().map_or(0, |l| l.tracks.len())
+                        ),
+                    );
+                    ui.separator();
+                    ui.add(egui::Label::new(self.root.display().to_string()).truncate());
+                });
+                let status = ui
+                    .add(egui::Label::new(&self.status).truncate())
+                    .on_hover_text(&self.status);
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::unique("library-workflow-status"), status.rect)
+                });
+                #[cfg(not(test))]
+                let _ = status;
+            });
     }
     pub(super) fn add_music_source(&mut self, folder: PathBuf) {
         if self.root.as_os_str().is_empty() {
@@ -371,7 +373,11 @@ impl Player {
                     self.smart_preview.stop();
                     if let Some(library) = &self.library {
                         self.dj_browser.select_saved_smart(
-                            &playlist, &self.root, library, &self.run.settings, &self.queue,
+                            &playlist,
+                            &self.root,
+                            library,
+                            &self.run.settings,
+                            &self.queue,
                         );
                     }
                     self.activate(ui, Some(skin::Module::Dj));
