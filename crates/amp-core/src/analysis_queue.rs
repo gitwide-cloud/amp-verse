@@ -348,11 +348,15 @@ impl Queue {
             token: job.token.clone(),
         };
         let worker = std::thread::spawn(move || {
-            while rx.recv_timeout(std::time::Duration::from_secs(20)).is_err() {
-                if q.heartbeat(&job).is_err() {
-                    break;
-                }
-            }
+            renew_until_stopped(
+                |delay| {
+                    matches!(
+                        rx.recv_timeout(delay),
+                        Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                    )
+                },
+                || q.heartbeat(&job),
+            );
         });
         KeepAlive {
             stop: Some(tx),
@@ -422,6 +426,38 @@ impl Queue {
         })
     }
 }
+/// Retry only known publication-lock contention. Each attempt still checks the
+/// persisted token and expiry inside heartbeat; retries never extend an expired
+/// claim. Three short retries bound lock pressure and shutdown remains interruptible.
+fn renew_until_stopped(
+    mut wait: impl FnMut(std::time::Duration) -> bool,
+    mut heartbeat: impl FnMut() -> Result<(), String>,
+) {
+    use std::time::Duration;
+    const NORMAL: Duration = Duration::from_secs(20);
+    const RETRIES: [Duration; 3] = [
+        Duration::from_secs(2),
+        Duration::from_secs(5),
+        Duration::from_secs(10),
+    ];
+    let mut delay = NORMAL;
+    let mut failures = 0;
+    while wait(delay) {
+        match heartbeat() {
+            Ok(()) => {
+                failures = 0;
+                delay = NORMAL;
+            }
+            Err(error) if Queue::temporary_failure(&error) && failures < RETRIES.len() => {
+                delay = RETRIES[failures];
+                failures += 1;
+            }
+            // Ownership loss, corrupt data and unknown I/O errors fail closed.
+            Err(_) => break,
+        }
+    }
+}
+
 pub struct KeepAlive {
     stop: Option<std::sync::mpsc::Sender<()>>,
     worker: Option<std::thread::JoinHandle<()>>,
@@ -633,5 +669,98 @@ mod transient_failure_tests {
         q.finish(&job, Err("Audio decoding failed")).unwrap();
         assert_eq!(q.recover_contention().unwrap(), 0);
         assert_eq!(q.stats().unwrap().failed, 1);
+    }
+}
+
+#[cfg(test)]
+mod heartbeat_retry_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn transient_failure_recovers_and_resets_retry_budget() {
+        let mut outcomes = [
+            Err("Shared record busy; retry after reloading".into()),
+            Ok(()),
+            Err("Shared analysis queue: Shared record busy; retry after reloading".into()),
+            Ok(()),
+            Err("Queue claim expired".into()),
+        ]
+        .into_iter();
+        let mut delays = Vec::new();
+        renew_until_stopped(
+            |d| {
+                delays.push(d.as_secs());
+                true
+            },
+            || outcomes.next().unwrap(),
+        );
+        assert_eq!(delays, [20, 2, 20, 2, 20]);
+        assert!(outcomes.next().is_none());
+    }
+
+    #[test]
+    fn persistent_contention_is_bounded() {
+        let mut delays = Vec::new();
+        let mut attempts = 0;
+        renew_until_stopped(
+            |d| {
+                delays.push(d.as_secs());
+                true
+            },
+            || {
+                attempts += 1;
+                Err("Shared record busy; retry after reloading".into())
+            },
+        );
+        assert_eq!(attempts, 4);
+        assert_eq!(delays, [20, 2, 5, 10]);
+    }
+
+    #[test]
+    fn cancellation_during_backoff_prevents_another_write() {
+        let mut attempts = 0;
+        renew_until_stopped(
+            |d| d == Duration::from_secs(20),
+            || {
+                attempts += 1;
+                Err("Shared record busy; retry after reloading".into())
+            },
+        );
+        assert_eq!(attempts, 1);
+    }
+
+    #[test]
+    fn ownership_loss_and_unknown_errors_are_terminal() {
+        for error in [
+            "Queue claim expired",
+            "database disk image is malformed",
+            "Permission denied",
+        ] {
+            let mut attempts = 0;
+            renew_until_stopped(
+                |_| true,
+                || {
+                    attempts += 1;
+                    Err(error.into())
+                },
+            );
+            assert_eq!(attempts, 1);
+        }
+    }
+
+    #[test]
+    fn disconnected_stop_channel_does_not_renew() {
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        drop(tx);
+        renew_until_stopped(
+            |d| {
+                matches!(
+                    rx.recv_timeout(d),
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout)
+                )
+            },
+            || panic!("renewal after worker owner disconnected"),
+        );
     }
 }

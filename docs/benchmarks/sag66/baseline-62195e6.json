@@ -1,0 +1,30 @@
+{
+  "catalog_snapshot_bytes": 135168,
+  "first_preparations_read_us": 1255.048,
+  "first_queue_open_us": 2494816.039,
+  "fixture_preparations": 16,
+  "fixture_tracks": 1000,
+  "heartbeat": {
+    "p50_us": 176154.963,
+    "p95_us": 293125.336,
+    "samples": 10
+  },
+  "heartbeat_accepts_deferred_claim": true,
+  "heartbeat_process_write_bytes": 2867200,
+  "limitations": "Local synthetic fixture, first reads are not OS-cold. No NAS timing, DSP retries, playback underruns or real-library opening measured. /proc write_bytes covers process block writes, not network traffic.",
+  "lookup": {
+    "p50_us": 557.541,
+    "p95_us": 712.236,
+    "samples": 100
+  },
+  "queue_stats": {
+    "p50_us": 632.066,
+    "p95_us": 685.9019999999999,
+    "samples": 20
+  },
+  "warm_preparations": {
+    "p50_us": 935.929,
+    "p95_us": 1351.5179999999998,
+    "samples": 20
+  }
+}
