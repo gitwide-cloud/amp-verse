@@ -7,6 +7,8 @@ license.workspace = true
 [features]
 default = []
 analysis = []
+# CI checks content IDs when another dependency enables insertion-ordered JSON.
+knowledge-order-check = ["serde_json/preserve_order"]
 
 [dependencies]
 url = "2"

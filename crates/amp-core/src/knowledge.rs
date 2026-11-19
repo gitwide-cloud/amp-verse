@@ -39,10 +39,13 @@ impl Observation {
     }
     pub fn id(&self) -> Result<String, String> {
         self.validate()?;
-        // Canonical object ordering is supplied by serde_json's default BTreeMap.
+        // Preserve the v1 struct-field layout and explicitly sort nested payload objects.
+        // Cargo feature unification may enable serde_json/preserve_order in another module.
+        let mut canonical = self.clone();
+        canonical.data.sort_all_objects();
         Ok(format!(
             "{:x}",
-            Sha256::digest(serde_json::to_vec(self).map_err(error)?)
+            Sha256::digest(serde_json::to_vec(&canonical).map_err(error)?)
         ))
     }
     /// A portable-preparation summary is evidence, not a raw DSP result or a verified beatgrid.
@@ -241,6 +244,20 @@ mod tests {
             kind: "measured".into(),
             data: serde_json::json!({"bpm":120}),
         }
+    }
+    #[test]
+    fn json_insertion_order_is_irrelevant_and_existing_v1_ids_remain_valid() {
+        assert_eq!(
+            record().id().unwrap(),
+            "ade8bc8f4c7c988fb0d63a517d841d9cef2acb2f9d1b26ea440d5258d967cd4a"
+        );
+        let mut first = record();
+        first.data =
+            serde_json::from_str(r#"{"z":1,"a":{"z":2,"a":3},"list":[{"z":4,"a":5}]}"#).unwrap();
+        let mut second = first.clone();
+        second.data =
+            serde_json::from_str(r#"{"list":[{"a":5,"z":4}],"a":{"a":3,"z":2},"z":1}"#).unwrap();
+        assert_eq!(first.id().unwrap(), second.id().unwrap());
     }
     #[test]
     fn immutable_reuse_versions_and_pagination_survive_restart() {

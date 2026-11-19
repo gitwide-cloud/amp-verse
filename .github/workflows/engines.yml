@@ -69,6 +69,8 @@ jobs:
             test-output/chroma/verification.log
       - name: Core, database, analysis, server and engine tests
         run: cargo test -p amp-core --features analysis -p amp-cast -p amp-engine -p amp-dj-policy --all-targets --locked
+      - name: Verify knowledge IDs with insertion-ordered JSON enabled
+        run: cargo test -p amp-core --features analysis,knowledge-order-check knowledge::tests --locked
       - name: Strict engine lint
         run: cargo clippy -p amp-core --features analysis -p amp-cast -p amp-engine -p amp-dj-policy --all-targets --locked -- -D warnings
       - name: Generated audio adaptive stream and worker lifecycle tests
