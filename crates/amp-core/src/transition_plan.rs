@@ -1,9 +1,41 @@
 //! Session-only pair planning. Never edits shared cues, grids or tempo metadata.
 use crate::Preparation;
+pub use amp_dj_policy::stem_handoff;
 pub use amp_dj_policy::{
     FallbackReason, Handoff, RequestedTiming, TempoMatch, TrackTiming, TransitionDecision,
     TransitionTier, plan_transition, tempo_distance, tempo_match,
 };
+pub fn timing_snapshot(p: &Preparation, stems_loaded: bool) -> TrackTiming {
+    let anchor = |key| p.extensions.get(key).and_then(|v| v.as_f64());
+    TrackTiming {
+        bpm: p.bpm,
+        beat_offset: p.beat_offset,
+        tempo_confidence: p.analysis.as_ref().map_or(0., |a| a.tempo_confidence),
+        reviewed: p.manual_override || p.analysis.as_ref().is_some_and(|a| a.reviewed),
+        rhythm_stable: p
+            .extensions
+            .get("rhythm_quality")
+            .map(|q| q.get("stable").and_then(|v| v.as_bool())),
+        rhythm_windows: p
+            .extensions
+            .get("rhythm_quality")
+            .and_then(|q| q.get("windows"))
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        phrase_anchor: anchor("mix_phrase_anchor"),
+        bar_anchor: anchor("mix_bar_anchor"),
+        stems_loaded,
+    }
+}
+pub fn requested_timing(timing: crate::mix_schedule::Timing) -> RequestedTiming {
+    use crate::mix_schedule::Timing;
+    match timing {
+        Timing::Immediate => RequestedTiming::Immediate,
+        Timing::Beat => RequestedTiming::Beat,
+        Timing::Bar => RequestedTiming::Bar,
+        _ => RequestedTiming::Phrase,
+    }
+}
 pub fn tail_fade(requested: f32, remaining: Option<f32>) -> f32 {
     amp_dj_policy::tail_fade(f64::from(requested), remaining.map_or(f64::NAN, f64::from)) as f32
 }
@@ -133,6 +165,8 @@ mod tests {
         let mut out = Preparation {
             bpm: Some(120.),
             beat_offset: Some(0.),
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
+            manual_override: true,
             cue_out: Some(120.),
             ..Default::default()
         };
@@ -144,6 +178,8 @@ mod tests {
         let mut incoming = Preparation {
             bpm: Some(125.),
             beat_offset: Some(0.),
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
+            manual_override: true,
             cue_out: Some(100.),
             ..Default::default()
         };
@@ -196,6 +232,8 @@ mod tests {
             cue_out: Some(90.),
             bpm: Some(120.),
             beat_offset: Some(0.),
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
+            manual_override: true,
             ..Default::default()
         };
         p.cues.push(crate::preparation::Cue {

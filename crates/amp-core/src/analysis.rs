@@ -432,6 +432,21 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
         return Err("Audio changed while it was being analyzed".into());
     }
     let mut p = decoded?;
+    if let Ok(loudness) = crate::loudness::measure(input) {
+        let value = serde_json::to_value(loudness).map_err(|e| e.to_string())?;
+        // Reviewed preparation keeps new analysis inside its existing proposal guard.
+        if let Some(proposal) = p.extensions.get_mut("analysis_recommendation") {
+            if let Some(fields) = proposal.as_object_mut() {
+                fields
+                    .entry("extensions")
+                    .or_insert_with(|| serde_json::json!({}))
+                    .as_object_mut()
+                    .map(|extensions| extensions.insert("loudness".into(), value));
+            }
+        } else {
+            p.extensions.insert("loudness".into(), value);
+        }
+    }
     p.source_sha256 = Some(fingerprint);
     Ok(p)
 }

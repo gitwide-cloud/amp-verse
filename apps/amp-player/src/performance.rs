@@ -31,6 +31,7 @@ fn scratch_phrase(seconds: f32, flourish: bool) -> f32 {
 }
 // Relative cuts preserve the user's saved EQ rather than resetting it to noon.
 // Bass crosses once at the midpoint; highs enter first, then the mids.
+#[cfg(test)]
 fn blend_eq(progress: f32, original: [[f32; 3]; 2]) -> [[f32; 3]; 2] {
     let p = progress.clamp(0., 1.);
     let ramp = |start: f32, end: f32| ((p - start) / (end - start)).clamp(0., 1.);
@@ -43,16 +44,16 @@ fn blend_eq(progress: f32, original: [[f32; 3]; 2]) -> [[f32; 3]; 2] {
     ];
     std::array::from_fn(|d| std::array::from_fn(|b| (original[d][b] - cuts[d][b]).max(-24.)))
 }
+#[cfg(test)]
 fn blend_stems(progress: f32, original: [[f32; 3]; 2]) -> [[f32; 3]; 2] {
-    let p = progress.clamp(0., 1.);
-    let ramp = |a: f32, b: f32| ((p - a) / (b - a)).clamp(0., 1.);
-    let drums = ramp(0.4, 0.6);
-    let weights = [
-        [1. - ramp(0., 0.25), 1. - ramp(0.5, 1.), 1. - drums],
-        [ramp(0.1, 0.35), ramp(0.45, 0.85), drums],
-    ];
-    std::array::from_fn(|d| std::array::from_fn(|s| original[d][s] * weights[d][s]))
+    let masks = amp_core::transition_plan::stem_handoff(
+        (progress.clamp(0., 1.) * 10000.) as u64,
+        10000,
+        400,
+    );
+    std::array::from_fn(|d| std::array::from_fn(|stem| original[d][stem] * masks[d][stem]))
 }
+
 fn buildup_halves(elapsed: f32, capture: f32, duration: f32) -> u8 {
     if elapsed < capture || duration <= capture {
         return 0;
@@ -68,6 +69,7 @@ pub struct Run {
     effect_bridge: Option<EffectBridge>,
     effect_done: Option<Instant>,
     pub choice: String,
+    pub transition_trace: Option<String>,
     pub profile: Option<show::SmartPlaylist>,
     pub settings: show::Settings,
     pub playlist: Option<String>,
@@ -104,6 +106,7 @@ impl Default for Run {
             effect_bridge: None,
             effect_done: None,
             choice: String::new(),
+            transition_trace: None,
             profile: None,
             settings: Default::default(),
             playlist: None,
@@ -162,74 +165,14 @@ impl Run {
             self.effect_bridge = Some(effect);
             return Some("Loop buildup transition".into());
         }
-        if effect.style == crate::transition_styles::Style::StemSwap {
-            if !effect.engaged {
-                if !audio
-                    .controls
-                    .pair_indices()
-                    .iter()
-                    .all(|d| audio.controls.stems_loaded[*d].load(Relaxed))
-                {
-                    return None;
-                }
-                effect.original_stems = std::array::from_fn(|side| {
-                    std::array::from_fn(|s| {
-                        f32::from_bits(
-                            audio.controls.stem_level[if side == 0 {
-                                effect.deck
-                            } else {
-                                audio.controls.other(effect.deck)
-                            }][s]
-                                .load(Relaxed),
-                        )
-                    })
-                });
-                effect.engaged = true;
-            }
-            for (side, levels) in blend_stems(progress, effect.original_stems)
-                .iter()
-                .enumerate()
-            {
-                let deck = if side == 0 {
-                    effect.deck
-                } else {
-                    audio.controls.other(effect.deck)
-                };
-                for (stem, value) in levels.iter().enumerate() {
-                    audio.controls.stem_level[deck][stem].store(value.to_bits(), Relaxed);
-                }
-            }
+        if matches!(
+            effect.style,
+            crate::transition_styles::Style::StemSwap | crate::transition_styles::Style::BassSwap
+        ) {
+            // Session envelopes are evaluated by Mixer from the audio frame clock.
+            let label = effect.style.label().to_string();
             self.effect_bridge = Some(effect);
-            return Some("Stem handoff transition".into());
-        }
-        if effect.style == crate::transition_styles::Style::BassSwap {
-            if !effect.engaged {
-                effect.original_eq = std::array::from_fn(|d| {
-                    std::array::from_fn(|b| {
-                        f32::from_bits(
-                            audio.controls.eq[if d == 0 {
-                                effect.deck
-                            } else {
-                                audio.controls.other(effect.deck)
-                            }][b]
-                                .load(Relaxed),
-                        )
-                    })
-                });
-                effect.engaged = true;
-            }
-            for (side, bands) in blend_eq(progress, effect.original_eq).iter().enumerate() {
-                let deck = if side == 0 {
-                    effect.deck
-                } else {
-                    audio.controls.other(effect.deck)
-                };
-                for (band, value) in bands.iter().enumerate() {
-                    audio.set_eq(deck, band, *value);
-                }
-            }
-            self.effect_bridge = Some(effect);
-            return Some("EQ blend / bass swap transition".into());
+            return Some(label);
         }
         let window = effect.seconds.min(0.8);
         let elapsed = progress * effect.seconds - (effect.seconds - window);
@@ -279,30 +222,8 @@ impl Run {
                     | crate::transition_styles::Style::LoopBuild
             ) {
                 audio.loop_stop(effect.deck);
-            } else if effect.style == crate::transition_styles::Style::StemSwap {
-                for (side, levels) in effect.original_stems.iter().enumerate() {
-                    let deck = if side == 0 {
-                        effect.deck
-                    } else {
-                        audio.controls.other(effect.deck)
-                    };
-                    for (stem, value) in levels.iter().enumerate() {
-                        audio.controls.stem_level[deck][stem].store(value.to_bits(), Relaxed);
-                    }
-                }
             } else if effect.style == crate::transition_styles::Style::Filter {
                 audio.controls.cutoff[effect.deck].store(effect.original.to_bits(), Relaxed);
-            } else if effect.style == crate::transition_styles::Style::BassSwap {
-                for (side, bands) in effect.original_eq.iter().enumerate() {
-                    let deck = if side == 0 {
-                        effect.deck
-                    } else {
-                        audio.controls.other(effect.deck)
-                    };
-                    for (band, value) in bands.iter().enumerate() {
-                        audio.set_eq(deck, band, *value);
-                    }
-                }
             } else {
                 audio.scratch(effect.deck, false, 1.);
             }
@@ -329,8 +250,6 @@ struct EffectBridge {
     grain: f32,
     engaged: bool,
     original: f32,
-    original_eq: [[f32; 3]; 2],
-    original_stems: [[f32; 3]; 2],
     start_progress: f32,
     halves: u8,
 }
@@ -1973,15 +1892,21 @@ impl Player {
                         })
                         .map(|beat| (crate::transition_styles::Style::LoopBuild, beat * 4.))
                     } else if safe && chosen == Some(crate::transition_styles::Style::StemSwap) {
-                        self.audio
-                            .as_ref()
-                            .filter(|a| {
-                                a.controls
-                                    .pair_indices()
-                                    .iter()
-                                    .all(|d| a.controls.stems_loaded[*d].load(Relaxed))
-                            })
-                            .map(|_| (crate::transition_styles::Style::StemSwap, 0.))
+                        self.audio.as_ref().map(|a| {
+                            let stems = a
+                                .controls
+                                .pair_indices()
+                                .iter()
+                                .all(|d| a.controls.stems_loaded[*d].load(Relaxed));
+                            (
+                                if stems {
+                                    crate::transition_styles::Style::StemSwap
+                                } else {
+                                    crate::transition_styles::Style::BassSwap
+                                },
+                                0.,
+                            )
+                        })
                     } else if safe
                         && matches!(
                             chosen,
@@ -2086,6 +2011,36 @@ impl Player {
                             )
                         })
                     });
+                    let decision = self
+                        .loaded_track(outgoing)
+                        .zip(self.loaded_track(incoming))
+                        .map(|(out, next)| {
+                            use amp_core::transition_plan::*;
+                            plan_transition(
+                                timing_snapshot(
+                                    &out.preparation,
+                                    a.controls.stems_loaded[outgoing].load(Relaxed),
+                                ),
+                                timing_snapshot(
+                                    &next.preparation,
+                                    a.controls.stems_loaded[incoming].load(Relaxed),
+                                ),
+                                requested_timing(self.run.transitions.timing),
+                                match chosen {
+                                    Some(crate::transition_styles::Style::StemSwap) => {
+                                        Handoff::StemSwap
+                                    }
+                                    Some(crate::transition_styles::Style::BassSwap) => {
+                                        Handoff::BassSwap
+                                    }
+                                    _ => Handoff::Fade,
+                                },
+                                self.deck_rate(outgoing),
+                                0.16,
+                                self.fade_seconds as f64,
+                                remaining.map_or(f64::NAN, f64::from),
+                            )
+                        });
                     let seconds = build_plan.map_or_else(
                         || amp_core::transition_plan::tail_fade(self.fade_seconds, remaining),
                         |(_, seconds)| seconds,
@@ -2109,6 +2064,27 @@ impl Player {
                     } else {
                         None
                     };
+                    a.set_handoff_mode(effect_plan.map_or(0, |(style, _)| match style {
+                        crate::transition_styles::Style::StemSwap => 2,
+                        crate::transition_styles::Style::BassSwap => 1,
+                        _ => 0,
+                    }));
+                    if let Some(decision) = &decision {
+                        use amp_core::transition_plan::Handoff;
+                        if matches!(
+                            chosen,
+                            Some(
+                                crate::transition_styles::Style::StemSwap
+                                    | crate::transition_styles::Style::BassSwap
+                            )
+                        ) {
+                            a.set_handoff_mode(match decision.handoff {
+                                Handoff::StemSwap => 2,
+                                Handoff::BassSwap => 1,
+                                Handoff::Fade => 0,
+                            });
+                        }
+                    }
                     let result = if let Some((build_grid, _)) = build_plan {
                         self.status =
                             "16-beat buildup handoff: incoming track owns the drop".into();
@@ -2187,6 +2163,9 @@ impl Player {
                     };
                     match result {
                         Ok(()) => {
+                            self.run.transition_trace = decision
+                                .as_ref()
+                                .map(|d| format!("{:?}: {:?}", d.tier, d.fallback_reasons));
                             self.run.force_mashup = false;
                             if chosen == Some(crate::transition_styles::Style::Mashup)
                                 && mashup_plan.is_none()
@@ -2202,8 +2181,6 @@ impl Player {
                                     grain,
                                     engaged: false,
                                     original: 0.,
-                                    original_eq: [[0.; 3]; 2],
-                                    original_stems: [[1.; 3]; 2],
                                     start_progress: 0.,
                                     halves: 0,
                                 });

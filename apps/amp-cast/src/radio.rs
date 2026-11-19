@@ -98,7 +98,10 @@ async fn decode(
         .arg("-i")
         .arg(&path)
         .args(["-vn", "-ac", "2", "-ar", "44100", "-af"])
-        .arg(format!("atempo={rate}"))
+        .arg(format!(
+            "atempo={rate},volume={}dB",
+            amp_core::loudness::auto_gain_db(&preparation)
+        ))
         .args(["-f", "f32le"])
         .arg(temp.as_os_str());
     let result = tokio::process::Command::from(command)
@@ -136,6 +139,7 @@ async fn decode(
     })
 }
 struct Clock {
+    limiter: amp_core::limiter::LookaheadLimiter,
     start: tokio::time::Instant,
     frames: u64,
 }
@@ -143,8 +147,17 @@ impl Clock {
     async fn write(
         &mut self,
         input: &mut tokio::process::ChildStdin,
-        bytes: &[u8],
+        bytes: &mut [u8],
     ) -> Result<(), String> {
+        for frame in bytes.chunks_exact_mut(8) {
+            let input = [
+                f32::from_le_bytes(frame[..4].try_into().unwrap()),
+                f32::from_le_bytes(frame[4..].try_into().unwrap()),
+            ];
+            let output = self.limiter.process(input);
+            frame[..4].copy_from_slice(&output[0].to_le_bytes());
+            frame[4..].copy_from_slice(&output[1].to_le_bytes());
+        }
         self.frames += bytes.len() as u64 / 8;
         tokio::time::timeout(std::time::Duration::from_secs(15), input.write_all(bytes))
             .await
@@ -172,7 +185,7 @@ async fn emit(
             .read_exact(&mut buffer[..n])
             .await
             .map_err(|e| e.to_string())?;
-        clock.write(input, &buffer[..n]).await?;
+        clock.write(input, &mut buffer[..n]).await?;
         remaining -= n as u64 / 8;
     }
     Ok(())
@@ -382,6 +395,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
     });
     let output_guard = AbortTask(output_task);
     let mut clock = Clock {
+        limiter: amp_core::limiter::LookaheadLimiter::new(RATE as u32),
         start: tokio::time::Instant::now(),
         frames: 0,
     };
@@ -486,7 +500,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
         {
             next_entry = plan.entry;
         }
-        if let Some(grid) = amp_core::mix_schedule::grid_at_rates(
+        if let Some(grid) = amp_core::mix_schedule::safe_grid_at_rates(
             &current.preparation,
             incoming,
             next_entry,
@@ -544,11 +558,11 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
                     let i = frame * 8 + channel * 4;
                     let x = f32::from_le_bytes(a[i..i + 4].try_into().unwrap());
                     let y = f32::from_le_bytes(b[i..i + 4].try_into().unwrap());
-                    let mixed = (x * weights[0] + y * weights[1]).clamp(-1., 1.);
+                    let mixed = x * weights[0] + y * weights[1];
                     a[i..i + 4].copy_from_slice(&mixed.to_le_bytes());
                 }
             }
-            clock.write(&mut input, &a[..n]).await?;
+            clock.write(&mut input, &mut a[..n]).await?;
             offset += frames;
             remaining -= frames;
         }

@@ -103,6 +103,8 @@ mod tests {
         let p = Preparation {
             bpm: Some(120.),
             beat_offset: Some(0.),
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
+            manual_override: true,
             ..Default::default()
         };
         let saved = p.clone();
@@ -140,6 +142,8 @@ mod tests {
             cue_in: 110.,
             bpm: Some(120.),
             beat_offset: Some(0.),
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
+            manual_override: true,
             ..Default::default()
         };
         let end = exit(&p, Style::Hype, Pace::Quick, 300., 8.);

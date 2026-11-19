@@ -192,3 +192,36 @@ mod tests {
         assert_eq!(key_code("unknown"), 0);
     }
 }
+
+/// Multiplicative session masks, in outgoing/incoming order. The drum exchange
+/// begins on a beat boundary and lasts at most one beat. Vocals have a 7% gap.
+pub fn stem_handoff(elapsed: u64, total: u64, beat: u64) -> [[f32; 3]; 2] {
+    let p = elapsed as f32 / total.max(1) as f32;
+    let ramp = |a: f32, b: f32| ((p - a) / (b - a)).clamp(0., 1.);
+    let beat = beat.max(1).min(total.max(1));
+    let start = ((total / 2) / beat) * beat;
+    let drums = (elapsed.saturating_sub(start) as f32 / beat as f32).clamp(0., 1.);
+    [
+        [1. - ramp(0., 0.35), 1. - ramp(0.5, 1.), 1. - drums],
+        [ramp(0.42, 0.70), ramp(0.45, 0.85), drums],
+    ]
+}
+#[cfg(test)]
+mod envelope_tests {
+    #[test]
+    fn f05_f06_vocals_exclusive_and_drum_swap_one_beat() {
+        let mut silent = 0;
+        for i in 0..4000 {
+            let m = super::stem_handoff(i, 4000, 484);
+            assert_eq!(m[0][0] * m[1][0], 0.);
+            if m[0][0] == 0. && m[1][0] == 0. {
+                silent += 1;
+            }
+            assert_eq!(m[1][0] * 0., 0.);
+        }
+        assert!(silent >= 200);
+        let start = (2000 / 484) * 484;
+        assert_eq!(super::stem_handoff(start, 4000, 484)[1][2], 0.);
+        assert_eq!(super::stem_handoff(start + 484, 4000, 484)[0][2], 0.);
+    }
+}

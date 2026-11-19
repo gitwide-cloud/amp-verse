@@ -179,19 +179,26 @@ pub fn safe_grid_at_rates(
     out_rate: f64,
     in_rate: f64,
 ) -> Option<Grid> {
-    grid_at_rates(out, incoming, entry, origin, timing, out_rate, in_rate).or_else(|| {
-        timing.phrase_beats().and_then(|_| {
-            grid_at_rates(
-                out,
-                incoming,
-                entry,
-                origin,
-                Timing::Beat,
-                out_rate,
-                in_rate,
-            )
-        })
-    })
+    use crate::transition_plan::{
+        Handoff, TransitionTier, plan_transition, requested_timing, timing_snapshot,
+    };
+    let plan = plan_transition(
+        timing_snapshot(out, false),
+        timing_snapshot(incoming, false),
+        requested_timing(timing),
+        Handoff::Fade,
+        out_rate,
+        0.2,
+        3.,
+        f64::NAN,
+    );
+    let timing = match plan.tier {
+        TransitionTier::T0PhraseLocked => timing,
+        TransitionTier::T1BarLocked => Timing::Bar,
+        TransitionTier::T2BeatLocked => Timing::Beat,
+        _ => return None,
+    };
+    grid_at_rates(out, incoming, entry, origin, timing, out_rate, in_rate)
 }
 #[cfg(test)]
 mod tests {

@@ -63,6 +63,7 @@ pub struct Controls {
     section_epoch: [AtomicU64; 6],
     pub eq: [[AtomicU32; 3]; 6],
     pub trim_db: [AtomicU32; 6],
+    auto_gain_db: [AtomicU32; 6],
     pub stem_level: [[AtomicU32; 3]; 6],
     pub stem_knobs: [[AtomicU32; 3]; 6],
     pub stems_loaded: [AtomicBool; 6],
@@ -148,6 +149,7 @@ impl Default for Controls {
             section_epoch: std::array::from_fn(|_| AtomicU64::new(0)),
             eq: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             trim_db: std::array::from_fn(|_| atom(0.)),
+            auto_gain_db: std::array::from_fn(|_| atom(0.)),
             stem_level: std::array::from_fn(|_| std::array::from_fn(|_| atom(1.))),
             stem_knobs: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             stems_loaded: std::array::from_fn(|_| AtomicBool::new(false)),
@@ -261,6 +263,7 @@ fn scratch_motion(elapsed: u64, beat: u64) -> (f64, f32) {
     (offset, edge * if phase < 0.5 { 0.4 } else { 0.16 })
 }
 struct Fade {
+    handoff_mode: u32,
     from: f32,
     to: f32,
     total: u64,
@@ -279,6 +282,7 @@ struct SampleVoice {
     playing: bool,
 }
 enum Command {
+    HandoffMode(u32),
     StemLevels(usize, [f32; 3]),
     RestoreSync(usize, bool),
     Clock(f32, u32),
@@ -336,6 +340,10 @@ struct SectionChange {
     old: Option<Source>,
 }
 struct Mixer {
+    pending_handoff: u32,
+    master_limiter: amp_core::limiter::LookaheadLimiter,
+    player_limiter: amp_core::limiter::LookaheadLimiter,
+    cue_limiter: amp_core::limiter::LookaheadLimiter,
     player_envelope: f32,
     launches: [Option<u64>; 6],
     sections: [Option<SectionChange>; 6],
@@ -352,6 +360,10 @@ struct Mixer {
 impl Mixer {
     fn new(rate: u32, commands: mpsc::Receiver<Command>, controls: Arc<Controls>) -> Self {
         Self {
+            master_limiter: amp_core::limiter::LookaheadLimiter::new(rate),
+            player_limiter: amp_core::limiter::LookaheadLimiter::new(rate),
+            cue_limiter: amp_core::limiter::LookaheadLimiter::new(rate),
+            pending_handoff: 0,
             player_envelope: 1.,
             launches: Default::default(),
             sections: Default::default(),
@@ -369,6 +381,7 @@ impl Mixer {
     fn process_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
             match command {
+                Command::HandoffMode(mode) => self.pending_handoff = mode,
                 Command::RestoreSync(d, enabled) => {
                     let bpm = get(&self.controls.bpm[d]);
                     let ratio = get(&self.controls.master_bpm) / bpm;
@@ -476,6 +489,7 @@ impl Mixer {
                     grid,
                 } => {
                     self.fade = Some(Fade {
+                        handoff_mode: std::mem::take(&mut self.pending_handoff),
                         from: get(&self.controls.crossfader),
                         to,
                         total: (seconds * self.rate as f32).max(1.) as u64,
@@ -503,6 +517,7 @@ impl Mixer {
                     let fade = (fade * self.rate as f32).max(1.) as u64;
                     let hold = (hold * self.rate as f32).max(1.) as u64;
                     self.fade = Some(Fade {
+                        handoff_mode: std::mem::take(&mut self.pending_handoff),
                         from: get(&self.controls.crossfader),
                         to,
                         total: fade * 2 + hold,
@@ -526,6 +541,7 @@ impl Mixer {
                 } => {
                     set(&self.controls.fade_progress, 0.);
                     self.fade = Some(Fade {
+                        handoff_mode: std::mem::take(&mut self.pending_handoff),
                         from: get(&self.controls.crossfader),
                         to,
                         total: (seconds * self.rate as f32).max(1.) as u64,
@@ -614,6 +630,7 @@ impl Mixer {
                 Command::Fade { to, seconds } => {
                     set(&self.controls.fade_progress, 0.);
                     self.fade = Some(Fade {
+                        handoff_mode: std::mem::take(&mut self.pending_handoff),
                         from: get(&self.controls.crossfader),
                         to,
                         total: (seconds * self.rate as f32).max(1.) as u64,
@@ -726,7 +743,7 @@ impl Mixer {
             })
         });
         let trims = std::array::from_fn::<_, 6, _>(|d| {
-            10f32.powf(get(&c.trim_db[d]).clamp(-12., 12.) / 20.)
+            10f32.powf((get(&c.trim_db[d]).clamp(-12., 12.) + get(&c.auto_gain_db[d])) / 20.)
         });
         let sweeps = std::array::from_fn::<_, 6, _>(|d| get(&c.sweep[d]).clamp(-1., 1.));
         let sweep_alpha = std::array::from_fn::<_, 6, _>(|d| {
@@ -841,6 +858,8 @@ impl Mixer {
                 c.fading.store(false, Relaxed);
             }
             let mut mashup_mix = None;
+            let mut handoff_masks = None;
+            let mut eq_masks = [[1.; 3]; 2];
             let mut scratch_read: Option<(usize, f64)> = None;
             if let Some(fade) = &mut self.fade {
                 let outgoing = c.other(fade.incoming);
@@ -908,6 +927,35 @@ impl Mixer {
                         ));
                     }
                     let t = (fade.elapsed as f32 / fade.total as f32).clamp(0., 1.);
+                    if fade.handoff_mode > 0 && fade.mashup.is_none() {
+                        let bpm = get(&c.bpm[outgoing]) * c.effective_rate(outgoing);
+                        if bpm.is_finite() && bpm > 0. {
+                            let beat = (60. * self.rate as f32 / bpm).round().max(1.) as u64;
+                            let masks = amp_core::transition_plan::stem_handoff(
+                                fade.elapsed,
+                                fade.total,
+                                beat,
+                            );
+                            if fade.handoff_mode == 2 {
+                                let mut ordered = [[1.; 3]; 2];
+                                ordered[outgoing % 2] = masks[0];
+                                ordered[fade.incoming % 2] = masks[1];
+                                handoff_masks = Some(ordered);
+                            } else {
+                                let highs = (t / 0.4).clamp(0., 1.);
+                                let mids = ((t - 0.4) / 0.5).clamp(0., 1.);
+                                let cuts = [
+                                    [24. * masks[1][2], 12. * mids, 9. * highs],
+                                    [24. * masks[0][2], 9. * (1. - mids), 6. * (1. - highs)],
+                                ];
+                                for (side, deck) in
+                                    [outgoing, fade.incoming].into_iter().enumerate()
+                                {
+                                    eq_masks[deck % 2] = cuts[side].map(|db| 10f32.powf(-db / 20.));
+                                }
+                            }
+                        }
+                    }
                     set(&c.fade_progress, t);
                     set(&c.crossfader, fade.from + (fade.to - fade.from) * t);
                     fade.elapsed += 1;
@@ -987,6 +1035,9 @@ impl Mixer {
             let mut stem_masks = [[1.; 3]; 2];
             if let Some((buses_override, masks)) = mashup_mix {
                 buses = buses_override;
+                stem_masks = masks;
+            }
+            if let Some(masks) = handoff_masks {
                 stem_masks = masks;
             }
             c.mashup_active.store(
@@ -1102,24 +1153,27 @@ impl Mixer {
                         l.capturing = false;
                     }
                 }
-                for (stem, mask) in stem_masks[d % 2].iter().enumerate() {
-                    v.stem_mix[stem] += (get(&c.stem_level[d][stem]).clamp(0., 1.)
+                for stem in 0..3 {
+                    v.stem_mix[stem] +=
+                        (get(&c.stem_level[d][stem]).clamp(0., 1.) - v.stem_mix[stem]) * 0.004;
+                }
+                // Apply masks AFTER smoothing user gains: zero means exactly zero.
+                let stem_gain: [f32; 3] = std::array::from_fn(|stem| {
+                    v.stem_mix[stem]
                         * if c.pair_indices().contains(&d) {
-                            *mask
+                            stem_masks[d % 2][stem]
                         } else {
                             1.
                         }
-                        - v.stem_mix[stem])
-                        * 0.004;
-                }
+                });
                 let mut frame: Frame =
                     if source.separated && scratch_read.is_some_and(|(deck, _)| deck == d) {
-                        [frame[4] * v.stem_mix[2], frame[5] * v.stem_mix[2]]
+                        [frame[4] * stem_gain[2], frame[5] * stem_gain[2]]
                     } else if source.separated {
                         std::array::from_fn(|ch| {
-                            frame[ch] * v.stem_mix[0]
-                                + frame[ch + 2] * v.stem_mix[1]
-                                + frame[ch + 4] * v.stem_mix[2]
+                            frame[ch] * stem_gain[0]
+                                + frame[ch + 2] * stem_gain[1]
+                                + frame[ch + 4] * stem_gain[2]
                         })
                     } else {
                         [frame[0], frame[1]]
@@ -1139,9 +1193,14 @@ impl Mixer {
                     frame[ch] *= v.trim;
                     v.low[ch] += alpha_low * (frame[ch] - v.low[ch]);
                     v.high[ch] += alpha_high * (frame[ch] - v.high[ch]);
-                    let value = v.low[ch] * eq[d][0]
-                        + (v.high[ch] - v.low[ch]) * eq[d][1]
-                        + (frame[ch] - v.high[ch]) * eq[d][2];
+                    let mask = if c.pair_indices().contains(&d) {
+                        eq_masks[d % 2]
+                    } else {
+                        [1.; 3]
+                    };
+                    let value = v.low[ch] * eq[d][0] * mask[0]
+                        + (v.high[ch] - v.low[ch]) * eq[d][1] * mask[1]
+                        + (frame[ch] - v.high[ch]) * eq[d][2] * mask[2];
                     v.filter[ch] += filter[d] * (value - v.filter[ch]);
                     frame[ch] = if get(&c.cutoff[d]) >= 20000. {
                         value
@@ -1211,18 +1270,17 @@ impl Mixer {
                 let blend = get(&c.cue_blend).clamp(0., 1.);
                 let volume = get(&c.cue_volume).clamp(0., 1.);
                 let frame = std::array::from_fn(|ch| {
-                    ((cue_mix[ch] * (1. - blend) + mix[ch] * get(&c.master) * blend) * volume)
-                        .clamp(-0.98, 0.98)
+                    (cue_mix[ch] * (1. - blend) + mix[ch] * get(&c.master) * blend) * volume
                 });
-                let _ = monitor.push(frame);
+                let _ = monitor.push(self.cue_limiter.process(frame));
             }
-            let master = [
-                (mix[0] * get(&c.master)).clamp(-0.98, 0.98),
-                (mix[1] * get(&c.master)).clamp(-0.98, 0.98),
-            ];
+            let master = self.master_limiter.process(mix.map(|v| v * get(&c.master)));
+            let player_master = self
+                .player_limiter
+                .process(player_mix.map(|v| v * get(&c.master)));
             if let Some(tap) = &mut self.broadcast {
                 let output = if c.broadcast_player_only.load(Relaxed) {
-                    player_mix.map(|value| (value * get(&c.master)).clamp(-0.98, 0.98))
+                    player_master
                 } else {
                     master
                 };
@@ -1441,6 +1499,9 @@ impl Engine {
         self.send(Command::Broadcast(Some(producer)))?;
         Ok(consumer)
     }
+    pub fn set_handoff_mode(&self, mode: u32) {
+        let _ = self.send(Command::HandoffMode(mode));
+    }
     pub fn stop_broadcast_tap(&self) {
         let _ = self.send(Command::Broadcast(None));
     }
@@ -1503,6 +1564,10 @@ impl Engine {
 
         if section.is_none() {
             self.cancel_section(deck);
+            set(
+                &self.controls.auto_gain_db[deck],
+                amp_core::loudness::auto_gain_db(&track.preparation),
+            );
             self.controls.source_origin[deck].store(track.preparation.cue_in.to_bits(), Relaxed);
             set(
                 &self.controls.bpm[deck],

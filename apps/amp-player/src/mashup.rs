@@ -49,9 +49,8 @@ pub fn envelope(elapsed: u64, fade: u64, hold: u64, incoming: usize) -> ([f32; 2
     let mut masks = [[1.; 3]; 2];
     if elapsed < fade {
         let p = elapsed as f32 / fade.max(1) as f32;
-        weights[incoming] = p;
-        masks[outgoing] = [1. - p, 1., 1.];
-        masks[incoming] = [1., 0., 0.];
+        masks[outgoing] = [(1. - p / 0.60).max(0.), 1., 1.];
+        masks[incoming] = [((p - 0.65) / 0.35).clamp(0., 1.), 0., 0.];
     } else if elapsed < fade + hold {
         masks[outgoing] = [0., 1., 1.];
         masks[incoming] = [1., 0., 0.];
@@ -105,6 +104,7 @@ mod tests {
         assert_eq!(m[1], [1.; 3]);
         for t in 0..400 {
             let (_, m) = envelope(t, 100, 200, 0);
+            assert_eq!(m[0][0] * m[1][0], 0.);
             assert!(m.iter().flatten().all(|v| (0. ..=1.).contains(v)));
         }
     }

@@ -1,0 +1,360 @@
+{
+  "schema": "amp.sag65.synthetic_transition_fixtures.v1",
+  "sample_rate": 44100,
+  "code_baselines_audited": {
+    "origin_main": "aaec29c",
+    "preview_baseline": "62195e6 (origin/delivery/preview-packaging-followup-20261118)"
+  },
+  "measured_baseline_vs_proposed": {
+    "loudness_and_headroom_f10": {
+      "source_hot_outgoing_lufs": -9.6,
+      "source_quiet_incoming_lufs": -18.0,
+      "uncorrected_loudness_jump_lu": 8.4,
+      "proposed_autogain_db_for_quiet_incoming": 4.0,
+      "current_radio_rs_clipped_samples": 1053,
+      "current_radio_rs_clipped_pct": 0.597,
+      "current_radio_rs_ebur128": {
+        "integrated_lufs": -7.4,
+        "lra_lu": 0.1,
+        "true_peak_dbtp": 0.0
+      },
+      "current_mixer_rs_plus3db_clipped_samples": 1242,
+      "current_mixer_rs_plus3db_clipped_pct": 0.704,
+      "current_mixer_rs_plus3db_ebur128": {
+        "integrated_lufs": -7.4,
+        "lra_lu": 0.1,
+        "true_peak_dbtp": -0.2
+      },
+      "proposed_autogain_limiter_clipped_samples": 0,
+      "proposed_autogain_limiter_ebur128": {
+        "integrated_lufs": -11.8,
+        "lra_lu": 0.1,
+        "true_peak_dbtp": -1.8
+      }
+    },
+    "vocal_clash_f05": {
+      "transition_seconds": 4.0,
+      "current_blend_stems_dual_vocal_overlap_ms": 500.0,
+      "current_blend_stems_dual_vocal_overlap_pct": 12.5,
+      "current_blend_stems_min_overlap_rms": 0.032,
+      "proposed_vocal_safe_dual_vocal_overlap_ms": 0.0,
+      "proposed_vocal_safe_dual_vocal_overlap_pct": 0.0
+    },
+    "energy_loudness_trap_f07": {
+      "dynamic_dance_lufs": -15.8,
+      "brickwalled_ambient_pad_lufs": -3.6,
+      "current_raw_rms_energy_dynamic_dance": 0.728,
+      "current_raw_rms_energy_brickwalled_pad": 1.0,
+      "current_engine_misranks_pad_higher_than_dance": true,
+      "proposed_perceptual_dynamic_dance": {
+        "normalized_crest_db": 15.79,
+        "onset_rate_hz": 2.0,
+        "mean_onset_flux": 0.01034,
+        "perceptual_energy_0_1": 0.392
+      },
+      "proposed_perceptual_brickwalled_pad": {
+        "normalized_crest_db": 1.53,
+        "onset_rate_hz": 0.0,
+        "mean_onset_flux": 0.00018,
+        "perceptual_energy_0_1": 0.001
+      }
+    },
+    "drift_and_phase_f01_f08": {
+      "f01_beat_count": 33,
+      "f08_beat_count": 64,
+      "f08_start_bpm": 118.0,
+      "f08_end_bpm": 122.0,
+      "f08_max_constant_grid_phase_error_beats": 0.272,
+      "f08_exceeds_stability_threshold_0_12": true
+    }
+  },
+  "fixtures": [
+    {
+      "id": "F01",
+      "name": "phrase_downbeat_aligned_124bpm",
+      "category": "phrase_downbeat_alignment",
+      "outgoing": {
+        "bpm": 124.0,
+        "beat_offset": 0.1,
+        "mix_bar_anchor": 0.1,
+        "mix_phrase_anchor": 0.1,
+        "tempo_confidence": 0.94,
+        "rhythm_stable": true,
+        "harmonic_key": "8A",
+        "key_confidence": 0.88,
+        "lufs": -14.0,
+        "wav": "wav/f01_steady_124a.wav",
+        "sha256": "d028eea681e8274521684cd8ce65fbac58ed5619621af5580c54eaf7a0942cf8"
+      },
+      "incoming": {
+        "bpm": 124.0,
+        "beat_offset": 0.25,
+        "mix_bar_anchor": 0.25,
+        "mix_phrase_anchor": 0.25,
+        "tempo_confidence": 0.93,
+        "rhythm_stable": true,
+        "harmonic_key": "9A",
+        "key_confidence": 0.85,
+        "lufs": -14.0,
+        "wav": "wav/f01_steady_124b.wav",
+        "sha256": "c0ab3f35d6b10841fe0ddc61e7ba3071c7081d4121337c5c7243bbc72b54a2be"
+      },
+      "expected_tier": "T0_PHRASE_LOCKED",
+      "expected_rate": 1.0,
+      "expected_pulse_factor": 1.0,
+      "max_phase_error_ms": 1.0,
+      "expected_fallback_reason": null
+    },
+    {
+      "id": "F02",
+      "name": "unreviewed_phrase_trap_124bpm",
+      "category": "phrase_downbeat_alignment",
+      "outgoing": {
+        "bpm": 124.0,
+        "beat_offset": 0.1,
+        "mix_bar_anchor": null,
+        "mix_phrase_anchor": null,
+        "downbeat_verified": false,
+        "tempo_confidence": 0.85,
+        "rhythm_stable": true
+      },
+      "incoming": {
+        "bpm": 124.0,
+        "beat_offset": 0.25,
+        "mix_bar_anchor": null,
+        "mix_phrase_anchor": null,
+        "downbeat_verified": false,
+        "tempo_confidence": 0.85,
+        "rhythm_stable": true
+      },
+      "requested_timing": "Phrase16",
+      "current_engine_bug": "phrase_anchor() silently falls back to beat_offset (mix_schedule.rs:72), counting 16 beats from arbitrary beat 0",
+      "expected_tier": "T2_BEAT_LOCKED",
+      "expected_fallback_reason": "unverified_phrase_anchor_downgraded_to_beat"
+    },
+    {
+      "id": "F03",
+      "name": "half_double_tempo_140_to_70",
+      "category": "half_double_tempo",
+      "outgoing": {
+        "bpm": 140.0,
+        "beat_offset": 0.0,
+        "tempo_confidence": 0.9,
+        "rhythm_stable": true,
+        "harmonic_key": "5A",
+        "key_confidence": 0.8
+      },
+      "incoming": {
+        "bpm": 70.0,
+        "beat_offset": 0.0,
+        "tempo_confidence": 0.88,
+        "rhythm_stable": true,
+        "harmonic_key": "5A",
+        "key_confidence": 0.8
+      },
+      "requested_timing": "Phrase16",
+      "expected_tier": "T2_BEAT_LOCKED",
+      "expected_rate": 1.0,
+      "expected_pulse_factor": 2.0,
+      "expected_half_double_soft_penalty_gt": 0.0,
+      "expected_fallback_reason": "half_double_pulse_ambiguous_phrase_downgraded_to_beat"
+    },
+    {
+      "id": "F04",
+      "name": "harmonic_soft_constraint_and_keylock_shift",
+      "category": "harmonic_compatibility",
+      "subcases": [
+        {
+          "case": "4a_same_bpm_adjacent_camelot",
+          "out_key": "8A",
+          "in_key": "9A",
+          "in_rate": 1.0,
+          "key_lock": false,
+          "in_key_conf": 0.85,
+          "expected_harmonic_cost_range": [
+            0.25,
+            0.5
+          ]
+        },
+        {
+          "case": "4b_plus6pct_no_keylock_semitone_clash",
+          "out_key": "8A",
+          "in_key": "8A",
+          "in_rate": 1.06,
+          "key_lock": false,
+          "in_key_conf": 0.85,
+          "effective_sounding_key": "3A",
+          "expected_harmonic_cost_min": 1.8
+        },
+        {
+          "case": "4c_plus6pct_with_keylock_stays_8A",
+          "out_key": "8A",
+          "in_key": "8A",
+          "in_rate": 1.06,
+          "key_lock": true,
+          "in_key_conf": 0.85,
+          "effective_sounding_key": "8A",
+          "expected_harmonic_cost_max": 0.1
+        },
+        {
+          "case": "4d_low_key_confidence_attenuated",
+          "out_key": "8A",
+          "in_key": "2A",
+          "in_rate": 1.0,
+          "key_lock": true,
+          "in_key_conf": 0.08,
+          "expected_confidence_scaled_below_confident_clash": true
+        },
+        {
+          "case": "4e_soft_constraint_never_hard_blocks_single_candidate",
+          "candidates": 1,
+          "out_key": "8A",
+          "in_key": "2A",
+          "expected_playable": true,
+          "expected_mitigation": "shorter_fade_or_eq_filter_swap"
+        }
+      ]
+    },
+    {
+      "id": "F05",
+      "name": "vocal_clash_stem_and_nonstem",
+      "category": "vocal_clashes",
+      "outgoing_vocal_window_s": [
+        0.0,
+        4.0
+      ],
+      "incoming_vocal_window_s": [
+        0.0,
+        5.0
+      ],
+      "stems_loaded_mode": {
+        "expected_dual_vocal_overlap_ms": 0.0,
+        "expected_guard_gap_pct": 7.0
+      },
+      "non_stem_mode": {
+        "expected_action": "shift_entry_or_exit_to_instrumental_or_apply_mid_duck_short_fade",
+        "max_unattenuated_dual_vocal_s": 1.0
+      }
+    },
+    {
+      "id": "F06",
+      "name": "stem_handoff_bleed_and_mute_preservation",
+      "category": "stem_aware_handoffs",
+      "user_stem_gains_outgoing": [
+        1.0,
+        0.8,
+        1.0
+      ],
+      "user_stem_gains_incoming": [
+        0.0,
+        1.0,
+        0.9
+      ],
+      "expected_invariants": [
+        "incoming_vocal_remains_exactly_0_throughout_and_after_transition",
+        "user_stem_gains_restored_exactly_on_complete_or_cancel",
+        "drum_swap_window_le_1_beat_aligned_to_bar_or_beat",
+        "missing_stems_on_either_deck_falls_back_to_eq_bass_swap"
+      ]
+    },
+    {
+      "id": "F07",
+      "name": "energy_arc_loudness_trap",
+      "category": "energy_arcs",
+      "dynamic_dance_wav": "wav/f07_dynamic_dance.wav",
+      "brickwalled_pad_wav": "wav/f07_brickwalled_ambient_pad.wav",
+      "expected_invariants": [
+        "perceptual_energy(dynamic_dance) > perceptual_energy(brickwalled_pad)",
+        "multi_phase_arc_supports_warmup_build_peak_valley_cooldown",
+        "show_ranking_does_not_double_count_energy_or_tempo"
+      ]
+    },
+    {
+      "id": "F08",
+      "name": "dynamic_tempo_drift_live_drummer",
+      "category": "dynamic_tempo",
+      "wav": "wav/f08_drifting_118_to_122.wav",
+      "sha256": "7ab9e45f8c51703e75d3517bbca965f6b3e1616429e5f189398fe9dcd9a4af40",
+      "start_bpm": 118.0,
+      "end_bpm": 122.0,
+      "expected_constant_grid_stable": false,
+      "expected_tier_without_warp_anchors": "T4_UNSYNCED_CLEAN_FADE",
+      "expected_fallback_reason": "rhythm_drift_exceeds_0_12_beats"
+    },
+    {
+      "id": "F09",
+      "name": "tempo_ramp_recovery_118_to_126",
+      "category": "dynamic_tempo",
+      "outgoing_bpm": 118.0,
+      "incoming_bpm": 126.0,
+      "initial_matched_rate": 0.936508,
+      "expected_post_handoff_behavior": "slew_incoming_rate_toward_1_0_at_le_0_25_pct_per_sec_with_key_lock",
+      "anti_pattern_prevented": "permanent_tempo_gravity_locking_set_at_118_bpm"
+    },
+    {
+      "id": "F10",
+      "name": "loudness_jump_and_master_clipping",
+      "category": "loudness_limiter_headroom",
+      "hot_outgoing_wav": "wav/f10_hot_outgoing.wav",
+      "hot_incoming_wav": "wav/f10_hot_incoming.wav",
+      "quiet_incoming_wav": "wav/f10_quiet_incoming.wav",
+      "expected_invariants": [
+        "autogain_reduces_8_4_lu_jump_to_within_1_0_lu",
+        "master_bus_true_peak_le_-1_0_dbtp",
+        "zero_hard_clipped_samples_at_full_scale",
+        "autogain_clamped_to_[-12_db, +6_db]_to_prevent_noise_floor_pumping"
+      ]
+    },
+    {
+      "id": "F11",
+      "name": "low_confidence_sparse_grid_fallback",
+      "category": "confidence_and_fallback",
+      "subcases": [
+        {
+          "case": "11a_rhythm_stable_null_windows_lt_3",
+          "bpm": 122.0,
+          "beat_offset": 0.1,
+          "tempo_confidence": 0.55,
+          "rhythm_windows": 2,
+          "rhythm_stable": null,
+          "current_bug": "timing_reliable treats stable:null as reliable",
+          "expected_tier": "T3_TEMPO_ONLY_OR_T4_UNSYNCED"
+        },
+        {
+          "case": "11b_tempo_conf_0_42",
+          "bpm": 122.0,
+          "beat_offset": 0.1,
+          "tempo_confidence": 0.42,
+          "rhythm_stable": true,
+          "expected_tier": "T4_UNSYNCED_CLEAN_FADE",
+          "expected_rhythmic_fx_allowed": false
+        },
+        {
+          "case": "11c_no_bpm_metadata",
+          "bpm": null,
+          "beat_offset": null,
+          "expected_tier": "T4_UNSYNCED_CLEAN_FADE",
+          "expected_no_fake_120bpm_grain": true
+        }
+      ]
+    },
+    {
+      "id": "F12",
+      "name": "short_tail_and_manual_cue_preservation",
+      "category": "safety_and_fallback",
+      "outgoing_remaining_s": 2.0,
+      "requested_fade_s": 8.0,
+      "manual_override": true,
+      "manual_cues": [
+        {
+          "id": "user-drop",
+          "seconds": 32.0,
+          "kind": "hotcue"
+        }
+      ],
+      "expected_effective_fade_s": 1.85,
+      "expected_tier": "T5_EMERGENCY_TAIL_RESCUE",
+      "expected_manual_metadata_mutated": false
+    }
+  ]
+}
