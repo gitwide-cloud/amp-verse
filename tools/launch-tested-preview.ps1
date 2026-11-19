@@ -21,7 +21,7 @@ $start.FileName = Join-Path $app 'amp-player.exe'
 $start.WorkingDirectory = $app
 $start.UseShellExecute = $false
 if ($MusicRoot) {
-    $root = (Resolve-Path -LiteralPath $MusicRoot).Path
+    $root = (Resolve-Path -LiteralPath $MusicRoot).ProviderPath
     if ($root.Contains('"')) { throw 'Invalid music folder' }
     $argumentRoot = $root.TrimEnd('\')
     if ($argumentRoot -match '^[A-Za-z]:$') { $argumentRoot += '\.' }
@@ -42,7 +42,10 @@ $values = @{
     AMP_LAB_TOOLS=(Join-Path $app 'tools\lab-youtube');
     AMP_STEM_PYTHON=(Join-Path $app 'addons\stems\Scripts\python.exe')
 }
-if ($AcceptanceFixture) { $values['USERPROFILE'] = $profile; $values['HOME'] = $profile }
+# Some legacy preference/index readers derive AppData from USERPROFILE rather
+# than APPDATA. Isolate both shortcut and acceptance launches, child-only.
+$values['USERPROFILE'] = $profile
+$values['HOME'] = $profile
 foreach ($key in $values.Keys) { $start.EnvironmentVariables[$key] = $values[$key] }
 $start.EnvironmentVariables.Remove('AMP_CAST_SOURCE_LOCATIONS')
 $start.EnvironmentVariables.Remove('AMP_LAB_EXE')
