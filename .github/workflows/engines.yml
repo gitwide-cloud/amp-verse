@@ -8,6 +8,7 @@ on:
       - 'apps/amp-engine/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'tools/check_chroma.py'
       - '.github/workflows/engines.yml'
   pull_request:
     paths:
@@ -16,6 +17,7 @@ on:
       - 'apps/amp-engine/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
+      - 'tools/check_chroma.py'
       - '.github/workflows/engines.yml'
   workflow_dispatch:
 permissions:
@@ -45,6 +47,15 @@ jobs:
         if: runner.os == 'Windows'
         run: choco install ffmpeg --yes --no-progress
       - run: cargo fmt --all --check
+      - name: Verify native chroma parity and measure bounded component throughput
+        run: python tools/check_chroma.py --out test-output/chroma
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: amp-chroma-evidence-${{ runner.os }}-${{ github.sha }}
+          path: |
+            test-output/chroma/report.json
+            test-output/chroma/verification.log
       - name: Core, database, analysis, server and engine tests
         run: cargo test -p amp-core --features analysis -p amp-cast -p amp-engine -p amp-dj-policy --all-targets --locked
       - name: Strict engine lint
@@ -60,6 +71,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then ext=.exe; else ext=; fi
           cp target/release/amp-cast$ext target/release/amp-prepare$ext target/release/amp-engine$ext engine-checkpoint/
           cp LICENSE THIRD_PARTY_NOTICES.md docs/SERVER_ANALYSIS_DATABASE.md engine-checkpoint/
+          cp test-output/chroma/report.json engine-checkpoint/chroma-benchmark.json
           python -c "import hashlib,json,pathlib; d=pathlib.Path('engine-checkpoint'); files=[{'name':p.name,'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(d.iterdir()) if p.is_file()]; (d/'build.json').write_text(json.dumps({'commit':'${{ github.sha }}','os':'${{ runner.os }}','preview':True,'deployed':False,'files':files},indent=2))"
       - uses: actions/upload-artifact@v4
         with:
