@@ -286,9 +286,21 @@ mod tests {
 
     fn fixture(tag: &str) -> serde_json::Value {
         let name = "amp-engine-windows-x86_64.exe";
-        serde_json::json!({"tag_name":tag,"draft":false,"prerelease":false,"assets":
-            [name.to_string(),format!("{name}.sha256"),format!("{name}.json")].iter().map(|name|
-                serde_json::json!({"name":name,"state":"uploaded","browser_download_url":format!("{DOWNLOADS}{tag}/{name}")})).collect::<Vec<_>>()})
+        let assets = [
+            name.to_string(),
+            format!("{name}.sha256"),
+            format!("{name}.json"),
+        ]
+        .iter()
+        .map(|name| {
+            serde_json::json!({
+                "name": name,
+                "state": "uploaded",
+                "browser_download_url": format!("{DOWNLOADS}{tag}/{name}")
+            })
+        })
+        .collect::<Vec<_>>();
+        serde_json::json!({"tag_name":tag,"draft":false,"prerelease":false,"assets":assets})
     }
 
     fn metadata(tag: &str) -> serde_json::Value {
