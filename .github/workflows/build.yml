@@ -140,16 +140,16 @@ jobs:
         run: |
           mkdir -p dist/setup
           cp tools/setup_lab_youtube.py dist/setup/
-      - uses: actions/upload-artifact@v4
-        with:
-          name: ${{ matrix.artifact }}-v${{ steps.package_version.outputs.version }}
-          path: dist/
       - name: Include tested preview installer
         if: runner.os == 'Windows'
         shell: bash
         run: |
           cp tools/install-tested-preview.ps1 tools/launch-tested-preview.ps1 dist/
           cp docs/tested-preview-install.md dist/
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.artifact }}-v${{ steps.package_version.outputs.version }}
+          path: dist/
       - name: Package optional analysis add-on
         shell: bash
         run: |
