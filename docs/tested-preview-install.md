@@ -42,10 +42,14 @@ engine is always taken from this delivery, never from the old installation.
 The receipt records those runtime hashes and sources.
 
 Close the current player and Cast host yourself, then use the new shortcut.
-Settings, device identity, caches, roaming and local app data are isolated per full commit; preview control
-and Cast ports bind to loopback. The application may import a copy of the existing
-music-root preference and index its selected music when opened; the installer
-itself performs no library scan. Shared library metadata is still shared when you
+Settings, device identity, caches, home/profile paths, roaming and local app data
+are isolated per full commit for both normal and acceptance launches. Existing
+music-root preferences are not imported. Choose a music folder explicitly; the
+installer itself performs no library scan. Show Control and Cast autostart are
+disabled. Show Control uses loopback when enabled. The delivered 1c2945dd binary
+has a separate known limitation: manually starting Native Cast overrides the
+launcher bind and listens on all interfaces. Do not start Native Cast during
+this isolated acceptance; the launcher does not enforce its bind address. Shared library metadata is still shared when you
 select the same NAS music root. This is **not** a sandbox for editing that library.
 
 To return to the previous version, close the preview and use the original AMP
@@ -55,9 +59,17 @@ you no longer need it. No automatic cleanup is performed.
 
 For isolated GUI acceptance, run the installed launcher with
 `-AcceptanceFixture -MusicRoot C:\Path\To\DisposableFixture`. This uses a separate
-acceptance profile and overrides inherited home/profile paths for the child so
-it cannot import the normal music-root preference. Use only disposable fixture
+acceptance profile. Both modes override inherited home/profile paths for the
+child so neither imports the normal music-root preference. Use only disposable fixture
 music here. Normal shortcuts do not select acceptance mode.
 
 Verification status must be recorded for the actual delivery: script parser
 validation alone does not establish successful installation or GUI acceptance.
+
+Launcher follow-up to the 1c2945dd binary / 62195e6 installer delivery: fixes
+normal-mode USERPROFILE isolation and PowerShell 5.1 UNC MusicRoot resolution.
+This source patch does not change compiled binaries or an installed preview.
+Before shipping it, validate with Windows PowerShell 5.1 for both launch modes
+and a UNC fixture root; refresh delivery-manifest hashes and provenance for the
+launcher and this document. Preserve the prior launcher for rollback. Never
+reuse the prior manifest hash after changing these files.
