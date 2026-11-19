@@ -26,6 +26,21 @@ The Home Assistant/Node-RED connectors execute ONLY ON THE SERVER. Store their c
 
 UI, HA/Node-RED and Bitfocus use the same versioned commands/state, preserving playback ownership, cue privacy, authorization and clear failures when a target is offline. The latest owner clarification explicitly overrides the earlier server-only statement for BITFOCUS only; HA/Node-RED remain server-only.
 
+## Bitfocus Companion action coverage
+
+On desktop and server, Companion exposes the available AMP Verse capabilities as configurable Bitfocus actions with real-state feedback. Coverage includes:
+
+- Music/player: select/play a song, pause/resume/stop, seek where supported, queue operations, output/volume.
+- Clips: select/trigger/stop a clip and route it through the applicable player/DJ/sampler path. A clip trigger must state its target/bus rather than silently replace an unrelated live mix.
+- Playlists: choose/load normal or Smart Playlists, play or send to DJ, and explicit ordered/shuffle behavior. Automated station hosting remains server-only; normal playlists preserve saved order unless Shuffle is on.
+- DJ: load tracks or a saved mix, transport/cue/Auto Mix controls and configured performance actions. Preserve private cue and manual locks.
+- Cast/radio: select a target, start/stop a live send or receive, connect to a server-hosted station, choose physical output and report actual connection/buffering/error state. Respect one active sending OR receiving session on desktop/mobile and never steal a newer owner silently.
+- Remote: target an authorized AMP installation, issue its supported commands, retrieve state and trigger configured remote functions. Show the selected local/remote target clearly.
+
+Use one versioned command/capability/state model with the apps rather than inventing independent playback logic for Bitfocus. Bind buttons to stable song/clip/playlist/station/device IDs, not transient list row indices. Distinguish Load from Play and one-shot actions from stateful toggles. Match action availability to installed modules and target capabilities. Handle unavailable/offline targets explicitly, prevent duplicate/replayed triggers on reconnect, and show success only from acknowledged/observed state. Keep feedback loops from triggering actions recursively. Button feedback includes playback, loaded item/mix, selected output, station/cast ownership and connection/error state. Validate cross-module event scenarios with actual target state, not only HTTP acceptance.
+
+This is the requested integration scope, not a claim every listed action is already implemented.
+
 ## Required platforms
 
 AMP Verse Server is a Windows AND Linux product. Both platforms require library intake/management, analysis orchestration, database/API, virtual stations, uploads/sync and physical audio output for received desktop mixes. OS-specific audio/GPU/service adapters sit behind common server semantics. Validate Windows device/path/service behavior independently from Linux; a successful Linux build is not Windows acceptance. Keep the existing Windows/Linux build matrix. Browser controls must not depend on the server OS.
