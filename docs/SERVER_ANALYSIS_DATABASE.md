@@ -44,6 +44,20 @@ Normal playlists and Smart Playlists can be created/edited on desktop and Androi
 
 Server may host multiple isolated automated stations. Each connected desktop/mobile endpoint still selects just one active sending OR receiving Cast session. Do not enable endpoint relay loops, background client-hosted automated playlist stations or hidden simultaneous sessions. This clarification narrows earlier general statements about universal sending/receiving: both directions are supported as modes, never concurrently on a client installation.
 
+## Library, playlist builder and Auto Mix ordering: owner clarification
+
+Keep the library organized/browsable as FOLDERS. In the DJ workspace, ordinary Playlists and Smart Playlists replace crates; do not introduce a separate crate collection or replace the folder library with playlists.
+
+The playlist builder must make it easy to find desired music, browse/filter the collection, audition candidates and assemble/review a list. Ordinary playlists have explicit saved membership and ordering, with clear add/remove/reorder actions. Smart Playlists have saved rules/sources and a visible eligible-song preview; matching songs are distinct from execution order. Search/filter/selection should preserve the current draft, scroll and playback state. Broader filter/layout details need real-screen UX validation rather than an unreviewed universal layout.
+
+Auto Mix selection policy is explicit by playlist type:
+
+- REGULAR PLAYLIST: follow saved track order. Mixing/transition preparation may adapt the handoff, but compatibility scoring must not silently reorder or substitute the next track. With Shuffle OFF, playlist order wins over BPM/key/energy preferences. If the next track is unavailable, report it and apply a documented skip/stop policy without silently turning the list into a Smart Playlist.
+- REGULAR PLAYLIST + SHUFFLE ON: use a shuffled traversal of that playlist's members. Retain membership and avoid unintended repeats within a pass. Smart harmonic/energy ranking is not implicitly enabled by Shuffle.
+- SMART PLAYLIST: the DJ may rank/select the best next eligible track using prepared tempo/key/energy/phrase information and the configured mixing style. Preserve saved source/filter/exclusion rules, repeat controls, manual requests/locks and honest missing-analysis fallbacks. Execution ordering may change; shared rule definitions remain intact.
+
+The policy applies consistently to desktop Auto Mix and server-hosted automated stations. Mobile receives the same playlist types/semantics; its lack of analysis write permission is unrelated. Sync ordinary order and explicit Shuffle state according to documented ownership; do not silently publish a transient Smart Playlist execution order over the user's saved playlist. Tests must prove that a less-compatible next song remains next in ordered mode, Shuffle uses only members, and Smart ranking never violates eligibility.
+
 ## Data model
 
 - Library tracks and paths are associations, not the identity of a musical recording. Exact file identity starts with SHA-256; different encodings/retags require separately validated audio-identity mapping before reuse. Artist/title alone is never enough, especially for DJ edits and remixes.
