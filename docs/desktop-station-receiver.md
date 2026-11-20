@@ -19,7 +19,11 @@ Stop requests cancellation without waiting on the UI thread. The receiver role
 and its per-Player audio lease remain reserved until the worker has killed and
 reaped the decoder and joined its HTTP/stderr pumps. Closing the window requests
 the same finite cleanup; it never leaves a detached decoder process running.
-Liveness is polled from the main Player update even with the Cast view closed.
+Windows decoders are assigned while suspended to a kill-on-close Job Object;
+Linux decoders install PR_SET_PDEATHSIG and check the parent-race condition.
+These process-level guards also stop the decoder if the application exits before
+its asynchronous reaper can run. An owned parent-exit fixture tests this path by
+exiting without Rust destructors. Liveness is polled from the main Player update even with the Cast view closed.
 
 For this transport fix, pause local Player/DJ, previews, sampler and cue playback
 before choosing Listen. Sending and receiving are mutually exclusive. While
