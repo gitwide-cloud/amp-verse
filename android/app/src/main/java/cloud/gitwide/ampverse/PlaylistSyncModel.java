@@ -69,12 +69,12 @@ final class PlaylistSyncModel {
         }else if(status==409||status==400){entry.put("blocked",copy(response)).put("blocked_message",status==409?"Conflict / uncertain receipt. Your phone edit is retained.":"Server rejected this playlist. Your phone edit is retained.");}
         // Transport/5xx: the same persisted pending operation ID is retried; never issue a replacement.
     }
-    static void useServer(JSONObject state,String id)throws JSONException {
-        JSONObject entry=state.getJSONObject("documents").getJSONObject(id);if(!entry.has("current"))throw new JSONException("Refresh the server version first");
+    static void useServer(JSONObject state,String id,JSONObject reviewed)throws JSONException {
+        JSONObject entry=state.getJSONObject("documents").getJSONObject(id);if(!equal(entry.opt("current"),reviewed))throw new JSONException("The server version changed since review; reopen the review.");if(!entry.has("current"))throw new JSONException("Refresh the server version first");
         entry.put("baseline",copy(entry.getJSONObject("current")));entry.remove("desired");entry.remove("desired_base_document");entry.remove("pending");entry.remove("blocked");entry.remove("blocked_message");
     }
-    static void reviewKeepDraft(JSONObject state,String id)throws JSONException {
-        JSONObject entry=state.getJSONObject("documents").getJSONObject(id);if(!entry.has("current")||!entry.has("desired"))throw new JSONException("Both server version and phone draft are required");
+    static void reviewKeepDraft(JSONObject state,String id,JSONObject reviewed)throws JSONException {
+        JSONObject entry=state.getJSONObject("documents").getJSONObject(id);if(!equal(entry.opt("current"),reviewed))throw new JSONException("The server version changed since review; reopen the review.");if(!entry.has("current")||!entry.has("desired"))throw new JSONException("Both server version and phone draft are required");
         // Called only after explicit review. New operation uses the freshly reviewed canonical revision.
         JSONObject base=entry.getJSONObject("desired_base_document"),proposed=entry.getJSONObject("desired").getJSONObject("document"),current=copy(entry.getJSONObject("current").getJSONObject("document"));
         Set<String> keys=new HashSet<>();Iterator<String> b=base.keys(),p=proposed.keys();while(b.hasNext())keys.add(b.next());while(p.hasNext())keys.add(p.next());

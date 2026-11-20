@@ -30,7 +30,7 @@ public class PlaylistSyncModelTest {
     @Test public void uncertainConflictNeverAutomaticallyReissuesPublication()throws Exception{
         JSONObject s=state(),original=normal("Old",1);PlaylistSyncModel.pull(s,snapshot(original));PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","Phone"));JSONObject op=PlaylistSyncModel.next(s);
         PlaylistSyncModel.reply(s,op,409,new JSONObject().put("status","uncertain"));s=new JSONObject(s.toString());assertNull(PlaylistSyncModel.next(s));assertEquals("Phone",PlaylistSyncModel.visible(s.getJSONObject("documents").getJSONObject("normal_stable")).getJSONObject("document").getString("name"));
-        JSONObject desktop=normal("Old",3);desktop.getJSONObject("document").getJSONObject("future").put("desktop_extension",7);PlaylistSyncModel.pull(s,snapshot(desktop));PlaylistSyncModel.reviewKeepDraft(s,"normal_stable");JSONObject reviewed=PlaylistSyncModel.next(s);assertEquals(3,reviewed.getJSONObject("base_revision").getInt("revision"));assertNotEquals(op.getString("operation_id"),reviewed.getString("operation_id"));
+        JSONObject desktop=normal("Old",3);desktop.getJSONObject("document").getJSONObject("future").put("desktop_extension",7);PlaylistSyncModel.pull(s,snapshot(desktop));PlaylistSyncModel.reviewKeepDraft(s,"normal_stable",s.getJSONObject("documents").getJSONObject("normal_stable").getJSONObject("current"));JSONObject reviewed=PlaylistSyncModel.next(s);assertEquals(3,reviewed.getJSONObject("base_revision").getInt("revision"));assertNotEquals(op.getString("operation_id"),reviewed.getString("operation_id"));
     }
     @Test public void otherAuthorityAndWrongAckCannotReplaceBaselines()throws Exception{
         JSONObject s=state(),original=normal("Old",1);PlaylistSyncModel.pull(s,snapshot(original));JSONObject before=PlaylistSyncModel.copy(s);try{PlaylistSyncModel.pull(s,snapshot(normal("Other",2)).put("library_id","different"));fail();}catch(JSONException expected){}assertTrue(PlaylistSyncModel.equal(before,s));
@@ -43,7 +43,7 @@ public class PlaylistSyncModelTest {
 
     @Test public void sameFieldConflictCannotBeBlindlyRebased()throws Exception{
         JSONObject s=state(),original=normal("Old",1);PlaylistSyncModel.pull(s,snapshot(original));PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","Phone"));JSONObject op=PlaylistSyncModel.next(s);PlaylistSyncModel.reply(s,op,409,new JSONObject().put("status","uncertain"));PlaylistSyncModel.pull(s,snapshot(normal("Desktop",2)));
-        try{PlaylistSyncModel.reviewKeepDraft(s,"normal_stable");fail();}catch(JSONException expected){}
+        try{PlaylistSyncModel.reviewKeepDraft(s,"normal_stable",s.getJSONObject("documents").getJSONObject("normal_stable").getJSONObject("current"));fail();}catch(JSONException expected){}
         assertNull(PlaylistSyncModel.next(s));assertEquals("Phone",PlaylistSyncModel.visible(s.getJSONObject("documents").getJSONObject("normal_stable")).getJSONObject("document").getString("name"));
     }
     @Test public void numericAckAndFullSmartRuleExtensionsRoundtrip()throws Exception{
@@ -62,5 +62,10 @@ public class PlaylistSyncModelTest {
         PlaylistSyncModel.save(s,a,PlaylistSyncModel.copy(a.getJSONObject("document")).put("name","A phone"));PlaylistSyncModel.save(s,b,PlaylistSyncModel.copy(b.getJSONObject("document")).put("name","B phone"));JSONObject first=PlaylistSyncModel.next(s);PlaylistSyncModel.reply(s,first,200,ack(first,2));JSONObject second=PlaylistSyncModel.next(s);assertEquals("smart_b",second.getString("document_id"));assertEquals(2,second.getJSONObject("base_revision").getInt("revision"));
     }
 
+
+    @Test public void staleConflictReviewCannotAuthorizeAChangedServerVersion()throws Exception {
+        JSONObject s=state(),original=normal("Old",1);PlaylistSyncModel.pull(s,snapshot(original));PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","Phone"));JSONObject op=PlaylistSyncModel.next(s);PlaylistSyncModel.reply(s,op,409,new JSONObject().put("status","uncertain"));JSONObject reviewed=PlaylistSyncModel.copy(s.getJSONObject("documents").getJSONObject("normal_stable").getJSONObject("current"));PlaylistSyncModel.pull(s,snapshot(normal("New desktop",2)));
+        try{PlaylistSyncModel.reviewKeepDraft(s,"normal_stable",reviewed);fail();}catch(JSONException expected){}assertNull(PlaylistSyncModel.next(s));assertTrue(s.getJSONObject("documents").getJSONObject("normal_stable").has("desired"));
+    }
 }
 

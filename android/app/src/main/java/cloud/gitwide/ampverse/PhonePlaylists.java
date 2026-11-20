@@ -16,6 +16,7 @@ final class PhonePlaylists {
     static double knownEnergy(Context context,MediaItem item){android.content.SharedPreferences prefs=context.getSharedPreferences("phone-track-details",0);if(prefs.contains(item.mediaId+":energy"))return prefs.getFloat(item.mediaId+":energy",0);JSONObject p=DjEngine.preparation(item);return PhoneSmartRules.extensions(p).optDouble("energy",Double.NaN);}
     static List<MediaItem> tracks(Context context,JSONObject list)throws JSONException{if(list.has("_sync_envelope"))try{return PlaylistSync.items(context,list);}catch(Exception e){throw new IllegalStateException("Cannot resolve saved server playlist",e);}return tracks(context,list,new HashSet<>());}
     private static List<MediaItem> tracks(Context context,JSONObject list,Set<String> visited)throws JSONException {
+        if(list.has("_sync_envelope"))try{return PlaylistSync.items(context,list);}catch(Exception error){throw new IllegalStateException("Saved server playlist unavailable",error);}
         if(!visited.add(list.getString("id")))throw new IllegalArgumentException("Playlist sources cannot refer to each other in a loop");
         List<MediaItem> library=LibraryStore.read(context),songs=new ArrayList<>();
         if(!list.optBoolean("smart")){JSONArray ids=list.optJSONArray("songs");if(ids!=null)for(int i=0;i<ids.length();i++)for(MediaItem song:library)if(song.mediaId.equals(ids.getString(i))){songs.add(song);break;}return songs;}
