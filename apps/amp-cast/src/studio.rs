@@ -67,6 +67,7 @@ pub fn routes() -> Router<Arc<Cast>> {
     Router::new()
         .route("/api/studio/bootstrap", get(bootstrap))
         .route("/api/studio/session", post(session))
+        .route("/api/studio/session/logout", post(logout))
         .route("/api/studio/tracks", get(tracks))
         .route("/api/studio/tracks/{id}/audio", get(audio))
         .route(
@@ -80,7 +81,9 @@ pub fn routes() -> Router<Arc<Cast>> {
         .route("/api/studio/playlists", get(playlists).post(save_playlist))
 }
 async fn session(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
-    if !cast.authorized(&headers) {
+    let mut credential_headers = headers.clone();
+    credential_headers.remove("cookie");
+    if !cast.authorized(&credential_headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let ticket = amp_core::coordination::token();
@@ -96,13 +99,53 @@ async fn session(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response 
             Instant::now() + Duration::from_secs(300),
         ),
     );
-    Json(json!({"ticket":ticket,"expires_in":300})).into_response()
+    let cookie = match browser_session::login(&cast, &headers) {
+        Ok(cookie) => cookie,
+        Err(status) => {
+            return err(
+                status,
+                if status == StatusCode::TOO_MANY_REQUESTS {
+                    "Too many browser sessions. Try again later."
+                } else {
+                    "Cannot save browser sign-in. Check the server account can write its private configuration folder, then retry."
+                },
+            );
+        }
+    };
+    let mut response =
+        Json(json!({"ticket":ticket,"expires_in":300,"signed_in":true})).into_response();
+    response
+        .headers_mut()
+        .insert("set-cookie", cookie.parse().unwrap());
+    response
+        .headers_mut()
+        .insert("cache-control", "no-store".parse().unwrap());
+    response
+}
+async fn logout(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
+    if !cast.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let cookie = match browser_session::logout(&cast, &headers) {
+        Ok(cookie) => cookie,
+        Err(status) => {
+            return err(
+                status,
+                "Could not revoke this browser session. Check the server configuration folder and retry signing out.",
+            );
+        }
+    };
+    let mut response = StatusCode::NO_CONTENT.into_response();
+    response
+        .headers_mut()
+        .insert("set-cookie", cookie.parse().unwrap());
+    response
 }
 async fn bootstrap(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({"tracks":cast.tracks.len(),"capabilities":{"library":true,"preparation":true,"waveform":true,"lab_export":true,"playlists":true,"smart_playlists":true,"dj":false,"stems":false,"arrangement":false},"modules":[{"id":"library","available":true},{"id":"preparation","available":true},{"id":"lab","available":true},{"id":"dj","available":false},{"id":"stems","available":false},{"id":"arrangement","available":false}]})).into_response()
+    Json(json!({"browser_session_persistent":cast.config_dir.lock().unwrap().is_some(),"tracks":cast.tracks.len(),"capabilities":{"library":true,"preparation":true,"waveform":true,"lab_export":true,"playlists":true,"smart_playlists":true,"dj":false,"stems":false,"arrangement":false},"modules":[{"id":"library","available":true},{"id":"preparation","available":true},{"id":"lab","available":true},{"id":"dj","available":false},{"id":"stems","available":false},{"id":"arrangement","available":false}]})).into_response()
 }
 async fn tracks(
     State(cast): State<Arc<Cast>>,
@@ -771,6 +814,143 @@ mod api_tests {
     use super::*;
     use axum::http::Request;
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn browser_session_sign_in_refresh_media_logout_and_csrf_are_scoped() {
+        let (_root, cast, app) = fixture();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/studio/bootstrap")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/studio/session")
+                    .header("x-amp-password", "wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/studio/session")
+                    .header("x-amp-password", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let set_cookie = response.headers()["set-cookie"].to_str().unwrap();
+        assert!(
+            set_cookie.contains("HttpOnly")
+                && set_cookie.contains("SameSite=Strict")
+                && set_cookie.contains("Path=/api")
+        );
+        assert!(!set_cookie.contains("secret"));
+        let cookie = set_cookie.split(';').next().unwrap().to_owned();
+        for uri in [
+            "/api/studio/bootstrap",
+            "/api/studio/tracks",
+            "/api/studio/tracks/0/audio",
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(uri)
+                        .header("cookie", &cookie)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/studio/session/logout")
+                    .header("cookie", &cookie)
+                    .header("sec-fetch-site", "cross-site")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/studio/bootstrap")
+                    .header("cookie", &cookie)
+                    .header("x-amp-station", "other")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let (_other_root, _other_cast, other) = fixture();
+        let response = other
+            .oneshot(
+                Request::builder()
+                    .uri("/api/studio/bootstrap")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/studio/session/logout")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        assert!(
+            response.headers()["set-cookie"]
+                .to_str()
+                .unwrap()
+                .contains("Max-Age=0")
+        );
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/studio/bootstrap")
+                    .header("cookie", &cookie)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        drop(cast);
+    }
     fn cast() -> Arc<Cast> {
         Cast::new(
             std::env::temp_dir(),
