@@ -17,6 +17,7 @@ pub mod discovery;
 pub mod energy_profile;
 pub mod engine_api;
 pub mod knowledge;
+pub mod playlist_sync_contract;
 pub mod podcast_feed;
 pub mod show;
 pub mod smart;

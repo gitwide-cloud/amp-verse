@@ -1,0 +1,47 @@
+name: Verify playlist sync contract
+on:
+  push:
+    branches: ['feature/playlist-sync-contract']
+    paths:
+      - 'crates/**'
+      - 'apps/amp-cast/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/playlist-sync.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: playlist-sync-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  playlist-sync:
+    name: Playlist sync (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    env:
+      CARGO_TERM_COLOR: always
+      RUSTFLAGS: -Dwarnings
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Verify source formatting
+        run: cargo fmt --all -- --check
+      - name: Check whitespace errors
+        run: git diff --check
+      - name: Core playlist wire contract
+        run: cargo test --locked -p amp-core playlist_sync_contract
+      - name: Conservative server operations and receipt replay
+        run: cargo test --locked -p amp-cast --lib playlist_sync
+      - name: Strict core and server lint
+        run: cargo clippy --locked -p amp-core -p amp-cast --all-targets -- -D warnings
+

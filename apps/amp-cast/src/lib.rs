@@ -3,6 +3,7 @@ pub mod config;
 mod hls;
 mod knowledge;
 mod live;
+mod playlist_sync;
 mod podcasts_web;
 mod radio;
 mod recovery;
@@ -171,6 +172,7 @@ impl Cast {
 }
 pub fn router(cast: Arc<Cast>) -> Router {
     Router::new()
+        .merge(playlist_sync::routes())
         .route(
             "/",
             get(|| async { Html(include_str!("../web/studio.html")) }),
