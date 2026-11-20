@@ -47,3 +47,4 @@ jobs:
             android/app/build/reports/tests/
             android/app/build/reports/lint-results-*.html
             android/app/build/outputs/apk/*/debug/*.apk
+            android/app/build/outputs/apk/androidTest/*/debug/*.apk
