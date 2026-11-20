@@ -83,7 +83,12 @@ jobs:
         if: runner.os == 'Linux'
         env:
           SDL_AUDIODRIVER: dummy
-        run: cargo test -p amp-core --features analysis --locked -- --ignored --test-threads=1
+        run: |
+          cargo test -p amp-core --features analysis --locked -- --ignored --test-threads=1
+          fixture="$(mktemp --suffix=.wav)"
+          trap 'rm -f "$fixture"' EXIT
+          ffmpeg -v error -y -f lavfi -i sine=frequency=440:duration=2 "$fixture"
+          AMP_WAVEFORM_FIXTURE="$fixture" cargo test -p amp-player --bin amp-player --locked regular_playlist_automix_follows_saved_order -- --ignored --test-threads=1
       - name: Verify MP3 Lab editor foundation with real codecs
         if: runner.os == 'Linux'
         run: cargo test -p amp-player --bin amp-player lab_editor::tests::ffmpeg_export_smoke -- --ignored

@@ -88,6 +88,8 @@ pub struct Run {
     planned_force: bool,
     pub active: usize,
     pub preloaded: Option<(usize, usize)>,
+    regular_start: Option<usize>,
+    regular_preloaded: Option<(usize, usize)>,
     pub(super) pending: Option<(usize, Instant)>,
     pub(super) pending_at: Option<f64>,
     transition: Option<usize>,
@@ -125,6 +127,8 @@ impl Default for Run {
             planned_force: false,
             active: 0,
             preloaded: None,
+            regular_start: None,
+            regular_preloaded: None,
             pending: None,
             pending_at: None,
             transition: None,
@@ -241,6 +245,7 @@ impl Run {
         self.pending_at = None;
         self.transition = None;
         self.preloaded = None;
+        self.regular_preloaded = None;
     }
 }
 struct EffectBridge {
@@ -692,7 +697,6 @@ impl Player {
                 execution == Execution::AutoFade,
             );
         }
-        let engine = self.audio.as_mut().unwrap();
         self.pitch[d] = (rate - 1.) * 100.;
         self.loaded_snapshot[d] = Some(track.clone());
         self.loaded_origin[d] = Some(self.root.clone());
@@ -700,10 +704,15 @@ impl Player {
         if !paired {
             return Ok(());
         }
+        if execution == Execution::PlayNow {
+            self.consume_regular_preload(d, index);
+        }
+        self.run.regular_preloaded = None;
         self.auto = false;
         match execution {
             Execution::LoadOnly => self.run.preloaded = Some((d, index)),
             Execution::PlayNow => {
+                let engine = self.audio.as_mut().unwrap();
                 self.run.preloaded = None;
                 self.run.pending = None;
                 self.run.pending_at = None;
@@ -734,6 +743,61 @@ impl Player {
     fn preload_smart(&mut self) -> Result<(), String> {
         self.preload_variant(0)
     }
+    fn preload_regular_playlist(&mut self) -> Result<(), String> {
+        let active = self.active_deck();
+        let current = self.loaded[active];
+        if let Some(first) = self.run.regular_start.take()
+            && current == Some(first)
+            && self.queue.first() == Some(&first)
+            && self.audio.as_ref().is_some_and(|audio| {
+                audio.playing(active) || audio.controls.finished[active].load(Relaxed)
+            })
+        {
+            self.queue.remove(0);
+        }
+        let mut candidates = self.queue.clone();
+        if let Some(library) = &self.library {
+            candidates.retain(|&song| {
+                library
+                    .tracks
+                    .get(song)
+                    .is_some_and(|track| !self.run.failed_songs.contains(&show::song_id(track)))
+            });
+        }
+        if self.shuffle && candidates.len() > 1 {
+            let start = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .subsec_nanos() as usize
+                % candidates.len();
+            candidates.rotate_left(start);
+            if candidates.iter().any(|&song| Some(song) != current) {
+                candidates.retain(|&song| Some(song) != current);
+            }
+        }
+        let mut failure = None;
+        for index in candidates {
+            match self.call_track(index, None, Deck::Auto, Execution::LoadOnly) {
+                Ok(()) => {
+                    self.run.regular_preloaded = self.run.preloaded;
+                    return Ok(());
+                }
+                Err(error) => failure = Some(error),
+            }
+        }
+        Err(failure.unwrap_or_else(|| "Playlist finished".into()))
+    }
+
+    fn consume_regular_preload(&mut self, deck: usize, song: usize) {
+        if self.run.regular_preloaded.take() == Some((deck, song))
+            && self.run.preloaded == Some((deck, song))
+            && let Some(position) = self.queue.iter().position(|&queued| queued == song)
+        {
+            self.queue.remove(position);
+            self.queue_selected = None;
+        }
+    }
+
     fn preload_variant(&mut self, alternate: usize) -> Result<(), String> {
         if self.run.preloaded.is_some() {
             return Ok(());
@@ -761,6 +825,9 @@ impl Player {
             self.run.requests.pop_front();
         }
         if self.run.profile.is_none() {
+            if self.run.playlist.is_some() {
+                return self.preload_regular_playlist();
+            }
             let incoming = self.requested_deck(Deck::Auto, true);
             if let Some(index) = self.loaded[incoming]
                 && self.audio.as_ref().is_some_and(|a| {
@@ -1201,6 +1268,8 @@ impl Player {
                 self.run.profile = None;
                 self.run.playlist = Some(list.name.clone());
                 self.run.cancel_automation();
+                self.run.failed_songs.clear();
+                self.run.regular_start = Some(first);
                 self.queue = indices;
                 self.player_sequence.smart = None;
                 self.player_sequence.explicit_regular = true;
@@ -1295,7 +1364,7 @@ impl Player {
                     self.next();
                     return Ok(());
                 }
-                if self.run.profile.is_some() {
+                if self.run.profile.is_some() || self.run.playlist.is_some() {
                     self.execute_control(Action::MixNext { immediate })?;
                 } else {
                     let i = *self.queue.first().ok_or("No next song is queued")?;
@@ -2448,6 +2517,10 @@ impl Player {
         self.run.completed_handoffs = self.run.completed_handoffs.wrapping_add(1);
         self.run.active = incoming;
         self.run.transition = None;
+        if let Some(song) = self.loaded[incoming] {
+            self.consume_regular_preload(incoming, song);
+        }
+        self.run.regular_preloaded = None;
         self.run.preloaded = None;
         if let Some(i) = self.loaded[incoming] {
             self.record_song(i);
@@ -2492,6 +2565,70 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn regular_playlist_handoffs_consume_only_the_matching_queue_entry() {
+        let mut player = super::Player {
+            queue: vec![3, 1, 4, 1],
+            ..Default::default()
+        };
+        player.run.playlist = Some("Regular".into());
+        player.run.preloaded = Some((1, 4));
+        player.run.regular_preloaded = player.run.preloaded;
+        player.loaded[1] = Some(3);
+        player.complete_change(1);
+        assert_eq!(player.queue, [3, 1, 4, 1]);
+
+        player.run.preloaded = Some((0, 1));
+        player.run.regular_preloaded = player.run.preloaded;
+        player.loaded[0] = Some(1);
+        player.complete_change(0);
+        assert_eq!(player.queue, [3, 4, 1]);
+
+        player.queue.clear();
+        assert_eq!(player.preload_variant(0).unwrap_err(), "Playlist finished");
+    }
+
+    #[test]
+    #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
+    fn regular_playlist_automix_follows_saved_order() {
+        let fixture = std::env::var_os("AMP_WAVEFORM_FIXTURE").unwrap();
+        let root = tempfile::tempdir().unwrap();
+        for name in ["a.wav", "b.wav", "c.wav"] {
+            std::fs::copy(&fixture, root.path().join(name)).unwrap();
+        }
+        let mut player = super::Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            volume: 0,
+            channel_gain: [0.; 6],
+            fade_seconds: 0.2,
+            ..Default::default()
+        };
+        let path = root.path().join("saved-order.json");
+        player.dj_browser.playlists.push((
+            path.clone(),
+            amp_core::Playlist {
+                companion_available: false,
+                sync: None,
+                version: 1,
+                name: "Saved order".into(),
+                tracks: ["c.wav", "a.wav", "b.wav"].map(Into::into).to_vec(),
+            },
+        ));
+        player
+            .execute_control(super::Action::LoadPlaylist {
+                playlist: super::regular_playlist_id(&path),
+            })
+            .unwrap();
+        player
+            .execute_control(super::Action::AutoDj { enabled: true })
+            .unwrap();
+        assert_eq!(player.loaded[player.active_deck()], Some(2));
+        wait(&mut player, |p| p.loaded[p.active_deck()] == Some(0));
+        wait(&mut player, |p| p.loaded[p.active_deck()] == Some(1));
+        assert!(player.queue.is_empty());
+    }
+
     #[test]
     #[ignore = "muted native audio; requires AMP_WAVEFORM_FIXTURE"]
     fn automatic_match_uses_sounding_deck_not_unrelated_master_or_toggle() {
