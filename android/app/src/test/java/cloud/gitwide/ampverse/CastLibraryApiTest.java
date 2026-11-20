@@ -33,4 +33,12 @@ public class CastLibraryApiTest {
  @Test public void changedStationStopsBeforeAnyPlayerPublication()throws Exception {
   try(Fixture f=new Fixture(status("station-A"),status("station-B"))){CastClient c=f.client();c.connect();try{c.status();fail();}catch(CastClient.HostUnavailableException expected){assertTrue(expected.getMessage().contains("changed"));}f.done.get(5,TimeUnit.SECONDS);assertEquals(2,f.requests.size());}
  }
+ @Test public void openLanSyncSnapshotAndOperationDoNotRequireANewCode()throws Exception {
+  try(Fixture f=new Fixture("{\"documents\":[]}", "{\"status\":\"applied\"}")){
+   String base="http://127.0.0.1:"+f.server.getLocalPort();PlaylistSyncHttp http=new PlaylistSyncHttp(base,"","server-A","library-A");
+   assertEquals(200,http.request("/api/sync/v1/playlists",null).code);
+   assertEquals(200,http.request("/api/sync/v1/playlist-operations",new JSONObject().put("operation_id","retained-operation")).code);
+   f.done.get(5,TimeUnit.SECONDS);for(String request:f.requests){assertTrue(request.contains("x-amp-server: server-a"));assertTrue(request.contains("x-amp-library: library-a"));assertFalse(request.contains("x-amp-password:"));}
+  }
+ }
 }

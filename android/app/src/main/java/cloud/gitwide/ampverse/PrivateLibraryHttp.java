@@ -10,7 +10,7 @@ final class PrivateLibraryHttp {
   return new OkHttpClient.Builder().proxy(Proxy.NO_PROXY).followRedirects(false).followSslRedirects(false)
    .connectTimeout(5,TimeUnit.SECONDS).readTimeout(20,TimeUnit.SECONDS)
    .addInterceptor(chain->{
-    if(password.isEmpty()||server.isEmpty()||library.isEmpty()||!base.scheme().equals(target.scheme())
+    if(server.isEmpty()||library.isEmpty()||!base.scheme().equals(target.scheme())
      ||!base.host().equals(target.host())||base.port()!=target.port()||!target.username().isEmpty()||!target.password().isEmpty()
      ||!target.encodedPath().equals("/api/player/audio")||!library.equals(target.queryParameter("library_id"))
      ||!target.equals(chain.request().url()))throw new IOException("Private library source left its selected authority");

@@ -21,8 +21,8 @@ final class ModuleJobs {
         if(jobs.values().stream().anyMatch(job->!job.done))throw new IllegalStateException("A download is already running");
         String id=UUID.randomUUID().toString();Job job=new Job();jobs.put(id,job);JSONObject captured=new JSONObject(args.toString());
         worker.execute(()->{java.io.File stage=null;boolean published=false;try{
-            String password=captured.getString("password");if(password.isEmpty())throw new IllegalArgumentException("Private library access required");
-            CastClient client=new CastClient(captured.getString("base"),password);JSONObject status=client.connect();String server=captured.getString("server_id"),library=captured.getString("library_id"),path=CastLibraryModel.path(captured.getString("path"));
+            String password=captured.getString("password");
+            CastClient client=new CastClient(captured.getString("base"),password);JSONObject status=client.connect();CastLibraryModel.requireAccess(status,password);String server=captured.getString("server_id"),library=captured.getString("library_id"),path=CastLibraryModel.path(captured.getString("path"));
             if(!server.equals(status.optString("server_id"))||!library.equals(status.optString("library_id")))throw new IllegalStateException("Selected server/library changed");
             JSONObject caps=status.optJSONObject("capabilities");if(caps==null||!"library_path_v1".equals(caps.optString("private_audio")))throw new IllegalStateException("Update selected server for private audio download");
             String target=android.net.Uri.parse(client.base).buildUpon().path("/api/player/audio").appendQueryParameter("library_id",library).appendQueryParameter("path",path).appendQueryParameter("download","true").build().toString();

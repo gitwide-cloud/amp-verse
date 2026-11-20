@@ -30,4 +30,9 @@ public class CastLibraryModelTest {
   assertFalse(CastLibraryModel.supports(new JSONObject()));assertFalse(CastLibraryModel.supports(new JSONObject().put("capabilities",new JSONObject().put("player_queue",1))));
   assertTrue(CastLibraryModel.supports(new JSONObject().put("capabilities",new JSONObject().put("player_queue",1).put("player_track_refs","library_path_v1"))));
  }
+ @Test public void openLanNeedsNoCodeButOptionalProtectedModeStillRequiresIt()throws Exception {
+  CastLibraryModel.requireAccess(new JSONObject().put("password_required",false),"");
+  CastLibraryModel.requireAccess(new JSONObject().put("password_required",true),"configured-code");
+  try{CastLibraryModel.requireAccess(new JSONObject().put("password_required",true),"");fail();}catch(JSONException expected){assertTrue(expected.getMessage().contains("requires"));}
+ }
 }

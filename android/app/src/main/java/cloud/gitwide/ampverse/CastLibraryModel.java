@@ -9,6 +9,7 @@ final class CastLibraryModel {
         for(String part:path.split("/",-1))if(part.isEmpty()||part.equals(".")||part.equals(".."))throw new JSONException("Invalid server relative path");
         return path;
     }
+    static void requireAccess(JSONObject status,String password)throws JSONException {if(status.optBoolean("password_required")&&password.isEmpty())throw new JSONException("This selected server requires its optional access code");}
     static boolean supports(JSONObject status){JSONObject caps=status.optJSONObject("capabilities");return caps!=null&&caps.optInt("player_queue")>=1&&"library_path_v1".equals(caps.optString("player_track_refs"));}
     static JSONObject play(String library,JSONArray refs,boolean speakers)throws JSONException {
         if(library.isEmpty()||refs.length()==0||refs.length()>20000)throw new JSONException("Choose available server songs");

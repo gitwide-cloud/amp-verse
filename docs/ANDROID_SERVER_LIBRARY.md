@@ -4,7 +4,7 @@ Source branch: feature/android-server-owner-flow, based on de9f996 plus frozen A
 
 Full AMP Cast and the standalone Cast companion use the same CastPanel and CastLibraryView. The FullCastPanel subclass owns local playlist downloads; the companion delegates storage and phone playback to AMP Player over the existing same-signer ContentProvider. Standalone server browsing/control remains independent of Player IPC; phone playback/storage requires the matching Player.
 
-Choose a discovered named AMP server to open its Library. Addresses, access-code entry and raw diagnostics remain under Advanced. Selecting/browsing a server does not start audio. Exact previously authorized base/server/library credentials may be recovered from AMP Player's encrypted Keystore record; discovery cannot migrate credentials to a different address or identity.
+Choose a discovered named AMP server to open its Library. Addresses, optional access-code entry and raw diagnostics remain under Advanced. Open trusted-LAN servers require no code; a configured server password remains enforced. Selecting/browsing a server does not start audio. Exact previously authorized base/server/library credentials may be recovered from AMP Player's encrypted Keystore record; discovery cannot migrate credentials to a different address or identity.
 
 ## Playback ownership
 
@@ -15,6 +15,8 @@ Choose a discovered named AMP server to open its Library. Addresses, access-code
 - Stop targets phone library/radio listening or the selected server program. Other phone playback is retained when the phone radio/library stop action is used.
 - Remote opens the selected server's web player in the browser. Native headers and credentials are not put in the URL; browser sign-in remains a separate remembered Studio session.
 - Server Play allows 35 seconds for bounded server preflight. Failed/timed-out commands are not automatically resent; inspect status before repeating.
+
+Server/library bindings apply in both open and optional-code modes. An empty credential is legitimate when password_required is false; identity is not treated as a secret.
 
 Private file streaming uses GET/HEAD /api/player/audio?library_id=...&path=..., capability private_audio:library_path_v1. MediaItems contain public resource URLs and an opaque process-local binding identifier. Only AMP Player's media-source factory attaches the selected private headers to that exact resource, using a direct client with redirects disabled. Ordinary Internet radio never receives those headers. Credentials are not serialized with queues. A process restart or expired binding requires selecting the source again.
 

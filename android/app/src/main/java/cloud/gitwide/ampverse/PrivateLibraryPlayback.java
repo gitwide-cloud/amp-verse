@@ -15,8 +15,9 @@ final class PrivateLibraryPlayback {
  static synchronized Binding binding(MediaItem item){if(item==null||!item.mediaId.startsWith("amp-private:"))return null;return bindings.get(item.mediaId.substring(12));}
  static boolean owns(MediaItem item){return item!=null&&item.mediaId.startsWith("amp-private:");}
  static JSONObject prepare(JSONObject args)throws Exception {
-  String password=args.getString("password");if(password.isEmpty())throw new IllegalArgumentException("Private library access is required");
+  String password=args.getString("password");
   CastClient c=new CastClient(args.getString("base"),password);JSONObject status=c.connect();
+  CastLibraryModel.requireAccess(status,password);
   String server=args.getString("server_id"),library=args.getString("library_id");
   if(!server.equals(status.optString("server_id"))||!library.equals(status.optString("library_id")))throw new IllegalStateException("Selected server/library changed");
   JSONObject capabilities=status.optJSONObject("capabilities");if(capabilities==null||!"library_path_v1".equals(capabilities.optString("private_audio")))throw new IllegalStateException("Update the selected server for private library streaming");

@@ -20,4 +20,11 @@ public class PrivateLibraryHttpTest {
   }
   try{PrivateLibraryHttp.create(base,"secret","server-A","library-A",valid).newCall(new Request.Builder().url(base+"/other").build()).execute();fail();}catch(IOException expected){assertTrue(expected.getMessage().contains("selected authority"));}
  }
+ @Test public void openLanFileReadAllowsEmptyCredentialWithExactAuthorityHeaders()throws Exception {
+  try(CastLibraryApiTest.Fixture f=new CastLibraryApiTest.Fixture("audio")){
+   String base="http://127.0.0.1:"+f.server.getLocalPort(),target=base+"/api/player/audio?library_id=library-A&path=song.mp3";
+   try(Response response=PrivateLibraryHttp.create(base,"","server-A","library-A",target).newCall(new Request.Builder().url(target).build()).execute()){assertEquals(200,response.code());}
+   f.done.get(5,TimeUnit.SECONDS);String request=f.requests.get(0);assertTrue(request.contains("x-amp-server: server-a"));assertTrue(request.contains("x-amp-library: library-a"));
+  }
+ }
 }

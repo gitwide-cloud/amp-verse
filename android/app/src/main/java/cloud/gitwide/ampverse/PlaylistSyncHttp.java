@@ -11,9 +11,8 @@ final class PlaylistSyncHttp {
     static final class Reply {final int code;final JSONObject body;Reply(int c,JSONObject b){code=c;body=b;}}
     PlaylistSyncHttp(String base,String password,String server,String library){this.base=base;this.password=password;this.server=server;this.library=library;}
     Reply request(String path,JSONObject body)throws Exception {
-        if(password.isEmpty())throw new IOException("A private server access code is required");
         HttpURLConnection c=(HttpURLConnection)new URL(base+path).openConnection(Proxy.NO_PROXY);
-        c.setInstanceFollowRedirects(false);c.setConnectTimeout(4000);c.setReadTimeout(8000);c.setRequestProperty("x-amp-password",password);
+        c.setInstanceFollowRedirects(false);c.setConnectTimeout(4000);c.setReadTimeout(8000);if(!password.isEmpty())c.setRequestProperty("x-amp-password",password);
         if(!server.isEmpty())c.setRequestProperty("x-amp-server",server);if(!library.isEmpty())c.setRequestProperty("x-amp-library",library);
         try{if(body!=null){c.setRequestMethod("POST");c.setDoOutput(true);c.setRequestProperty("Content-Type","application/json");byte[] bytes=body.toString().getBytes(StandardCharsets.UTF_8);if(bytes.length>1024*1024)throw new IOException("Playlist edit exceeds server limit");try(OutputStream o=c.getOutputStream()){o.write(bytes);}}
             int code=c.getResponseCode();if(code>=300&&code<400)throw new IOException("Redirect refused; saved server binding was retained");
