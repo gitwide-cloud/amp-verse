@@ -72,6 +72,11 @@ jobs:
       - name: Windows codec fixtures
         if: runner.os == 'Windows'
         run: choco install ffmpeg --yes --no-progress
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify Studio browser session flow
+        run: node --test apps/amp-cast/web/studio-session.test.cjs
       - run: cargo fmt --all --check
       - name: Verify native chroma parity and measure bounded component throughput
         run: python tools/check_chroma.py --out test-output/chroma
