@@ -78,3 +78,13 @@ Sync endpoints require a configured NONEMPTY password and valid existing passwor
 Existing safe normal filename stems (spaces, dots and Unicode included) keep their exact IDs and paths. Updates accept these bounded path-free legacy IDs; creates retain strict token IDs. Nested packed playlist paths are explicitly reported as unsupported_unenrolled_playlist_path instead of being silently flattened to the conventional root. No rename, omission or duplicate top-level mapping occurs.
 
 Snapshot JSON is counted incrementally without allocating serialized copies; a document is appended only while the count and byte budgets permit it. The final envelope is also counted against 4 MiB. Normal wire conversion caps 20,000 references. Loose record reads check file size and use a 2 MiB + 1 bounded reader before JSON parsing; oversized records fail explicitly. Packed records use existing catalog_db::read (catalog_db.rs:162-179) and catalog_shards::read, whose SELECT document currently allocates one complete SQLite String without a prefetch byte cap. The API rejects that record above 2 MiB before parsing/cloning, but cannot prevent the core allocation without a separate bounded-reader change. It does not accumulate unbounded packed documents into its response.
+
+
+## Configured LAN access policy
+
+Sync follows the server's configured access policy. An owner-selected trusted-LAN
+server with no configured code accepts code-free native/browser clients, while a
+code-protected server still requires its valid credential or authorized session.
+An explicitly configured empty credential is invalid. Both modes always require
+the exact server/library identities and reject cross-site browser writes before
+creating operation records. No-code mode does not add public network exposure.

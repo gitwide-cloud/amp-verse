@@ -21,7 +21,7 @@ fn error(code: StatusCode, message: impl ToString) -> Response {
     (code, Json(json!({"error":message.to_string()}))).into_response()
 }
 fn authority(c: &Cast, h: &HeaderMap) -> bool {
-    c.password.as_ref().is_some_and(|p| !p.is_empty())
+    c.password.as_ref().is_none_or(|p| !p.is_empty())
         && c.authorized(h)
         && h.get("x-amp-server").and_then(|v| v.to_str().ok()) == Some(c.server_id.as_str())
         && h.get("x-amp-library").and_then(|v| v.to_str().ok()) == c.library_id.as_deref()
@@ -872,10 +872,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn passwordless_or_empty_secret_cannot_read_or_create_ledger() {
+    async fn invalid_empty_configured_secret_cannot_read_or_create_ledger() {
         let f = Fixture::new();
         let op = f.op("public-identities");
-        for password in [None, Some(String::new())] {
+        for password in [Some(String::new())] {
             let c = Cast::with_identity(
                 f.root.clone(),
                 amp_core::scan(&f.root).unwrap(),
@@ -909,6 +909,71 @@ mod tests {
             }
         }
         assert!(!f.config.join("playlist-sync").exists());
+    }
+    #[tokio::test]
+    async fn trusted_lan_sync_honors_no_code_mode_but_keeps_identity_and_cross_site_guards() {
+        let f = Fixture::new();
+        let op = f.op("trusted-lan");
+        let c = Cast::with_identity(
+            f.root.clone(),
+            amp_core::scan(&f.root).unwrap(),
+            None,
+            "server".into(),
+            "station".into(),
+            "Fixture".into(),
+        );
+        *c.config_dir.lock().unwrap() = Some(f.config.clone());
+        for (server, library, cross_site) in [
+            ("other", op.library_id.as_str(), false),
+            ("server", "other", false),
+            ("server", op.library_id.as_str(), true),
+        ] {
+            let mut request = Request::post("/api/sync/v1/playlist-operations")
+                .header("content-type", "application/json")
+                .header("x-amp-server", server)
+                .header("x-amp-library", library);
+            if cross_site {
+                request = request.header("sec-fetch-site", "cross-site");
+            }
+            let response = router(c.clone())
+                .oneshot(
+                    request
+                        .body(Body::from(serde_json::to_vec(&op).unwrap()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        }
+        assert!(!f.config.join("playlist-sync").exists());
+        let response = router(c.clone())
+            .oneshot(
+                Request::get("/api/sync/v1/playlists")
+                    .header("x-amp-server", "server")
+                    .header("x-amp-library", &op.library_id)
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response = router(c)
+            .oneshot(
+                Request::post("/api/sync/v1/playlist-operations")
+                    .header("content-type", "application/json")
+                    .header("x-amp-server", "server")
+                    .header("x-amp-library", &op.library_id)
+                    .body(Body::from(serde_json::to_vec(&op).unwrap()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = axum::body::to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap();
+        let reply: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reply["status"], "ack");
     }
     #[test]
     fn legacy_space_dot_unicode_ids_roundtrip_exactly_without_new_id_relaxation() {
