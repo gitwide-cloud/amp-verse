@@ -38,6 +38,7 @@ mod mashup;
 mod media_lookup;
 mod mix_schedule;
 mod output_admission;
+mod receiver_process;
 mod startup_index;
 mod station_receiver;
 use dj_engine as mixer;

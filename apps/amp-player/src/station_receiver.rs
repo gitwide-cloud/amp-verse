@@ -192,12 +192,12 @@ fn supervise<F: Fn() -> Command>(
             break;
         }
         let start = Instant::now();
-        let mut child = match decoder()
+        let mut command = decoder();
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
-            .stderr(Stdio::piped())
-            .spawn()
-        {
+            .stderr(Stdio::piped());
+        let mut child = match crate::receiver_process::spawn(&mut command) {
             Ok(child) => child,
             Err(error) => {
                 message(state, format!("Could not start station decoder: {error}"));
