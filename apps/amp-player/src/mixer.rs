@@ -101,6 +101,13 @@ impl Controls {
             play.store(false, Relaxed);
         }
         self.fading.store(false, Relaxed);
+        self.level_fading.store(false, Relaxed);
+        self.mashup_active.store(false, Relaxed);
+        for deck in 0..DECKS {
+            self.scratching[deck].store(false, Relaxed);
+            self.vinyl_follow[deck].store(false, Relaxed);
+            self.section_state[deck].store(0, Relaxed);
+        }
     }
 
     pub(super) fn set_broadcast_source(&self, player_only: bool) {
@@ -780,6 +787,7 @@ impl Mixer {
                 self.cue_limiter.process([0., 0.]);
             }
             self.fade = None;
+            self.sections = Default::default();
             self.launches = Default::default();
             self.levels = Default::default();
             for voice in &mut self.samples {
@@ -4446,6 +4454,21 @@ mod tests {
         mixer.render(512, |_, _| {});
         let position = controls.position[0].load(Relaxed);
         assert!(position > 0);
+        mixer.sections[0] = Some(SectionChange {
+            source: None,
+            origin: 0.,
+            previous_origin: 0.,
+            grid: None,
+            at: None,
+            expected: 1,
+            total: 100,
+            elapsed: 0,
+            old: None,
+        });
+        mixer.launches[0] = Some(u64::MAX);
+        controls.mashup_active.store(true, Relaxed);
+        controls.scratching[0].store(true, Relaxed);
+        controls.section_state[0].store(1, Relaxed);
         let old = gate.epoch();
         let lease = gate.acquire(&AtomicBool::new(false)).unwrap();
         assert!(gate.local_allowed().unwrap_err().contains("Stop listening"));
@@ -4455,6 +4478,10 @@ mod tests {
         mixer.render(512, |_, frame| assert_eq!(frame, [0., 0.]));
         assert_eq!(controls.position[0].load(Relaxed), position);
         assert!(!controls.play[0].load(Relaxed));
+        assert!(!controls.mashup_active.load(Relaxed));
+        assert!(!controls.scratching[0].load(Relaxed));
+        assert_eq!(controls.section_state[0].load(Relaxed), 0);
+        assert!(mixer.sections.iter().all(Option::is_none));
         drop(lease);
         // A pre-lease command arriving late cannot restart a deck after release.
         tx.send(Command::Admitted(old, Box::new(Command::Play(0))))
