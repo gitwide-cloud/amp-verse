@@ -36,10 +36,15 @@ final class PlaylistSyncModel {
         JSONObject merged=copy(current);Set<String> keys=new HashSet<>();Iterator<String> a=base.keys(),b=proposed.keys();while(a.hasNext())keys.add(a.next());while(b.hasNext())keys.add(b.next());
         for(String key:keys){if(equal(base.opt(key),proposed.opt(key)))continue;if(!equal(current.opt(key),base.opt(key))&&!equal(current.opt(key),proposed.opt(key)))throw new JSONException("Both drafts changed "+key);if(proposed.has(key))merged.put(key,proposed.get(key));else merged.remove(key);}return merged;
     }
+    private static JSONObject operation(JSONObject state,JSONObject desired,String operationId)throws JSONException {
+        Object baseline=desired.opt("revision");return new JSONObject().put("protocol",1).put("operation_id",operationId).put("device_id",state.getString("device_id")).put("server_id",state.getString("server_id")).put("library_id",state.getString("library_id")).put("document_id",desired.getString("document_id")).put("kind",desired.getString("kind")).put("document_version",desired.getInt("document_version")).put("action",desired.optBoolean("new_document")?"create":"update").put("base_revision",baseline==null?JSONObject.NULL:baseline).put("document",copy(desired.getJSONObject("document")));
+    }
+    private static void wireBound(JSONObject operation)throws JSONException {if(operation.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length>1024*1024)throw new JSONException("This edit exceeds the server operation limit; reduce it before saving");}
     static void save(JSONObject state,JSONObject original,JSONObject document)throws JSONException {
         String name=document.optString("name");if(name.trim().isEmpty()||name.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>200)throw new JSONException("Playlist names must be 1–200 UTF-8 bytes");
         if(original.getString("kind").equals("normal")&&document.getJSONArray("tracks").length()>20000)throw new JSONException("Too many playlist references");
         if(!original.optBoolean("new_document")&&equal(original.getJSONObject("document"),document))return;
+        wireBound(operation(state,copy(original).put("document",copy(document)),"00000000-0000-0000-0000-000000000000"));
         String id=original.getString("document_id");JSONObject entries=state.getJSONObject("documents"),entry=entries.optJSONObject(id);
         if(entry==null){entry=new JSONObject();entries.put(id,entry);}
         JSONObject desired=copy(original);desired.put("document",copy(document));
@@ -56,8 +61,7 @@ final class PlaylistSyncModel {
             if(entry.has("pending"))return copy(entry.getJSONObject("pending"));
             if(!entry.has("desired"))continue;
             JSONObject desired=entry.getJSONObject("desired");
-            Object baseline=desired.opt("revision");
-            JSONObject op=new JSONObject().put("protocol",1).put("operation_id",UUID.randomUUID().toString()).put("device_id",state.getString("device_id")).put("server_id",state.getString("server_id")).put("library_id",state.getString("library_id")).put("document_id",id).put("kind",desired.getString("kind")).put("document_version",desired.getInt("document_version")).put("action",desired.optBoolean("new_document")?"create":"update").put("base_revision",baseline==null?JSONObject.NULL:baseline).put("document",copy(desired.getJSONObject("document")));
+            JSONObject op=operation(state,desired,UUID.randomUUID().toString());wireBound(op);
             entry.put("pending",op);return copy(op);
         }return null;
     }

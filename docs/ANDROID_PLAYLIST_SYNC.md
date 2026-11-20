@@ -38,3 +38,5 @@ Repeated unchanged saves do not generate publication/revision churn. Overlapping
 The Cast panel exposes synchronization through an opt-in Listener capability/callback instead of depending directly on the sync UI. Full MainActivity/TV opt in. Standalone Cast companions default to hiding this action until an authorized AMP Player IPC bridge is supplied; the Full-edition setup path is currently required. This seam is intended to preserve SAG-87 shared-panel/FullCastPanel routing rather than overwriting that independent flow.
 
 State reads go through AtomicFile recovery even when only its backup exists; reauthorization does not reset a recoverable outbox. A device storage fixture simulates backup-only process interruption and checks pending-operation preservation. The CI builds that instrumentation APK; it does not claim the device test was executed.
+
+Outgoing operations are checked against the complete 1 MiB wire limit before saving or assigning a pending operation ID, so an oversized edit cannot become a permanently unsendable pending request. Open editor data remains available for reducing the edit.
