@@ -2,7 +2,7 @@
 use amp_core::{Folder, Library};
 use serde::{Deserialize, Serialize};
 use std::{
-    io::{BufWriter, Read, Write},
+    io::{self, BufWriter, Read, Write},
     path::{Component, Path},
 };
 
@@ -14,6 +14,28 @@ struct Snapshot<T = Library> {
 }
 
 const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
+
+struct LimitedWriter<W> {
+    inner: W,
+    remaining: u64,
+}
+
+impl<W: Write> Write for LimitedWriter<W> {
+    fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(io::Error::other(
+                "Startup catalog exceeds the cache size limit",
+            ));
+        }
+        let written = self.inner.write(bytes)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
 fn valid_folder(folder: &Folder, count: usize) -> bool {
     folder.tracks.iter().all(|&i| i < count)
         && folder.folders.iter().all(|f| valid_folder(f, count))
@@ -60,9 +82,16 @@ pub fn load(file: &Path, root: &Path) -> Option<Library> {
     .then_some(snapshot.library)
 }
 pub fn save(file: &Path, root: &Path, library: &Library) -> Result<(), String> {
+    save_with_limit(file, root, library, MAX_SNAPSHOT_BYTES)
+}
+
+fn save_with_limit(file: &Path, root: &Path, library: &Library, limit: u64) -> Result<(), String> {
     let parent = file.parent().ok_or("Missing startup catalog directory")?;
     let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    let mut writer = BufWriter::new(temporary.as_file_mut());
+    let mut writer = LimitedWriter {
+        inner: BufWriter::new(temporary.as_file_mut()),
+        remaining: limit,
+    };
     serde_json::to_writer(
         &mut writer,
         &Snapshot {
@@ -75,9 +104,6 @@ pub fn save(file: &Path, root: &Path, library: &Library) -> Result<(), String> {
     writer.flush().map_err(|e| e.to_string())?;
     drop(writer);
     let output = temporary.as_file();
-    if output.metadata().map_err(|e| e.to_string())?.len() > MAX_SNAPSHOT_BYTES {
-        return Err("Startup catalog exceeds the cache size limit".into());
-    }
     output.sync_all().map_err(|e| e.to_string())?;
     temporary.persist(file).map_err(|e| e.to_string())?;
     Ok(())
@@ -85,6 +111,35 @@ pub fn save(file: &Path, root: &Path, library: &Library) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cache_writer_rejects_overflow_without_replacing_the_snapshot() {
+        let mut bounded = LimitedWriter {
+            inner: Vec::new(),
+            remaining: 3,
+        };
+        bounded.write_all(b"abc").unwrap();
+        assert!(bounded.write_all(b"x").is_err());
+        assert_eq!(bounded.inner.as_slice(), b"abc");
+
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("catalog.json");
+        let library = Library {
+            tracks: vec![],
+            tree: Folder {
+                name: "Music".into(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        };
+        save(&file, dir.path(), &library).unwrap();
+        let previous = std::fs::read(&file).unwrap();
+        let limit = previous.len() as u64;
+        save_with_limit(&file, dir.path(), &library, limit).unwrap();
+        assert!(save_with_limit(&file, dir.path(), &library, limit - 1).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), previous);
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
     #[test]
     #[ignore = "requires an explicit local catalog fixture"]
     fn configured_catalog_import() {
