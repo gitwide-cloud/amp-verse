@@ -387,21 +387,16 @@ impl Player {
             .data_mut(|d| d.remove_temp::<bool>(egui::Id::unique("quick-cast-click")))
             .unwrap_or(false)
         {
-            self.cast.request_live(if self.workspace.enabled {
-                self.playback_owner == playback_owner::Owner::Player
-            } else {
-                title == "PLAYER"
-            });
+            self.follow_live_broadcast_owner();
+            let player_only = self.current_cast_player_only();
+            self.cast.request_live(player_only);
             let _ = self.cast.google.remote(google_cast::Operation::Discover);
             ui.ctx()
                 .data_mut(|d| d.insert_temp(egui::Id::unique("quick-cast-open"), true));
             ui.ctx().data_mut(|d| {
                 d.insert_temp(
                     egui::Id::unique("quick-cast-pane"),
-                    if title == "PLAYER"
-                        || (self.workspace.enabled
-                            && self.playback_owner == playback_owner::Owner::Player)
-                    {
+                    if self.current_cast_player_only() {
                         0usize
                     } else {
                         2usize
@@ -3120,7 +3115,18 @@ impl Player {
             );
         }
     }
+    fn current_cast_player_only(&self) -> bool {
+        self.playback_owner == playback_owner::Owner::Player
+    }
+    fn follow_live_broadcast_owner(&mut self) {
+        let player_only = self.current_cast_player_only();
+        if let (Some(broadcast), Some(audio)) = (&mut self.live_mix, &self.audio) {
+            broadcast.follow_source(audio, player_only);
+        }
+        self.cast.live_player_only = player_only;
+    }
     fn cast_ui(&mut self, ui: &mut egui::Ui) {
+        self.follow_live_broadcast_owner();
         self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
         if let Some(broadcast) = &self.live_mix {
             self.cast.live_status = broadcast.status.lock().unwrap().clone();
@@ -3141,6 +3147,7 @@ impl Player {
         if self.cast.get().is_none() {
             return;
         }
+        self.follow_live_broadcast_owner();
         self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
         if let Some(broadcast) = &self.live_mix {
             self.cast.live_status = broadcast.status.lock().unwrap().clone();
@@ -3148,6 +3155,7 @@ impl Player {
         self.cast.prepare_live(&self.root);
         if let Some(start) = self.cast.live_action.take() {
             if start {
+                self.cast.live_player_only = self.current_cast_player_only();
                 let result = (|| {
                     self.ensure_audio()?;
                     self.ensure_right_samples()?;

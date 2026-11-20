@@ -9,6 +9,7 @@ use std::{
 };
 pub struct Broadcast {
     pub player_only: bool,
+    source_player_only: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     muted: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -54,11 +55,10 @@ impl Broadcast {
             );
         }
         let main = audio.broadcast_source_tap(player_only)?;
-        let samples = if player_only {
-            None
-        } else {
-            Some(aux.broadcast_tap()?)
-        };
+        // Keep the sampler subscription warm even in Player mode. Its frames are
+        // drained but excluded until the actual playback owner changes to DJ.
+        let samples = Some(aux.broadcast_tap()?);
+        let source_player_only = Arc::new(AtomicBool::new(player_only));
         let child = Arc::new(Mutex::new(encoder(audio.sample_rate, normalize)?));
         let level = Arc::new(AtomicU32::new(1f32.to_bits()));
         let muted = Arc::new(AtomicBool::new(false));
@@ -71,7 +71,7 @@ impl Broadcast {
             normalize,
             address,
             password,
-            player_only,
+            player_only: source_player_only.clone(),
             level: level.clone(),
             muted: muted.clone(),
             stop: stop.clone(),
@@ -82,12 +82,24 @@ impl Broadcast {
         std::thread::spawn(move || sender.run());
         Ok(Self {
             player_only,
+            source_player_only,
             level,
             muted,
             stop,
             child,
             status,
         })
+    }
+    pub fn follow_source(&mut self, audio: &crate::mixer::Engine, player_only: bool) {
+        if self.player_only == player_only {
+            return;
+        }
+        set_source_mode(&audio.controls, &self.source_player_only, player_only);
+        self.player_only = player_only;
+        let mut status = self.status.lock().unwrap();
+        if status.starts_with("Broadcasting ") {
+            *status = source_label(player_only).into();
+        }
     }
     pub fn set_level(&self, level: f32, muted: bool) -> Result<(), String> {
         if !level.is_finite() || !(0. ..=1.).contains(&level) {
@@ -100,6 +112,26 @@ impl Broadcast {
     pub fn running(&self) -> bool {
         !self.stop.load(Relaxed)
     }
+}
+pub(super) fn set_source_mode(
+    controls: &crate::mixer::Controls,
+    source: &AtomicBool,
+    player_only: bool,
+) {
+    controls.set_broadcast_source(player_only);
+    source.store(player_only, std::sync::atomic::Ordering::Release);
+}
+fn source_label(player_only: bool) -> &'static str {
+    if player_only {
+        "Broadcasting AMP Player output"
+    } else {
+        "Broadcasting live DJ mix · decks, mixer, stems and sampler"
+    }
+}
+fn broadcast_frame(main: [f32; 2], aux: [f32; 2], gain: f32, player_only: bool) -> [f32; 2] {
+    std::array::from_fn(|channel| {
+        ((main[channel] + if player_only { 0. } else { aux[channel] }) * gain).clamp(-0.98, 0.98)
+    })
 }
 fn encoder(sample_rate: u32, normalize: bool) -> Result<Child, String> {
     let mut command = amp_core::command("ffmpeg");
@@ -148,7 +180,7 @@ struct Sender {
     normalize: bool,
     address: String,
     password: String,
-    player_only: bool,
+    player_only: Arc<AtomicBool>,
     level: Arc<AtomicU32>,
     muted: Arc<AtomicBool>,
     stop: Arc<AtomicBool>,
@@ -264,27 +296,33 @@ impl Sender {
             let stopped = self.stop.clone();
             let level = self.level.clone();
             let muted = self.muted.clone();
+            let player_only = self.player_only.clone();
             let writer = std::thread::spawn(move || {
                 let mut bytes = Vec::with_capacity(8192);
+                let mut source = player_only.load(std::sync::atomic::Ordering::Acquire);
                 while !writer_stop.load(Relaxed) && !stopped.load(Relaxed) {
                     bytes.clear();
+                    let current = player_only.load(std::sync::atomic::Ordering::Acquire);
+                    if current != source {
+                        while main.pop().is_ok() {}
+                        if let Some(samples) = &mut samples {
+                            while samples.pop().is_ok() {}
+                        }
+                        source = current;
+                    }
                     for _ in 0..1024 {
                         let Ok(frame) = main.pop() else { break };
                         let aux = samples
                             .as_mut()
                             .and_then(|s| s.pop().ok())
                             .unwrap_or([0.; 2]);
-                        for channel in 0..2 {
-                            let gain = if muted.load(Relaxed) {
-                                0.
-                            } else {
-                                f32::from_bits(level.load(Relaxed))
-                            };
-                            bytes.extend_from_slice(
-                                &((frame[channel] + aux[channel]) * gain)
-                                    .clamp(-0.98, 0.98)
-                                    .to_le_bytes(),
-                            );
+                        let gain = if muted.load(Relaxed) {
+                            0.
+                        } else {
+                            f32::from_bits(level.load(Relaxed))
+                        };
+                        for sample in broadcast_frame(frame, aux, gain, source) {
+                            bytes.extend_from_slice(&sample.to_le_bytes());
                         }
                     }
                     if bytes.is_empty() {
@@ -295,12 +333,8 @@ impl Sender {
                 }
                 (main, samples)
             });
-            *self.status.lock().unwrap() = if self.player_only {
-                "Broadcasting AMP Player output"
-            } else {
-                "Broadcasting live DJ mix · decks, mixer, stems and sampler"
-            }
-            .into();
+            *self.status.lock().unwrap() =
+                source_label(self.player_only.load(std::sync::atomic::Ordering::Acquire)).into();
             let outcome = (|| -> Result<(), String> {
                 let mut bytes = [0; 8192];
                 let mut sequence = response["next_sequence"].as_u64().unwrap_or(0);
@@ -414,6 +448,22 @@ fn upload(
 mod tests {
     use super::*;
     #[test]
+    fn current_owner_frame_keeps_sampler_private_for_player_and_includes_it_for_dj() {
+        let mode = AtomicBool::new(true);
+        let main = [0.03, 0.04];
+        let sampler = [0.02, 0.01];
+        let player = broadcast_frame(main, sampler, 0.5, mode.load(Relaxed));
+        assert!((player[0] - 0.015).abs() < 1e-7 && (player[1] - 0.02).abs() < 1e-7);
+        mode.store(false, Relaxed);
+        let dj = broadcast_frame(main, sampler, 0.5, mode.load(Relaxed));
+        assert!((dj[0] - 0.025).abs() < 1e-7 && (dj[1] - 0.025).abs() < 1e-7);
+        mode.store(true, Relaxed);
+        assert_eq!(
+            broadcast_frame(main, sampler, 0.5, mode.load(Relaxed)),
+            player
+        );
+    }
+    #[test]
     fn cancelled_backoff_stops_promptly() {
         let stop = Arc::new(AtomicBool::new(false));
         let signal = stop.clone();
@@ -492,7 +542,7 @@ mod tests {
             normalize: false,
             address: address.clone(),
             password: String::new(),
-            player_only: true,
+            player_only: Arc::new(AtomicBool::new(true)),
             level: Arc::new(AtomicU32::new(1f32.to_bits())),
             muted: Arc::new(AtomicBool::new(false)),
             stop: stop.clone(),

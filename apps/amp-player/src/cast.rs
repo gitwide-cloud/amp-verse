@@ -742,13 +742,17 @@ impl Dashboard {
         } else if self.section == 1 {
             ui.heading("Broadcast live audio");
             self.normalize_control(ui);
-            ui.add_enabled_ui(!self.live_active, |ui| {
-                ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.live_player_only, false, "DJ master mix");
-                    ui.selectable_value(&mut self.live_player_only, true, "Music Player");
-                });
+            ui.label(if self.live_player_only {
+                "Current source: Music Player"
+            } else {
+                "Current source: DJ master mix"
             });
-            ui.label("Send the actual master mix: both decks, crossfader, EQ, stems and sampler. Headphone cue stays private.");
+            ui.weak("Follows whichever Player or DJ output is currently active.");
+            ui.label(if self.live_player_only {
+                "Send the current Music Player output. DJ decks and sampler stay private."
+            } else {
+                "Send the actual master mix: both decks, crossfader, EQ, stems and sampler. Headphone cue stays private."
+            });
             let supported = self
                 .snapshot
                 .as_ref()

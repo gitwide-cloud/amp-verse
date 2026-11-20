@@ -92,6 +92,11 @@ pub struct Controls {
     pub decode_errors: Mutex<Vec<(usize, u64, String)>>,
 }
 impl Controls {
+    pub(super) fn set_broadcast_source(&self, player_only: bool) {
+        self.broadcast_player_only
+            .store(player_only, std::sync::atomic::Ordering::Release);
+    }
+
     pub fn beat_at(&self, frame: u64, rate: u32) -> f64 {
         f64::from_bits(self.clock_origin_beat.load(Relaxed))
             + frame.saturating_sub(self.clock_origin_frame.load(Relaxed)) as f64 / rate as f64
@@ -1554,9 +1559,7 @@ impl Engine {
         self.broadcast_source_tap(false)
     }
     pub fn broadcast_source_tap(&self, player_only: bool) -> Result<rtrb::Consumer<Frame>, String> {
-        self.controls
-            .broadcast_player_only
-            .store(player_only, Relaxed);
+        self.controls.set_broadcast_source(player_only);
         let (producer, consumer) = RingBuffer::new(self.sample_rate as usize);
         self.send(Command::Broadcast(Some(producer)))?;
         Ok(consumer)
@@ -4113,6 +4116,55 @@ mod tests {
         m.render(1, |_, _| {});
         assert!(m.voices[2].pending_loop.is_none());
         assert!(!c.looping[2].load(Relaxed));
+    }
+    #[test]
+    fn current_cast_owner_ignores_classic_window_and_switches_actual_pcm_on_one_tap() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut mixer = Mixer::new(48000, rx, controls.clone());
+        let (producer, mut consumer) = RingBuffer::new(2048);
+        tx.send(Command::Broadcast(Some(producer))).unwrap();
+        tx.send(Command::Load(0, source(0.01, 4000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(1, source(0.03, 4000), true, 1))
+            .unwrap();
+        set(&controls.crossfader, 1.);
+        let mut player = crate::Player {
+            playback_owner: crate::playback_owner::Owner::Dj,
+            ..Default::default()
+        };
+        player.workspace.enabled = false; // The classic Player window can remain open while DJ owns playback.
+        let mode = AtomicBool::new(true);
+        let mut render = |player: &crate::Player| {
+            crate::live_mix::set_source_mode(&controls, &mode, player.current_cast_player_only());
+            let mut local = 0.;
+            mixer.render(1000, |_, frame| local = frame[0]);
+            let mut broadcast = 0.;
+            while let Ok(frame) = consumer.pop() {
+                broadcast = frame[0];
+            }
+            (local, broadcast)
+        };
+        let (local, dj) = render(&player);
+        assert!(!mode.load(Relaxed));
+        assert!(
+            dj > 0.004 && (local - dj).abs() < 1e-7,
+            "classic window must cast the actual DJ program"
+        );
+        player.playback_owner = crate::playback_owner::Owner::Player;
+        let (local, player_audio) = render(&player);
+        assert!(mode.load(Relaxed));
+        assert!((local / player_audio - 3.).abs() < 0.01);
+        player.playback_owner = crate::playback_owner::Owner::Dj;
+        let (local, switched_dj) = render(&player);
+        assert!(!mode.load(Relaxed));
+        assert!(
+            (local - switched_dj).abs() < 1e-7,
+            "an active Player tap must follow a switch to the DJ program"
+        );
+        assert!(switched_dj > player_audio * 2.9);
+        assert!(controls.play[0].load(Relaxed) && controls.play[1].load(Relaxed));
+        // No Broadcast replacement command or encoder/session restart occurred.
     }
     #[test]
     fn player_broadcast_tap_excludes_other_decks_and_preserves_local_mix() {
