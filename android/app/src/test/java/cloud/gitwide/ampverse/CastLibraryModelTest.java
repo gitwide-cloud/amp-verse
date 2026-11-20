@@ -35,4 +35,9 @@ public class CastLibraryModelTest {
   CastLibraryModel.requireAccess(new JSONObject().put("password_required",true),"configured-code");
   try{CastLibraryModel.requireAccess(new JSONObject().put("password_required",true),"");fail();}catch(JSONException expected){assertTrue(expected.getMessage().contains("requires"));}
  }
+ @Test public void windowsCatalogSeparatorsBecomeTheSamePortableReferences()throws Exception {
+  assertEquals("Album/曲.mp3",CastLibraryModel.catalogPath("Album\\曲.mp3"));
+  try{CastLibraryModel.catalogPath("Album\\..\\outside.mp3");fail();}catch(JSONException expected){}
+  assertEquals("Album/曲.mp3",CastLibraryModel.catalogPath("Album/曲.mp3"));
+ }
 }
