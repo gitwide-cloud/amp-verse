@@ -60,6 +60,17 @@ fn buildup_halves(elapsed: f32, capture: f32, duration: f32) -> u8 {
     }
     (1 + ((elapsed - capture) / (duration - capture) * 4.) as u8).min(4)
 }
+struct RegularReservation {
+    deck: usize,
+    slot: usize,
+    index: usize,
+    queue: Vec<usize>,
+    started: Instant,
+}
+struct RegularRun {
+    unstarted: bool,
+    reservation: Option<RegularReservation>,
+}
 pub struct Run {
     pub failure: Option<String>,
     recognition_context: Option<String>,
@@ -71,6 +82,7 @@ pub struct Run {
     pub choice: String,
     pub transition_trace: Option<amp_core::transition_plan::TransitionDecision>,
     pub profile: Option<show::SmartPlaylist>,
+    regular: Option<RegularRun>,
     pub settings: show::Settings,
     pub playlist: Option<String>,
     pub style: Style,
@@ -108,6 +120,7 @@ impl Default for Run {
             choice: String::new(),
             transition_trace: None,
             profile: None,
+            regular: None,
             settings: Default::default(),
             playlist: None,
             style: Style::Steady,
@@ -134,6 +147,22 @@ impl Default for Run {
     }
 }
 impl Run {
+    pub(super) fn has_regular_playlist(&self) -> bool {
+        self.profile.is_none() && self.regular.is_some()
+    }
+    pub(super) fn load_regular_playlist(&mut self, name: String) {
+        self.cancel_automation();
+        self.profile = None;
+        self.playlist = Some(name);
+        self.requests.clear();
+        self.failed_songs.clear();
+        self.progression = None;
+        self.planned_progression = None;
+        self.regular = Some(RegularRun {
+            unstarted: true,
+            reservation: None,
+        });
+    }
     pub(super) fn recent_songs(&self) -> Vec<String> {
         self.recent.iter().cloned().collect()
     }
@@ -241,6 +270,11 @@ impl Run {
         self.pending_at = None;
         self.transition = None;
         self.preloaded = None;
+        if let Some(regular) = &mut self.regular
+            && !regular.unstarted
+        {
+            regular.reservation = None;
+        }
     }
 }
 struct EffectBridge {
@@ -735,6 +769,9 @@ impl Player {
         self.preload_variant(0)
     }
     fn preload_variant(&mut self, alternate: usize) -> Result<(), String> {
+        if self.cancel_changed_regular_queue() {
+            return Err(self.status.clone());
+        }
         if self.run.preloaded.is_some() {
             return Ok(());
         }
@@ -759,6 +796,9 @@ impl Player {
                 }
             }
             self.run.requests.pop_front();
+        }
+        if self.run.has_regular_playlist() {
+            return self.preload_regular(alternate);
         }
         if self.run.profile.is_none() {
             let incoming = self.requested_deck(Deck::Auto, true);
@@ -880,6 +920,181 @@ impl Player {
             }
         }
     }
+    fn cancel_changed_regular_queue(&mut self) -> bool {
+        let stale = self
+            .run
+            .regular
+            .as_ref()
+            .and_then(|r| r.reservation.as_ref())
+            .is_some_and(|r| r.queue != self.queue);
+        if !stale {
+            return false;
+        }
+        if let Some((deck, _)) = self.run.preloaded
+            && let Some(audio) = &mut self.audio
+        {
+            let outgoing = audio.controls.other(deck);
+            if audio.playing(outgoing) {
+                audio.set_fader((outgoing % 2) as f32);
+                audio.stop(deck);
+            } else if !audio.playing(deck) {
+                audio.stop(deck);
+            }
+        }
+        self.run.cancel_automation();
+        if let Some(regular) = &mut self.run.regular {
+            regular.reservation = None;
+        }
+        self.status =
+            "Playlist queue changed; Auto Mix stopped. Turn it on again to use the updated order."
+                .into();
+        self.run.failure = Some(self.status.clone());
+        true
+    }
+    fn reserve_regular(&mut self, deck: usize, slot: usize, index: usize) {
+        if let Some(regular) = &mut self.run.regular {
+            regular.reservation = Some(RegularReservation {
+                deck,
+                slot,
+                index,
+                queue: self.queue.clone(),
+                started: Instant::now(),
+            });
+        }
+    }
+    fn commit_regular(&mut self, deck: usize) {
+        let Some(regular) = &mut self.run.regular else {
+            return;
+        };
+        let Some(reservation) = regular.reservation.take() else {
+            return;
+        };
+        if reservation.deck == deck
+            && self.loaded[deck] == Some(reservation.index)
+            && self.queue == reservation.queue
+            && self.queue.get(reservation.slot) == Some(&reservation.index)
+        {
+            self.queue.remove(reservation.slot);
+            self.queue_selected = None;
+            regular.unstarted = false;
+        }
+    }
+    // Initial Play Now is asynchronous: account for it only after its decoder is
+    // current, ready and actually playing. A cancelled/failed preload consumes nothing.
+    pub(super) fn commit_regular_audible_start(&mut self) {
+        if self.cancel_changed_regular_queue() {
+            return;
+        }
+        if !self.run.has_regular_playlist() {
+            return;
+        }
+        let deck = if self.playback_owner == crate::playback_owner::Owner::Player {
+            0
+        } else {
+            self.active_deck()
+        };
+        let audible = self.audio.as_ref().is_some_and(|a| {
+            a.load_current(deck)
+                && a.loaded(deck)
+                && a.controls.ready[deck].load(Relaxed)
+                && a.playing(deck)
+        });
+        if !audible {
+            return;
+        }
+        let unstarted = self.run.regular.as_ref().is_some_and(|r| r.unstarted);
+        if unstarted
+            && self.run.regular.as_ref().unwrap().reservation.is_none()
+            && self.loaded[deck] == self.queue.first().copied()
+            && !self.queue.is_empty()
+        {
+            self.reserve_regular(deck, 0, self.queue[0]);
+        }
+        let starts_here = self
+            .run
+            .regular
+            .as_ref()
+            .and_then(|r| r.reservation.as_ref())
+            .is_some_and(|r| {
+                r.deck == deck
+                    && (self.run.preloaded.is_none()
+                        || self.playback_owner == crate::playback_owner::Owner::Player)
+            });
+        if starts_here {
+            self.commit_regular(deck);
+            if self.playback_owner == crate::playback_owner::Owner::Player {
+                self.run.preloaded = None;
+            }
+        }
+    }
+    fn preload_regular(&mut self, alternate: usize) -> Result<(), String> {
+        self.commit_regular_audible_start();
+        let previous = self
+            .run
+            .regular
+            .as_ref()
+            .and_then(|r| r.reservation.as_ref())
+            .map(|r| r.slot);
+        if let Some(regular) = &mut self.run.regular {
+            regular.reservation = None;
+        }
+        let tracks = &self.library.as_ref().ok_or("Library unavailable")?.tracks;
+        let mut candidates: Vec<_> = self
+            .queue
+            .iter()
+            .enumerate()
+            .filter_map(|(slot, &index)| {
+                tracks
+                    .get(index)
+                    .filter(|t| !self.run.failed_songs.contains(&show::song_id(t)))
+                    .map(|_| (slot, index))
+            })
+            .collect();
+        if alternate > 0 && candidates.len() > 1 {
+            candidates.retain(|(slot, _)| Some(*slot) != previous);
+        }
+        if self.shuffle || alternate > 0 {
+            let current = self.loaded[self.active_deck()];
+            if candidates.iter().any(|(_, index)| Some(*index) != current) {
+                candidates.retain(|(_, index)| Some(*index) != current);
+            }
+            if !candidates.is_empty() {
+                let seed = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .subsec_nanos() as usize;
+                let len = candidates.len();
+                candidates.rotate_left(seed % len);
+            }
+        }
+        for (slot, index) in candidates {
+            if self.run.failed_songs.contains(&show::song_id(
+                &self.library.as_ref().unwrap().tracks[index],
+            )) {
+                continue;
+            }
+            match self.call_track(index, None, Deck::Auto, Execution::LoadOnly) {
+                Ok(()) => {
+                    let deck = self
+                        .run
+                        .preloaded
+                        .ok_or("Incoming playlist deck is unavailable")?
+                        .0;
+                    self.reserve_regular(deck, slot, index);
+                    return Ok(());
+                }
+                Err(error) => {
+                    let track = &self.library.as_ref().unwrap().tracks[index];
+                    let id = show::song_id(track);
+                    if !self.run.failed_songs.contains(&id) {
+                        self.run.failed_songs.push(id);
+                    }
+                    self.status = format!("Skipping {}: {error}", track.title);
+                }
+            }
+        }
+        Err(if self.queue.is_empty() {"Playlist finished"} else {"No playable songs remain in this playlist; retry Auto Mix after restoring the unavailable files"}.into())
+    }
     pub(super) fn recover_failed_song(&mut self, deck: usize, error: &str) {
         if self.playback_owner == crate::playback_owner::Owner::Player && deck == 0 {
             if let Some(track) = self.loaded_track(0) {
@@ -911,11 +1126,19 @@ impl Player {
         if let Some(audio) = &mut self.audio {
             audio.stop(deck);
         }
+        if let Some(regular) = &mut self.run.regular
+            && regular.reservation.as_ref().is_some_and(|r| r.deck == deck)
+        {
+            regular.reservation = None;
+        }
         if self.run.preloaded.is_some_and(|(d, _)| d == deck) {
             self.run.preloaded = None;
             self.run.pending = None;
             self.run.pending_at = None;
             self.run.transition = None;
+            if let Some(regular) = &mut self.run.regular {
+                regular.reservation = None;
+            }
         } else if self.run.transition.is_some() {
             // An outgoing decoder failed: the prepared incoming deck can take over.
             self.run.pending = self.run.preloaded.map(|(d, _)| (d, Instant::now()));
@@ -1197,16 +1420,14 @@ impl Player {
                     .filter_map(|path| library.tracks.iter().position(|t| &t.path == path))
                     .collect();
                 let first = *indices.first().ok_or("Playlist has no available songs")?;
-                self.run.auto = false;
-                self.run.profile = None;
-                self.run.playlist = Some(list.name.clone());
-                self.run.cancel_automation();
+                self.run.load_regular_playlist(list.name.clone());
                 self.queue = indices;
                 self.player_sequence.smart = None;
                 self.player_sequence.explicit_regular = true;
                 self.queue_selected = None;
                 self.playlist_snapshot = Some((path, list));
-                self.load_deck(0, first, false);
+                debug_assert_eq!(self.queue.first(), Some(&first));
+                self.preload_smart()?;
             }
             Action::TransitionSettings {
                 enabled,
@@ -1295,13 +1516,16 @@ impl Player {
                     self.next();
                     return Ok(());
                 }
-                if self.run.profile.is_some() {
-                    self.execute_control(Action::MixNext { immediate })?;
-                } else {
-                    let i = *self.queue.first().ok_or("No next song is queued")?;
-                    self.call_track(i, None, Deck::Auto, Execution::AutoFade)?;
-                    self.queue.remove(0);
+                if self.run.profile.is_none()
+                    && self.run.regular.is_none()
+                    && !self.queue.is_empty()
+                {
+                    self.run.regular = Some(RegularRun {
+                        unstarted: false,
+                        reservation: None,
+                    });
                 }
+                self.execute_control(Action::MixNext { immediate })?;
             }
             Action::SmartShuffle => {
                 self.run.preloaded = None;
@@ -1471,6 +1695,7 @@ impl Player {
                 self.run.planned_progression = p.energy_progression.clone();
                 self.run.planned_force = false;
                 self.run.progression = None;
+                self.run.regular = None;
                 self.run.profile = Some(p.clone());
                 self.run.playlist = Some(p.id);
                 self.run.style = style.unwrap_or(p.style);
@@ -1646,8 +1871,10 @@ impl Player {
                 self.run.preloaded = None;
             }
             Action::AutoDjPause { paused } => {
-                if self.run.profile.is_none() || self.run.playlist.is_none() {
-                    return Err("Load a Smart Playlist first".into());
+                if (self.run.profile.is_none() && !self.run.has_regular_playlist())
+                    || self.run.playlist.is_none()
+                {
+                    return Err("Load a playlist first".into());
                 }
                 if self.run.transition.is_some()
                     || self.run.pending.is_some()
@@ -1678,12 +1905,13 @@ impl Player {
                 }
             }
             Action::AutoDj { enabled } => {
+                self.commit_regular_audible_start();
                 if !enabled {
                     self.auto_dj_controls = false;
                 }
                 self.run.paused = false;
                 if enabled && self.run.playlist.is_none() {
-                    return Err("Load a Smart Playlist first".into());
+                    return Err("Load a playlist first".into());
                 }
                 // An explicit restart retries songs skipped by the previous run.
                 if enabled {
@@ -1694,7 +1922,9 @@ impl Player {
                 // Do not claim ON until loading/starting the first song succeeds.
                 self.run.auto = false;
                 if enabled
-                    && !(self.playback_owner == crate::playback_owner::Owner::Dj
+                    && !((self.playback_owner == crate::playback_owner::Owner::Dj
+                        || (self.run.has_regular_playlist()
+                            && self.run.regular.as_ref().is_some_and(|r| !r.unstarted)))
                         && self
                             .audio
                             .as_ref()
@@ -1836,6 +2066,32 @@ impl Player {
     }
     pub(super) fn performance_tick(&mut self) {
         self.enforce_playback_owner();
+        if self.cancel_changed_regular_queue() {
+            return;
+        }
+        self.commit_regular_audible_start();
+        if self.run.auto
+            && self.run.has_regular_playlist()
+            && self.run.preloaded.is_none()
+            && let Some((deck, started)) = self
+                .run
+                .regular
+                .as_ref()
+                .and_then(|r| r.reservation.as_ref())
+                .map(|r| (r.deck, r.started))
+            && self
+                .audio
+                .as_ref()
+                .is_some_and(|a| !a.load_current(deck) || !a.controls.ready[deck].load(Relaxed))
+        {
+            if started.elapsed() > Duration::from_secs(15) {
+                self.recover_failed_song(
+                    deck,
+                    "Initial playlist song did not become ready; trying another song",
+                );
+            }
+            return;
+        }
         // Every temporary effect must release its transport when automation stops.
         if ((self.run.pending.is_none() && self.run.transition.is_none())
             || !self.run.scratch_assist)
@@ -2435,6 +2691,7 @@ impl Player {
         }
     }
     fn complete_change(&mut self, incoming: usize) {
+        self.commit_regular(incoming);
         if self.run.auto
             && self.run.transitions.tempo_recovery
             && let Some(audio) = &self.audio
@@ -2492,6 +2749,302 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    fn normal_test_player(root: &std::path::Path) -> Player {
+        Player {
+            root: root.into(),
+            playback_owner: crate::playback_owner::Owner::Dj,
+            library: Some(amp_core::Library {
+                tracks: (0..3)
+                    .map(|i| amp_core::Track {
+                        path: format!("source-{i}/song.wav").into(),
+                        title: format!("Song {i}"),
+                        preparation: Default::default(),
+                    })
+                    .collect(),
+                tree: amp_core::Folder {
+                    name: "Music".into(),
+                    folders: vec![],
+                    tracks: vec![],
+                },
+            }),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn regular_playlist_failed_preload_keeps_order_duplicates_and_saved_sources() {
+        let root = tempfile::tempdir().unwrap();
+        let mut player = normal_test_player(root.path());
+        let path = root.path().join("ordered.json");
+        let list = amp_core::Playlist {
+            version: 1,
+            name: "Ordered".into(),
+            tracks: vec![
+                "source-1/song.wav".into(),
+                "source-1/song.wav".into(),
+                "source-0/song.wav".into(),
+            ],
+            sync: None,
+            companion_available: false,
+        };
+        let original = serde_json::to_value(&list).unwrap();
+        player.dj_browser.playlists.push((path.clone(), list));
+        let error = player
+            .execute_control(Action::LoadPlaylist {
+                playlist: regular_playlist_id(&path),
+            })
+            .unwrap_err();
+        assert!(error.contains("No playable songs"), "{error}");
+        assert!(!error.contains("Smart"));
+        assert!(player.run.has_regular_playlist());
+        assert_eq!(player.queue, [1, 1, 0]);
+        assert_eq!(player.run.failed_songs.len(), 2);
+        assert_eq!(
+            serde_json::to_value(&player.playlist_snapshot.as_ref().unwrap().1).unwrap(),
+            original
+        );
+        assert!(player.run.preloaded.is_none());
+        assert!(
+            player
+                .execute_control(Action::AutoDj { enabled: true })
+                .is_err()
+        );
+        assert!(!player.run.auto);
+        player
+            .execute_control(Action::ManualLock { enabled: true })
+            .unwrap();
+        assert_eq!(player.queue, [1, 1, 0]);
+    }
+    #[test]
+    fn regular_playlist_queue_commits_one_reserved_occurrence_only_after_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let mut player = normal_test_player(root.path());
+        player.run.load_regular_playlist("Duplicates".into());
+        player.queue = vec![0, 1, 0];
+        player.loaded[1] = Some(0);
+        player.reserve_regular(1, 2, 0);
+        player.run.preloaded = Some((1, 0));
+        assert_eq!(player.queue, [0, 1, 0]);
+        player.complete_change(1);
+        assert_eq!(
+            player.queue,
+            [0, 1],
+            "remove the reserved duplicate, not the first matching song"
+        );
+        player.complete_change(1);
+        assert_eq!(player.queue, [0, 1], "handoff commitment is idempotent");
+        player.loaded[0] = Some(1);
+        player.reserve_regular(0, 1, 1);
+        player.run.preloaded = Some((0, 1));
+        player
+            .execute_control(Action::ManualLock { enabled: true })
+            .unwrap();
+        player.complete_change(0);
+        assert_eq!(
+            player.queue,
+            [0, 1],
+            "a cancelled preload never drains the queue"
+        );
+        player.reserve_regular(0, 1, 1);
+        player.run.preloaded = Some((0, 1));
+        player.recover_failed_song(0, "injected decode failure");
+        assert_eq!(player.queue, [0, 1]);
+        assert!(player.run.regular.as_ref().unwrap().reservation.is_none());
+        player.reserve_regular(0, 1, 1);
+        player.run.preloaded = Some((0, 1));
+        player.run.auto = true;
+        player.queue.push(2);
+        assert!(
+            player
+                .execute_control(Action::MixNext { immediate: true })
+                .unwrap_err()
+                .contains("queue changed")
+        );
+        assert!(!player.run.auto && player.run.preloaded.is_none() && player.run.pending.is_none());
+        player.complete_change(0);
+        assert_eq!(
+            player.queue,
+            [0, 1, 2],
+            "queue edits invalidate an older position reservation"
+        );
+    }
+    #[test]
+    fn regular_shuffle_selects_remaining_members_without_consuming_failed_attempts() {
+        let root = tempfile::tempdir().unwrap();
+        let mut player = normal_test_player(root.path());
+        player.run.load_regular_playlist("Shuffle".into());
+        player.queue = vec![0, 1, 2, 0];
+        player.loaded[0] = Some(0);
+        player.reserve_regular(1, 1, 1);
+        player.run.preloaded = Some((1, 1));
+        let error = player.execute_control(Action::SmartShuffle).unwrap_err();
+        assert!(error.contains("No playable songs"), "{error}");
+        assert_eq!(player.queue, [0, 1, 2, 0]);
+        let tracks = &player.library.as_ref().unwrap().tracks;
+        assert_eq!(
+            player.run.failed_songs,
+            [show::song_id(&tracks[2])],
+            "shuffle tries another remaining member, not sounding/currently preloaded songs"
+        );
+        assert!(player.run.preloaded.is_none());
+    }
+    #[test]
+    #[ignore = "muted native audio and FFmpeg; generated playlist fixtures only"]
+    fn regular_playlist_automatic_preload_shuffle_cancel_and_handoff() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = root.path().join("fixture.wav");
+        let generated = amp_core::command("ffmpeg")
+            .args([
+                "-nostdin",
+                "-v",
+                "error",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=8",
+            ])
+            .arg(&fixture)
+            .output()
+            .unwrap();
+        assert!(generated.status.success());
+        for i in 0..3 {
+            std::fs::create_dir(root.path().join(format!("source-{i}"))).unwrap();
+            std::fs::copy(&fixture, root.path().join(format!("source-{i}/song.wav"))).unwrap();
+        }
+        let mut player = normal_test_player(root.path());
+        player.channel_gain = [0.; 6];
+        player.fade_seconds = 0.1;
+        player.run.transitions.enabled = false;
+        let path = root.path().join("playlist.json");
+        let list = amp_core::Playlist {
+            version: 1,
+            name: "Ordered normal".into(),
+            tracks: vec![
+                "source-1/song.wav".into(),
+                "source-0/song.wav".into(),
+                "source-2/song.wav".into(),
+                "source-1/song.wav".into(),
+            ],
+            sync: None,
+            companion_available: false,
+        };
+        let saved = serde_json::to_value(&list).unwrap();
+        player.dj_browser.playlists.push((path.clone(), list));
+        player
+            .execute_control(Action::LoadPlaylist {
+                playlist: regular_playlist_id(&path),
+            })
+            .unwrap();
+        assert_eq!(player.queue, [1, 0, 2, 1]);
+        assert_eq!(player.run.preloaded.map(|(_, i)| i), Some(1));
+        wait(&mut player, |p| {
+            p.audio.as_ref().unwrap().controls.ready[p.run.preloaded.unwrap().0].load(Relaxed)
+        });
+        player
+            .execute_control(Action::AutoDj { enabled: true })
+            .unwrap();
+        wait(&mut player, |p| {
+            p.queue.len() == 3 && p.run.preloaded.is_some()
+        });
+        assert_eq!(player.loaded[player.active_deck()], Some(1));
+        assert_eq!(player.queue, [0, 2, 1]);
+        assert_eq!(
+            player.run.preloaded.map(|(_, i)| i),
+            Some(0),
+            "normal automatic next follows saved order without Smart rules"
+        );
+        player
+            .execute_control(Action::AutoDjPause { paused: true })
+            .unwrap();
+        assert_eq!(player.queue, [0, 2, 1]);
+        player
+            .execute_control(Action::AutoDjPause { paused: false })
+            .unwrap();
+        player.execute_control(Action::SmartShuffle).unwrap();
+        let selected = player.run.preloaded.unwrap().1;
+        assert_eq!(
+            selected, 2,
+            "shuffle must not repeat current or already-preloaded member when another remains"
+        );
+        assert_eq!(player.queue, [0, 2, 1]);
+        player
+            .execute_control(Action::ManualLock { enabled: true })
+            .unwrap();
+        assert_eq!(player.queue, [0, 2, 1]);
+        player
+            .execute_control(Action::AutoDj { enabled: true })
+            .unwrap();
+        wait(&mut player, |p| p.run.preloaded.is_some());
+        assert_eq!(player.run.preloaded.unwrap().1, 0);
+        player
+            .execute_control(Action::MixNext { immediate: true })
+            .unwrap();
+        wait(&mut player, |p| {
+            p.loaded[p.active_deck()] == Some(0) && p.run.transition.is_none() && p.queue.len() == 2
+        });
+        assert_eq!(player.queue, [2, 1]);
+        assert_eq!(
+            serde_json::to_value(&player.playlist_snapshot.as_ref().unwrap().1).unwrap(),
+            saved
+        );
+        player
+            .execute_control(Action::AutoDj { enabled: false })
+            .unwrap();
+        if let Some(audio) = &mut player.audio {
+            for deck in 0..6 {
+                audio.stop(deck);
+            }
+        }
+        let mut transferred = normal_test_player(root.path());
+        transferred.channel_gain = [0.; 6];
+        transferred.playback_owner = crate::playback_owner::Owner::Player;
+        transferred.shuffle = true;
+        let list = player.playlist_snapshot.as_ref().unwrap().1.clone();
+        transferred.dj_browser.playlists.push((path.clone(), list));
+        transferred
+            .execute_control(Action::LoadPlaylist {
+                playlist: regular_playlist_id(&path),
+            })
+            .unwrap();
+        let (deck, selected) = transferred.run.preloaded.unwrap();
+        assert_eq!(deck, 0);
+        let slot = transferred
+            .run
+            .regular
+            .as_ref()
+            .unwrap()
+            .reservation
+            .as_ref()
+            .unwrap()
+            .slot;
+        let mut remaining = transferred.queue.clone();
+        remaining.remove(slot);
+        transferred
+            .transport_play(crate::playback_owner::Owner::Player, 0)
+            .unwrap();
+        wait(&mut transferred, |p| p.queue.len() == 3);
+        assert_eq!(
+            transferred.queue, remaining,
+            "shuffled Player start consumes exactly its selected occurrence"
+        );
+        transferred
+            .execute_control(Action::AutoDj { enabled: true })
+            .unwrap();
+        assert_eq!(
+            transferred.loaded[transferred.active_deck()],
+            Some(selected),
+            "owner transfer must not replay or skip the sounding song"
+        );
+        assert_eq!(transferred.queue, remaining);
+        transferred
+            .execute_control(Action::ManualLock { enabled: true })
+            .unwrap();
+        assert_eq!(transferred.queue, remaining);
+        if let Some(audio) = &mut transferred.audio {
+            for deck in 0..6 {
+                audio.stop(deck);
+            }
+        }
+    }
     #[test]
     #[ignore = "muted native audio; requires AMP_WAVEFORM_FIXTURE"]
     fn automatic_match_uses_sounding_deck_not_unrelated_master_or_toggle() {

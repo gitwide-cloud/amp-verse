@@ -1112,7 +1112,7 @@ impl Player {
         }
     }
     fn auto_crossfade(&mut self) {
-        if self.run.profile.is_some() {
+        if self.run.profile.is_some() || self.run.has_regular_playlist() {
             if let Err(error) = self.execute_control(control::Action::MixNext { immediate: true }) {
                 self.status = error;
             }
@@ -1408,6 +1408,7 @@ impl Player {
                             .collect();
                         if let Some(indices) = indices {
                             self.queue = indices;
+                            self.run.load_regular_playlist(list.name.clone());
                             self.player_sequence.smart = None;
                             self.player_sequence.explicit_regular = true;
                             self.queue_selected = None;
@@ -2207,25 +2208,26 @@ impl Player {
         );
         if enabled != old {
             self.run.failure = None;
-            let result = if !enabled || self.run.profile.is_some() {
-                self.execute_control(control::Action::AutoDj { enabled })
-            } else {
-                let choice = self
-                    .dj_browser
-                    .selected_smart()
-                    .map(str::to_owned)
-                    .unwrap_or_else(|| self.run.choice.clone());
-                if choice.is_empty() {
-                    Err("Choose a music source in DJ settings, then turn Auto Mix on.".into())
+            let result =
+                if !enabled || self.run.profile.is_some() || self.run.has_regular_playlist() {
+                    self.execute_control(control::Action::AutoDj { enabled })
                 } else {
-                    self.execute_control(control::Action::LoadSmartPlaylist {
-                        playlist: choice,
-                        execution: control::Execution::PlayNow,
-                        style: None,
-                        energy: None,
-                    })
-                }
-            };
+                    let choice = self
+                        .dj_browser
+                        .selected_smart()
+                        .map(str::to_owned)
+                        .unwrap_or_else(|| self.run.choice.clone());
+                    if choice.is_empty() {
+                        Err("Choose a music source in DJ settings, then turn Auto Mix on.".into())
+                    } else {
+                        self.execute_control(control::Action::LoadSmartPlaylist {
+                            playlist: choice,
+                            execution: control::Execution::PlayNow,
+                            style: None,
+                            energy: None,
+                        })
+                    }
+                };
             if let Err(error) = result {
                 self.status = error.clone();
                 self.run.failure = Some(error);
@@ -2949,7 +2951,10 @@ impl Player {
             {
                 audio.scratch(deck, false, 0.);
                 audio.controls.play[deck].store(resume, std::sync::atomic::Ordering::Relaxed);
-                if self.jog_auto[deck] && resume && self.run.profile.is_some() {
+                if self.jog_auto[deck]
+                    && resume
+                    && (self.run.profile.is_some() || self.run.has_regular_playlist())
+                {
                     self.run.auto = true;
                 }
                 self.jog_auto[deck] = false;

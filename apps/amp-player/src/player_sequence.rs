@@ -88,6 +88,7 @@ impl Player {
         }
     }
     pub(super) fn player_sequence_tick(&mut self) {
+        self.commit_regular_audible_start();
         let Some(audio) = &self.audio else {
             return;
         };
