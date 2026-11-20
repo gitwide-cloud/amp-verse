@@ -18,7 +18,9 @@ class CastPanel extends LinearLayout {
     private TextView capabilityNote,connectionState;
     private Button stopPhone,disconnect,chromecast,hostBroadcast,serverPlay,serverStop,stationPlaylist;
     private volatile boolean verified;
-    private boolean hostLaunchSupported,serverOutputSupported,playlistSupported,serverOutputRunning;
+    private boolean hostLaunchSupported,serverOutputSupported,serverOutputRunning;
+    boolean playlistSupported,sharingSupported;
+    private long foregroundGeneration;
     final EditText address,password,search;
     final LinearLayout serverList,connectionFields,sharedLists;
     private LinearLayout stationControls;
@@ -76,13 +78,20 @@ class CastPanel extends LinearLayout {
         int extrasStart=getChildCount();
         addView(action("Google Cast receiver controls",()->activity.startActivity(new android.content.Intent(activity,GoogleCastActivity.class))));
         sharedLists=new LinearLayout(activity);sharedLists.setOrientation(VERTICAL);addView(sharedLists);
-        addView(action("Offline playlists",this::offline));
+
 
         search=new EditText(activity);search.setSingleLine(true);search.setTextColor(colors.text);search.setHintTextColor(colors.muted);search.setHint("Search songs in this station");search.setContentDescription("Search station songs");addView(search);
         queue=label("Find a server to see its music.",14);addView(queue);
         search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int a,int c,int d){}public void onTextChanged(CharSequence t,int a,int b,int c){renderQueue();}public void afterTextChanged(android.text.Editable t){}});
         UiSections.fold(this,colors,"Advanced · station downloads and diagnostics",extrasStart);
-        addView(action("Help",()->new android.app.AlertDialog.Builder(activity).setTitle("Radio help").setMessage("Search LAN stations to find a nearby AMP host, or search broadcast stations by name. For your own music, choose Host Smart Station on the desktop, connect here, and Save offline with my cues. Offline playlists remain separate from phone-folder music.").setPositiveButton("Done",null).show()));enabled(false);
+        addView(action("Help",()->new android.app.AlertDialog.Builder(activity).setTitle("Radio help").setMessage("Find nearby servers, choose AMP Radio, and open Library. Create saves on the server; Download makes a one-way offline copy. Remote opens that server’s web player. Two-way sync is not implemented.").setPositiveButton("Done",null).show()));enabled(false);
+        android.view.View heading=getChildAt(0);
+        android.view.View[] primary={heading,find,serverList,connectionState,status,now,disconnect,listen,stopPhone,library};
+        LinearLayout advanced=new LinearLayout(activity);advanced.setOrientation(VERTICAL);
+        for(android.view.View view:primary)if(view.getParent() instanceof android.view.ViewGroup)((android.view.ViewGroup)view.getParent()).removeView(view);
+        while(getChildCount()>0){android.view.View child=getChildAt(0);removeView(child);advanced.addView(child);}
+        for(android.view.View view:primary)addView(view);
+        int advancedStart=getChildCount();addView(advanced);UiSections.fold(this,colors,"Advanced",advancedStart);
         handler.postDelayed(poll,3000);
     }
     private int dp(int n){return (int)(n*getResources().getDisplayMetrics().density);}
@@ -90,6 +99,7 @@ class CastPanel extends LinearLayout {
     private EditText field(String hint,boolean secret){EditText v=new EditText(activity);v.setHint(hint);v.setSingleLine(true);v.setTextColor(colors.text);v.setHintTextColor(colors.muted);v.setInputType(InputType.TYPE_CLASS_TEXT|(secret?InputType.TYPE_TEXT_VARIATION_PASSWORD:InputType.TYPE_TEXT_VARIATION_URI));connectionFields.addView(v);return v;}
     Button action(String text,Runnable action){Button b=new Button(activity);b.setText(text);b.setAllCaps(false);b.setTextColor(Chrome.ink(colors,false));b.setBackground(Chrome.button(colors,false));b.setMinHeight(dp(48));b.setOnClickListener(v->action.run());return b;}
     private void enabled(boolean connected){
+        listen.setVisibility(connected?VISIBLE:GONE);
         stationControls.setVisibility(connected?VISIBLE:GONE);search.setVisibility(connected?VISIBLE:GONE);queue.setVisibility(connected?VISIBLE:GONE);
         connectionState.setText("Server connection: "+(busy?"checking / updating":connected&&verified?"verified · "+stationName:connected?"access or connection lost — re-verify":"disconnected"));
         boolean ready=connected&&verified&&!busy;library.availability(ready);
@@ -108,12 +118,13 @@ class CastPanel extends LinearLayout {
     void work(Operation operation,boolean background,boolean affectsHost){
         if(closed||busy||(background&&polling))return;
         final CastClient context=client;
+        final long generation=background?foregroundGeneration:++foregroundGeneration;
         if(background)polling=true;else{busy=true;enabled(client!=null);status.setText("Working…");}
         worker.execute(()->{String message;boolean failed=false,unavailable=false;
             try{message=operation.run();}catch(Exception error){failed=true;unavailable=affectsHost&&(background||error instanceof CastClient.AuthorizationException||error instanceof CastClient.HostUnavailableException);message=(unavailable?"Server access unavailable: ":"Action could not complete: ")+(error.getMessage()==null?error.getClass().getSimpleName():error.getMessage())+(unavailable?(context==null?" Select the server again or check Advanced.":" Refresh host status to re-verify."):"");}
             final String result=message;final boolean error=failed,lost=unavailable;
             activity.runOnUiThread(()->{if(closed)return;if(background)polling=false;else busy=false;
-                if(background&&client!=context)return;
+                if(background&&(client!=context||generation!=foregroundGeneration))return;
                 if(lost&&client==context)verified=false;
                 if(!background||error)status.setText(result);enabled(client!=null);
             });
@@ -127,7 +138,7 @@ class CastPanel extends LinearLayout {
     private void connect(){connect(null);}
     private void connect(String expectedIdentity){
         if(busy||closed)return;
-        final String url=address.getText().toString(),secret=password.getText().toString();library.clear();client=null;verified=false;running=false;hostLaunchSupported=false;serverOutputSupported=false;playlistSupported=false;serverOutputRunning=false;onAir=false;preparing=false;now.setText("No host selected");capabilityNote.setText("Host capabilities have not been checked.");tracks=new JSONArray();sharedLists.removeAllViews();enabled(false);
+        final String url=address.getText().toString(),secret=password.getText().toString();library.clear();client=null;verified=false;running=false;stationName="AMP Radio";sharingSupported=false;hostLaunchSupported=false;serverOutputSupported=false;playlistSupported=false;serverOutputRunning=false;onAir=false;preparing=false;now.setText("No host selected");capabilityNote.setText("Host capabilities have not been checked.");tracks=new JSONArray();sharedLists.removeAllViews();enabled(false);
         work(()->{CastClient.requireLanAddress(url);CastClient candidate=new CastClient(url,secret);JSONObject snapshot=candidate.connect();if(expectedIdentity!=null&&!expectedIdentity.equals(snapshot.optString("server_id")+"/"+snapshot.optString("station_id")))throw new java.io.IOException("Discovered host identity changed. Select the host again.");if(snapshot.optBoolean("password_required")&&secret.isEmpty()){activity.runOnUiThread(()->{if(!closed)requestPassword(snapshot.optString("station_name","AMP Radio"),expectedIdentity);});return "This server’s Library is password-protected.";}candidate.get("/api/station/playlists");JSONObject libraryData=CastLibrary.snapshot(candidate);JSONObject list=candidate.playlist();JSONObject manifest=snapshot.optJSONObject("capabilities")!=null&&snapshot.getJSONObject("capabilities").optBoolean("smart_sharing")?candidate.get("/api/smart/manifest"):null;
             activity.runOnUiThread(()->{if(closed)return;client=candidate;verified=true;connectionFields.setVisibility(GONE);activity.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putString("cast-server",candidate.base).apply();render(snapshot,list);renderShared(manifest);library.open(candidate,stationName,libraryData);});return "Server connected and access verified. Choose an output; existing station playback is unchanged.";});
     }
@@ -139,6 +150,7 @@ class CastPanel extends LinearLayout {
     private void command(boolean launch){final CastClient selected=client;if(selected==null||!verified||(launch&&!playlistSupported))return;work(()->{selected.command(launch);JSONObject snapshot=selected.status(),list=selected.playlist();activity.runOnUiThread(()->{if(!closed&&client==selected)render(snapshot,list);});return launch?"Station started":"Station stopped";});}
     private void render(JSONObject snapshot,JSONObject list){
         JSONObject capabilities=snapshot.optJSONObject("capabilities");
+        sharingSupported=capabilities!=null&&capabilities.optBoolean("smart_sharing",false);
         hostLaunchSupported=capabilities!=null&&capabilities.optBoolean("host_master_launch",false);
         serverOutputSupported=capabilities!=null&&capabilities.optBoolean("server_output_control",false);
         playlistSupported=capabilities!=null&&capabilities.optBoolean("playlist_playback",false);
@@ -153,7 +165,7 @@ class CastPanel extends LinearLayout {
     }
     private void renderShared(JSONObject manifest){
         sharedLists.removeAllViews();final CastClient owner=client;if(manifest==null){if(client!=null){sharedLists.addView(label("Playlist downloads are off on this host. Live listening does not save songs or cues.",14));sharedLists.addView(action("Enable playlist downloads…",()->new android.app.AlertDialog.Builder(activity).setTitle("Share this host's playlists?").setMessage("Allow connected devices with host access to download playlist audio and prepared cues. This does not change the live DJ broadcast.").setPositiveButton("Enable",(d,n)->{final CastClient selected=owner;if(!selected(selected))return;work(()->{selected.post("/api/smart/enable",null);JSONObject available=selected.get("/api/smart/manifest");activity.runOnUiThread(()->{if(!closed&&client==selected)renderShared(available);});return "Choose a playlist below, then Save offline with my cues.";});}).setNegativeButton("Cancel",null).show()));}return;}queue.setVisibility(GONE);sharedLists.addView(label("Station playlists",18));JSONArray lists=manifest.optJSONArray("playlists");if(lists==null)return;
-        for(int i=0;i<lists.length();i++){JSONObject playlist=lists.optJSONObject(i);if(playlist==null)continue;sharedLists.addView(label(playlist.optString("name")+" · "+playlist.optJSONArray("tracks").length()+" songs",16));final CastClient selected=client;if(playlistSupported)sharedLists.addView(action("Use playlist as host source",()->{if(!selected(selected)||!playlistSupported)return;work(()->{selected.playPlaylist(playlist.optString("id"));sync(selected);return "Host playlist requested. Choose a destination when it is on air.";});}));sharedLists.addView(action("Save offline with my cues",()->downloadPlaylist(selected,manifest,playlist)));}
+        for(int i=0;i<lists.length();i++){JSONObject playlist=lists.optJSONObject(i);if(playlist==null)continue;sharedLists.addView(label(playlist.optString("name")+" · "+playlist.optJSONArray("tracks").length()+" songs",16));final CastClient selected=client;sharedLists.addView(action("Save offline with my cues",()->downloadPlaylist(selected,manifest,playlist)));}
     }
     void downloadPlaylist(CastClient selected,JSONObject manifest,JSONObject playlist){status.setText("Downloads require AMP Player.");}
     private void chooseStationPlaylist(){final CastClient selected=client;if(!selected(selected)||!playlistSupported){status.setText("Connect and verify host access first");return;}work(()->{JSONArray lists=selected.get("/api/station/playlists").getJSONArray("playlists");if(lists.length()==0)return "No saved host playlists available";activity.runOnUiThread(()->{if(closed||client!=selected)return;String[] names=new String[lists.length()];for(int i=0;i<names.length;i++)names[i]=lists.optJSONObject(i).optString("name");new android.app.AlertDialog.Builder(activity).setTitle("Launch independent Smart Radio").setItems(names,(d,i)->{if(!selected(selected)||!playlistSupported)return;work(()->{selected.post("/api/station/play/"+android.net.Uri.encode(lists.optJSONObject(i).optString("id")),null);sync(selected);return "Smart Radio launch requested";});}).setNegativeButton("Cancel",null).show();});return "Choose a saved playlist";});}
@@ -168,7 +180,7 @@ class CastPanel extends LinearLayout {
         if(busy)return;address.setText(server.url);password.setText("");connect(server.id);
     }
     private void requestPassword(String name,String expectedIdentity){
-        EditText secret=new EditText(activity);secret.setSingleLine(true);secret.setInputType(129);secret.setHint("Server password");
+        EditText secret=new EditText(activity);secret.setSingleLine(true);secret.setInputType(129);secret.setHint("Server password");secret.setContentDescription("Selected server password");
         new android.app.AlertDialog.Builder(activity).setTitle(name+" · protected Library").setMessage("Enter this server’s password to open Library.").setView(secret).setPositiveButton("Open Library",(d,n)->{if(busy||closed)return;password.setText(secret.getText());connect(expectedIdentity);}).setNegativeButton("Cancel",null).show();
     }
     void findServers(){
