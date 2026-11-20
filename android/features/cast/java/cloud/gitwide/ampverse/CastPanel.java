@@ -9,7 +9,7 @@ import java.util.concurrent.*;
 
 /** Integrated Android station controls; local listening uses the existing playback service. */
 final class CastPanel extends LinearLayout {
-    interface Listener {void listen(String url,String name);void stopListening();default void playlist(java.util.List<androidx.media3.common.MediaItem> items){}}
+    interface Listener {default boolean playlistSyncAvailable(){return false;}default void playlistSync(CastClient selected){}void listen(String url,String name);void stopListening();default void playlist(java.util.List<androidx.media3.common.MediaItem> items){}}
     private final Activity activity;
     private final Appearance colors;
     private final Listener listener;
@@ -87,7 +87,7 @@ final class CastPanel extends LinearLayout {
         queue=label("Find a server to see its music.",14);addView(queue);
         search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int a,int c,int d){}public void onTextChanged(CharSequence t,int a,int b,int c){renderQueue();}public void afterTextChanged(android.text.Editable t){}});
         addView(action("Help",()->new android.app.AlertDialog.Builder(activity).setTitle("Radio help").setMessage("Station access selects a host without changing playback. Local listening plays its stream here. Server speakers play it on the host audio output. Remote desktop broadcast changes the host source to its desktop Player/DJ master. Google Cast asks a Google speaker to fetch the host stream. Sending this phone’s own playback is not implemented. Internet radio and offline playlists are separate listening choices.").setPositiveButton("Done",null).show()));enabled(false);
-        addView(action("Enable saved-playlist sync",()->{CastClient selected=client;if(selected==null||!verified){Toast.makeText(activity,"Connect to an authorized host first",Toast.LENGTH_LONG).show();return;}selected.withPrivateAuthorization((base,secret,server,library)->PlaylistSyncUi.authorize(activity,base,secret,server,library));}));
+        if(listener.playlistSyncAvailable())addView(action("Enable saved-playlist sync",()->{CastClient selected=client;if(selected==null||!verified){Toast.makeText(activity,"Connect to an authorized host first",Toast.LENGTH_LONG).show();return;}listener.playlistSync(selected);}));
         handler.postDelayed(poll,3000);
     }
     private int dp(int n){return (int)(n*getResources().getDisplayMetrics().density);}

@@ -34,3 +34,5 @@ Pure Java model fixtures cover authority isolation, missing/duplicate references
 
 
 Repeated unchanged saves do not generate publication/revision churn. Overlapping local editors retain both saved proposals instead of silently replacing one. Explicit conflict review is fenced to the exact version displayed; a newer server version requires reopening review. Invalid names and oversized reference lists fail before durable outbox changes.
+
+The Cast panel exposes synchronization through an opt-in Listener capability/callback instead of depending directly on the sync UI. Full MainActivity/TV opt in. Standalone Cast companions default to hiding this action until an authorized AMP Player IPC bridge is supplied; the Full-edition setup path is currently required. This seam is intended to preserve SAG-87 shared-panel/FullCastPanel routing rather than overwriting that independent flow.
