@@ -302,7 +302,7 @@ pub(super) async fn validate_selection(
         serde_json::from_value(selection["rules"].clone()).ok();
     let finite = selection["finite"] == true;
     let mut cursor = 0;
-    let mut failures = selection["unavailable"].as_u64().unwrap_or(0);
+    let unavailable = selection["unavailable"].as_u64().unwrap_or(0);
     for (occurrence, &ordered) in indices.iter().take(32).enumerate() {
         let index = if finite {
             ordered
@@ -327,11 +327,11 @@ pub(super) async fn validate_selection(
         if result.is_ok() {
             if finite {
                 selection["start_occurrence"] = serde_json::json!(occurrence);
-                selection["failed_occurrences"] = serde_json::json!(failures);
+                selection["failed_occurrences"] =
+                    serde_json::json!(unavailable + occurrence as u64);
             }
             return Ok(());
         }
-        failures += 1;
         if let Some(profile) = &mut profile {
             profile.excluded.push(show::song_id(&cast.tracks[index]));
         }

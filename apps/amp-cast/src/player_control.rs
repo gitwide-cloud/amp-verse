@@ -164,16 +164,35 @@ async fn indices(cast: Arc<Cast>, request: Play) -> Result<Vec<usize>, (StatusCo
 struct Intent {
     generation: u64,
     number: u64,
+    deadline: tokio::time::Instant,
 }
-async fn begin_play(cast: &Cast) -> Intent {
+async fn begin_play(cast: &Cast, deadline: tokio::time::Instant) -> Intent {
     let _operation = cast.operation.lock().await;
     Intent {
+        deadline,
         generation: cast.station.lock().await.generation,
         number: cast
             .player_intent
             .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
             + 1,
     }
+}
+fn deadline_error() -> Response {
+    error(
+        StatusCode::SERVICE_UNAVAILABLE,
+        "Playback checking timed out. Current playback was kept; check the music source and retry explicitly.",
+    )
+}
+async fn before<T>(
+    deadline: tokio::time::Instant,
+    future: impl std::future::Future<Output = T>,
+) -> Result<T, ()> {
+    if tokio::time::Instant::now() >= deadline {
+        return Err(());
+    }
+    tokio::time::timeout_at(deadline, future)
+        .await
+        .map_err(|_| ())
 }
 async fn current_intent(cast: &Cast, intent: Intent) -> bool {
     cast.player_intent
@@ -260,18 +279,41 @@ async fn play(
     headers: HeaderMap,
     Json(request): Json<Play>,
 ) -> Response {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
     if !allowed(&cast, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let intent = begin_play(&cast).await;
-    let mut selected = match selection(&cast, &request).await {
-        Ok(value) => value,
-        Err(response) => return response.into_response(),
+    let intent = match before(deadline, begin_play(&cast, deadline)).await {
+        Ok(intent) => intent,
+        Err(()) => return deadline_error(),
+    };
+    play_selected(
+        cast.clone(),
+        headers,
+        request.server_speakers,
+        intent,
+        selection(&cast, &request),
+    )
+    .await
+}
+async fn play_selected(
+    cast: Arc<Cast>,
+    headers: HeaderMap,
+    server_speakers: bool,
+    intent: Intent,
+    selected: impl std::future::Future<Output = Result<Value, (StatusCode, &'static str)>>,
+) -> Response {
+    let mut selected = match before(intent.deadline, selected).await {
+        Ok(Ok(selected)) => selected,
+        Ok(Err(problem)) => return problem.into_response(),
+        Err(()) => return deadline_error(),
     };
     // Probe before the operation lock and before stopping a healthy owner. The
     // decoder only reads generated/selected audio; it never opens a speaker.
-    let preflight = tokio::time::timeout(
-        std::time::Duration::from_secs(20),
+    let preflight = tokio::time::timeout_at(
+        intent
+            .deadline
+            .min(tokio::time::Instant::now() + std::time::Duration::from_secs(20)),
         radio::validate_selection(cast.clone(), &mut selected),
     )
     .await;
@@ -293,7 +335,7 @@ async fn play(
             "No playable songs were found in the first 32 selected occurrences. Repair their audio or choose another playlist; current playback was kept.",
         );
     }
-    finish_play(cast, headers, selected, request.server_speakers, intent).await
+    finish_play(cast, headers, selected, server_speakers, intent).await
 }
 async fn finish_play(
     cast: Arc<Cast>,
@@ -302,25 +344,45 @@ async fn finish_play(
     server_speakers: bool,
     intent: Intent,
 ) -> Response {
-    let _operation = cast.operation.lock().await;
-    if !current_intent(&cast, intent).await {
+    let _operation = match before(intent.deadline, cast.operation.lock()).await {
+        Ok(guard) => guard,
+        Err(()) => return deadline_error(),
+    };
+    let current = match before(intent.deadline, current_intent(&cast, intent)).await {
+        Ok(current) => current,
+        Err(()) => return deadline_error(),
+    };
+    if !current {
         return error(
             StatusCode::CONFLICT,
             "A newer playback or Stop request took priority. Current playback was kept.",
         );
     }
     if server_speakers {
-        if let Err(message) = station_control::probe_output().await {
-            *cast.server_output_error.lock().unwrap() = Some(message.clone());
-            return error(StatusCode::SERVICE_UNAVAILABLE, &message);
+        match before(intent.deadline, station_control::probe_output()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(message)) => {
+                *cast.server_output_error.lock().unwrap() = Some(message.clone());
+                return error(StatusCode::SERVICE_UNAVAILABLE, &message);
+            }
+            Err(()) => return deadline_error(),
         }
     }
-    if !current_intent(&cast, intent).await {
+    let current = match before(intent.deadline, current_intent(&cast, intent)).await {
+        Ok(current) => current,
+        Err(()) => return deadline_error(),
+    };
+    if !current {
         return error(
             StatusCode::CONFLICT,
             "A newer playback request took priority. Current playback was kept.",
         );
     }
+    if tokio::time::Instant::now() >= intent.deadline {
+        return deadline_error();
+    }
+    // Commit inline only after all checking stages fit the common budget. No
+    // detached checking task can perform this handoff after timeout/cancellation.
     cast.shutdown().await;
     *cast.selection.lock().unwrap() = Some(selected);
     let response = start_unlocked(State(cast.clone()), headers).await;
@@ -441,6 +503,60 @@ mod tests {
             .unwrap()
     }
     #[tokio::test]
+    async fn shared_deadline_cancels_blocked_selection_and_lock_wait_without_handoff() {
+        for stage in ["selection", "lock"] {
+            let root = tempfile::tempdir().unwrap();
+            let cast = Cast::new(
+                root.path().into(),
+                amp_core::scan(root.path()).unwrap(),
+                None,
+            );
+            {
+                let mut station = cast.station.lock().await;
+                station.running = true;
+                station.source = "live_dj".into();
+                station.generation = 77;
+            }
+            let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(40);
+            let intent = begin_play(&cast, deadline).await;
+            if stage == "selection" {
+                let (release, blocked) = tokio::sync::oneshot::channel::<()>();
+                let response =
+                    play_selected(cast.clone(), HeaderMap::new(), false, intent, async move {
+                        blocked.await.unwrap();
+                        Ok(json!({"finite":true,"tracks":[0]}))
+                    })
+                    .await;
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                assert!(
+                    release.send(()).is_err(),
+                    "timed-out selection must be dropped, not a detached future that can handoff later"
+                );
+            } else {
+                let guard = cast.operation.lock().await;
+                let response = finish_play(
+                    cast.clone(),
+                    HeaderMap::new(),
+                    json!({"finite":true,"tracks":[0]}),
+                    false,
+                    intent,
+                )
+                .await;
+                assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+                drop(guard);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            {
+                let station = cast.station.lock().await;
+                assert!(station.running);
+                assert_eq!(station.generation, 77);
+                assert_eq!(station.source, "live_dj");
+                assert!(cast.selection.lock().unwrap().is_none());
+            }
+            cast.shutdown().await;
+        }
+    }
+    #[tokio::test]
     async fn paused_preflight_cannot_resurrect_after_stop_or_replace_a_new_owner_or_intent() {
         for replacement in ["stop", "live", "intent"] {
             let root = tempfile::tempdir().unwrap();
@@ -450,7 +566,11 @@ mod tests {
                 amp_core::scan(root.path()).unwrap(),
                 None,
             );
-            let intent = begin_play(&cast).await;
+            let intent = begin_play(
+                &cast,
+                tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+            )
+            .await;
             let generation = intent.generation;
             let (entered, waiting) = tokio::sync::oneshot::channel();
             let (release, resume) = tokio::sync::oneshot::channel();
@@ -469,7 +589,11 @@ mod tests {
             });
             waiting.await.unwrap();
             if replacement == "intent" {
-                let _ = begin_play(&cast).await;
+                let _ = begin_play(
+                    &cast,
+                    tokio::time::Instant::now() + std::time::Duration::from_secs(30),
+                )
+                .await;
             } else {
                 let uri = if replacement == "stop" {
                     "/api/stop"
@@ -993,8 +1117,10 @@ mod tests {
         assert!(output.status.success());
         let pcm: Vec<f32> = output
             .stdout
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
         assert!(
             pcm.len() > 44100 * 29 / 10 && pcm.len() < 44100 * 33 / 10,
