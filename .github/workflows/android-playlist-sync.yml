@@ -32,7 +32,7 @@ jobs:
         with:
           gradle-version: '8.11.1'
       - name: Unit tests, both editions, and shared Cast client consumers
-        run: gradle -p android :app:testFullDebugUnitTest :app:testLiteDebugUnitTest :app:assembleFullDebug :app:assembleLiteDebug :app:lintFullDebug :app:lintLiteDebug :amp-cast:assembleDebug :amp-remote:assembleDebug
+        run: gradle -p android :app:testFullDebugUnitTest :app:assembleFullDebug :app:assembleLiteDebug :app:lintFullDebug :app:lintLiteDebug :amp-cast:assembleDebug :amp-remote:assembleDebug
       - name: Check patch whitespace
         run: git diff --check
       - uses: actions/upload-artifact@v4

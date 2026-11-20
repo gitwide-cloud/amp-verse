@@ -8,12 +8,12 @@ import java.util.*;
 public class PlaylistSyncModelTest {
     JSONObject state()throws Exception{return PlaylistSyncModel.state("server","library","phone");}
     JSONObject normal(String name,int revision)throws Exception{return new JSONObject().put("document_id","normal_stable").put("kind","normal").put("document_version",1).put("revision",new JSONObject().put("revision",revision)).put("document",new JSONObject().put("version",1).put("name",name).put("companion_available",true).put("future",new JSONObject().put("keep",true)).put("tracks",new JSONArray().put(ref("a")).put(ref("missing")).put(ref("a"))));}
-    JSONObject ref(String key)throws Exception{return new JSONObject().put("track_key",key).put("library_id","library").put("relative_path",key+".mp3");}
+    JSONObject ref(String key)throws Exception{return new JSONObject().put("track_key",PlaylistSyncModel.trackKey(key+".mp3")).put("library_id","library").put("relative_path",key+".mp3");}
     JSONObject snapshot(JSONObject doc)throws Exception{return new JSONObject().put("protocol",1).put("server_id","server").put("library_id","library").put("smart_revision",new JSONObject().put("revision",1)).put("documents",new JSONArray().put(doc));}
     JSONObject ack(JSONObject op,int revision)throws Exception{return new JSONObject().put("server_id","server").put("library_id","library").put("operation_id",op.getString("operation_id")).put("status","applied").put("canonical",new JSONObject().put("document_id",op.getString("document_id")).put("kind",op.getString("kind")).put("document_version",1).put("revision",new JSONObject().put("revision",revision)).put("document",PlaylistSyncModel.copy(op.getJSONObject("document"))));}
     @Test public void pullPreservesDuplicatesAndUnresolvedMappingWithoutTouchingMedia()throws Exception{
         JSONObject s=state(),remote=normal("Server",1);PlaylistSyncModel.pull(s,snapshot(remote));JSONObject view=PlaylistSyncModel.visible(s.getJSONObject("documents").getJSONObject("normal_stable"));
-        assertEquals(3,PlaylistSyncModel.orderedReferences(view).length());JSONObject mappings=new JSONObject().put("a","local-content-id");assertEquals(Arrays.asList("local-content-id","local-content-id"),PlaylistSyncModel.mappedNormal(view,mappings));assertEquals(3,remote.getJSONObject("document").getJSONArray("tracks").length());assertFalse(s.has("playback"));assertFalse(s.has("preparation"));
+        assertEquals(3,PlaylistSyncModel.orderedReferences(view).length());JSONObject mappings=new JSONObject().put(PlaylistSyncModel.trackKey("a.mp3"),"local-content-id");assertEquals(Arrays.asList("local-content-id","local-content-id"),PlaylistSyncModel.mappedNormal(view,mappings));assertEquals(3,remote.getJSONObject("document").getJSONArray("tracks").length());assertFalse(s.has("playback"));assertFalse(s.has("preparation"));
     }
     @Test public void openDraftKeepsCapturedBaselineAndPollingDoesNotOverwriteSavedDesired()throws Exception{
         JSONObject s=state();PlaylistSyncModel.pull(s,snapshot(normal("Old",1)));JSONObject draft=PlaylistSyncModel.visible(s.getJSONObject("documents").getJSONObject("normal_stable"));
@@ -37,7 +37,7 @@ public class PlaylistSyncModelTest {
         PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","Phone"));JSONObject op=PlaylistSyncModel.next(s);try{PlaylistSyncModel.reply(s,op,200,ack(op,2).put("operation_id","other"));fail();}catch(JSONException expected){}assertNotNull(PlaylistSyncModel.next(s));
     }
     @Test public void absentRemoteDocumentIsNotADeletionAndMappingsStayDeviceLocal()throws Exception{
-        JSONObject s=state();s.getJSONObject("mappings").put("a","content-local");PlaylistSyncModel.pull(s,snapshot(normal("Old",1)));PlaylistSyncModel.pull(s,snapshot(normal("Old",1)).put("documents",new JSONArray()));
+        JSONObject s=state();s.getJSONObject("mappings").put(PlaylistSyncModel.trackKey("a.mp3"),"content-local");PlaylistSyncModel.pull(s,snapshot(normal("Old",1)));PlaylistSyncModel.pull(s,snapshot(normal("Old",1)).put("documents",new JSONArray()));
         assertTrue(s.getJSONObject("documents").has("normal_stable"));JSONObject original=normal("Old",1);PlaylistSyncModel.save(s,original,original.getJSONObject("document"));JSONObject op=PlaylistSyncModel.next(s);assertFalse(op.has("mappings"));assertFalse(op.toString().contains("content-local"));
     }
 
@@ -51,5 +51,16 @@ public class PlaylistSyncModelTest {
         PlaylistSyncModel.pull(s,snapshot(original));PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(rules).put("name","Phone smart"));JSONObject op=PlaylistSyncModel.next(s),result=ack(op,2);result.getJSONObject("canonical").getJSONObject("document").put("target_energy",1);
         PlaylistSyncModel.reply(s,op,200,result);assertNull(PlaylistSyncModel.next(s));JSONObject saved=PlaylistSyncModel.visible(s.getJSONObject("documents").getJSONObject("smart_saved")).getJSONObject("document");assertEquals(1,saved.getJSONArray("filters").length());assertTrue(saved.getJSONObject("future").getBoolean("keep"));
     }
+
+    @Test public void newerSavedDraftPatchesOwnAckWithoutRevertingOtherOwnFields()throws Exception{
+        JSONObject s=state(),original=normal("Old",1);PlaylistSyncModel.pull(s,snapshot(original));JSONObject first=PlaylistSyncModel.copy(original.getJSONObject("document"));first.put("tracks",new JSONArray().put(ref("missing")));PlaylistSyncModel.save(s,original,first);JSONObject operation=PlaylistSyncModel.next(s);
+        PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","Later name"));PlaylistSyncModel.reply(s,operation,200,ack(operation,2));JSONObject next=PlaylistSyncModel.next(s);
+        assertEquals("Later name",next.getJSONObject("document").getString("name"));assertEquals(1,next.getJSONObject("document").getJSONArray("tracks").length());assertEquals(PlaylistSyncModel.trackKey("missing.mp3"),next.getJSONObject("document").getJSONArray("tracks").getJSONObject(0).getString("track_key"));
+    }
+    @Test public void ownSmartAckAdvancesOnlyMatchingQueuedContainerBaselines()throws Exception{
+        JSONObject s=state(),a=normal("A",1).put("kind","smart").put("document_id","smart_a"),b=normal("B",1).put("kind","smart").put("document_id","smart_b");JSONObject snap=snapshot(a).put("documents",new JSONArray().put(a).put(b));PlaylistSyncModel.pull(s,snap);
+        PlaylistSyncModel.save(s,a,PlaylistSyncModel.copy(a.getJSONObject("document")).put("name","A phone"));PlaylistSyncModel.save(s,b,PlaylistSyncModel.copy(b.getJSONObject("document")).put("name","B phone"));JSONObject first=PlaylistSyncModel.next(s);PlaylistSyncModel.reply(s,first,200,ack(first,2));JSONObject second=PlaylistSyncModel.next(s);assertEquals("smart_b",second.getString("document_id"));assertEquals(2,second.getJSONObject("base_revision").getInt("revision"));
+    }
+
 }
 

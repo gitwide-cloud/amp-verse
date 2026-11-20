@@ -5,6 +5,7 @@ import org.json.*;
 
 /** Playlist-only durable state machine. No Android, media, analysis, or network ownership. */
 final class PlaylistSyncModel {
+    static String trackKey(String path)throws JSONException {try{byte[] d=java.security.MessageDigest.getInstance("SHA-256").digest(path.getBytes(java.nio.charset.StandardCharsets.UTF_8));return String.format(java.util.Locale.ROOT,"song_%064x",new java.math.BigInteger(1,d));}catch(java.security.GeneralSecurityException e){throw new JSONException("SHA256 unavailable");}}
     static JSONObject copy(JSONObject value)throws JSONException{return new JSONObject(value.toString());}
     static JSONObject state(String server,String library,String device)throws JSONException{return new JSONObject().put("version",1).put("server_id",server).put("library_id",library).put("device_id",device).put("documents",new JSONObject()).put("mappings",new JSONObject()).put("catalog",new JSONObject());}
     static boolean equal(Object a,Object b)throws JSONException {
@@ -23,6 +24,7 @@ final class PlaylistSyncModel {
         JSONObject entries=state.getJSONObject("documents");
         for(int i=0;i<docs.length();i++){JSONObject canonical=copy(docs.getJSONObject(i));String id=canonical.getString("document_id");String kind=canonical.getString("kind");
             if(!(kind.equals("normal")&&id.startsWith("normal_")||kind.equals("smart")&&id.startsWith("smart_")))throw new JSONException("Unsupported playlist document");
+            if(kind.equals("normal")){JSONArray refs=canonical.getJSONObject("document").getJSONArray("tracks");if(refs.length()>20000)throw new JSONException("Too many ordered references");for(int n=0;n<refs.length();n++){JSONObject ref=refs.getJSONObject(n);String path=ref.getString("relative_path");if(!state.getString("library_id").equals(ref.getString("library_id"))||path.isEmpty()||path.startsWith("/")||path.contains("\\")||path.contains(":")||Arrays.asList(path.split("/",-1)).contains("..")||Arrays.asList(path.split("/",-1)).contains("")||!trackKey(path).equals(ref.getString("track_key")))throw new JSONException("Server track reference identity is invalid");JSONObject known=copy(ref).put("title",path);if(!state.getJSONObject("catalog").has(ref.getString("track_key")))state.getJSONObject("catalog").put(ref.getString("track_key"),known);}}
             JSONObject entry=entries.optJSONObject(id);if(entry==null){entry=new JSONObject();entries.put(id,entry);}
             entry.put("current",canonical);if(!entry.has("desired")&&!entry.has("pending")&&!entry.has("blocked"))entry.put("baseline",canonical);
         }
@@ -56,7 +58,14 @@ final class PlaylistSyncModel {
             if(!canonical.getString("document_id").equals(operation.getString("document_id"))||!equal(canonical.getJSONObject("document"),operation.getJSONObject("document")))throw new JSONException("Acknowledgment document differs from saved proposal");
             entry.put("baseline",canonical).put("current",canonical);entry.remove("pending");
             JSONObject desired=entry.optJSONObject("desired");
-            if(desired!=null){if(equal(desired.getJSONObject("document"),operation.getJSONObject("document")))entry.remove("desired");else {desired.put("revision",canonical.get("revision"));desired.remove("new_document");entry.put("desired_base_document",copy(canonical.getJSONObject("document")));}}
+            if(desired!=null){if(equal(desired.getJSONObject("document"),operation.getJSONObject("document"))){entry.remove("desired");entry.remove("desired_base_document");}else {
+                JSONObject base=entry.getJSONObject("desired_base_document"),proposed=desired.getJSONObject("document"),merged=copy(canonical.getJSONObject("document"));Set<String> keys=new HashSet<>();Iterator<String> a=base.keys(),b=proposed.keys();while(a.hasNext())keys.add(a.next());while(b.hasNext())keys.add(b.next());for(String key:keys)if(!equal(base.opt(key),proposed.opt(key))){if(proposed.has(key))merged.put(key,proposed.get(key));else merged.remove(key);}
+                desired.put("document",merged).put("revision",canonical.get("revision"));desired.remove("new_document");entry.put("desired_base_document",copy(canonical.getJSONObject("document")));
+            }}
+            if(operation.getString("kind").equals("smart")){
+                Object oldRevision=operation.opt("base_revision"),newRevision=canonical.get("revision");if(equal(state.opt("smart_revision"),oldRevision))state.put("smart_revision",newRevision);
+                JSONObject entries=state.getJSONObject("documents");Iterator<String> ids=entries.keys();while(ids.hasNext()){String id=ids.next();if(id.equals(operation.getString("document_id")))continue;JSONObject other=entries.getJSONObject(id);for(String slot:new String[]{"baseline","current","desired"}){JSONObject value=other.optJSONObject(slot);if(value!=null&&value.optString("kind").equals("smart")&&equal(value.opt("revision"),oldRevision)&&!other.has("blocked")&&!other.has("pending"))value.put("revision",newRevision);}}
+            }
         }else if(status==409||status==400){entry.put("blocked",copy(response)).put("blocked_message",status==409?"Conflict / uncertain receipt. Your phone edit is retained.":"Server rejected this playlist. Your phone edit is retained.");}
         // Transport/5xx: the same persisted pending operation ID is retried; never issue a replacement.
     }
