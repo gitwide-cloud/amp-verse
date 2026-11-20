@@ -40,7 +40,17 @@ final class StationMediaSourceFactory implements MediaSource.Factory {
                 return chain.proceed(chain.request().newBuilder().header("x-amp-server",server).header("x-amp-station",station).build());
             }).build();
     }
+    private MediaSource privateSource(MediaItem item){
+        PrivateLibraryPlayback.Binding binding=PrivateLibraryPlayback.binding(item);
+        String target=item.localConfiguration.uri.toString();
+        OkHttpClient http= binding==null?new OkHttpClient.Builder().addInterceptor(chain->{throw new IOException("Private library access expired; reopen the song");}).build()
+            :PrivateLibraryHttp.create(binding.base,binding.password,binding.server,binding.library,target);
+        DefaultMediaSourceFactory source=new DefaultMediaSourceFactory(new OkHttpDataSource.Factory(http));
+        if(drm!=null)source.setDrmSessionManagerProvider(drm);if(errors!=null)source.setLoadErrorHandlingPolicy(errors);
+        return source.createMediaSource(item);
+    }
     @Override public MediaSource createMediaSource(MediaItem item){
+        if(item.localConfiguration!=null&&PrivateLibraryPlayback.owns(item))return privateSource(item);
         if(item.localConfiguration==null||!adaptive(item.localConfiguration.uri))return ordinary.createMediaSource(item);
         Uri uri=item.localConfiguration.uri;
         HlsMediaSource.Factory hls=new HlsMediaSource.Factory(new OkHttpDataSource.Factory(stationHttp(uri)));

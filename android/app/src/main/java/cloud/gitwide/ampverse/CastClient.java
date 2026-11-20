@@ -7,6 +7,9 @@ import java.nio.charset.StandardCharsets;
 
 /** Direct, explicitly selected AMP Cast server. No discovery or shared-session auto-join. */
 final class CastClient {
+    // Server preflight (20s), device probe (5s), and serialized cleanup need margin.
+    // A timed-out Play may have reached the host: never automatically resend it.
+    private static final int PLAYER_START_READ_TIMEOUT_MS=45000;
     static final class AuthorizationException extends HttpException {
         AuthorizationException(int code){super(code,"Host control/download access rejected. Check admin access and feature availability. Public listening remains available.");}
     }
@@ -17,10 +20,12 @@ final class CastClient {
     static final class HostUnavailableException extends IOException {
         HostUnavailableException(String message,Throwable cause){super(message,cause);}
     }
+    interface PlaylistAuthorization {void accept(String base,String password,String server,String library);}
+    void withPrivateAuthorization(PlaylistAuthorization action){action.accept(base,password,serverId,libraryId);}
     boolean hasPassword(){return !password.isEmpty();}
     final String base;
     private final String password;
-    private String serverId="",stationId="";
+    private String serverId="",stationId="",libraryId="";
     private boolean protectedAudio;
     private boolean adaptiveAudio;
     CastClient(String address,String password)throws Exception {
@@ -37,7 +42,7 @@ final class CastClient {
         JSONObject status=get("/api/status");
         String server=status.optString("server_id"),station=status.optString("station_id");
         if(server.isEmpty()||station.isEmpty())throw new IOException("This server needs an AMP Cast update before phone control is available");
-        serverId=server;stationId=station;protectedAudio=status.optJSONObject("capabilities")!=null&&status.getJSONObject("capabilities").optInt("reliable_audio")>=1;
+        serverId=server;stationId=station;libraryId=status.optString("library_id");protectedAudio=status.optJSONObject("capabilities")!=null&&status.getJSONObject("capabilities").optInt("reliable_audio")>=1;
         adaptiveAudio="/api/audio/hls/master.m3u8".equals(status.optString("hls_url"));return status;
     }
     JSONObject status()throws Exception {
@@ -85,9 +90,10 @@ final class CastClient {
     private String request(String path,boolean command)throws Exception {return request(path,command,null);}
     private String request(String path,boolean command,JSONObject body)throws Exception {
         HttpURLConnection connection=(HttpURLConnection)new URL(base+path).openConnection();
-        connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(4000);connection.setReadTimeout(6000);
+        connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(4000);connection.setReadTimeout(path.equals("/api/player/play")?PLAYER_START_READ_TIMEOUT_MS:6000);
         try {
             if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);
+            if(path.startsWith("/api/sync/")||path.startsWith("/api/player/")){connection.setRequestProperty("x-amp-server",serverId);connection.setRequestProperty("x-amp-library",libraryId);}
             if(command){connection.setRequestMethod("POST");connection.setRequestProperty("x-amp-server",serverId);connection.setRequestProperty("x-amp-station",stationId);if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);connection.setDoOutput(true);if(body!=null)connection.setRequestProperty("Content-Type","application/json");try(OutputStream output=connection.getOutputStream()){if(body!=null)output.write(body.toString().getBytes(StandardCharsets.UTF_8));}}
             int code=connection.getResponseCode();
             if(code==401||code==403)throw new AuthorizationException(code);

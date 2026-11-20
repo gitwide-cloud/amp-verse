@@ -1,0 +1,112 @@
+package cloud.gitwide.ampverse;
+
+import android.content.Context;
+import android.security.keystore.*;
+import android.util.*;
+import androidx.media3.common.MediaItem;
+import java.io.*;
+import java.nio.charset.StandardCharsets;
+import java.security.*;
+import javax.crypto.*;
+import javax.crypto.spec.GCMParameterSpec;
+import java.util.*;
+import java.util.concurrent.*;
+import org.json.*;
+
+/** Automatic playlist-only synchronization while this app process is alive; resume retries durable work. */
+final class PlaylistSync {
+    private static final Object LOCK=new Object();
+    private static final PlaylistSyncBoundary PUBLICATION=new PlaylistSyncBoundary();
+    private static final ScheduledExecutorService WORK=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"amp-playlist-sync");t.setDaemon(true);return t;});
+    private static final java.util.Set<Runnable> LISTENERS=new java.util.concurrent.CopyOnWriteArraySet<>();
+    private static boolean started;static volatile String status="Choose an authorized Cast host to enable saved-playlist sync.";
+    static String hash(String s)throws Exception {StringBuilder out=new StringBuilder();for(byte b:MessageDigest.getInstance("SHA-256").digest(s.getBytes(StandardCharsets.UTF_8)))out.append(String.format(Locale.ROOT,"%02x",b&255));return out.toString();}
+    private static File folder(Context c){return new File(c.getNoBackupFilesDir(),"playlist-sync");}
+    private static String active(Context c){return c.getSharedPreferences("playlist-sync-selection",0).getString("active","");}
+    private static File file(Context c,String key,String suffix){if(!key.matches("[0-9a-f]{64}"))throw new IllegalArgumentException("Invalid saved server binding");return new File(folder(c),key+suffix);}
+    static JSONObject read(Context c,String key)throws Exception {File f=file(c,key,".json");try(InputStream in=new AtomicFile(f).openRead()){ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] b=new byte[8192];int n;while((n=in.read(b))!=-1){if(out.size()+n>16*1024*1024)throw new IOException("Saved sync state too large");out.write(b,0,n);}JSONObject state=new JSONObject(out.toString(StandardCharsets.UTF_8.name()));if(state.optInt("version")!=1)throw new IOException("Unsupported saved playlist sync state");return state;}}
+    private static void write(Context c,String key,JSONObject state)throws Exception {if(!folder(c).isDirectory()&&!folder(c).mkdirs())throw new IOException("Cannot create private sync folder");byte[] bytes=state.toString().getBytes(StandardCharsets.UTF_8);if(bytes.length>16*1024*1024)throw new IOException("Sync state limit reached; drafts retained");AtomicFile f=new AtomicFile(file(c,key,".json"));FileOutputStream out=f.startWrite();try{out.write(bytes);out.getFD().sync();f.finishWrite(out);}catch(Exception e){f.failWrite(out);throw e;}}
+    private static SecretKey secretKey()throws Exception {KeyStore store=KeyStore.getInstance("AndroidKeyStore");store.load(null);String alias="amp-playlist-sync-v1";if(store.containsAlias(alias))return (SecretKey)store.getKey(alias,null);KeyGenerator gen=KeyGenerator.getInstance(KeyProperties.KEY_ALGORITHM_AES,"AndroidKeyStore");gen.init(new KeyGenParameterSpec.Builder(alias,KeyProperties.PURPOSE_ENCRYPT|KeyProperties.PURPOSE_DECRYPT).setBlockModes(KeyProperties.BLOCK_MODE_GCM).setEncryptionPaddings(KeyProperties.ENCRYPTION_PADDING_NONE).build());return gen.generateKey();}
+    private static void credential(Context c,String key,JSONObject value)throws Exception {Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.ENCRYPT_MODE,secretKey());cipher.updateAAD(key.getBytes(StandardCharsets.UTF_8));JSONObject sealed=new JSONObject().put("iv",android.util.Base64.encodeToString(cipher.getIV(),android.util.Base64.NO_WRAP)).put("ciphertext",android.util.Base64.encodeToString(cipher.doFinal(value.toString().getBytes(StandardCharsets.UTF_8)),android.util.Base64.NO_WRAP));AtomicFile f=new AtomicFile(file(c,key,".credential"));FileOutputStream out=f.startWrite();try{out.write(sealed.toString().getBytes(StandardCharsets.UTF_8));out.getFD().sync();f.finishWrite(out);}catch(Exception e){f.failWrite(out);throw e;}}
+    private static JSONObject credential(Context c,String key)throws Exception {byte[] bytes;try(InputStream in=new AtomicFile(file(c,key,".credential")).openRead()){ByteArrayOutputStream out=new ByteArrayOutputStream();byte[] b=new byte[1024];int n;while((n=in.read(b))!=-1){if(out.size()+n>16384)throw new IOException("Credential record invalid");out.write(b,0,n);}bytes=out.toByteArray();}JSONObject sealed=new JSONObject(new String(bytes,StandardCharsets.UTF_8));Cipher cipher=Cipher.getInstance("AES/GCM/NoPadding");cipher.init(Cipher.DECRYPT_MODE,secretKey(),new GCMParameterSpec(128,android.util.Base64.decode(sealed.getString("iv"),android.util.Base64.NO_WRAP)));cipher.updateAAD(key.getBytes(StandardCharsets.UTF_8));return new JSONObject(new String(cipher.doFinal(android.util.Base64.decode(sealed.getString("ciphertext"),android.util.Base64.NO_WRAP)),StandardCharsets.UTF_8));}
+    static void start(Context context){Context c=context.getApplicationContext();synchronized(LOCK){if(started)return;started=true;}WORK.scheduleWithFixedDelay(()->cycle(c),0,30,TimeUnit.SECONDS);}
+    static void wake(Context c){start(c);WORK.execute(()->cycle(c.getApplicationContext()));}
+    static void listen(Runnable listener){LISTENERS.add(listener);}static void unlisten(Runnable listener){LISTENERS.remove(listener);}
+    private static void changed(){new android.os.Handler(android.os.Looper.getMainLooper()).post(()->{for(Runnable r:LISTENERS)r.run();});}
+    static void enable(Context context,String base,String password,String expectedServer,String expectedLibrary)throws Exception {
+        Context c=context.getApplicationContext();
+        String normalized=new CastClient(base,password).base;
+        PlaylistSyncHttp.Reply info=new PlaylistSyncHttp(normalized,password,"","").request("/api/status",null);
+        if(info.code!=200)throw new IOException("Cannot verify selected server");CastLibraryModel.requireAccess(info.body,password);String server=info.body.getString("server_id"),library=info.body.getString("library_id");if(server.isEmpty()||library.isEmpty())throw new IOException("Server identity unavailable");if(!server.equals(expectedServer)||!library.equals(expectedLibrary))throw new IOException("Selected host identity changed; reconnect before enabling playlist sync");
+        PlaylistSyncHttp http=new PlaylistSyncHttp(normalized,password,server,library);JSONObject snapshot=http.snapshot();String key=hash(server+"\n"+library);
+        PUBLICATION.select(()->{synchronized(LOCK){File stored=file(c,key,".json");boolean evidence=stored.exists()||new File(stored.getPath()+".bak").exists()||new File(stored.getPath()+".new").exists();JSONObject state=evidence?read(c,key):PlaylistSyncModel.state(server,library,UUID.randomUUID().toString());PlaylistSyncModel.pull(state,snapshot);state.put("base",normalized).put("enabled",true);write(c,key,state);credential(c,key,new JSONObject().put("base",normalized).put("password",password).put("server_id",server).put("library_id",library));if(!c.getSharedPreferences("playlist-sync-selection",0).edit().putString("active",key).commit())throw new IOException("Could not select saved server");}return null;});
+        status="Saved playlists sync automatically; phone metadata stays local.";wake(c);changed();
+    }
+    static void pause(Context c)throws Exception {synchronized(LOCK){String key=active(c);JSONObject state=read(c,key);state.put("enabled",false);write(c,key,state);}status="Playlist sync paused; phone drafts retained.";changed();}
+    private static boolean selected(Context c,String key,JSONObject state) {
+        return PlaylistSyncBoundary.selected(active(c),key,state.optBoolean("enabled"));
+    }
+    private static void cycle(Context c){
+        String key=active(c);if(key.isEmpty())return;
+        try{
+            JSONObject state,sealed;
+            synchronized(LOCK){state=read(c,key);if(!selected(c,key,state))return;sealed=credential(c,key);}
+            PlaylistSyncHttp http=new PlaylistSyncHttp(sealed.getString("base"),sealed.getString("password"),state.getString("server_id"),state.getString("library_id"));
+            JSONObject snapshot=http.snapshot();
+            synchronized(LOCK){state=read(c,key);if(!selected(c,key,state))return;PlaylistSyncModel.pull(state,snapshot);write(c,key,state);}
+            // Pause/selection are checked again before assigning a durable pending operation.
+            JSONObject operation;
+            synchronized(LOCK){state=read(c,key);if(!selected(c,key,state))return;operation=PlaylistSyncModel.next(state);if(operation!=null)write(c,key,state);}
+            if(operation!=null){
+                PlaylistSyncHttp.Reply reply=PUBLICATION.dispatch(()->{
+                    synchronized(LOCK){JSONObject latest=read(c,key);JSONObject entry=latest.getJSONObject("documents").optJSONObject(operation.getString("document_id"));JSONObject pending=entry==null?null:entry.optJSONObject("pending");
+                        return selected(c,key,latest)&&pending!=null&&operation.getString("operation_id").equals(pending.optString("operation_id"));
+                    }
+                },()->http.request("/api/sync/v1/playlist-operations",operation));
+                if(reply==null)return; // Old authority outbox is retained without publication.
+                synchronized(LOCK){state=read(c,key);PlaylistSyncModel.reply(state,operation,reply.code,reply.body);write(c,key,state);}
+                if(reply.code==401||reply.code==403)throw new IOException("Access code rejected; saved edits retained");
+            }
+            refreshCatalog(c,key,http);
+            synchronized(LOCK){if(!selected(c,key,read(c,key)))return;}
+            status="Saved playlists checked automatically. Conflicts stay paused for review.";changed();
+        }catch(Exception e){
+            if(!active(c).equals(key))return;
+            status="Playlist sync paused/retrying: "+(e.getMessage()==null?"connection unavailable":e.getMessage());changed();
+        }
+    }
+    private static void refreshCatalog(Context c,String key,PlaylistSyncHttp http)throws Exception {
+        synchronized(LOCK){JSONObject current=read(c,key);if(!selected(c,key,current)||current.optBoolean("catalog_loaded")&&current.optBoolean("catalog_verified"))return;if(current.optBoolean("catalog_loaded")){current.put("catalog_loaded",false);write(c,key,current);}}
+        PlaylistSyncCatalog.Result result=PlaylistSyncCatalog.fetch(offset->http.request("/api/studio/tracks?offset="+offset+"&limit=200",null),http.library);
+        synchronized(LOCK){
+            JSONObject state=read(c,key);if(!selected(c,key,state))return;
+            JSONObject catalog=result.entries,previous=state.getJSONObject("catalog");Iterator<String> oldKeys=previous.keys();
+            while(oldKeys.hasNext()){String old=oldKeys.next();if(!catalog.has(old))catalog.put(old,previous.get(old));}
+            state.put("catalog",catalog).put("catalog_loaded",true).put("catalog_verified",true).put("catalog_truncated",result.truncated);write(c,key,state);
+        }
+    }
+    static JSONArray lists(Context c){JSONArray out=new JSONArray();String key=active(c);if(key.isEmpty())return out;try{synchronized(LOCK){JSONObject state=read(c,key),entries=state.getJSONObject("documents");Iterator<String> ids=entries.keys();while(ids.hasNext()){String id=ids.next();JSONObject e=entries.getJSONObject(id);if(!e.has("baseline")&&!e.has("desired"))continue;JSONObject v=PlaylistSyncModel.visible(e);JSONObject row=v.getString("kind").equals("smart")?PlaylistSyncModel.copy(v.getJSONObject("document")):new JSONObject();if(v.getString("kind").equals("smart")){row.put("energy",row.isNull("target_energy")?-1:(row.optDouble("target_energy",5.5)-1)/9);JSONObject plan=row.optJSONObject("energy_progression");if(plan!=null)plan.put("target",(plan.optDouble("target",7.3)-1)/9);for(String field:new String[]{"excluded","preferred"}){JSONArray normalized=new JSONArray(),refs=row.optJSONArray(field);if(refs!=null)for(int r=0;r<refs.length();r++){String mapped=state.getJSONObject("mappings").optString(refs.getString(r));if(!mapped.isEmpty())normalized.put(mapped);}row.put(field,normalized);}String recognition=state.getJSONObject("mappings").optString(row.optString("recognition_song"));row.put("recognition_song",recognition);}out.put(row.put("id","server-"+key.substring(0,12)+"-"+id).put("name",v.getJSONObject("document").optString("name",id)).put("smart",v.getString("kind").equals("smart")).put("_sync_binding",key).put("_sync_envelope",v).put("_sync_blocked",e.has("blocked")).put("_sync_pending",e.has("desired")||e.has("pending")));}}}catch(Exception e){status="Saved server playlists unavailable; retained state was not replaced.";}return out;}
+    static void saved(Context c,JSONObject list,JSONObject document)throws Exception {String key=list.getString("_sync_binding");synchronized(LOCK){JSONObject state=read(c,key);PlaylistSyncModel.save(state,list.getJSONObject("_sync_envelope"),document);write(c,key,state);}wake(c);changed();}
+    static JSONObject stateFor(Context c,JSONObject list)throws Exception {synchronized(LOCK){return read(c,list.getString("_sync_binding"));}}
+    static void map(Context c,JSONObject list,String track,String mediaId)throws Exception {String key=list.getString("_sync_binding");synchronized(LOCK){JSONObject s=read(c,key);s.getJSONObject("mappings").put(track,mediaId);write(c,key,s);}changed();}
+    static List<MediaItem> media(Context c){List<MediaItem> all=new ArrayList<>(LibraryStore.read(c));all.addAll(RadioOffline.all(c));return all;}
+    static List<MediaItem> items(Context c,JSONObject list)throws Exception {
+        JSONObject s=stateFor(c,list),v=list.getJSONObject("_sync_envelope"),maps=s.getJSONObject("mappings");Map<String,MediaItem> media=new LinkedHashMap<>();for(MediaItem m:media(c))media.put(m.mediaId,m);List<MediaItem> out=new ArrayList<>();
+        if(v.getString("kind").equals("normal")){for(String id:PlaylistSyncModel.mappedNormal(v,maps)){MediaItem m=media.get(id);if(m!=null)out.add(m);}return out;}
+        JSONObject rules=v.getJSONObject("document");if(rules.optBoolean("source_unavailable")||rules.has("source_library")&&!rules.isNull("source_library")&&!rules.optString("source_library").equals(s.getString("library_id")))return out;
+        JSONObject catalog=s.getJSONObject("catalog");Iterator<String> keys=catalog.keys();while(keys.hasNext()){String key=keys.next();MediaItem m=media.get(maps.optString(key));if(m==null)continue;JSONObject ref=catalog.getJSONObject(key);boolean allowed=PhoneSmartRules.contains(rules.optJSONArray("allowed"),key),member=false;JSONArray sources=rules.optJSONArray("playlist_sources");if(sources!=null)for(int i=0;i<sources.length();i++)member|=PhoneSmartRules.contains(sources.getJSONObject(i).optJSONArray("songs"),key);
+            boolean folder=false;JSONArray folders=rules.optJSONArray("folders");if(folders!=null)for(int i=0;i<folders.length();i++){String f=folders.getString(i);folder|=f.isEmpty()||f.equals(".")||ref.getString("relative_path").startsWith(f.endsWith("/")?f:f+"/");}
+            boolean defaultAllowed=allowed||(!rules.optBoolean("restrict_allowed")&&(rules.optJSONArray("allowed")==null||rules.getJSONArray("allowed").length()==0))||folder&&(rules.optJSONArray("allowed")==null||rules.getJSONArray("allowed").length()==0);
+            boolean source=member||defaultAllowed&&(folder||!rules.optBoolean("restrict_folders")&&(folders==null||folders.length()==0));
+            if(!source)continue;String path=ref.getString("relative_path").toLowerCase(Locale.ROOT);JSONObject prep=DjEngine.preparation(m);String kind=PhoneSmartRules.extensions(prep).optString("media_kind",PhoneSmartRules.extensions(prep).optString("media_kind_detected","music"));boolean spoken=false;for(String genre:PhoneSmartRules.genres(m))if(Arrays.asList("audiobook","audiobooks","speech","spoken word","podcast","podcasts","lecture","lectures").contains(genre.toLowerCase(Locale.ROOT)))spoken=true;if(!allowed&&!member&&(spoken||!kind.equals("music")||path.matches(".*(^|/)(podcasts|audiobooks|speeches|lectures|spoken word)/.*")))continue;
+            JSONObject local=PlaylistSyncModel.copy(rules);for(String field:new String[]{"excluded","preferred"}){JSONArray values=new JSONArray(),raw=rules.optJSONArray(field);if(raw!=null)for(int i=0;i<raw.length();i++){String mapped=maps.optString(raw.getString(i));if(!mapped.isEmpty())values.put(mapped);}local.put(field,values);}
+            if(PhoneSmartRules.matches(c,m,local))out.add(m);
+        }return out;
+    }
+    static void review(Context c,JSONObject list,boolean useServer,JSONObject reviewed)throws Exception {String key=list.getString("_sync_binding"),id=list.getJSONObject("_sync_envelope").getString("document_id");synchronized(LOCK){JSONObject s=read(c,key);if(useServer)PlaylistSyncModel.useServer(s,id,reviewed);else PlaylistSyncModel.reviewKeepDraft(s,id,reviewed);write(c,key,s);}wake(c);changed();}
+    static JSONObject rememberedAccess(Context c,String base,String server,String library)throws Exception {synchronized(LOCK){String key=hash(server+"\n"+library);JSONObject saved=credential(c,key);if(!base.equals(saved.getString("base"))||!server.equals(saved.getString("server_id"))||!library.equals(saved.getString("library_id")))throw new IOException("No remembered access for this selected authority");return new JSONObject().put("password",saved.getString("password"));}}
+    static void requireBinding(Context c,String server,String library)throws Exception {synchronized(LOCK){String key=hash(server+"\n"+library);JSONObject state=read(c,key);if(!selected(c,key,state)||!server.equals(state.getString("server_id"))||!library.equals(state.getString("library_id")))throw new IOException("Enable sync for this exact selected server/library first");}}
+    static void createBound(Context c,String server,String library,boolean smart,String name)throws Exception {synchronized(LOCK){requireBinding(c,server,library);create(c,smart,name);}}
+    static void saveBound(Context c,String server,String library,JSONObject envelope,JSONObject document)throws Exception {synchronized(LOCK){requireBinding(c,server,library);String key=hash(server+"\n"+library);JSONObject state=read(c,key);PlaylistSyncModel.save(state,envelope,document);write(c,key,state);}wake(c);changed();}
+    static void create(Context c,boolean smart,String name)throws Exception {String key=active(c);synchronized(LOCK){JSONObject s=read(c,key);String id=UUID.randomUUID().toString();JSONObject d=new JSONObject().put("name",name).put("companion_available",false);if(smart)d.put("id",id).put("style","steady").put("folders",new JSONArray()).put("playlist_sources",new JSONArray()).put("allowed",new JSONArray()).put("excluded",new JSONArray()).put("preferred",new JSONArray()).put("restrict_allowed",false).put("restrict_folders",false).put("fallback","relax_recent").put("recent_repeat",5).put("use_manual_cues",true);else d.put("version",1).put("tracks",new JSONArray());JSONObject envelope=new JSONObject().put("document_id",(smart?"smart_":"normal_")+id).put("kind",smart?"smart":"normal").put("document_version",smart?2:1).put("new_document",true).put("revision",smart?s.opt("smart_revision"):JSONObject.NULL).put("document",d);PlaylistSyncModel.save(s,envelope,d);write(c,key,s);}wake(c);changed();}
+}

@@ -27,7 +27,7 @@ public final class ModuleProvider extends ContentProvider {
             return result;
         });
         // Catalog reads, settings and queue construction never occupy the audio/UI thread.
-        if(Arrays.asList("hello","library","playlists","module_read","module_write","sync_cast","podcast_download","podcast_downloads","job","offline_lists","sampler_slots").contains(argument)){task.run();try{return task.get();}catch(Exception error){throw new IllegalStateException(error);}}
+        if(Arrays.asList("hello","library","playlists","module_read","module_write","sync_cast","podcast_download","podcast_downloads","job","offline_lists","sampler_slots","playlist_sync_enable","playlist_sync_save","playlist_sync_create","player_private_prepare","playlist_sync_access","download_private").contains(argument)){task.run();try{return task.get();}catch(Exception error){throw new IllegalStateException(error);}}
         new Handler(Looper.getMainLooper()).post(task);
         try{return task.get(5,TimeUnit.SECONDS);}catch(Exception error){task.cancel(false);throw new IllegalStateException("AMP Player is busy; retry the command",error);}
     }
@@ -45,13 +45,19 @@ public final class ModuleProvider extends ContentProvider {
         if("sampler_slots".equals(action))return SamplerStore.slots(context.getSharedPreferences("dj",0));
         if("sampler_import".equals(action)){SamplerStore.Imported sample=selection.sample();SharedPreferences prefs=context.getSharedPreferences("dj",0);SamplerStore.expect(prefs,sample.side(),sample.pad(),sample.expected());DjEngine engine=PlaybackService.existingDj();if(engine!=null)engine.assign(sample.side(),sample.pad(),sample.file().toString(),sample.name(),sample.loop());else SamplerStore.save(prefs,sample.side(),sample.pad(),sample.file().toString(),sample.name(),sample.loop());return new JSONObject().put("message","Clip saved to sampler "+(sample.side()==0?"A":"B")+" pad "+(sample.pad()+1));}
         if("sampler_clear".equals(action)){int side=args.getInt("side"),pad=args.getInt("pad");SharedPreferences prefs=context.getSharedPreferences("dj",0);SamplerStore.expect(prefs,side,pad,args.getLong("revision"));DjEngine engine=PlaybackService.existingDj();if(engine!=null)engine.clearPad(side,pad);else SamplerStore.clear(prefs,side,pad);return new JSONObject().put("message","Sampler pad cleared; source files retained");}
-        if("hello".equals(action))return new JSONObject().put("api",1).put("core",BuildConfig.VERSION_CODE).put("edition",BuildConfig.EDITION);
+        if("hello".equals(action))return new JSONObject().put("api",1).put("core",BuildConfig.VERSION_CODE).put("edition",BuildConfig.EDITION).put("radio_stop",true).put("playlist_sync",1);
         if("library".equals(action)){
             List<MediaItem> all=LibraryStore.read(context);JSONArray rows=new JSONArray();String query=args.optString("query").toLowerCase(Locale.ROOT);int offset=Math.max(0,args.optInt("offset")),matched=0;
             for(MediaItem item:all){String title=String.valueOf(item.mediaMetadata.title),artist=String.valueOf(item.mediaMetadata.artist);if(!(title+" "+artist).toLowerCase(Locale.ROOT).contains(query))continue;if(matched++<offset)continue;if(rows.length()<50)rows.put(new JSONObject().put("id",item.mediaId).put("title",title).put("artist",artist));}
             return new JSONObject().put("items",rows).put("total",matched);
         }
         if("playlists".equals(action)){JSONArray stored=PhonePlaylists.read(context),summary=new JSONArray();for(int i=0;i<stored.length();i++){JSONObject list=stored.getJSONObject(i);summary.put(new JSONObject().put("id",list.optString("id")).put("name",list.optString("name")).put("smart",list.optBoolean("smart")));}return new JSONObject().put("items",summary);}
+        if("playlist_sync_access".equals(action))return PlaylistSync.rememberedAccess(context,args.getString("base"),args.getString("server_id"),args.getString("library_id"));
+        if("playlist_sync_enable".equals(action)){PlaylistSync.enable(context,args.getString("base"),args.getString("password"),args.getString("server_id"),args.getString("library_id"));return new JSONObject().put("message","Saved-playlist sync enabled");}
+        if("playlist_sync_save".equals(action)){PlaylistSync.saveBound(context,args.getString("server_id"),args.getString("library_id"),args.getJSONObject("envelope"),args.getJSONObject("document"));return new JSONObject().put("message","Saved draft queued safely; conflicts require Library review");}
+        if("playlist_sync_create".equals(action)){PlaylistSync.createBound(context,args.getString("server_id"),args.getString("library_id"),args.getBoolean("smart"),args.getString("name"));return new JSONObject().put("message","New playlist queued; refresh after synchronization");}
+        if("player_private_prepare".equals(action))return PrivateLibraryPlayback.prepare(args);
+        if("download_private".equals(action))return ModuleJobs.privateDownload(context,args);
         if("sync_cast".equals(action))return ModuleJobs.syncCast(context,args);
         if("podcast_download".equals(action))return ModuleJobs.podcast(context,args);
         if("podcast_downloads".equals(action))return new JSONObject().put("items",ModuleJobs.podcastDownloads(context));
@@ -66,6 +72,8 @@ public final class ModuleProvider extends ContentProvider {
         if("player_pause".equals(action)){PlaybackService.pauseForLab();return new JSONObject();}
         Player player=PlaybackService.player();
         if(player==null)throw new IllegalStateException("Open AMP Player to connect its audio service.");
+        if("player_private_play".equals(action)){List<MediaItem> items=PrivateLibraryPlayback.take(args.getString("token"));PlaybackService.switchToPlayer();player.setMediaItems(items);player.setRepeatMode(Player.REPEAT_MODE_OFF);player.setShuffleModeEnabled(false);player.prepare();player.play();return new JSONObject().put("message","Streaming private library through AMP Player");}
+        if("player_stop_radio".equals(action)){if(player.getCurrentMediaItem()!=null&&("amp-radio".equals(player.getCurrentMediaItem().mediaId)||PrivateLibraryPlayback.owns(player.getCurrentMediaItem())))player.stop();return new JSONObject().put("message","Phone radio stopped; server and other playback unchanged");}
         if("podcast_offline".equals(action)){
             JSONArray downloads=ModuleJobs.podcastDownloads(context);for(int i=0;i<downloads.length();i++){JSONObject item=downloads.getJSONObject(i);String id=item.getString("id");if(id.equals(args.getString("id"))&&id.matches("[a-f0-9-]{36}")){java.io.File file=new java.io.File(context.getFilesDir(),"podcasts/downloads/"+id+".audio");if(!file.isFile())throw new IllegalStateException("Episode is no longer downloaded");player.setMediaItem(new MediaItem.Builder().setMediaId("amp-podcast:"+id).setUri(Uri.fromFile(file)).setMediaMetadata(new MediaMetadata.Builder().setTitle(item.optString("title")).build()).build());player.prepare();player.play();return new JSONObject();}}throw new IllegalArgumentException("Episode is not downloaded");
         }
@@ -73,6 +81,7 @@ public final class ModuleProvider extends ContentProvider {
             if(action.equals("offline_queue"))PlaybackService.dj().queue(selection.items());else{player.setMediaItems(selection.items());player.prepare();player.play();}return new JSONObject().put("message","Loaded offline playlist with prepared cues");
         }
         if("player_stream".equals(action)){
+            PlaybackService.switchToPlayer();
             String url=args.getString("url");Uri uri=Uri.parse(url);if(!Arrays.asList("https","http","content").contains(uri.getScheme()))throw new IllegalArgumentException("Unsupported media source");
             player.setMediaItem(new MediaItem.Builder().setMediaId(args.optString("kind","amp-radio")).setUri(uri).setMediaMetadata(new MediaMetadata.Builder().setTitle(args.optString("title","AMP audio")).build()).build());player.prepare();player.play();return new JSONObject();
         }
