@@ -51,7 +51,7 @@ jobs:
           SOURCES
           sources=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/amp-ubuntu.list" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0)
           sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev ffmpeg xvfb
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev libasound2-plugins pulseaudio pulseaudio-utils ffmpeg xvfb
       - name: Windows audio test dependencies
         if: runner.os == 'Windows'
         run: |
@@ -86,9 +86,13 @@ jobs:
         run: |
           cargo test -p amp-core --features analysis --locked -- --ignored --test-threads=1
           fixture="$(mktemp --suffix=.wav)"
-          trap 'rm -f "$fixture"' EXIT
+          alsa="$(mktemp)"
+          trap 'rm -f "$fixture" "$alsa"' EXIT
           ffmpeg -v error -y -f lavfi -i sine=frequency=440:duration=2 "$fixture"
-          AMP_WAVEFORM_FIXTURE="$fixture" cargo test -p amp-player --bin amp-player --locked regular_playlist_automix_follows_saved_order -- --ignored --test-threads=1
+          pulseaudio --start --exit-idle-time=-1
+          pactl load-module module-null-sink sink_name=amp_ci
+          printf 'pcm.!default { type pulse device "amp_ci" }\n' > "$alsa"
+          ALSA_CONFIG_PATH="$alsa" AMP_WAVEFORM_FIXTURE="$fixture" cargo test -p amp-player --bin amp-player --locked regular_playlist_automix_follows_saved_order -- --ignored --test-threads=1
       - name: Verify MP3 Lab editor foundation with real codecs
         if: runner.os == 'Linux'
         run: cargo test -p amp-player --bin amp-player lab_editor::tests::ffmpeg_export_smoke -- --ignored

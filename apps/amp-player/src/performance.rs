@@ -2624,8 +2624,12 @@ mod tests {
             .execute_control(super::Action::AutoDj { enabled: true })
             .unwrap();
         assert_eq!(player.loaded[player.active_deck()], Some(2));
-        wait(&mut player, |p| p.loaded[p.active_deck()] == Some(0));
-        wait(&mut player, |p| p.loaded[p.active_deck()] == Some(1));
+        wait(&mut player, |p| {
+            p.loaded[p.active_deck()] == Some(0) && p.run.transition.is_none()
+        });
+        wait(&mut player, |p| {
+            p.loaded[p.active_deck()] == Some(1) && p.run.transition.is_none()
+        });
         assert!(player.queue.is_empty());
     }
 
