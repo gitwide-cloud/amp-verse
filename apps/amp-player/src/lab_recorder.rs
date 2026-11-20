@@ -58,7 +58,7 @@ impl Recorder {
             return;
         }
         let mut cmd = amp_core::command("ffmpeg");
-        cmd.args(["-hide_banner", "-loglevel", "error", "-n", "-y"]);
+        cmd.args(["-hide_banner", "-loglevel", "error", "-n"]);
         #[cfg(target_os = "windows")]
         cmd.args(["-f", "dshow", "-i"])
             .arg(format!("audio={}", self.source.trim()));
