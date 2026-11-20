@@ -73,7 +73,7 @@ The server tests use temporary generated libraries/configuration only. They exer
 
 ## Review hardening
 
-Sync endpoints require a configured NONEMPTY password and valid existing password authorization in addition to exact identities. Public server/library IDs alone never authorize data reads or writes; passwordless and empty-password Cast deployments cannot use these endpoints.
+Sync endpoints follow the owner's configured server access mode. A trusted-LAN deployment with no configured code accepts code-free clients; protected deployments require their existing credential or valid scoped session. Both modes require exact server/library identities and retain the existing Origin/Fetch-Site checks. An explicitly configured empty password remains invalid. Identity headers are binding checks, not credentials.
 
 Existing safe normal filename stems (spaces, dots and Unicode included) keep their exact IDs and paths. Updates accept these bounded path-free legacy IDs; creates retain strict token IDs. Nested packed playlist paths are explicitly reported as unsupported_unenrolled_playlist_path instead of being silently flattened to the conventional root. No rename, omission or duplicate top-level mapping occurs.
 
