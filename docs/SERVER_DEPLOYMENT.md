@@ -26,6 +26,12 @@ Default analysis is disabled, one worker, 60-second interval, and pause while br
 
 CLI analysis: `amp-prepare MUSIC_FOLDER --jobs 1 --watch 300`. Completed tracks are reused. `--force` is explicit reanalysis, normally for review/debugging rather than an unattended repeating job.
 
+## Windows standalone package
+
+Run `install-windows-server.ps1` from an extracted Windows engine artifact. The installer verifies the binaries against `build.json`, preserves the previous installation in a rollback folder, and leaves the server configuration and music alone. It does not start or stop the server.
+
+For LAN use, run the installer as administrator with `-PrivateLan`. It installs inbound TCP 8787 and UDP discovery 18787 rules for the installed server executable on one Private interface and its local IPv4 subnet. Use `-InterfaceAlias` if more than one Private interface is active. Start the server with an explicit private bind and a control password. A loopback install requires no firewall rules. Phones and laptops need no inbound firewall rule to connect.
+
 ## Linux / Docker
 
 Build `cargo build --locked --release -p amp-cast`. This builds server and analyzer without GUI/audio-device dependencies. FFmpeg must be installed for analysis and MP3 broadcasting. The Dockerfile supplies FFmpeg; native packages do not bundle a QNAP FFmpeg binary.
