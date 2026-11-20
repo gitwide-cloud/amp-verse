@@ -413,7 +413,7 @@ fn wav_has_audio(path: &Path) -> std::io::Result<bool> {
             }
             block_align = Some(u64::from(align));
         } else if &chunk[..4] == b"data" {
-            return Ok(block_align.is_some_and(|align| size >= align && size % align == 0));
+            return Ok(block_align.is_some_and(|align| size >= align && size.is_multiple_of(align)));
         }
         offset = end + size % 2;
     }
