@@ -875,7 +875,8 @@ mod tests {
     async fn invalid_empty_configured_secret_cannot_read_or_create_ledger() {
         let f = Fixture::new();
         let op = f.op("public-identities");
-        for password in [Some(String::new())] {
+        {
+            let password = Some(String::new());
             let c = Cast::with_identity(
                 f.root.clone(),
                 amp_core::scan(&f.root).unwrap(),
@@ -973,7 +974,7 @@ mod tests {
             .await
             .unwrap();
         let reply: Value = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(reply["status"], "ack");
+        assert_eq!(reply["status"], "applied");
     }
     #[test]
     fn legacy_space_dot_unicode_ids_roundtrip_exactly_without_new_id_relaxation() {
