@@ -17,6 +17,8 @@ final class CastClient {
         URI uri=new URI(input);
         if(!("http".equalsIgnoreCase(uri.getScheme())||"https".equalsIgnoreCase(uri.getScheme()))||uri.getHost()==null||uri.getUserInfo()!=null||uri.getQuery()!=null||uri.getFragment()!=null||!(uri.getPath().isEmpty()||uri.getPath().equals("/")))
             throw new IOException("Enter the server address, for example http://192.168.1.50:8787");
+        if(uri.getHost().equalsIgnoreCase("localhost")||uri.getHost().startsWith("127.")||uri.getHost().equals("[::1]")||uri.getHost().equals("::1"))
+            throw new IOException("That is this phone's loopback address. Enter the test host's LAN address; a server bound only to 127.0.0.1 is not reachable from this phone.");
         base=new URI(uri.getScheme().toLowerCase(),null,uri.getHost(),uri.getPort(),null,null,null).toString();this.password=password;
     }
     JSONObject connect()throws Exception {
@@ -80,6 +82,8 @@ final class CastClient {
                 while((count=input.read(chunk))!=-1){if(output.size()+count>8*1024*1024)throw new IOException("Station response too large");output.write(chunk,0,count);}
                 return output.toString(StandardCharsets.UTF_8.name());
             }
+        }catch(java.net.ConnectException e){throw new IOException("Cannot reach the selected host. Check its LAN address, listener binding and firewall. A 127.0.0.1-only listener cannot accept this phone. Existing playback was not stopped.",e);
+        }catch(java.net.SocketTimeoutException e){throw new IOException("The selected host timed out. Check LAN connectivity and retry; a command may have reached the host, so refresh its status before repeating it.",e);
         }finally{connection.disconnect();}
     }
 }
