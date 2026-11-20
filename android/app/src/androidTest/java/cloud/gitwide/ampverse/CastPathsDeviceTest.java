@@ -17,12 +17,21 @@ public class CastPathsDeviceTest {
         if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=0;i<group.getChildCount();i++){TextView result=find(group.getChildAt(i),text);if(result!=null)return result;}}
         return null;
     }
+    private void assertFriendlyVisibleLabels(View view){
+        if(view.isShown() && view instanceof TextView){
+            String text=((TextView)view).getText().toString();
+            assertFalse("Public label exposed a URL: "+text,text.contains("http://")||text.contains("https://"));
+            assertFalse("Public label exposed a loopback address: "+text,text.contains("127.0.0.1"));
+        }
+        if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=0;i<group.getChildCount();i++)assertFriendlyVisibleLabels(group.getChildAt(i));}
+    }
     @Test public void disconnectedPathsStayVisibleAndConnectionDetailsStayAdvanced(){
         org.junit.Assume.assumeTrue("Full Cast UI only",BuildConfig.EDITION.equals("full"));
         Intent intent=new Intent(ApplicationProvider.getApplicationContext(),MainActivity.class).putExtra("module","AMP Cast").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
         try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(intent)){
             scenario.onActivity(activity->{
                 View root=activity.getWindow().getDecorView();
+                assertFriendlyVisibleLabels(root);
                 for(String text:new String[]{"Local listening · host → this phone","Google Cast · host → Google speaker","Server speakers · host → its audio output","Station source · change the host’s program","Remote desktop broadcast · desktop master → host"}){
                     TextView path=find(root,text);assertNotNull(text,path);assertTrue(text,path.isShown());
                 }

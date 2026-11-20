@@ -54,7 +54,7 @@ final class CastPanel extends LinearLayout {
         address=field("http://192.168.1.50:8787",false);address.setContentDescription("AMP Cast server address");address.setText(activity.getSharedPreferences("settings",Context.MODE_PRIVATE).getString("cast-server",""));
         password=field("Optional admin password",true);password.setContentDescription("AMP Cast admin password");
         connect=action("Connect",()->connect());connectionFields.addView(connect);
-        status=label("Not connected. A host bound to 127.0.0.1 is reachable only on that host. Use a LAN-enabled test server.",14);addView(status);
+        status=label("Not connected. Find a nearby AMP host, or open Advanced connection settings to connect manually.",14);addView(status);
         now=label("No station selected",18);addView(now);
         stationControls=new LinearLayout(activity);stationControls.setOrientation(VERTICAL);addView(stationControls);
         localNote=path("Local listening · host → this phone");

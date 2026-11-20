@@ -84,3 +84,8 @@ The restoration also prevents a second connection click from clearing the select
 Validation of this restoration: `cargo test -p amp-cast --lib --locked` passed 29 tests with eight existing ignored tests; the bound-interface/IPv6 callback regression passed. All 14 changed/new Java sources parsed using javalang 0.13.0. Rust station-control formatting and `git diff --check` passed. Android assembly and instrumentation execution remain pending CI/device verification; parsing is not Android type checking.
 
 Safe isolated Pixel checks: `CastAddressDeviceTest` uses no network; `CastFailureDeviceTest` creates a same-device private-IPv4 HTTP fixture (skips when no private interface exists); `CastPathsDeviceTest` opens only the Full Cast UI and checks disconnected controls/Advanced disclosure without network or playback commands. None needs `castUrl`. `CastDeviceTest` requires an explicitly supplied isolated generated-audio station and must not target an owner's live station.
+
+
+### Friendly-label review follow-up
+
+Removed the restored raw stream URL from the Google Cast source summary and removed the literal loopback address from the default disconnected status. The source summary now uses only the selected station's friendly title (with a fallback for a missing title). Actual stream URLs remain transport data. Manual address fields and explicit connection validation retain their relevant technical detail behind Advanced. The disconnected-path regression also rejects URLs and loopback addresses in visible default labels. No receiver load or playback command was added.

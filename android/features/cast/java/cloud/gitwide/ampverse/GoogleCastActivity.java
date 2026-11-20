@@ -56,7 +56,7 @@ public final class GoogleCastActivity extends AppCompatActivity {
         LinearLayout content=new LinearLayout(this);content.setOrientation(LinearLayout.VERTICAL);int pad=(int)(20*getResources().getDisplayMetrics().density);content.setPadding(pad,pad,pad,pad);scroll.addView(content);setContentView(scroll);
         TextView heading=new TextView(this);heading.setText("Google Home / Chromecast");heading.setTextSize(24);heading.setTextColor(colors.text);content.addView(heading);
         status=new TextView(this);status.setText("Choose a Google speaker. It fetches the host stream directly; phone audio is not sent.");status.setTextSize(17);status.setTextColor(colors.muted);content.addView(status);
-        TextView source=new TextView(this);source.setTextColor(colors.text);source.setText("Host station: "+getIntent().getStringExtra("title")+"\n"+getIntent().getStringExtra("stream"));content.addView(source);
+        TextView source=new TextView(this);source.setTextColor(colors.text);String title=getIntent().getStringExtra("title");source.setText("Host station: "+(title==null||title.trim().isEmpty()?"Selected station":title));content.addView(source);
         try {
             CastContext.getSharedInstance(this);
             boolean light=getSharedPreferences("settings",MODE_PRIVATE).getString("theme","classic").equals("modern-light");
