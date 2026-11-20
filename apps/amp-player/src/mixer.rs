@@ -29,6 +29,7 @@ fn set(v: &AtomicU32, x: f32) {
 pub const DECKS: usize = 6;
 pub const MASTER: usize = DECKS;
 pub struct Controls {
+    pub(crate) output_gate: Arc<crate::output_admission::Gate>,
     pub broadcast_player_only: AtomicBool,
     pub pair: [AtomicU32; 2],
     pub master_bpm: AtomicU32,
@@ -92,6 +93,23 @@ pub struct Controls {
     pub decode_errors: Mutex<Vec<(usize, u64, String)>>,
 }
 impl Controls {
+    pub(crate) fn pause_for_receiver(&self) {
+        for play in &self.play {
+            play.store(false, Relaxed);
+        }
+        for play in &self.sample_playing {
+            play.store(false, Relaxed);
+        }
+        self.fading.store(false, Relaxed);
+        self.level_fading.store(false, Relaxed);
+        self.mashup_active.store(false, Relaxed);
+        for deck in 0..DECKS {
+            self.scratching[deck].store(false, Relaxed);
+            self.vinyl_follow[deck].store(false, Relaxed);
+            self.section_state[deck].store(0, Relaxed);
+        }
+    }
+
     pub(super) fn set_broadcast_source(&self, player_only: bool) {
         self.broadcast_player_only
             .store(player_only, std::sync::atomic::Ordering::Release);
@@ -121,6 +139,7 @@ impl Controls {
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            output_gate: crate::output_admission::current(),
             broadcast_player_only: AtomicBool::new(false),
             pair: [AtomicU32::new(0), AtomicU32::new(1)],
             key_lock: std::array::from_fn(|_| AtomicBool::new(false)),
@@ -290,6 +309,7 @@ struct SampleVoice {
     playing: bool,
 }
 enum Command {
+    Admitted(u64, Box<Command>),
     HandoffMode(u32),
     StemLevels(usize, [f32; 3]),
     RestoreSync(usize, bool),
@@ -336,6 +356,23 @@ enum Command {
     Loop(usize, Option<Vec<DeckFrame>>),
     LoopHalve(usize),
 }
+impl Command {
+    fn starts_audio(&self) -> bool {
+        matches!(
+            self,
+            Self::Play(_)
+                | Self::Launch(_)
+                | Self::SampleTrigger(_)
+                | Self::Load(_, _, true, _)
+                | Self::Fade { .. }
+                | Self::ScheduledFade { .. }
+                | Self::ScratchFade { .. }
+                | Self::Mashup { .. }
+                | Self::Section(..)
+        )
+    }
+}
+
 struct SectionChange {
     source: Option<Source>,
     origin: f64,
@@ -388,7 +425,20 @@ impl Mixer {
     }
     fn process_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
+            let command = match command {
+                Command::Admitted(epoch, command) => {
+                    if (self.controls.output_gate.leased()
+                        || epoch != self.controls.output_gate.epoch())
+                        && command.starts_audio()
+                    {
+                        continue;
+                    }
+                    *command
+                }
+                command => command,
+            };
             match command {
+                Command::Admitted(..) => unreachable!("command envelope already removed"),
                 Command::HandoffMode(mode) => self.pending_handoff = mode,
                 Command::RestoreSync(d, enabled) => {
                     let bpm = get(&self.controls.bpm[d]);
@@ -721,7 +771,33 @@ impl Mixer {
         }
     }
     fn render(&mut self, frames: usize, mut output: impl FnMut(usize, Frame)) {
+        let gate = self.controls.output_gate.clone();
+        let admission = gate.render();
         self.process_commands();
+        if admission.is_none() {
+            self.controls.pause_for_receiver();
+            // Discard limiter lookahead tails, without allocation or source advance.
+            for _ in 0..self.master_limiter.latency() {
+                self.master_limiter.process([0., 0.]);
+            }
+            for _ in 0..self.player_limiter.latency() {
+                self.player_limiter.process([0., 0.]);
+            }
+            for _ in 0..self.cue_limiter.latency() {
+                self.cue_limiter.process([0., 0.]);
+            }
+            self.fade = None;
+            self.sections = Default::default();
+            self.launches = Default::default();
+            self.levels = Default::default();
+            for voice in &mut self.samples {
+                voice.playing = false;
+            }
+            for index in 0..frames {
+                output(index, [0., 0.]);
+            }
+            return;
+        }
         let c = &self.controls;
         let rates = std::array::from_fn::<_, 6, _>(|d| {
             if c.tempo_recovery[d].load(Relaxed) {
@@ -1426,6 +1502,8 @@ impl Engine {
             .map(|d| d.name().to_owned())
             .unwrap_or_else(|_| "Default output".into());
         let controls = Arc::new(Controls::default());
+        controls.output_gate.local_allowed()?;
+        controls.output_gate.register(&controls);
         let (tx, rx) = mpsc::sync_channel(64);
         let mixer = Mixer::new(rate, rx, controls.clone());
         let stream = match config.sample_format() {
@@ -1982,8 +2060,12 @@ impl Engine {
         }
     }
     fn send(&self, command: Command) -> Result<(), String> {
+        if command.starts_audio() {
+            self.controls.output_gate.local_allowed()?;
+        }
+        let epoch = self.controls.output_gate.epoch();
         self.commands
-            .try_send(command)
+            .try_send(Command::Admitted(epoch, Box::new(command)))
             .map_err(|_| "Audio command queue is busy".into())
     }
     pub fn stop(&mut self, deck: usize) {
@@ -4357,5 +4439,64 @@ mod tests {
         );
         assert!(c.underruns.iter().all(|u| u.load(Relaxed) == 0));
         assert!(elapsed.as_secs_f64() < 5.);
+    }
+    #[test]
+    fn receiver_lease_freezes_pcm_positions_and_rejects_stale_resume() {
+        let gate = Arc::new(crate::output_admission::Gate::default());
+        let scope = crate::output_admission::scope(gate.clone());
+        let controls = Arc::new(Controls::default());
+        gate.register(&controls);
+        drop(scope);
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut mixer = Mixer::new(48000, rx, controls.clone());
+        tx.send(Command::Load(0, source(0.25, 48000), true, 1))
+            .unwrap();
+        mixer.render(512, |_, _| {});
+        let position = controls.position[0].load(Relaxed);
+        assert!(position > 0);
+        mixer.sections[0] = Some(SectionChange {
+            source: None,
+            origin: 0.,
+            previous_origin: 0.,
+            grid: None,
+            at: None,
+            expected: 1,
+            total: 100,
+            elapsed: 0,
+            old: None,
+        });
+        mixer.launches[0] = Some(u64::MAX);
+        controls.mashup_active.store(true, Relaxed);
+        controls.scratching[0].store(true, Relaxed);
+        controls.section_state[0].store(1, Relaxed);
+        let old = gate.epoch();
+        let lease = gate.acquire(&AtomicBool::new(false)).unwrap();
+        assert!(gate.local_allowed().unwrap_err().contains("Stop listening"));
+        tx.send(Command::Admitted(old, Box::new(Command::Play(0))))
+            .unwrap();
+        controls.play[0].store(true, Relaxed); // Legacy direct-admission paths.
+        mixer.render(512, |_, frame| assert_eq!(frame, [0., 0.]));
+        assert_eq!(controls.position[0].load(Relaxed), position);
+        assert!(!controls.play[0].load(Relaxed));
+        assert!(!controls.mashup_active.load(Relaxed));
+        assert!(!controls.scratching[0].load(Relaxed));
+        assert_eq!(controls.section_state[0].load(Relaxed), 0);
+        assert!(mixer.sections.iter().all(Option::is_none));
+        drop(lease);
+        // A pre-lease command arriving late cannot restart a deck after release.
+        tx.send(Command::Admitted(old, Box::new(Command::Play(0))))
+            .unwrap();
+        mixer.render(512, |_, frame| assert_eq!(frame, [0., 0.]));
+        assert_eq!(controls.position[0].load(Relaxed), position);
+        assert!(!controls.play[0].load(Relaxed));
+        assert!(gate.local_allowed().is_ok());
+        tx.send(Command::Admitted(gate.epoch(), Box::new(Command::Play(0))))
+            .unwrap();
+        mixer.render(512, |_, _| {});
+        assert!(controls.position[0].load(Relaxed) > position);
+        assert!(
+            !Controls::default().output_gate.leased(),
+            "Independent offline/test mixer is not globally muted"
+        );
     }
 }
