@@ -152,7 +152,7 @@ public final class MainActivity extends Activity {
         }else if(module.equals("AMP Remote")){
             remotePanel=new RemotePanel(this,appearance);page.addView(remotePanel);
         }else if(module.equals("AMP Cast")){
-            castPanel=new CastPanel(this,appearance,new CastPanel.Listener(){
+            castPanel=new FullCastPanel(this,appearance,new CastPanel.Listener(){
                 public void listen(String url,String name){
                     if(player==null){message="Playback service is still connecting. Try Listen again.";refresh();return;}
                     player.setMediaItem(new MediaItem.Builder().setMediaId("amp-radio").setUri(url).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle(name).build()).build());
