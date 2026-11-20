@@ -14,7 +14,7 @@ Choose a discovered named AMP server to open its Library. Addresses, optional ac
 - Phone Smart playback uses GET /api/player/playlist with playlist_snapshot:library_path_v1, explicitly labeled eligible_snapshot. It is a fixed eligible sequence, not continuous native Smart DJ ordering. Server Smart playback keeps the server's existing continuous Smart selection.
 - Stop targets phone library/radio listening or the selected server program. Other phone playback is retained when the phone radio/library stop action is used.
 - Remote opens the selected server's web player in the browser. Native headers and credentials are not put in the URL; browser sign-in remains a separate remembered Studio session.
-- Server Play allows 35 seconds for bounded server preflight. Failed/timed-out commands are not automatically resent; inspect status before repeating.
+- Server Play allows 45 seconds for bounded server preflight. Failed/timed-out commands are not automatically resent; inspect status before repeating.
 
 Server/library bindings apply in both open and optional-code modes. An empty credential is legitimate when password_required is false; identity is not treated as a secret.
 

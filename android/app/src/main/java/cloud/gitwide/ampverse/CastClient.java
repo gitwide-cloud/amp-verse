@@ -7,6 +7,9 @@ import java.nio.charset.StandardCharsets;
 
 /** Direct, explicitly selected AMP Cast server. No discovery or shared-session auto-join. */
 final class CastClient {
+    // Server preflight (20s), device probe (5s), and serialized cleanup need margin.
+    // A timed-out Play may have reached the host: never automatically resend it.
+    private static final int PLAYER_START_READ_TIMEOUT_MS=45000;
     static final class AuthorizationException extends HttpException {
         AuthorizationException(int code){super(code,"Host control/download access rejected. Check admin access and feature availability. Public listening remains available.");}
     }
@@ -87,7 +90,7 @@ final class CastClient {
     private String request(String path,boolean command)throws Exception {return request(path,command,null);}
     private String request(String path,boolean command,JSONObject body)throws Exception {
         HttpURLConnection connection=(HttpURLConnection)new URL(base+path).openConnection();
-        connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(4000);connection.setReadTimeout(path.equals("/api/player/play")?35000:6000);
+        connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(4000);connection.setReadTimeout(path.equals("/api/player/play")?PLAYER_START_READ_TIMEOUT_MS:6000);
         try {
             if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);
             if(path.startsWith("/api/sync/")||path.startsWith("/api/player/")){connection.setRequestProperty("x-amp-server",serverId);connection.setRequestProperty("x-amp-library",libraryId);}
