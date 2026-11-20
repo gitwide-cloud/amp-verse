@@ -42,6 +42,7 @@ public class CastDeviceTest {
                 assertTrue(device.wait(Until.hasObject(By.text("Advanced · server address and password")),5000));
                 device.findObject(By.text("Advanced · server address and password")).click();
                 assertTrue(device.wait(Until.hasObject(By.text("Connect")),5000));
+                device.findObject(By.desc("AMP Cast admin password")).setText("incorrect");
                 device.findObject(By.text("Connect")).click();
                 assertTrue(device.wait(Until.hasObject(By.textContains("control rejected")),12000));
                 Thread.sleep(5500);
@@ -49,6 +50,7 @@ public class CastDeviceTest {
                 device.findObject(By.desc("AMP Cast admin password")).setText("test-secret");
                 device.findObject(By.text("Connect")).click();
                 assertTrue(device.wait(Until.hasObject(By.text("Server connected and access verified. Choose an output; existing station playback is unchanged.")),12000));
+                showDescription("Advanced · station downloads and diagnostics");if(device.findObject(By.desc("Advanced · station downloads and diagnostics")).getText().endsWith("+"))device.findObject(By.desc("Advanced · station downloads and diagnostics")).click();
                 showDescription("Search station songs");device.findObject(By.desc("Search station songs")).setText("zzzz-no-match");
                 assertTrue(device.wait(Until.hasObject(By.text("No songs match your search.")),3000));
                 showDescription("Search station songs");device.findObject(By.desc("Search station songs")).setText("phone-test");
@@ -57,7 +59,7 @@ public class CastDeviceTest {
                 scenario.onActivity(a->((android.view.inputmethod.InputMethodManager)a.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(a.getWindow().getDecorView().getWindowToken(),0));
                 showDescription("Source actions · change host program");if(device.findObject(By.desc("Source actions · change host program")).getText().endsWith("+"))device.findObject(By.desc("Source actions · change host program")).click();
                 showText("Start host station");device.findObject(By.text("Start host station")).click();
-                assertTrue(device.wait(Until.hasObject(By.text("Station started")),12000));assertTrue(client.status().getBoolean("running"));
+                showText("Station started");assertTrue(device.wait(Until.hasObject(By.text("Station started")),12000));assertTrue(client.status().getBoolean("running"));
                 showText("Listen on this phone");assertTrue(device.wait(Until.hasObject(By.text("Listen on this phone").enabled(true)),12000));
                 device.findObject(By.text("Listen on this phone")).click();
                 long until=System.currentTimeMillis()+12000;boolean[] active={false};
@@ -65,17 +67,34 @@ public class CastDeviceTest {
                 assertTrue("Real server MP3 must play through phone service",active[0]);
                 showText("Stop phone listening");device.findObject(By.text("Stop phone listening")).click();assertTrue(client.status().getBoolean("running"));
                 showText("Disconnect from server");device.findObject(By.text("Disconnect from server")).click();
+                assertTrue(device.wait(Until.hasObject(By.textContains("Server disconnected.")),5000));
                 assertTrue("Disconnect must preserve station",client.status().getBoolean("running"));
                 showText("Advanced · server address and password");device.findObject(By.text("Advanced · server address and password")).click();
                 showText("Connect");device.findObject(By.text("Connect")).click();
                 assertTrue(device.wait(Until.hasObject(By.text("Server connected and access verified. Choose an output; existing station playback is unchanged.")),12000));
-                showText("Stop host program for all listeners");device.findObject(By.text("Stop host program for all listeners")).click();assertTrue(device.wait(Until.hasObject(By.text("Station stopped")),12000));assertFalse(client.status().getBoolean("running"));
+                showText("Stop host program for all listeners");device.findObject(By.text("Stop host program for all listeners")).click();showText("Station stopped");assertTrue(device.wait(Until.hasObject(By.text("Station stopped")),12000));assertFalse(client.status().getBoolean("running"));
             }
         }finally {
             client.command(false);
             if(player[0]!=null)main(()->{player[0].stop();if(saved.isEmpty())player[0].clearMediaItems();else player[0].setMediaItems(saved,index[0],position[0]);player[0].setVolume(volume[0]);if(playing[0]&&!saved.isEmpty()){player[0].prepare();player[0].play();}player[0].release();});
             if(savedServer==null)prefs.edit().remove("cast-server").commit();else prefs.edit().putString("cast-server",savedServer).commit();
         }
+    }
+    @Test public void createPlaylistPersistsOnFixtureWithoutChangingStation()throws Exception {
+        String url=InstrumentationRegistry.getArguments().getString("castUrl");
+        org.junit.Assume.assumeNotNull(url); // Isolated fixture only; never OFFICECOMP.
+        CastClient client=new CastClient(url,"test-secret");
+        org.json.JSONObject before=client.connect();
+        org.json.JSONArray tracks=client.get("/api/studio/tracks?limit=1").getJSONArray("tracks");
+        assertTrue(tracks.length()>0);
+        String name="Android fixture "+java.util.UUID.randomUUID();
+        org.json.JSONObject saved=client.postJson("/api/studio/playlists",new org.json.JSONObject().put("name",name).put("tracks",new org.json.JSONArray().put(tracks.getJSONObject(0).getInt("id"))));
+        CastClient reopened=new CastClient(url,"test-secret");reopened.connect();
+        org.json.JSONArray lists=reopened.get("/api/studio/playlists").getJSONArray("playlists");
+        org.json.JSONObject found=null;
+        for(int i=0;i<lists.length();i++)if(saved.getString("id").equals(lists.getJSONObject(i).optString("id")))found=lists.getJSONObject(i);
+        assertNotNull("New client must read saved server playlist",found);assertEquals(name,found.getString("name"));assertEquals(1,found.getJSONArray("tracks").length());
+        org.json.JSONObject after=reopened.status();assertEquals(before.getString("station_id"),after.getString("station_id"));assertEquals(before.getBoolean("running"),after.getBoolean("running"));assertEquals(before.optString("current_source"),after.optString("current_source"));
     }
     @Test public void userEntryRejectsLocalButMockClientRemainsUsable()throws Exception {
         for(String value:new String[]{"127.0.0.1:8787","localhost:8787","http://localhost.:8787","http://[::1]:8787","http://[0:0:0:0:0:0:0:1]:8787","http://[::]:8787","0.0.0.0:8787"}) {

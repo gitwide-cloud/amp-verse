@@ -7,6 +7,9 @@ import java.nio.charset.StandardCharsets;
 
 /** Direct, explicitly selected AMP Cast server. No discovery or shared-session auto-join. */
 final class CastClient {
+    static class HttpException extends IOException {final int code;HttpException(int code,String message){super(message);this.code=code;}}
+    static final class AuthorizationException extends HttpException {AuthorizationException(int code,String message){super(code,message);}}
+    static final class HostUnavailableException extends IOException {HostUnavailableException(String message){super(message);}}
     final String base;
     private final String password;
     private String serverId="",stationId="";
@@ -36,7 +39,7 @@ final class CastClient {
     }
     JSONObject status()throws Exception {
         JSONObject status=get("/api/status");
-        if(!serverId.equals(status.optString("server_id"))||!stationId.equals(status.optString("station_id")))throw new IOException("Server or station changed. Connect again before controlling it.");
+        if(!serverId.equals(status.optString("server_id"))||!stationId.equals(status.optString("station_id")))throw new HostUnavailableException("Server or station changed. Connect again before controlling it.");
         return status;
     }
     JSONObject playlist()throws Exception{return get("/api/playlist");}
@@ -72,6 +75,7 @@ final class CastClient {
         } finally {done.set(true);watcher.interrupt();connection.disconnect();}
     }
     JSONObject get(String path)throws Exception {return new JSONObject(request(path,false));}
+    JSONObject postJson(String path,JSONObject body)throws Exception {return new JSONObject(request(path,true,body));}
     void post(String path,JSONObject body)throws Exception {request(path,true,body);}
     private String request(String path,boolean command)throws Exception {return request(path,command,null);}
     private String request(String path,boolean command,JSONObject body)throws Exception {
@@ -81,16 +85,16 @@ final class CastClient {
             if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);
             if(command){connection.setRequestMethod("POST");connection.setRequestProperty("x-amp-server",serverId);connection.setRequestProperty("x-amp-station",stationId);if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);connection.setDoOutput(true);if(body!=null)connection.setRequestProperty("Content-Type","application/json");try(OutputStream output=connection.getOutputStream()){if(body!=null)output.write(body.toString().getBytes(StandardCharsets.UTF_8));}}
             int code=connection.getResponseCode();
-            if(code==401||code==403)throw new IOException("Station control rejected. Check the admin password and selected station.");
-            if(code<200||code>=300){String message="AMP Cast returned HTTP "+code;InputStream failure=connection.getErrorStream();if(failure!=null)try(InputStream input=failure){byte[] data=new byte[2048];int n=input.read(data);if(n>0)message+=" · "+new String(data,0,n,StandardCharsets.UTF_8);}throw new IOException(message);}
+            if(code==401||code==403)throw new AuthorizationException(code,"Station control rejected. Check the admin password and selected station.");
+            if(code<200||code>=300){String message="AMP Cast returned HTTP "+code;InputStream failure=connection.getErrorStream();if(failure!=null)try(InputStream input=failure){byte[] data=new byte[2048];int n=input.read(data);if(n>0)message+=" · "+new String(data,0,n,StandardCharsets.UTF_8);}throw new HttpException(code,message);}
             if(code==204)return "";
             try(InputStream input=connection.getInputStream();ByteArrayOutputStream output=new ByteArrayOutputStream()) {
                 byte[] chunk=new byte[4096];int count;
                 while((count=input.read(chunk))!=-1){if(output.size()+count>8*1024*1024)throw new IOException("Station response too large");output.write(chunk,0,count);}
                 return output.toString(StandardCharsets.UTF_8.name());
             }
-        }catch(java.net.ConnectException e){throw new IOException("Cannot reach the selected host. Check its LAN address, listener binding and firewall. A 127.0.0.1-only listener cannot accept this phone. Existing playback was not stopped.",e);
-        }catch(java.net.SocketTimeoutException e){throw new IOException("The selected host timed out. Check LAN connectivity and retry; a command may have reached the host, so refresh its status before repeating it.",e);
-        }finally{connection.disconnect();}
+        }catch(java.net.ConnectException e){throw new HostUnavailableException("Cannot reach the selected host. Check its LAN address, listener binding and firewall. A 127.0.0.1-only listener cannot accept this phone. Existing playback was not stopped.");
+        }catch(java.net.SocketTimeoutException e){throw new HostUnavailableException("The selected host timed out. Check LAN connectivity and retry; a command may have reached the host, so refresh its status before repeating it.");
+        }catch(HttpException e){throw e;}catch(IOException e){throw new HostUnavailableException(e.getMessage());}finally{connection.disconnect();}
     }
 }

@@ -13,7 +13,7 @@ import static org.junit.Assert.*;
 public final class ModuleScreenTest {
  @Test public void eachSignedCompanionConnectsAndRendersItsRealScreen()throws Exception{
   Context c=InstrumentationRegistry.getInstrumentation().getTargetContext();UiDevice device=UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
-  String[] ids={"dj","cast","podcasts","remote","lab"};String[] labels={"Choose playlist","Find LAN stations","Browse categories","Discover devices","Download MP3"};
+  String[] ids={"dj","cast","podcasts","remote","lab"};String[] labels={"Choose playlist","Find nearby servers","Browse categories","Discover devices","Download MP3"};
   File captures=new File(c.getFilesDir(),"module-test-screenshots");captures.mkdirs();
   for(int i=0;i<ids.length;i++){
    c.startActivity(new Intent().setClassName("cloud.gitwide.ampverse."+ids[i],"cloud.gitwide.ampverse.CompanionActivity").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK).putExtra("amp-test-keep-awake",true));

@@ -17,13 +17,14 @@ public final class CompanionActivity extends Activity {
     final Handler handler=new Handler(Looper.getMainLooper());
     Appearance colors;
     LinearLayout body;
-    TextView status;
+    TextView status,ipcStatus;
     FeatureScreen feature;
     private ListenableFuture<MediaController> connection;
     private MediaController controller;
     boolean closed,active,playerReady;
+    int ipcGeneration;
     Runnable ipcChanged=()->{};
-    void ipc(boolean ready,String message){playerReady=ready;status.setText("AMP Player IPC: "+message);ipcChanged.run();}
+    void ipc(boolean ready,String message){playerReady=ready;ipcStatus.setText("AMP Player IPC: "+message);ipcChanged.run();}
     int dp(int value){return (int)(value*getResources().getDisplayMetrics().density);}
     TextView label(String text,int size){TextView v=new TextView(this);v.setText(text);v.setTextSize(size);v.setTextColor(colors.text);v.setPadding(dp(6),dp(6),dp(6),dp(6));return v;}
     Button button(String title,Runnable action){Button b=new Button(this);b.setText(title);b.setAllCaps(false);b.setTextColor(colors.text);b.setMinHeight(dp(48));b.setBackground(Chrome.button(colors,false));b.setOnClickListener(v->action.run());return b;}
@@ -35,16 +36,37 @@ public final class CompanionActivity extends Activity {
     void command(String action,JSONObject data){rpc(action,data,result->status.setText("AMP Player: "+result.optString("message","Done")));}
     void work(Callable<String> action){worker.execute(()->{try{String message=action.call();runOnUiThread(()->{if(!closed)status.setText(message);});}catch(Exception e){runOnUiThread(()->{if(!closed)status.setText(e.getMessage());});}});}
     @Override public void onCreate(Bundle state){super.onCreate(state);if(BuildConfig.DEBUG&&getIntent().getBooleanExtra("amp-test-keep-awake",false))getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);colors=new Appearance(this);LinearLayout root=column();root.setBackground(Chrome.panel(colors,false));root.setPadding(dp(8),dp(8),dp(8),dp(8));root.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(dp(8)+i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),dp(8)+i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom());return i;});
-        row(root,button("ϟ AMP "+BuildConfig.MODULE.toUpperCase(java.util.Locale.ROOT),()->startActivity(new Intent().setClassName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.MainActivity"))),button("Back to Player",()->{startActivity(new Intent().setClassName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.MainActivity"));finish();}));
-        status=label("Connecting to AMP Player…",14);root.addView(status);ScrollView scroll=new ScrollView(this);body=column();scroll.addView(body);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);
+        row(root,button("ϟ AMP "+BuildConfig.MODULE.toUpperCase(java.util.Locale.ROOT),()->openPlayer(false)),button("Back to Player",()->openPlayer(true)));
+        ipcStatus=label("AMP Player IPC: connecting…",14);root.addView(ipcStatus);status=label("",14);root.addView(status);ScrollView scroll=new ScrollView(this);body=column();scroll.addView(body);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);
         if(BuildConfig.MODULE.equals("cast")){feature=new FeatureScreen(this);feature.open(body);}
     }
     @Override public void onStart(){super.onStart();active=true;connectCore();}
-    private void connectCore(){if(closed||!active||connection!=null)return;try{
-        if(getPackageManager().checkSignatures(getPackageName(),"cloud.gitwide.ampverse")!=android.content.pm.PackageManager.SIGNATURE_MATCH)throw new IllegalStateException("Install AMP Player and this module from the same signed release.");
-        connection=new MediaController.Builder(this,new SessionToken(this,new ComponentName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.PlaybackService"))).setListener(new MediaController.Listener(){@Override public void onDisconnected(MediaController controller){if(CompanionActivity.this.controller!=controller)return;CompanionActivity.this.controller=null;ipc(false,"disconnected; server connection is separate");if(connection!=null)MediaController.releaseFuture(connection);connection=null;if(active&&!closed)handler.postDelayed(CompanionActivity.this::connectCore,500);}}).buildAsync();
-        ListenableFuture<MediaController> pending=connection;pending.addListener(()->{if(connection!=pending||!active||closed)return;try{controller=pending.get();rpc("hello",null,result->{if(connection!=pending||!active||closed)return;if(result.optInt("api")!=1||result.optInt("core")<34)throw new IllegalStateException("Update AMP Player to use this module");if(BuildConfig.MODULE.equals("cast")&&!result.optBoolean("radio_stop"))throw new IllegalStateException("Update AMP Player from this Cast release for safe phone listening controls");if(feature==null){feature=new FeatureScreen(this);feature.open(body);}ipc(true,"connected · phone playback is owned by AMP Player");});}catch(Exception error){ipc(false,"unavailable. Open or update AMP Player, then reopen this app.");}},getMainExecutor());
-    }catch(Exception error){ipc(false,error.getMessage());body.addView(button("Open AMP Player",()->startActivity(new Intent().setClassName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.MainActivity"))));}}
-    @Override public void onStop(){active=false;if(connection!=null)MediaController.releaseFuture(connection);connection=null;controller=null;ipc(false,"disconnected while app is in background; server session unchanged");super.onStop();}
+    private void openPlayer(boolean finishAfter){try{startActivity(new Intent().setClassName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.MainActivity"));if(finishAfter)finish();}catch(ActivityNotFoundException e){ipc(false,"AMP Player is not installed. Install the matching signed APK; server controls remain available.");}}
+    private void releaseCore(){ipcGeneration++;ListenableFuture<MediaController> old=connection;connection=null;controller=null;playerReady=false;if(old!=null)MediaController.releaseFuture(old);ipcChanged.run();}
+    private void connectCore(){
+        if(closed||!active||connection!=null)return;
+        final int generation=++ipcGeneration;
+        try{
+            if(getPackageManager().checkSignatures(getPackageName(),"cloud.gitwide.ampverse")!=android.content.pm.PackageManager.SIGNATURE_MATCH)throw new IllegalStateException("Install AMP Player and this module from the same signed release.");
+            connection=new MediaController.Builder(this,new SessionToken(this,new ComponentName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.PlaybackService"))).setListener(new MediaController.Listener(){
+                @Override public void onDisconnected(MediaController disconnected){if(generation!=ipcGeneration)return;releaseCore();ipc(false,"disconnected; server connection is separate");}
+            }).buildAsync();
+            ListenableFuture<MediaController> pending=connection;
+            pending.addListener(()->{
+                if(generation!=ipcGeneration||!active||closed)return;
+                try{
+                    controller=pending.get();
+                    worker.execute(()->{
+                        JSONObject hello=null;String failure=null;
+                        try{hello=ModuleRpc.call(this,"hello",null);if(hello.optInt("api")!=1||hello.optInt("core")<34)throw new IllegalStateException("Update AMP Player to use this module");if(BuildConfig.MODULE.equals("cast")&&!hello.optBoolean("radio_stop"))throw new IllegalStateException("Update AMP Player from this Cast release for safe phone listening controls");}
+                        catch(Exception e){failure=e.getMessage()==null?e.getClass().getSimpleName():e.getMessage();}
+                        final String error=failure;
+                        runOnUiThread(()->{if(generation!=ipcGeneration||!active||closed)return;if(error!=null){releaseCore();ipc(false,error+". Reopen this app after updating Player.");return;}if(feature==null){feature=new FeatureScreen(this);feature.open(body);}ipc(true,"connected · phone playback is owned by AMP Player");});
+                    });
+                }catch(Exception e){releaseCore();ipc(false,"unavailable. Open/update AMP Player, then reopen this app.");}
+            },getMainExecutor());
+        }catch(Exception e){releaseCore();ipc(false,e.getMessage());}
+    }
+    @Override public void onStop(){active=false;releaseCore();ipc(false,"disconnected while app is in background; server session unchanged");super.onStop();}
     @Override public void onDestroy(){closed=true;if(feature!=null)feature.close();handler.removeCallbacksAndMessages(null);worker.shutdownNow();super.onDestroy();}
 }
