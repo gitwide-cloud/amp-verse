@@ -116,7 +116,7 @@ jobs:
             sleep 0.1
           done
           pactl info
-          cargo test -p amp-player --bin amp-player performance::tests::regular_playlist_automatic_preload_shuffle_cancel_and_handoff --locked -- --ignored --exact --test-threads=1 --nocapture
+          cargo test -p amp-player --bin amp-player dj_logic::tests::regular_playlist_automatic_preload_shuffle_cancel_and_handoff --locked -- --ignored --exact --test-threads=1 --nocapture
       - name: Verify supervised live sender recovers after a five-second outage
         run: cargo test -p amp-player --bin amp-player live_mix::tests::supervised_sender_recovers_current_pcm_after_five_second_transport_outage --locked -- --ignored --test-threads=1
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
