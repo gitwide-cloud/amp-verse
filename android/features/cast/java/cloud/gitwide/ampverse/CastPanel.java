@@ -156,7 +156,7 @@ class CastPanel extends LinearLayout {
     }
     private void readStatus(CastClient selected)throws Exception {
         JSONObject snapshot=selected.status(),list=selected.playlist(),manifest=sharedManifest(selected,snapshot);
-        activity.runOnUiThread(()->{if(!closed&&client==selected){render(snapshot,list);renderShared(manifest);libraryView.bind(candidate,snapshot);}});
+        activity.runOnUiThread(()->{if(!closed&&client==selected){render(snapshot,list);renderShared(manifest);}});
     }
     private void postAndRefresh(CastClient selected,String path,JSONObject body)throws Exception {selected.post(path,body);readStatus(selected);}
     void refresh(){refresh(true);}

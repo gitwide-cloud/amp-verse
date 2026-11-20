@@ -87,7 +87,7 @@ final class CastClient {
     private String request(String path,boolean command)throws Exception {return request(path,command,null);}
     private String request(String path,boolean command,JSONObject body)throws Exception {
         HttpURLConnection connection=(HttpURLConnection)new URL(base+path).openConnection();
-        connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(4000);connection.setReadTimeout(6000);
+        connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(4000);connection.setReadTimeout(path.equals("/api/player/play")?35000:6000);
         try {
             if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);
             if(command){connection.setRequestMethod("POST");connection.setRequestProperty("x-amp-server",serverId);connection.setRequestProperty("x-amp-station",stationId);if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);connection.setDoOutput(true);if(body!=null)connection.setRequestProperty("Content-Type","application/json");try(OutputStream output=connection.getOutputStream()){if(body!=null)output.write(body.toString().getBytes(StandardCharsets.UTF_8));}}
