@@ -37,7 +37,7 @@ final class CastPanel extends LinearLayout {
         addView(action("Search broadcast stations",()->{final String query=radioQuery.getText().toString().trim();if(query.isEmpty())return;work(()->{JSONArray stations=RadioDirectory.search(query);activity.runOnUiThread(()->{if(closed)return;serverList.removeAllViews();for(int i=0;i<stations.length();i++){JSONObject station=stations.optJSONObject(i);if(station==null)continue;String stream=station.optString("url_resolved");if(!stream.startsWith("http://")&&!stream.startsWith("https://"))continue;serverList.addView(action(station.optString("name")+" · Listen",()->listener.listen(stream,station.optString("name"))));}});return "Broadcast station results";});}));
         UiSections.fold(this,colors,"Internet radio",broadcastStart);
         connectionFields=new LinearLayout(activity);connectionFields.setOrientation(VERTICAL);
-        Button manual=action("Server settings / enter address",()->connectionFields.setVisibility(connectionFields.getVisibility()==VISIBLE?GONE:VISIBLE));addView(manual);
+        Button manual=action("Advanced connection settings",()->connectionFields.setVisibility(connectionFields.getVisibility()==VISIBLE?GONE:VISIBLE));addView(manual);
         addView(connectionFields);connectionFields.setVisibility(GONE);
         address=field("http://192.168.1.50:8787",false);address.setContentDescription("AMP Cast server address");address.setText(activity.getSharedPreferences("settings",Context.MODE_PRIVATE).getString("cast-server",""));
         password=field("Optional admin password",true);password.setContentDescription("AMP Cast admin password");
@@ -76,9 +76,13 @@ final class CastPanel extends LinearLayout {
         worker.execute(()->{String message;try{message=operation.run();}catch(Exception error){message="Could not update station: "+(error.getMessage()==null?error.getClass().getSimpleName():error.getMessage());}
             final String result=message;activity.runOnUiThread(()->{if(closed)return;busy=false;status.setText(result);enabled(client!=null);});});
     }
-    private void connect(){
-        final String url=address.getText().toString(),secret=password.getText().toString();client=null;enabled(false);
-        work(()->{CastClient candidate=new CastClient(url,secret);JSONObject snapshot=candidate.connect();candidate.get("/api/station/playlists");JSONObject list=candidate.playlist();JSONObject manifest=snapshot.optJSONObject("capabilities")!=null&&snapshot.getJSONObject("capabilities").optBoolean("smart_sharing")?candidate.get("/api/smart/manifest"):null;
+    private void connect(){connect(null);}
+    private void connect(String expectedIdentity){
+        final String url=address.getText().toString(),secret=password.getText().toString();
+        work(()->{CastClient candidate=new CastClient(url,secret);JSONObject snapshot=candidate.connect();
+            String identity=snapshot.optString("server_id")+"/"+snapshot.optString("station_id");
+            if(expectedIdentity!=null&&!expectedIdentity.equals(identity))throw new java.io.IOException("Station changed. Search again before connecting.");
+            candidate.get("/api/station/playlists");JSONObject list=candidate.playlist();JSONObject manifest=snapshot.optJSONObject("capabilities")!=null&&snapshot.getJSONObject("capabilities").optBoolean("smart_sharing")?candidate.get("/api/smart/manifest"):null;
             activity.runOnUiThread(()->{if(closed)return;client=candidate;connectionFields.setVisibility(GONE);activity.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putString("cast-server",candidate.base).putString("cast-server-id",snapshot.optString("server_id")).putString("cast-station-id",snapshot.optString("station_id")).apply();render(snapshot,list);renderShared(manifest);});return "Station connected";});
     }
     private void refresh(){final CastClient selected=client;if(selected==null)return;work(()->{JSONObject snapshot=selected.status(),list=selected.playlist();JSONObject manifest=snapshot.optJSONObject("capabilities")!=null&&snapshot.getJSONObject("capabilities").optBoolean("smart_sharing")?selected.get("/api/smart/manifest"):null;activity.runOnUiThread(()->{if(!closed&&client==selected){render(snapshot,list);renderShared(manifest);}});return "Station refreshed";});}
@@ -121,8 +125,33 @@ final class CastPanel extends LinearLayout {
         if(total>200)text.append("Showing 200 of ").append(total).append(" matches. Refine your search.");
         queue.setText(text.length()==0?(client==null?"Find a server to see its music.":query.isEmpty()?"No songs in this station yet.":"No songs match your search."):text.toString());
     }
-    private void findServers(){
-        work(()->{java.util.List<CastDiscovery.Server> servers=CastDiscovery.find();activity.runOnUiThread(()->{if(closed)return;serverList.removeAllViews();for(CastDiscovery.Server server:servers){serverList.addView(action(server.name+" · "+server.url.replace("http://",""),()->{address.setText(server.url);password.setText("");connect();}));}});return servers.isEmpty()?"No servers found. Check Wi-Fi or enter the server address.":"Choose a server below.";});
+    private void findServers() {
+        work(() -> {
+            java.util.List<CastDiscovery.Server> servers = CastDiscovery.find();
+            activity.runOnUiThread(() -> {
+                if (closed) return;
+                serverList.removeAllViews();
+                java.util.Map<String, Integer> counts = new java.util.HashMap<>();
+                for (CastDiscovery.Server server : servers) {
+                    counts.merge(server.name, 1, Integer::sum);
+                }
+                java.util.Map<String, Integer> shown = new java.util.HashMap<>();
+                for (CastDiscovery.Server server : servers) {
+                    String name = server.name.trim().isEmpty() ? "AMP Verse Server" : server.name;
+                    if (counts.get(server.name) > 1) {
+                        name += " (" + shown.merge(server.name, 1, Integer::sum) + ")";
+                    }
+                    serverList.addView(action(name, () -> {
+                        address.setText(server.url);
+                        password.setText("");
+                        connect(server.id);
+                    }));
+                }
+            });
+            return servers.isEmpty()
+                    ? "No AMP Verse servers found. Check that both devices are on the same private network and the server allows LAN connections."
+                    : "Choose a server to connect.";
+        });
     }
     void close(){closed=true;handler.removeCallbacksAndMessages(null);worker.shutdownNow();}
 }
