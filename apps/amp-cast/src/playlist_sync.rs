@@ -6,11 +6,12 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     fs,
-    io::Write,
+    io::{Read, Write},
     path::{Path, PathBuf},
 };
 
 const MAX_SNAPSHOT: usize = 4 * 1024 * 1024;
+const MAX_RECORD: usize = 2 * 1024 * 1024;
 pub fn routes() -> Router<Arc<Cast>> {
     Router::new()
         .route("/api/sync/v1/playlists", get(snapshot))
@@ -20,7 +21,8 @@ fn error(code: StatusCode, message: impl ToString) -> Response {
     (code, Json(json!({"error":message.to_string()}))).into_response()
 }
 fn authority(c: &Cast, h: &HeaderMap) -> bool {
-    c.authorized(h)
+    c.password.as_ref().is_some_and(|p| !p.is_empty())
+        && c.authorized(h)
         && h.get("x-amp-server").and_then(|v| v.to_str().ok()) == Some(c.server_id.as_str())
         && h.get("x-amp-library").and_then(|v| v.to_str().ok()) == c.library_id.as_deref()
         && c.library_id.is_some()
@@ -29,14 +31,26 @@ fn raw(path: &Path) -> Result<Option<Value>, String> {
     let bytes = if let Some(b) = amp_core::catalog_db::read(path)? {
         Some(b)
     } else {
-        match fs::read(path) {
-            Ok(b) => Some(b),
+        match fs::File::open(path) {
+            Ok(file) => {
+                if file.metadata().map_err(|e| e.to_string())?.len() > MAX_RECORD as u64 {
+                    return Err("Playlist record exceeds read bound".into());
+                }
+                let mut b = Vec::new();
+                file.take(MAX_RECORD as u64 + 1)
+                    .read_to_end(&mut b)
+                    .map_err(|e| e.to_string())?;
+                Some(b)
+            }
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
             Err(e) => return Err(e.to_string()),
         }
     };
     bytes
         .map(|b| {
+            if b.len() > MAX_RECORD {
+                return Err("Playlist record exceeds read bound".into());
+            }
             let mut v: Value = serde_json::from_slice(&b).map_err(|e| e.to_string())?;
             amp_core::coordination::adopt_legacy(&mut v)?;
             Ok(v)
@@ -49,12 +63,7 @@ fn rev(v: &Value) -> Value {
 fn normal_path(c: &Cast, id: &str) -> Result<PathBuf, String> {
     let stem = id
         .strip_prefix("normal_")
-        .filter(|s| {
-            !s.is_empty()
-                && s.len() <= 128
-                && s.bytes()
-                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-        })
+        .filter(|s| amp_core::playlist_sync_contract::safe_existing_id(s))
         .ok_or("Invalid playlist ID")?;
     let folder = c.root.join("ampdj/playlists");
     checked_path(c, &folder)?;
@@ -108,9 +117,13 @@ fn wire_normal(c: &Cast, id: &str, stored: &Value) -> Result<Value, String> {
         .as_object_mut()
         .ok_or("Invalid playlist")?
         .remove("_amp_sync");
-    let tracks = stored["tracks"]
+    let entries = stored["tracks"]
         .as_array()
-        .ok_or("Invalid ordered tracks")?
+        .ok_or("Invalid ordered tracks")?;
+    if entries.len() > 20000 {
+        return Err("Playlist exceeds ordered-reference bound".into());
+    }
+    let tracks = entries
         .iter()
         .map(|p| {
             let path = p.as_str().ok_or("Invalid track path")?.replace('\\', "/");
@@ -153,9 +166,67 @@ fn verify_library(c: &Cast) -> Result<(), String> {
     }
     Ok(())
 }
+struct SnapshotBudget {
+    used: usize,
+    hash: Sha256,
+}
+struct BudgetWriter<'a> {
+    remaining: usize,
+    written: usize,
+    hash: &'a mut Sha256,
+}
+impl Write for BudgetWriter<'_> {
+    fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
+        if b.len() > self.remaining {
+            return Err(std::io::Error::other(
+                "Playlist snapshot exceeds response bound",
+            ));
+        }
+        self.remaining -= b.len();
+        self.written += b.len();
+        self.hash.update(b);
+        Ok(b.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+impl SnapshotBudget {
+    fn new() -> Self {
+        let mut hash = Sha256::new();
+        hash.update(b"[");
+        Self { used: 2, hash }
+    }
+    fn push(&mut self, documents: &mut Vec<Value>, document: Value) -> Result<(), String> {
+        if documents.len() >= 1000 {
+            return Err("Playlist snapshot exceeds document bound".into());
+        }
+        if !documents.is_empty() {
+            self.used = self.used.checked_add(1).ok_or("Snapshot bound overflow")?;
+            self.hash.update(b",");
+        }
+        let remaining = MAX_SNAPSHOT
+            .checked_sub(self.used)
+            .ok_or("Playlist snapshot exceeds response bound")?;
+        let mut writer = BudgetWriter {
+            remaining,
+            written: 0,
+            hash: &mut self.hash,
+        };
+        serde_json::to_writer(&mut writer, &document).map_err(|e| e.to_string())?;
+        self.used += writer.written;
+        documents.push(document);
+        Ok(())
+    }
+    fn finish(mut self) -> String {
+        self.hash.update(b"]");
+        format!("{:x}", self.hash.finalize())
+    }
+}
 fn collect(c: &Cast) -> Result<Value, String> {
     verify_library(c)?;
     let mut documents = Vec::new();
+    let mut budget = SnapshotBudget::new();
     let mut paths = amp_core::catalog_db::playlist_paths(&c.root)?;
     paths.sort();
     if paths.len() > 1000 {
@@ -168,8 +239,10 @@ fn collect(c: &Cast) -> Result<Value, String> {
         {
             continue;
         }
-        if !path.starts_with(c.root.join("ampdj/playlists")) {
-            continue;
+        if path.parent() != Some(c.root.join("ampdj/playlists").as_path()) {
+            return Err(
+                "unsupported_unenrolled_playlist_path: outside conventional playlist root".into(),
+            );
         }
         let id = format!(
             "normal_{}",
@@ -178,8 +251,11 @@ fn collect(c: &Cast) -> Result<Value, String> {
                 .ok_or("Invalid playlist filename")?
         );
         let checked = normal_path(c, &id)?;
+        if checked != path {
+            return Err("unsupported_unenrolled_playlist_path: exact mapping unavailable".into());
+        }
         if let Some(v) = raw(&checked)? {
-            documents.push(wire_normal(c, &id, &v)?)
+            budget.push(&mut documents, wire_normal(c, &id, &v)?)?;
         }
     }
     let mut smart_revision = Value::Null;
@@ -192,16 +268,19 @@ fn collect(c: &Cast) -> Result<Value, String> {
             .as_array()
             .ok_or("Invalid smart settings")?
         {
-            documents.push(json!({"document_id":format!("smart_{}",rules["id"].as_str().ok_or("Invalid smart ID")?),"kind":"smart","document_version":settings["version"],"revision":smart_revision,"document":rules}));
+            budget.push(&mut documents,json!({"document_id":format!("smart_{}",rules["id"].as_str().ok_or("Invalid smart ID")?),"kind":"smart","document_version":settings["version"],"revision":smart_revision,"document":rules}))?;
         }
     }
-    let bytes = serde_json::to_vec(&documents).map_err(|e| e.to_string())?;
-    if documents.len() > 1000 || bytes.len() > MAX_SNAPSHOT {
-        return Err("Playlist snapshot exceeds response bound".into());
-    }
-    Ok(
-        json!({"protocol":1,"server_id":c.server_id,"library_id":c.library_id,"snapshot_token":format!("{:x}",Sha256::digest(bytes)),"documents":documents,"smart_revision":smart_revision,"deletes_supported":false,"automatic_client_sync":false}),
-    )
+    let token = budget.finish();
+    let response = json!({"protocol":1,"server_id":c.server_id,"library_id":c.library_id,"snapshot_token":token,"documents":documents,"smart_revision":smart_revision,"deletes_supported":false,"automatic_client_sync":false});
+    let mut hash = Sha256::new();
+    let mut writer = BudgetWriter {
+        remaining: MAX_SNAPSHOT,
+        written: 0,
+        hash: &mut hash,
+    };
+    serde_json::to_writer(&mut writer, &response).map_err(|e| e.to_string())?;
+    Ok(response)
 }
 async fn snapshot(State(c): State<Arc<Cast>>, h: HeaderMap) -> Response {
     if !authority(&c, &h) {
@@ -783,5 +862,117 @@ mod tests {
             StatusCode::BAD_REQUEST
         );
         assert!(!f.config.join("playlist-sync").exists());
+    }
+
+    #[tokio::test]
+    async fn passwordless_or_empty_secret_cannot_read_or_create_ledger() {
+        let f = Fixture::new();
+        let op = f.op("public-identities");
+        for password in [None, Some(String::new())] {
+            let c = Cast::with_identity(
+                f.root.clone(),
+                amp_core::scan(&f.root).unwrap(),
+                password,
+                "server".into(),
+                "station".into(),
+                "Fixture".into(),
+            );
+            *c.config_dir.lock().unwrap() = Some(f.config.clone());
+            for (method, path, body) in [
+                ("GET", "/api/sync/v1/playlists", Body::empty()),
+                (
+                    "POST",
+                    "/api/sync/v1/playlist-operations",
+                    Body::from(serde_json::to_vec(&op).unwrap()),
+                ),
+            ] {
+                let req = Request::builder()
+                    .method(method)
+                    .uri(path)
+                    .header("content-type", "application/json")
+                    .header("x-amp-server", "server")
+                    .header("x-amp-library", &op.library_id)
+                    .header("x-amp-password", "")
+                    .body(body)
+                    .unwrap();
+                assert_eq!(
+                    router(c.clone()).oneshot(req).await.unwrap().status(),
+                    StatusCode::FORBIDDEN
+                );
+            }
+        }
+        assert!(!f.config.join("playlist-sync").exists());
+    }
+    #[test]
+    fn legacy_space_dot_unicode_ids_roundtrip_exactly_without_new_id_relaxation() {
+        let f = Fixture::new();
+        let c = f.cast();
+        fs::create_dir_all(f.root.join("ampdj/playlists")).unwrap();
+        let stem = "Party mix.v2 – café";
+        let path = f.root.join("ampdj/playlists").join(format!("{stem}.json"));
+        amp_core::coordination::atomic_write(&path,&json!({"version":1,"name":"Legacy","tracks":["missing/song.mp3"],"companion_available":true})).unwrap();
+        let snapshot = collect(&c).unwrap();
+        let original = &snapshot["documents"][0];
+        assert_eq!(original["document_id"], format!("normal_{stem}"));
+        let mut op = f.op("legacy");
+        op.action = Action::Update;
+        op.document_id = format!("normal_{stem}");
+        op.base_revision = Some(original["revision"].clone());
+        op.document = Some(original["document"].clone());
+        op.document.as_mut().unwrap()["name"] = json!("Edited");
+        assert_eq!(execute(&c, op.clone()).unwrap().0, StatusCode::OK);
+        assert_eq!(raw(&path).unwrap().unwrap()["name"], "Edited");
+        op.action = Action::Create;
+        op.base_revision = None;
+        assert!(op.validate("server", &op.library_id).is_err());
+        amp_core::catalog_db::compact(&f.root).unwrap();
+        assert_eq!(
+            collect(&f.cast()).unwrap()["documents"][0]["document_id"],
+            format!("normal_{stem}")
+        );
+    }
+    #[test]
+    fn nested_packed_playlist_is_reported_instead_of_flattened() {
+        let f = Fixture::new();
+        let c = f.cast();
+        amp_core::catalog_db::compact(&f.root).unwrap();
+        let nested = f.root.join("ampdj/playlists/nested/saved.json");
+        assert!(
+            amp_core::catalog_db::write(
+                &nested,
+                &serde_json::to_vec(&json!({"version":1,"name":"Nested","tracks":[]})).unwrap()
+            )
+            .unwrap()
+        );
+        assert!(
+            collect(&c)
+                .unwrap_err()
+                .contains("unsupported_unenrolled_playlist_path")
+        );
+        assert!(!f.root.join("ampdj/playlists/saved.json").exists());
+    }
+    #[test]
+    fn snapshot_budget_stops_before_append_and_loose_reads_are_bounded() {
+        let mut budget = SnapshotBudget::new();
+        let mut documents = Vec::new();
+        let first = json!({"padding":"x".repeat(MAX_SNAPSHOT/2)});
+        budget.push(&mut documents, first.clone()).unwrap();
+        assert!(budget.push(&mut documents, first).is_err());
+        assert_eq!(documents.len(), 1);
+        let mut small = SnapshotBudget::new();
+        let mut values = Vec::new();
+        small.push(&mut values, json!({"a":1})).unwrap();
+        small.push(&mut values, json!({"b":2})).unwrap();
+        assert_eq!(
+            small.finish(),
+            format!("{:x}", Sha256::digest(serde_json::to_vec(&values).unwrap()))
+        );
+        let f = Fixture::new();
+        let path = f._dir.path().join("oversized.json");
+        fs::File::create(&path)
+            .unwrap()
+            .set_len(MAX_RECORD as u64 + 1)
+            .unwrap();
+        assert!(raw(&path).unwrap_err().contains("read bound"));
     }
 }

@@ -74,6 +74,16 @@ fn token(value: &str) -> bool {
             .bytes()
             .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_')
 }
+/// A legacy document ID is an exact filename stem, never a path.
+pub fn safe_existing_id(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 512
+        && value != "."
+        && value != ".."
+        && !value
+            .chars()
+            .any(|c| c.is_control() || matches!(c, '/' | '\\' | ':'))
+}
 impl Operation {
     /// Pure validation only. Delete remains unsupported until transactional tombstones exist.
     pub fn validate(&self, server: &str, library: &str) -> Result<(), String> {
@@ -103,7 +113,13 @@ impl Operation {
         let id = self
             .document_id
             .strip_prefix(prefix)
-            .filter(|id| token(id))
+            .filter(|id| {
+                if self.action == Action::Create {
+                    token(id)
+                } else {
+                    safe_existing_id(id)
+                }
+            })
             .ok_or("Invalid document ID")?;
         if self.action == Action::Update && self.base_revision.is_none() {
             return Err("Update requires a baseline".into());
