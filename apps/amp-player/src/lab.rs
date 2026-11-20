@@ -1,3 +1,5 @@
+#[path = "lab_recorder.rs"]
+mod recorder;
 #[path = "lab_timeline.rs"]
 mod timeline;
 use amp_core::{
@@ -14,6 +16,7 @@ pub struct Arrangement {
     clips: Vec<Clip>,
     timeline: timeline::Timeline,
     editor: crate::lab_editor::Editor,
+    recorder: recorder::Recorder,
     tab: usize,
     demo_loaded: bool,
     status: String,
@@ -63,6 +66,10 @@ impl Arrangement {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if self.tab == 0 {
+                        self.recorder.show(ui);
+                        if let Some(path) = self.recorder.take_completed() {
+                            self.editor.load_path(path);
+                        }
                         self.editor.show(ui, root, library);
                     } else {
                         self.content(ui, root, library);
