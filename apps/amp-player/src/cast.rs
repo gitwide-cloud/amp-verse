@@ -8,6 +8,8 @@ struct Status {
     #[serde(default)]
     server_id: String,
     #[serde(default)]
+    library_id: Option<String>,
+    #[serde(default)]
     station_id: String,
     running: bool,
     now_playing: Option<String>,
@@ -385,6 +387,19 @@ impl Dashboard {
             self.live_action = Some(false);
             let _ = self.google.remote(crate::google_cast::Operation::Stop);
         }
+    }
+    pub fn sync_candidate(&self) -> Option<crate::playlist_sync::Candidate> {
+        let status = &self.snapshot.as_ref()?.status;
+        if self.connected_address.is_empty() || status.server_id.is_empty() {
+            return None;
+        }
+        Some(crate::playlist_sync::Candidate {
+            address: self.connected_address.clone(),
+            password: self.password.clone(),
+            server_id: status.server_id.clone(),
+            library_id: status.library_id.clone()?,
+            password_required: status.password_required,
+        })
     }
     pub fn endpoint(&self) -> (String, String) {
         self.live_binding

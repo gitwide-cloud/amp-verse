@@ -48,6 +48,8 @@ mod organized_library;
 use dj_logic as performance;
 mod playback_owner;
 mod player_sequence;
+mod playlist_sync;
+mod playlist_sync_secret;
 mod podcast_cache;
 mod podcast_plugin;
 mod podcasts;
@@ -184,6 +186,7 @@ struct Player {
     player_on_top: bool,
     run: performance::Run,
     show_editor: show_editor::Editor,
+    playlist_sync: playlist_sync::Client,
     smart_preview: smart_preview::Preview,
     control: Option<control::Control>,
     control_attempted: bool,
@@ -295,6 +298,7 @@ impl Default for Player {
             player_on_top: load_player_on_top(),
             run: Default::default(),
             show_editor: Default::default(),
+            playlist_sync: Default::default(),
             smart_preview: Default::default(),
             control: None,
             control_attempted: false,
@@ -3140,6 +3144,8 @@ impl Player {
                 .max_height(ui.available_height())
                 .show(ui, |ui| {
                     self.cast.show(ui, &self.root, self.library.is_some());
+                    self.playlist_sync
+                        .show(ui, self.cast.sync_candidate(), &self.root);
                 });
         });
     }
@@ -3233,6 +3239,14 @@ impl eframe::App for Player {
                 self.connect_music_root(destination);
             }
             return;
+        }
+
+        if let Some(saved) = self.playlist_sync.poll(&self.root) {
+            self.dj_browser.refresh_sync_saved(
+                saved,
+                &mut self.run.settings,
+                &mut self.show_editor,
+            );
         }
 
         if !self.control_attempted && self.screenshot_view.is_empty() {
