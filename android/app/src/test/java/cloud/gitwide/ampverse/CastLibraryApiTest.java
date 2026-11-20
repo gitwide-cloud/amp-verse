@@ -44,4 +44,14 @@ public class CastLibraryApiTest {
  @Test public void savedLibrarySnapshotUsesExactSelectedServerAndLibraryHeaders()throws Exception {
   try(Fixture f=new Fixture(status("station-A"),"{\"documents\":[]}")){CastClient c=f.client();c.connect();c.get("/api/sync/v1/playlists");f.done.get(5,TimeUnit.SECONDS);String request=f.requests.get(1);assertTrue(request.startsWith("GET /api/sync/v1/playlists"));assertTrue(request.contains("x-amp-server: server-a"));assertTrue(request.contains("x-amp-library: library-a"));}
  }
+ @Test public void savedNormalIdentityRequestAndOrderedSnapshotAvoidDirectSongLimit()throws Exception {
+  JSONArray refs=new JSONArray();for(int i=0;i<1500;i++)refs.put(new JSONObject().put("relative_path",i==0?"missing.mp3":"song.mp3"));
+  JSONObject envelope=new JSONObject().put("kind","normal").put("document_id","normal_long").put("document",new JSONObject().put("tracks",refs));String original=envelope.toString();
+  JSONObject snapshot=new JSONObject().put("library_id","library-A").put("playlist_id","normal_long").put("selection_mode","ordered").put("unavailable",1).put("tracks",new JSONArray().put(new JSONObject().put("path","song.mp3")).put(new JSONObject().put("path","song.mp3")));
+  try(Fixture f=new Fixture(status("station-A"),"{}",snapshot.toString())){
+   CastClient c=f.client();c.connect();c.post("/api/player/play",CastLibraryModel.savedPlay("library-A",envelope,true));JSONObject body=new JSONObject(fixtureBodyWait(f,1));assertEquals("normal_long",body.getString("playlist_id"));assertFalse(body.has("tracks"));assertEquals("library-A",body.getString("library_id"));
+   JSONObject read=c.get("/api/player/playlist?library_id=library-A&playlist_id=normal_long");CastLibraryModel.Snapshot result=CastLibraryModel.savedSnapshot("library-A",envelope,read);assertEquals(2,result.paths.length());assertEquals(1,result.unavailable);assertEquals(original,envelope.toString());f.done.get(5,TimeUnit.SECONDS);String request=f.requests.get(2);assertTrue(request.contains("x-amp-server: server-a"));assertTrue(request.contains("x-amp-library: library-a"));assertTrue(request.startsWith("GET /api/player/playlist?"));
+  }
+ }
+ private static String fixtureBodyWait(Fixture f,int index)throws Exception {long until=System.nanoTime()+TimeUnit.SECONDS.toNanos(3);while(f.requests.size()<=index){if(System.nanoTime()>until)throw new IOException("No fixture request");Thread.sleep(5);}String request=f.requests.get(index);return request.substring(request.indexOf("\n\n")+2);}
 }

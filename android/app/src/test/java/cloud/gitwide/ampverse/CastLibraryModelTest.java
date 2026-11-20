@@ -40,4 +40,14 @@ public class CastLibraryModelTest {
   try{CastLibraryModel.catalogPath("Album\\..\\outside.mp3");fail();}catch(JSONException expected){}
   assertEquals("Album/曲.mp3",CastLibraryModel.catalogPath("Album/曲.mp3"));
  }
+ @Test public void savedLongNormalPlayUsesIdentityWithoutExpandingMissingReferences()throws Exception {
+  JSONArray refs=new JSONArray();for(int i=0;i<1500;i++)refs.put(new JSONObject().put("relative_path",i==10?"missing.mp3":"song"+i+".mp3"));JSONObject envelope=new JSONObject().put("kind","normal").put("document_id","normal_Legacy.list").put("document",new JSONObject().put("tracks",refs));String original=envelope.toString();
+  JSONObject request=CastLibraryModel.savedPlay("library-A",envelope,true);assertEquals("normal_Legacy.list",request.getString("playlist_id"));assertFalse(request.has("tracks"));assertTrue(request.toString().length()<200);assertTrue(request.getBoolean("server_speakers"));assertEquals(original,envelope.toString());
+ }
+ @Test public void orderedPhoneSnapshotSkipsOnlyReportedUnavailablePlaybackMembersAndKeepsSavedRefs()throws Exception {
+  JSONObject envelope=new JSONObject().put("kind","normal").put("document_id","normal_mix").put("document",new JSONObject().put("tracks",new JSONArray().put("missing.mp3").put("A.mp3").put("A.mp3")));String original=envelope.toString();
+  JSONObject data=new JSONObject().put("library_id","library-A").put("playlist_id","normal_mix").put("selection_mode","ordered").put("unavailable",1).put("tracks",new JSONArray().put(new JSONObject().put("path","Album\\A.mp3")).put(new JSONObject().put("path","Album/A.mp3")));
+  CastLibraryModel.Snapshot snapshot=CastLibraryModel.savedSnapshot("library-A",envelope,data);assertEquals(1,snapshot.unavailable);assertFalse(snapshot.smart);assertEquals("[\"Album/A.mp3\",\"Album/A.mp3\"]",snapshot.paths.toString());assertEquals(original,envelope.toString());
+  for(String field:new String[]{"library_id","playlist_id","selection_mode"}){JSONObject wrong=new JSONObject(data.toString()).put(field,"changed");try{CastLibraryModel.savedSnapshot("library-A",envelope,wrong);fail(field);}catch(JSONException expected){}}
+ }
 }
