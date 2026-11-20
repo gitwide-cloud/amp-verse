@@ -7,6 +7,11 @@ before the binding is saved. Sync is separate from live Cast routing: starting a
 local broadcast does not change the paired canonical server. No new IP-address
 settings or automatic selection of the first discovered station is introduced.
 
+Startup binding reads, pairing, credential protection, pause persistence and all
+NAS document reads run on workers. The UI only polls ready messages, compares
+captured lexical root keys and applies already-built saved browser models. A
+blocked or offline NAS worker cannot hold the UI waiting for filesystem access.
+
 While the desktop app is running, a background worker checks saved normal and
 Smart Playlists about every 15 seconds. It synchronizes playlist documents, not
 audio files, analysis, cues, tags, playing queues, decks or unsaved editor drafts.
@@ -14,7 +19,8 @@ Opening another music root pauses the binding. **Pause playlist sync** disables
 automatic work without changing saved playlists or deleting retained proposals.
 No application/service is installed by enabling this feature.
 
-The current implementation requires the same library identity on both sides.
+The current implementation requires an absolute music-folder selection (use the
+Library folder picker) and the same library identity on both sides.
 This supports the same NAS share and a deliberate copy retaining its identity and
 relative layout. An unrelated local library is refused: source/origin remapping
 has not been implemented. Music-source mappings and audio availability are not

@@ -124,7 +124,9 @@ impl Browser {
         settings: &mut amp_core::show::Settings,
         editor: &mut crate::show_editor::Editor,
     ) {
-        if let Some(fresh) = view.settings {
+        if let Some(fresh) = view.settings
+            && crate::library_cache::accept_settings(settings, &fresh)
+        {
             editor.refresh_saved(&fresh);
             *settings = fresh.clone();
             self.settings_snapshot = Some(std::sync::Arc::new(fresh));
@@ -132,7 +134,16 @@ impl Browser {
         }
         for (path, playlist) in view.normal {
             if let Some((_, old)) = self.playlists.iter_mut().find(|(p, _)| *p == path) {
-                *old = playlist;
+                let accept = match (&old.sync, &playlist.sync) {
+                    (Some(old), Some(new)) if old.library_id == new.library_id => {
+                        new.revision >= old.revision
+                    }
+                    (Some(_), None) => false,
+                    _ => true,
+                };
+                if accept {
+                    *old = playlist;
+                }
             } else {
                 self.playlists.push((path, playlist));
             }

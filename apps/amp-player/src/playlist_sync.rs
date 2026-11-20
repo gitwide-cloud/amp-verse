@@ -17,6 +17,8 @@ pub struct Binding {
     server_id: String,
     library_id: String,
     root: PathBuf,
+    #[serde(default)]
+    ui_root: PathBuf,
     secret: Vec<u8>,
 }
 #[derive(Clone)]
@@ -61,9 +63,14 @@ struct State {
 pub struct Client {
     binding: Option<Binding>,
     initialized: bool,
-    pending: Option<mpsc::Receiver<Result<(Binding, String), String>>>,
+    pending: Option<mpsc::Receiver<Result<Completed, String>>>,
     next: Option<Instant>,
     pub status: String,
+}
+struct Completed {
+    binding: Option<Binding>,
+    status: String,
+    saved: Option<SavedView>,
 }
 pub struct SavedView {
     pub settings: Option<amp_core::show::Settings>,
@@ -660,14 +667,73 @@ fn view(binding: &Binding) -> Result<SavedView, String> {
         .collect::<Result<Vec<_>, String>>()?;
     Ok(SavedView { settings, normal })
 }
+fn root_key(path: &Path) -> String {
+    let value = path.to_string_lossy();
+    #[cfg(windows)]
+    {
+        let value = value.replace('/', "\\");
+        let value = if let Some(tail) = value.strip_prefix("\\\\?\\UNC\\") {
+            format!("\\\\{tail}")
+        } else {
+            value.strip_prefix("\\\\?\\").unwrap_or(&value).to_owned()
+        };
+        value.trim_end_matches('\\').to_ascii_lowercase()
+    }
+    #[cfg(not(windows))]
+    {
+        value.trim_end_matches('/').to_owned()
+    }
+}
+fn matches_root(binding: &Binding, root: &Path) -> bool {
+    root.is_absolute()
+        && (root_key(root) == root_key(&binding.root)
+            || (!binding.ui_root.as_os_str().is_empty()
+                && root_key(root) == root_key(&binding.ui_root)))
+}
+fn run_binding(binding: Binding, pair: bool) -> Result<Completed, String> {
+    let directory = config()?;
+    private_dir(&directory)?;
+    let mut status = cycle(&binding, &directory)?;
+    if pair {
+        save(&directory.join("binding.json"), &binding)?;
+    }
+    let saved = match view(&binding) {
+        Ok(saved) => Some(saved),
+        Err(error) => {
+            status.push_str(&format!(" Saved browser refresh unavailable: {error}"));
+            None
+        }
+    };
+    Ok(Completed {
+        binding: Some(binding),
+        status,
+        saved,
+    })
+}
 impl Client {
+    fn spawn(&mut self, work: impl FnOnce() -> Result<Completed, String> + Send + 'static) {
+        let (tx, rx) = mpsc::channel();
+        self.pending = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(work());
+        });
+    }
     pub fn poll(&mut self, root: &Path) -> Option<SavedView> {
         if !self.initialized {
             self.initialized = true;
-            self.binding = config()
-                .ok()
-                .and_then(|p| read(&p.join("binding.json")).ok().flatten())
-                .and_then(|v| serde_json::from_value(v).ok());
+            self.spawn(|| {
+                let binding = match read(&config()?.join("binding.json"))? {
+                    Some(value) if !value.is_null() => {
+                        Some(serde_json::from_value(value).map_err(err)?)
+                    }
+                    _ => None,
+                };
+                Ok(Completed {
+                    binding,
+                    status: String::new(),
+                    saved: None,
+                })
+            });
         }
         let mut refreshed = None;
         let result = match self.pending.as_ref().map(|rx| rx.try_recv()) {
@@ -680,12 +746,12 @@ impl Client {
         if let Some(result) = result {
             self.pending = None;
             match result {
-                Ok((binding, status)) => {
-                    self.status = status;
-                    if root.canonicalize().is_ok_and(|p| p == binding.root) {
-                        refreshed = view(&binding).ok();
+                Ok(done) => {
+                    self.status = done.status;
+                    if done.binding.as_ref().is_some_and(|b| matches_root(b, root)) {
+                        refreshed = done.saved;
                     }
-                    self.binding = Some(binding);
+                    self.binding = done.binding;
                 }
                 Err(error) => self.status = error,
             }
@@ -695,29 +761,13 @@ impl Client {
             && self.next.is_none_or(|t| Instant::now() >= t)
             && let Some(binding) = self.binding.clone()
         {
-            if root.canonicalize().is_ok_and(|p| p == binding.root) {
-                self.start(binding, false);
+            if matches_root(&binding, root) {
+                self.spawn(move || run_binding(binding, false));
             } else {
                 self.status = "Playlist sync paused: choose the paired music library".into();
             }
         }
         refreshed
-    }
-    fn start(&mut self, binding: Binding, pair: bool) {
-        let (tx, rx) = mpsc::channel();
-        self.pending = Some(rx);
-        std::thread::spawn(move || {
-            let result = (|| {
-                let directory = config()?;
-                private_dir(&directory)?;
-                let status = cycle(&binding, &directory)?;
-                if pair {
-                    save(&directory.join("binding.json"), &binding)?;
-                }
-                Ok((binding, status))
-            })();
-            let _ = tx.send(result);
-        });
     }
     pub fn show(&mut self, ui: &mut eframe::egui::Ui, candidate: Option<Candidate>, root: &Path) {
         ui.separator();
@@ -731,13 +781,14 @@ impl Client {
                 )
                 .clicked()
             {
-                self.binding = None;
-                self.next = None;
-                if let Ok(directory) = config()
-                    && let Err(error) = save(&directory.join("binding.json"), &Value::Null)
-                {
-                    self.status = error;
-                }
+                self.spawn(|| {
+                    save(&config()?.join("binding.json"), &Value::Null)?;
+                    Ok(Completed {
+                        binding: None,
+                        status: "Playlist sync paused; saved proposals retained".into(),
+                        saved: None,
+                    })
+                });
             }
         } else if let Some(candidate) = candidate {
             if ui
@@ -747,29 +798,16 @@ impl Client {
                 )
                 .clicked()
             {
-                let result = (|| {
-                    let root = root.canonicalize().map_err(err)?;
-                    if local_identity(&root)? != candidate.library_id {
-                        return Err("This is a different library. Explicit source remapping is required; nothing was changed.".into());
-                    }
-                    if candidate.password.is_empty() {
-                        return Err(
-                            "Reconnect the selected station with its access code first".into()
-                        );
-                    }
-                    let binding = Binding {
-                        base: format!("http://{}", candidate.address),
-                        server_id: candidate.server_id,
-                        library_id: candidate.library_id,
-                        root,
-                        secret: crate::playlist_sync_secret::seal(candidate.password.as_bytes())?,
-                    };
-                    Ok(binding)
-                })();
-                match result {
-                    Ok(binding) => self.start(binding, true),
-                    Err(error) => self.status = error,
-                }
+                let ui_root = root.to_path_buf();
+                self.status = "Checking the selected station and music library…".into();
+                self.spawn(move||{
+                    if !ui_root.is_absolute(){return Err("Choose this music folder with Library's folder picker before enabling sync".into());}
+                    let root=ui_root.canonicalize().map_err(err)?;
+                    if local_identity(&root)?!=candidate.library_id{return Err("This is a different library. Explicit source remapping is required; nothing was changed.".into());}
+                    if candidate.password.is_empty(){return Err("Reconnect the selected station with its access code first".into());}
+                    let binding=Binding{base:format!("http://{}",candidate.address),server_id:candidate.server_id,library_id:candidate.library_id,root,ui_root,secret:crate::playlist_sync_secret::seal(candidate.password.as_bytes())?};
+                    run_binding(binding,true)
+                });
             }
         } else {
             ui.weak("Connect to your chosen station with its access code first.");
@@ -796,6 +834,7 @@ mod tests {
                 server_id: "fixture-server".into(),
                 library_id,
                 root: root.canonicalize().unwrap(),
+                ui_root: root.clone(),
                 secret: crate::playlist_sync_secret::seal(b"test-secret").unwrap(),
             },
         )
@@ -809,6 +848,112 @@ mod tests {
             revision: json!({"revision":1,"library_id":binding.library_id,"device_id":"fixture","fields":{},"field_devices":{}}),
             document: json!({"version":1,"name":name,"tracks":[{"library_id":binding.library_id,"track_key":format!("song_{:x}",Sha256::digest(relative_path.as_bytes())),"relative_path":relative_path}],"future_setting":{"keep":true}}),
         }
+    }
+    #[test]
+    fn blocked_storage_worker_never_blocks_ui_or_probes_a_missing_root_on_completion() {
+        let (_dir, mut binding) = fixture();
+        binding.root = std::env::temp_dir().join(format!(
+            "unmounted-storage-fixture-{}",
+            amp_core::coordination::token()
+        ));
+        binding.ui_root = binding.root.clone();
+        let selected = binding.ui_root.clone();
+        let ui_thread = std::thread::current().id();
+        let mut client = Client {
+            initialized: true,
+            ..Default::default()
+        };
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        client.spawn(move || {
+            assert_ne!(std::thread::current().id(), ui_thread);
+            started_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            Ok(Completed {
+                binding: Some(binding),
+                status: "Fixture completed".into(),
+                saved: Some(SavedView {
+                    settings: Some(amp_core::show::Settings::default()),
+                    normal: vec![],
+                }),
+            })
+        });
+        started_rx.recv_timeout(Duration::from_secs(2)).unwrap();
+        // Completion remains blocked, but the UI can keep polling and rendering.
+        for _ in 0..5 {
+            assert!(client.poll(&selected).is_none());
+        }
+        release_tx.send(()).unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            if let Some(saved) = client.poll(&selected) {
+                assert!(saved.settings.is_some());
+                break;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "Worker completion was not applied without filesystem access"
+            );
+            std::thread::sleep(Duration::from_millis(2));
+        }
+        assert!(!matches_root(
+            client.binding.as_ref().unwrap(),
+            Path::new("other-unmounted-root")
+        ));
+        assert!(!matches_root(
+            client.binding.as_ref().unwrap(),
+            Path::new("")
+        ));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn lexical_windows_root_keys_match_raw_and_verbatim_unc_without_io() {
+        assert_eq!(
+            root_key(Path::new(r"\\?\UNC\NAS\Music")),
+            root_key(Path::new(r"\\nas\music"))
+        );
+        assert_eq!(
+            root_key(Path::new(r"\\?\C:\Music")),
+            root_key(Path::new(r"c:\music"))
+        );
+    }
+    #[test]
+    fn delayed_worker_models_never_replace_a_newer_local_saved_revision() {
+        let mut player = crate::Player::default();
+        let newer = amp_core::coordination::Revision {
+            revision: 3,
+            library_id: "fixture-library".into(),
+            ..Default::default()
+        };
+        let mut older = newer.clone();
+        older.revision = 2;
+        player.run.settings.sync = Some(newer.clone());
+        player.run.settings.playlists[0].name = "Newly saved".into();
+        let mut incoming = player.run.settings.clone();
+        incoming.sync = Some(older.clone());
+        incoming.playlists[0].name = "Delayed snapshot".into();
+        let path = PathBuf::from("fixture-playlist.json");
+        let saved = amp_core::Playlist {
+            companion_available: false,
+            sync: Some(newer),
+            version: 1,
+            name: "Newly saved normal".into(),
+            tracks: vec![],
+        };
+        let mut stale = saved.clone();
+        stale.sync = Some(older);
+        stale.name = "Delayed normal".into();
+        player.dj_browser.playlists.push((path.clone(), saved));
+        player.dj_browser.refresh_sync_saved(
+            SavedView {
+                settings: Some(incoming),
+                normal: vec![(path, stale)],
+            },
+            &mut player.run.settings,
+            &mut player.show_editor,
+        );
+        assert_eq!(player.run.settings.playlists[0].name, "Newly saved");
+        assert_eq!(player.dj_browser.playlists[0].1.name, "Newly saved normal");
     }
     #[test]
     fn three_way_conflicts_and_deletions_are_never_guessed() {
