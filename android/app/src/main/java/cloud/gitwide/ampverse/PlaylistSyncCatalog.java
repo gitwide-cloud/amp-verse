@@ -30,7 +30,7 @@ final class PlaylistSyncCatalog {
             if (rows.length()!=expected) throw new IOException("Incomplete server catalog page; retry required");
             for (int i=0;i<rows.length();i++) {
                 JSONObject row=rows.getJSONObject(i);
-                String path=row.getString("path").replace('\','/');
+                String path=row.getString("path").replace('\\','/');
                 if (path.isEmpty() || path.startsWith("/") || path.contains(":") || path.indexOf(0)>=0
                         || Arrays.asList(path.split("/",-1)).contains("..")
                         || Arrays.asList(path.split("/",-1)).contains(".")
