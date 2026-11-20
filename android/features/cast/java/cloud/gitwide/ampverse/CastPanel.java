@@ -15,7 +15,7 @@ class CastPanel extends LinearLayout {
     final Listener listener;
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     final TextView status,now,queue;
-    private TextView capabilityNote;
+    private TextView capabilityNote,diagnostics;
     private Button chromecast,hostBroadcast,serverPlay,serverStop,stationPlaylist;
     private volatile boolean verified;
     private boolean hostLaunchSupported,serverOutputSupported,playlistSupported,serverOutputRunning;
@@ -54,7 +54,7 @@ class CastPanel extends LinearLayout {
         addView(connectionFields);connectionFields.setVisibility(GONE);
         address=field("http://192.168.1.50:8787",false);address.setContentDescription("AMP Cast server address");address.setText(activity.getSharedPreferences("settings",Context.MODE_PRIVATE).getString("cast-server",""));
         password=field("Optional admin password",true);password.setContentDescription("AMP Cast admin password");
-        connect=action("Connect",()->connect());connectionFields.addView(connect);
+        connect=action("Connect",()->connect());connectionFields.addView(connect);diagnostics=label("",14);connectionFields.addView(diagnostics);
         status=label("Not connected. Find a nearby AMP host, or open Advanced connection settings to connect manually.",14);addView(status);
         now=label("No station selected",18);addView(now);
         libraryView=new CastLibraryView(activity,colors,listener,()->client,this::downloadSaved);addView(libraryView);
@@ -133,14 +133,14 @@ class CastPanel extends LinearLayout {
     void work(Operation operation){
         if(closed)return;if(busy){report("Another request is finishing. Try again when it completes.");return;}
         final TextView target=actionFeedback;busy=true;operationVersion++;enabled(client!=null);reportTo("Updating host…",target);
-        worker.execute(()->{String message;Exception failure=null;try{message=operation.run();}catch(Exception error){failure=error;message=error.getMessage()==null?error.getClass().getSimpleName():error.getMessage();}
-            final String result=message;final Exception error=failure;activity.runOnUiThread(()->{if(closed)return;busy=false;
+        worker.execute(()->{String message;Exception failure=null;try{message=operation.run();}catch(Exception error){failure=error;message="Selected server request failed. Check access and connection in Advanced.";}
+            final String result=message;final Exception error=failure;activity.runOnUiThread(()->{if(closed)return;busy=false;if(error!=null)diagnostics.setText(error.getMessage());
                 if(error instanceof CastClient.AuthorizationException){
                     CastClient.AuthorizationException rejection=(CastClient.AuthorizationException)error;
                     authRejected=passwordRequired||rejection.code==401;
                     if(authRejected)connectionFields.setVisibility(VISIBLE);
                 } else if(error instanceof CastClient.HostUnavailableException){verified=false;pollFailed=true;recoveryFeedback=target;}
-                reportTo(hostError.isEmpty()?result:result+"\nHost program: "+hostError,target);enabled(client!=null);
+                reportTo(hostError.isEmpty()?result:result+"\nHost reported an error; see Advanced diagnostics.",target);enabled(client!=null);
             });});
     }
     private JSONObject sharedManifest(CastClient selected,JSONObject snapshot)throws Exception {
@@ -187,12 +187,12 @@ class CastPanel extends LinearLayout {
         if(outputWasRunning&&!serverOutputRunning)reportTo("Server speaker output is now off. If this was unexpected, check FFplay and the host audio device.",feedbackViews.get(2));
         passwordRequired=snapshot.optBoolean("password_required");
         String nextError=snapshot.isNull("error")?"":snapshot.optString("error","");
-        if(!nextError.equals(hostError)){String message=nextError.isEmpty()?"Host program error cleared; see current source status.":"Host program: "+nextError;reportTo(message,feedbackViews.get(3));feedbackViews.get(4).setText(message);}
-        hostError=nextError;
+        if(!nextError.equals(hostError)){String message=nextError.isEmpty()?"Host program error cleared; see current source status.":"Host reported an error; see Advanced diagnostics.";reportTo(message,feedbackViews.get(3));feedbackViews.get(4).setText(message);}
+        hostError=nextError;if(!nextError.isEmpty())diagnostics.setText(nextError);
         capabilityNote.setText((snapshot.optBoolean("preparing")?"Host is preparing audio":snapshot.optBoolean("on_air",snapshot.optBoolean("running"))?"Host stream is on air":"Host is stopped")+"\nStation source: "+(playlistSupported?"playlist controls available":"playlist controls not advertised by this host")+"\nDesktop host broadcast: "+(hostLaunchSupported?"command supported; desktop readiness checked when requested":"not advertised; update/check selected host")+"\nServer speakers: "+(serverOutputSupported?"command supported; physical output unverified":"not advertised; update/check selected host"));
         running=snapshot.optBoolean("on_air",snapshot.optBoolean("running"));preparing=snapshot.optBoolean("preparing");
         stationName=snapshot.optString("station_name","AMP Cast");
-        now.setText(stationName+" · "+(snapshot.optBoolean("on_air",snapshot.optBoolean("running"))?"ON AIR":snapshot.optBoolean("preparing")?"Preparing audio":"Stopped")+"\n"+(snapshot.isNull("now_playing")?"No track playing":snapshot.optString("now_playing",""))+"\nSource: "+snapshot.optString("source","unknown")+"\nServer speakers: "+(serverOutputRunning?"process active (audibility unverified)":"off")+"\nListeners: "+snapshot.optInt("listeners")+"\n"+(client==null?"":client.protection())+(snapshot.isNull("error")?"":"\n"+snapshot.optString("error","")));
+        now.setText(stationName+" · "+(snapshot.optBoolean("on_air",snapshot.optBoolean("running"))?"ON AIR":snapshot.optBoolean("preparing")?"Preparing audio":"Stopped")+"\n"+(snapshot.isNull("now_playing")?"No track playing":snapshot.optString("now_playing",""))+"\nSource: "+snapshot.optString("source","unknown")+"\nServer speakers: "+(serverOutputRunning?"process active (audibility unverified)":"off")+"\nListeners: "+snapshot.optInt("listeners")+"\n"+(client==null?"":client.protection())+(snapshot.isNull("error")?"":"\nHost reported an error · see Advanced diagnostics"));
         tracks=list.optJSONArray("tracks");if(tracks==null)tracks=new JSONArray();renderQueue();
     }
     private void renderShared(JSONObject manifest){
@@ -206,7 +206,7 @@ class CastPanel extends LinearLayout {
         for(int i=0;i<lists.length();i++){JSONObject playlist=lists.optJSONObject(i);if(playlist==null)continue;sharedLists.addView(label(playlist.optString("name")+" · "+playlist.optJSONArray("tracks").length()+" songs",16));final CastClient selected=client;sharedLists.addView(action("Start host playlist",()->{if(!selected(selected))return;work(()->{selected.playPlaylist(playlist.optString("id"));readStatus(selected);return "Host playlist requested. When on air, choose Listen on this phone.";});}));sharedLists.addView(action("Save offline with my cues",()->downloadPlaylist(selected,manifest,playlist)));}
         }finally{feedbackForActions=previousFeedback;}
     }
-    private void downloadSaved(String id){final CastClient owner=client;if(!selected(owner))return;final JSONObject[] found=new JSONObject[2];work(()->{JSONObject manifest=owner.get("/api/smart/manifest");JSONArray lists=manifest.getJSONArray("playlists");for(int i=0;i<lists.length();i++)if(id.equals(lists.getJSONObject(i).optString("id")))found[1]=lists.getJSONObject(i);if(found[1]==null)throw new java.io.IOException("Enable sharing for this saved playlist on the server before downloading. Streaming remains separate.");found[0]=manifest;activity.runOnUiThread(()->finishDownloadSelection(owner,found));return "Download selected saved playlist";});}
+    private void downloadSaved(String id){final CastClient owner=client;if(!selected(owner))return;final JSONObject[] found=new JSONObject[2];work(()->{owner.post("/api/smart/enable",null);JSONObject manifest=owner.get("/api/smart/manifest");JSONArray lists=manifest.getJSONArray("playlists");for(int i=0;i<lists.length();i++)if(id.equals(lists.getJSONObject(i).optString("id")))found[1]=lists.getJSONObject(i);if(found[1]==null)throw new java.io.IOException("Enable sharing for this saved playlist on the server before downloading. Streaming remains separate.");found[0]=manifest;activity.runOnUiThread(()->finishDownloadSelection(owner,found));return "Download selected saved playlist";});}
     private void finishDownloadSelection(CastClient owner,JSONObject[] found){if(closed||client!=owner)return;if(busy){handler.postDelayed(()->finishDownloadSelection(owner,found),30);return;}downloadPlaylist(owner,found[0],found[1]);}
     void downloadPlaylist(CastClient selected,JSONObject manifest,JSONObject playlist){}
     private void chooseStationPlaylist(){final CastClient selected=client;if(selected==null){status.setText("Connect to a station first");return;}work(()->{JSONArray lists=selected.get("/api/station/playlists").getJSONArray("playlists");if(lists.length()==0)return "This host has no saved station playlists. Create one on the host first.";activity.runOnUiThread(()->{if(closed||client!=selected)return;String[] names=new String[lists.length()];for(int i=0;i<names.length;i++)names[i]=lists.optJSONObject(i).optString("name");new android.app.AlertDialog.Builder(activity).setTitle("Launch independent Smart Radio").setItems(names,(d,i)->{if(!selected(selected))return;work(()->{postAndRefresh(selected,"/api/station/play/"+android.net.Uri.encode(lists.optJSONObject(i).optString("id")),null);return "Smart Radio requested; see current host state.";});}).setNegativeButton("Cancel",null).show();});return "Choose a saved playlist";});}

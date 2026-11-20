@@ -59,6 +59,7 @@ public class CastDeviceTest {
                 text(device,"Connect").click();
                 assertTrue(device.wait(Until.hasObject(By.textStartsWith("Host connected.")),12000));
                 scenario.onActivity(a->((android.view.inputmethod.InputMethodManager)a.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(a.getWindow().getDecorView().getWindowToken(),0));
+                text(device,"Advanced · station source and diagnostics").click();
                 text(device,"Start host station").click();
                 awaitOnAir(client,true);
                 text(device,"Listen to host on this phone");

@@ -159,7 +159,7 @@ public final class MainActivity extends Activity {
                     player.setRepeatMode(Player.REPEAT_MODE_OFF);player.setShuffleModeEnabled(false);player.prepare();player.play();message="Phone listening requested: "+name;castPanel.phoneFeedback(message);refresh();
                 }
                 public void playlist(java.util.List<MediaItem> items){if(player==null||items.isEmpty()){message="No offline songs available.";return;}player.setMediaItems(items);player.setRepeatMode(Player.REPEAT_MODE_OFF);player.prepare();player.play();message="Playing offline station playlist";refresh();}
-                public void stopListening(){if(player!=null&&isRadio()){player.stop();message="Phone listening stopped. Server station remains independent.";}else message="Phone station listening is already stopped. Other phone playback is unchanged.";castPanel.phoneFeedback(message);refresh();}
+                public void stopListening(){if(player!=null&&(isRadio()||PrivateLibraryPlayback.owns(player.getCurrentMediaItem()))){player.stop();message="Phone listening stopped. Server station remains independent.";}else message="Phone station listening is already stopped. Other phone playback is unchanged.";castPanel.phoneFeedback(message);refresh();}
             });page.addView(castPanel);
         }else if(module.equals("AMP Podcasts")){podcastsPanel=new PodcastsPanel(this,appearance);page.addView(podcastsPanel);
         }else{

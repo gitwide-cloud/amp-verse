@@ -27,7 +27,7 @@ public final class ModuleProvider extends ContentProvider {
             return result;
         });
         // Catalog reads, settings and queue construction never occupy the audio/UI thread.
-        if(Arrays.asList("hello","library","playlists","module_read","module_write","sync_cast","podcast_download","podcast_downloads","job","offline_lists","sampler_slots","playlist_sync_enable","playlist_sync_save","playlist_sync_create").contains(argument)){task.run();try{return task.get();}catch(Exception error){throw new IllegalStateException(error);}}
+        if(Arrays.asList("hello","library","playlists","module_read","module_write","sync_cast","podcast_download","podcast_downloads","job","offline_lists","sampler_slots","playlist_sync_enable","playlist_sync_save","playlist_sync_create","player_private_prepare").contains(argument)){task.run();try{return task.get();}catch(Exception error){throw new IllegalStateException(error);}}
         new Handler(Looper.getMainLooper()).post(task);
         try{return task.get(5,TimeUnit.SECONDS);}catch(Exception error){task.cancel(false);throw new IllegalStateException("AMP Player is busy; retry the command",error);}
     }
@@ -55,6 +55,7 @@ public final class ModuleProvider extends ContentProvider {
         if("playlist_sync_enable".equals(action)){PlaylistSync.enable(context,args.getString("base"),args.getString("password"),args.getString("server_id"),args.getString("library_id"));return new JSONObject().put("message","Saved-playlist sync enabled");}
         if("playlist_sync_save".equals(action)){PlaylistSync.saveBound(context,args.getString("server_id"),args.getString("library_id"),args.getJSONObject("envelope"),args.getJSONObject("document"));return new JSONObject().put("message","Saved draft queued safely; conflicts require Library review");}
         if("playlist_sync_create".equals(action)){PlaylistSync.createBound(context,args.getString("server_id"),args.getString("library_id"),args.getBoolean("smart"),args.getString("name"));return new JSONObject().put("message","New playlist queued; refresh after synchronization");}
+        if("player_private_prepare".equals(action))return PrivateLibraryPlayback.prepare(args);
         if("sync_cast".equals(action))return ModuleJobs.syncCast(context,args);
         if("podcast_download".equals(action))return ModuleJobs.podcast(context,args);
         if("podcast_downloads".equals(action))return new JSONObject().put("items",ModuleJobs.podcastDownloads(context));
@@ -69,7 +70,8 @@ public final class ModuleProvider extends ContentProvider {
         if("player_pause".equals(action)){PlaybackService.pauseForLab();return new JSONObject();}
         Player player=PlaybackService.player();
         if(player==null)throw new IllegalStateException("Open AMP Player to connect its audio service.");
-        if("player_stop_radio".equals(action)){if(player.getCurrentMediaItem()!=null&&"amp-radio".equals(player.getCurrentMediaItem().mediaId))player.stop();return new JSONObject().put("message","Phone radio stopped; server and other playback unchanged");}
+        if("player_private_play".equals(action)){List<MediaItem> items=PrivateLibraryPlayback.take(args.getString("token"));PlaybackService.switchToPlayer();player.setMediaItems(items);player.setRepeatMode(Player.REPEAT_MODE_OFF);player.setShuffleModeEnabled(false);player.prepare();player.play();return new JSONObject().put("message","Streaming private library through AMP Player");}
+        if("player_stop_radio".equals(action)){if(player.getCurrentMediaItem()!=null&&("amp-radio".equals(player.getCurrentMediaItem().mediaId)||PrivateLibraryPlayback.owns(player.getCurrentMediaItem())))player.stop();return new JSONObject().put("message","Phone radio stopped; server and other playback unchanged");}
         if("podcast_offline".equals(action)){
             JSONArray downloads=ModuleJobs.podcastDownloads(context);for(int i=0;i<downloads.length();i++){JSONObject item=downloads.getJSONObject(i);String id=item.getString("id");if(id.equals(args.getString("id"))&&id.matches("[a-f0-9-]{36}")){java.io.File file=new java.io.File(context.getFilesDir(),"podcasts/downloads/"+id+".audio");if(!file.isFile())throw new IllegalStateException("Episode is no longer downloaded");player.setMediaItem(new MediaItem.Builder().setMediaId("amp-podcast:"+id).setUri(Uri.fromFile(file)).setMediaMetadata(new MediaMetadata.Builder().setTitle(item.optString("title")).build()).build());player.prepare();player.play();return new JSONObject();}}throw new IllegalArgumentException("Episode is not downloaded");
         }
