@@ -70,7 +70,9 @@ jobs:
         shell: powershell
         run: |
           powershell -NoProfile -File tools/test_install-tested-desktop.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File tools/test_install-tested-desktop-transaction.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify Windows raw and canonical metadata paths
         if: runner.os == 'Windows'
         run: cargo test -p amp-core raw_and_canonical_paths_share_preparation_and_catalog_keys --locked -- --nocapture
