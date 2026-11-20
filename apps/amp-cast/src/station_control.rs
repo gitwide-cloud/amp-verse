@@ -141,7 +141,7 @@ async fn launch(
         )
             .into_response();
     };
-    let destination = format!("127.0.0.1:{}", address.port());
+    let destination = local_listener_address(address).to_string();
     let secret = cast.password.clone().unwrap_or_default();
     let result=tokio::task::spawn_blocking(move||->Result<(),String>{
         let agent:ureq::Agent=ureq::Agent::config_builder().timeout_global(Some(std::time::Duration::from_secs(5))).max_redirects(0).proxy(None).build().into();
@@ -186,7 +186,7 @@ async fn output_start(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Resp
     let Some(address) = *cast.listen_address.lock().unwrap() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
-    let url = format!("http://127.0.0.1:{}/listen.mp3", address.port());
+    let url = format!("http://{}/listen.mp3", local_listener_address(address));
     let mut command = amp_core::command("ffplay");
     command
         .args([
@@ -240,4 +240,39 @@ async fn output_stop(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respo
     }
     stop_output(&cast);
     StatusCode::NO_CONTENT.into_response()
+}
+
+// A specific interface binding does not also listen on loopback.
+fn local_listener_address(address: std::net::SocketAddr) -> std::net::SocketAddr {
+    if address.ip().is_unspecified() {
+        std::net::SocketAddr::new(
+            if address.is_ipv4() {
+                std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)
+            } else {
+                std::net::IpAddr::V6(std::net::Ipv6Addr::LOCALHOST)
+            },
+            address.port(),
+        )
+    } else {
+        address
+    }
+}
+
+#[cfg(test)]
+mod listener_address_tests {
+    #[test]
+    fn callbacks_use_the_bound_interface_and_preserve_ipv6_url_brackets() {
+        for (bound, expected) in [
+            ("0.0.0.0:8877", "127.0.0.1:8877"),
+            ("192.168.10.5:8877", "192.168.10.5:8877"),
+            ("127.0.0.1:8877", "127.0.0.1:8877"),
+            ("[::]:8877", "[::1]:8877"),
+            ("[fd00::5]:8877", "[fd00::5]:8877"),
+        ] {
+            assert_eq!(
+                super::local_listener_address(bound.parse().unwrap()).to_string(),
+                expected
+            );
+        }
+    }
 }

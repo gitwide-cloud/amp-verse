@@ -83,7 +83,7 @@ public final class MainActivity extends Activity {
                 player = pending.get();
                 syncSavedLibrary();
                 player.addListener(new Player.Listener() {
-                    @Override public void onPlayerError(PlaybackException error) { message = isRadio()?"Radio connection interrupted; reconnecting…":"Cannot play this file: " + error.getErrorCodeName(); refresh(); }
+                    @Override public void onPlayerError(PlaybackException error) { message = isRadio()?"Phone station playback failed. Check the host stream and tap Listen to retry.":"Cannot play this file: " + error.getErrorCodeName(); if(castPanel!=null&&isRadio())castPanel.phoneFeedback(message);refresh(); }
                     @Override public void onMediaItemTransition(MediaItem item, int reason) { refresh(); }
                 });
                 draw();
@@ -154,12 +154,12 @@ public final class MainActivity extends Activity {
         }else if(module.equals("AMP Cast")){
             castPanel=new CastPanel(this,appearance,new CastPanel.Listener(){
                 public void listen(String url,String name){
-                    if(player==null){message="Playback service is still connecting. Try Listen again.";refresh();return;}
+                    if(player==null){message="Playback service is still connecting. Try Listen again.";castPanel.phoneFeedback(message);refresh();return;}
                     player.setMediaItem(new MediaItem.Builder().setMediaId("amp-radio").setUri(url).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle(name).build()).build());
-                    player.setRepeatMode(Player.REPEAT_MODE_OFF);player.setShuffleModeEnabled(false);player.prepare();player.play();message="Listening to "+name;refresh();
+                    player.setRepeatMode(Player.REPEAT_MODE_OFF);player.setShuffleModeEnabled(false);player.prepare();player.play();message="Phone listening requested: "+name;castPanel.phoneFeedback(message);refresh();
                 }
                 public void playlist(java.util.List<MediaItem> items){if(player==null||items.isEmpty()){message="No offline songs available.";return;}player.setMediaItems(items);player.setRepeatMode(Player.REPEAT_MODE_OFF);player.prepare();player.play();message="Playing offline station playlist";refresh();}
-                public void stopListening(){if(player!=null&&isRadio()){player.stop();message="Phone listening stopped. Server station remains independent.";refresh();}}
+                public void stopListening(){if(player!=null&&isRadio()){player.stop();message="Phone listening stopped. Server station remains independent.";}else message="Phone station listening is already stopped. Other phone playback is unchanged.";castPanel.phoneFeedback(message);refresh();}
             });page.addView(castPanel);
         }else if(module.equals("AMP Podcasts")){podcastsPanel=new PodcastsPanel(this,appearance);page.addView(podcastsPanel);
         }else{

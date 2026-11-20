@@ -1,0 +1,86 @@
+# Android Cast paths — candidate, not device accepted
+
+Baseline c0e1a5d (feature/browser-server-preview). Branch codex/sag-47-android-cast. Coordinate with SAG-26; this is separate from desktop current-master candidate cc2f8b7.
+
+The panel separates destinations receiving the host program from controls changing the host source. Opening, discovering and connecting must not start/stop audio. Source changes affect all listeners. Phone playback is not sent by the host-broadcast action. Android phone-source sending remains unimplemented; its disabled control says so.
+
+Host status now advertises host_master_launch and server_output_control as command support, not hardware readiness. Missing flags disable those actions. Request-time errors still report missing desktop control endpoint, wrong password or output process failure. Server speaker command acknowledgement is not audible confirmation. Lost status/identity verification disables mutations until a successful refresh or reconnect. Control/download authentication rejection opens password entry without disabling public listening. Shared playlist mutations are disabled too. Chromecast forwards the host URL and does not imply server-native Google Cast support.
+
+## Isolated acceptance matrix (not executed)
+
+Use generated audio and an authenticated private LAN test host with a distinct port/settings directory, not OFFICECOMP or production data. OFFICECOMP is loopback-only and analyzing; do not rebind/restart it. Keep real receiver output gated by the existing explicit test-window requirement.
+
+| Path | Required checks |
+| --- | --- |
+| Discovery | Dedicated test host advertised; select correct identity; no playback change; empty scan gives manual-address/binding guidance |
+| Manual address | Valid LAN host; malformed/loopback URL rejected; unreachable/timeout/401 explicit; credentials not persisted/logged; wrong identity disables controls |
+| Station to phone | Running host stream enables Listen; stopped/preparing source disabled; phone timeline is separate; stop phone does not stop station |
+| Host desktop master | New flag permits request; old host flag absent disables; missing Player/control password failure preserved; accepted request waits for actual running stream; phone source unchanged |
+| Server speakers | New flag required; stop output available independently from station running; missing ffplay/device not presented as audible success |
+| Chromecast | Host stream only, running required; receiver must reach host LAN address; buffering and failed receiver connection checked separately |
+| Phone-source sending | Disabled, explicit gap; no capture or fabricated stream; Player/DJ phone audio never silently replaced by host source |
+| Stale host | Status failure disables source/destination mutations and shared-playlist controls; successful identity-checked refresh recovers |
+
+Validation pending: Android full-flavor compilation and tests, mock endpoint regression execution, screenshots and real Android fixture acceptance, installable preview. No build/device pass claimed by this document. Server contract change has only formatting/diff validation until the serialized build lease is used. Desktop cc2f8b7's 13 passes do not validate this Android patch.
+
+## SAG-76 continuation
+
+The five paths remain visible before connecting, with explicit headings and a connection prerequisite. Background refresh updates host state without replacing the last foreground action result; background failures still appear. A stopped host explains why phone listening and Google Cast are disabled. These changes need full-flavor Android compilation and device review.
+
+### Reachability decision
+
+Do not rebind or restart the installed OFFICECOMP instance while its analysis/playback is active. Its loopback listener is a deliberate safe default in `apps/amp-cast/src/main.rs`; LAN discovery is explicitly suppressed for loopback listeners. This explains the current installation, but is not proof of a working LAN path. Android reports that limitation during initial connection, failed discovery and connection failure.
+
+The isolated fixture must use a new generated-audio directory, new `AMP_DEVICE_CONFIG_DIR` and `AMP_CAST_CONFIG_DIR`, `AMP_ANALYSIS_ENABLED=false`, a nonempty privately supplied `AMP_CAST_PASSWORD`, and `AMP_CAST_BIND=<private-LAN-IP>:<unused-port>`. Do not reuse production config, identities or credentials. Use default discovery UDP 18787 only if available; otherwise verify manual addressing independently and report discovery as untested. Test authenticated controls with both valid and invalid passwords. Never include secrets in reports.
+
+### Reverse direction: concrete missing implementation
+
+Android currently cannot transmit its own Player/DJ master to the server. `CastPanel` invokes `/api/live/launch`, which asks the remote desktop to send audio. `CastClient` supplies host listening URLs; it contains no live audio upload/session implementation. `AudioDsp.queueInput` processes PCM for local output and spectrum analysis, with no network sender. The server already has authenticated `/api/live/start`, `/api/live/audio`, `/api/live/stop` and an `x-amp-live-session` ownership token (`apps/amp-cast/src/live.rs`). The missing Android components are a current-master PCM tap including DJ routing, an encoder and bounded upload worker, and session ownership/cancellation/error handling that preserve local playback. Merely adding a button or posting `/api/live/launch` does not fill that gap.
+
+### Evidence this continuation
+
+- Source inspection and `git diff --check`: PASS.
+- Java compiler / adb discovery: unavailable in this runtime; no APK compiled or installed.
+- Second LAN device, authenticated fixture, real Android, physical output and preservation across device testing: NOT RUN.
+- No live service, analysis queue, playlist, credential or music data was modified. Preservation during real testing remains unverified.
+- Installable preview for this candidate: unavailable. Older artifacts are not evidence for this head.
+
+
+## Review correction candidate (after 30ecdad)
+
+Addressed source findings from SAG-79/SAG-80; this is a new uncompiled candidate, not device acceptance.
+
+- H1: background polling has a separate flag and never sets foreground busy. Its responses are discarded when a newer user operation or host selection supersedes it. Stable playlist manifests no longer recreate buttons every poll. Late dialog actions recheck host identity, verification and foreground busy, with visible feedback rather than silent rejection.
+- H2: desktop sender callbacks and server-speaker URLs use the actual bound interface; unspecified IPv4/IPv6 listeners use the matching loopback family. Added five address regression cases in `station_control.rs`; they have not run under a build lease.
+- H3: shared-manifest 401/403 produces an admin-password prompt while public status/listening stay available. Command auth rejection no longer invalidates public status. Discovered hosts are selected for explicit Connect and password entry; credentials are not persisted.
+- H4: destination readiness uses `on_air`, while `preparing` keeps Stop available and Start disabled.
+- H5/H6: each path has adjacent prerequisites and feedback. Successful recovery clears stale connection errors; host error and server-output-off transitions are reported. Control POSTs refresh status immediately. Source and output-process state are displayed without claiming physical audibility. Phone/TV listen and radio-scoped stop give feedback, and phone player errors appear in the Cast path.
+- H7: reconnect clears previous host state/lists. Google Cast registers receiver status callbacks, distinguishes buffering/playing/error, shows the station URL and direct host-to-speaker path, and detaches callbacks on pause/end. The picker uses the AMP light/dark palette's corresponding AppCompat theme. Actual icon contrast still needs screenshots.
+- M1–M5/M8: disabled styling includes phone-send/shared controls; saved address settings remain visible; wildcard addresses are rejected; Internet radio results have a separate container; queue visibility follows sharing state; empty station lists are explained; starting a host playlist no longer starts phone playback before on-air readiness; Help explains all paths.
+- M7 scope: these changes target the integrated full-flavor `CastPanel` and shared client/activity code. The standalone `android/modules/cast/FeatureScreen.java` companion retains its earlier UI and is not covered by this acceptance or an integrated APK. Do not publish or describe that companion as having these fixes.
+
+Google Cast callback implementation follows the official RemoteMediaClient API: https://developers.google.com/android/reference/com/google/android/gms/cast/framework/media/RemoteMediaClient . Receiver-reported playback is not proof of audibility.
+
+Validation: all changed/new Java files parse using javalang 0.13.0; `rustfmt --edition 2021 --check` and `git diff --check` pass. These are syntax/format checks only, not Java type checking or Android/Rust compilation. Address validation instrumentation was added. Existing playlist/offline mock fixtures were adjusted to a private IPv4 interface because production rejects loopback destinations; these remain same-device mock tests, not LAN acceptance. No automated tests were executed. Exact-head APK, authenticated isolated LAN fixture, physical Android/screenshots and preservation testing remain unavailable. A saved question to Pochiko requests the current serialized lease and authorized build/device access.
+
+
+## Targeted follow-up to SAG-84
+
+- R1/R2: HTTP command rejection has its own exception category; only typed host transport/identity/status-verification failures invalidate reachability. Internet radio, discovery and download failures do not invalidate the selected host. Foreground reachability failures record the affected feedback view, and background recovery updates that view as well as global status.
+- R3/R4: shared actions use the admin-control gate. An auth prompt does not hide the public queue; search and queue visibility agree. A passwordless host returning sharing-disabled 403 is treated as unavailable sharing rather than a password prompt.
+- R5: each foreground operation captures its feedback target. Output transitions use the server-speaker feedback, host program errors use source/desktop feedback, and sharing actions have an adjacent feedback view. Background status failures do not overwrite the last-clicked unrelated path.
+- R6: accepted Google loads wait for asynchronous receiver status; they no longer immediately render stale cached state. The receiver URL guard also rejects wildcard/loopback forms accepted by neither the client nor a remote speaker.
+- R7: the device flow uses the automatically visible saved-address controls, current labels, scroll-to-control helpers and explicit on-air readiness before Listen. Added a generated HTTP fixture regression separating 409/503 command rejection from closed-server reachability failure. These tests are source additions only and have not executed.
+
+The existing build-access interaction remains pending; no duplicate access request, build, APK, device run or live-service change was made for this pass.
+
+
+## Selective restoration on current integration (2026-11-20)
+
+Restored the four interrupted SAG-76 fixes (`06aac8f`, `30ecdad`, `5a39c7e`, `1f44b49`) onto integration `bfbf886` without replacing its newer adaptive HLS playback, friendly discovery labels, discovery identity verification, saved identities, or standalone Cast connection fixes. Manual address/password fields remain behind Advanced connection settings, and the station playlist selector retains its Station controls disclosure. All five path headings and prerequisites remain visible before connection; unsupported or unverified actions remain disabled.
+
+The restoration also prevents a second connection click from clearing the selected client while another operation is finishing. Tests for current disclosures were adjusted to open Advanced explicitly. Added a disconnected-path UI regression, and extended the generated HTTP fixture to cover authorization codes, stale host identity and retained HLS stream selection.
+
+Validation of this restoration: `cargo test -p amp-cast --lib --locked` passed 29 tests with eight existing ignored tests; the bound-interface/IPv6 callback regression passed. All 14 changed/new Java sources parsed using javalang 0.13.0. Rust station-control formatting and `git diff --check` passed. Android assembly and instrumentation execution remain pending CI/device verification; parsing is not Android type checking.
+
+Safe isolated Pixel checks: `CastAddressDeviceTest` uses no network; `CastFailureDeviceTest` creates a same-device private-IPv4 HTTP fixture (skips when no private interface exists); `CastPathsDeviceTest` opens only the Full Cast UI and checks disconnected controls/Advanced disclosure without network or playback commands. None needs `castUrl`. `CastDeviceTest` requires an explicitly supplied isolated generated-audio station and must not target an owner's live station.

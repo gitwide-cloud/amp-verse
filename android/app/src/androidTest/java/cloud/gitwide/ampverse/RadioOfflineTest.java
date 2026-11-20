@@ -29,11 +29,11 @@ public class RadioOfflineTest {
  }
  @Test public void cancelDisconnectsAStalledAudioTransfer()throws Exception {
   Context app=InstrumentationRegistry.getInstrumentation().getTargetContext();File output=File.createTempFile("offline-cancel-",".part",app.getCacheDir());
-  ServerSocket server=new ServerSocket(0,1,InetAddress.getByName("127.0.0.1"));java.util.concurrent.CountDownLatch headers=new java.util.concurrent.CountDownLatch(1),release=new java.util.concurrent.CountDownLatch(1);
+  ServerSocket server=new ServerSocket(0,1,CastTestAddress.privateAddress());java.util.concurrent.CountDownLatch headers=new java.util.concurrent.CountDownLatch(1),release=new java.util.concurrent.CountDownLatch(1);
   Thread host=new Thread(()->{try(Socket socket=server.accept()){BufferedReader reader=new BufferedReader(new InputStreamReader(socket.getInputStream()));String line;while((line=reader.readLine())!=null&&!line.isEmpty()){}socket.getOutputStream().write("HTTP/1.1 200 OK\r\nContent-Length: 10000\r\n\r\na".getBytes(StandardCharsets.US_ASCII));socket.getOutputStream().flush();headers.countDown();release.await(8,java.util.concurrent.TimeUnit.SECONDS);}catch(Exception ignored){}});host.start();
   java.util.concurrent.atomic.AtomicBoolean cancel=new java.util.concurrent.atomic.AtomicBoolean();java.util.concurrent.ExecutorService executor=java.util.concurrent.Executors.newSingleThreadExecutor();
   try{
-   CastClient client=new CastClient("http://127.0.0.1:"+server.getLocalPort(),"");
+   CastClient client=new CastClient("http://"+server.getInetAddress().getHostAddress()+":"+server.getLocalPort(),"");
    java.util.concurrent.Future<Boolean> task=executor.submit(()->{try{client.download(0,output,10000,"unused",cancel::get);return false;}catch(Exception expected){return true;}});
    assertTrue(headers.await(3,java.util.concurrent.TimeUnit.SECONDS));cancel.set(true);
    assertTrue("Cancel must not wait for the twenty-second network timeout",task.get(3,java.util.concurrent.TimeUnit.SECONDS));
@@ -51,14 +51,14 @@ public class RadioOfflineTest {
   StringBuilder checksum=new StringBuilder();for(byte b:java.security.MessageDigest.getInstance("SHA-256").digest(audio))checksum.append(String.format(java.util.Locale.ROOT,"%02x",b&255));
   JSONObject prep=new JSONObject().put("cue_in",1.25).put("cue_out",8.).put("bpm",128).put("manual_override",true).put("manual_cues",new JSONArray().put(new JSONObject().put("id","my-drop").put("number",3).put("seconds",1.25).put("label","My drop")));
   JSONObject metadata=new JSONObject().put("server_id","server").put("station_id","station").put("library_id","library").put("bytes",audio.length).put("sha256",checksum.toString()).put("preparation",prep);
-  ServerSocket server=new ServerSocket(0,8,InetAddress.getByName("127.0.0.1"));
+  ServerSocket server=new ServerSocket(0,8,CastTestAddress.privateAddress());
   Thread thread=new Thread(()->{while(!server.isClosed())try(Socket client=server.accept()){
    BufferedReader reader=new BufferedReader(new InputStreamReader(client.getInputStream(),StandardCharsets.US_ASCII));String request=reader.readLine(),line;while((line=reader.readLine())!=null&&!line.isEmpty()){}
    byte[] body=request.contains("/metadata ")?metadata.toString().getBytes(StandardCharsets.UTF_8):audio;
    OutputStream output=client.getOutputStream();output.write(("HTTP/1.1 200 OK\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));output.write(body);output.flush();
   }catch(Exception error){if(!server.isClosed())throw new RuntimeException(error);}});thread.start();
   try {
-   CastClient client=new CastClient("http://127.0.0.1:"+server.getLocalPort(),"");
+   CastClient client=new CastClient("http://"+server.getInetAddress().getHostAddress()+":"+server.getLocalPort(),"");
    JSONObject manifest=new JSONObject().put("server_id","server").put("station_id","station").put("library_id","library").put("tracks",new JSONArray().put(new JSONObject().put("id",0).put("title","Test song").put("extension","wav")));
    JSONObject playlist=new JSONObject().put("name","My station playlist").put("tracks",new JSONArray().put(0).put(0));
    java.util.List<Integer> progress=new java.util.ArrayList<>();
