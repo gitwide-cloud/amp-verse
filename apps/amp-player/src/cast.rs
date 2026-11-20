@@ -398,6 +398,7 @@ impl Dashboard {
             password: self.password.clone(),
             server_id: status.server_id.clone(),
             library_id: status.library_id.clone()?,
+            password_required: status.password_required,
         })
     }
     pub fn endpoint(&self) -> (String, String) {

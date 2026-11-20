@@ -1,8 +1,8 @@
 # Desktop automatic saved-playlist sync
 
 This client is opt-in. In AMP Cast, connect to the chosen station using its
-existing access code, then choose **Enable sync with this station**. An
-authenticated sync snapshot must confirm the exact server and library identities
+access code only if that station requires one, then choose **Enable sync with
+this station**. Open trusted-LAN stations need no code. A verified sync snapshot must confirm the exact server and library identities
 before the binding is saved. Sync is separate from live Cast routing: starting a
 local broadcast does not change the paired canonical server. No new IP-address
 settings or automatic selection of the first discovered station is introduced.
@@ -48,7 +48,10 @@ editors change those documents.
 Private local state lives under the installation's device configuration directory
 in `playlist-sync`. It stores the canonical baseline/revision, pending complete
 operations, durable offline desired data and conflict snapshots. It does not
-consume the older generic metadata outbox. Windows access codes are protected by
+consume the older generic metadata outbox. Empty credentials on an explicitly selected open station are valid and are not
+sent through credential encryption. Protected stations still require their code;
+a later server protection change is enforced by the server. Nonempty Windows
+access codes are protected by
 current-user DPAPI; Linux uses owner-only directory/file permissions (0700/0600),
 not OS-vault encryption. Credentials are never included in status/error messages.
 The existing server protocol uses authenticated local HTTP, so use a trusted LAN

@@ -19,6 +19,8 @@ pub struct Binding {
     root: PathBuf,
     #[serde(default)]
     ui_root: PathBuf,
+    #[serde(default = "protected_default")]
+    password_required: bool,
     secret: Vec<u8>,
 }
 #[derive(Clone)]
@@ -27,6 +29,7 @@ pub struct Candidate {
     pub password: String,
     pub server_id: String,
     pub library_id: String,
+    pub password_required: bool,
 }
 #[derive(Clone, Serialize, Deserialize, Debug, PartialEq)]
 struct Document {
@@ -75,6 +78,9 @@ struct Completed {
 pub struct SavedView {
     pub settings: Option<amp_core::show::Settings>,
     pub normal: Vec<(PathBuf, amp_core::Playlist)>,
+}
+fn protected_default() -> bool {
+    true
 }
 fn private_dir(path: &Path) -> Result<(), String> {
     amp_core::coordination::directory(path)?;
@@ -289,10 +295,19 @@ struct Transport {
 }
 impl Transport {
     fn new(binding: &Binding) -> Result<Self, String> {
-        let password =
-            String::from_utf8(crate::playlist_sync_secret::open(&binding.secret)?).map_err(err)?;
-        if password.is_empty() {
-            return Err("A protected server access code is required".into());
+        let password = if binding.secret.is_empty() {
+            String::new()
+        } else {
+            match crate::playlist_sync_secret::open(&binding.secret)
+                .and_then(|bytes| String::from_utf8(bytes).map_err(err))
+            {
+                Ok(value) => value,
+                Err(_) if !binding.password_required => String::new(),
+                Err(error) => return Err(error),
+            }
+        };
+        if binding.password_required && password.is_empty() {
+            return Err("The selected protected station requires its access code".into());
         }
         Ok(Self {
             agent: ureq::Agent::config_builder()
@@ -772,7 +787,7 @@ impl Client {
     pub fn show(&mut self, ui: &mut eframe::egui::Ui, candidate: Option<Candidate>, root: &Path) {
         ui.separator();
         ui.strong("Automatic saved-playlist sync");
-        ui.label("Uses the selected authenticated station. Keeps playback and unsaved edits unchanged. Deletions are not synchronized.");
+        ui.label("Uses the selected station. Keeps playback and unsaved edits unchanged. Deletions are not synchronized.");
         if self.binding.is_some() {
             if ui
                 .add_enabled(
@@ -804,13 +819,13 @@ impl Client {
                     if !ui_root.is_absolute(){return Err("Choose this music folder with Library's folder picker before enabling sync".into());}
                     let root=ui_root.canonicalize().map_err(err)?;
                     if local_identity(&root)?!=candidate.library_id{return Err("This is a different library. Explicit source remapping is required; nothing was changed.".into());}
-                    if candidate.password.is_empty(){return Err("Reconnect the selected station with its access code first".into());}
-                    let binding=Binding{base:format!("http://{}",candidate.address),server_id:candidate.server_id,library_id:candidate.library_id,root,ui_root,secret:crate::playlist_sync_secret::seal(candidate.password.as_bytes())?};
+                    if candidate.password_required&&candidate.password.is_empty(){return Err("Reconnect the selected protected station with its access code first".into());}
+                    let binding=Binding{base:format!("http://{}",candidate.address),server_id:candidate.server_id,library_id:candidate.library_id,root,ui_root,password_required:candidate.password_required,secret:if candidate.password.is_empty(){Vec::new()}else{crate::playlist_sync_secret::seal(candidate.password.as_bytes())?}};
                     run_binding(binding,true)
                 });
             }
         } else {
-            ui.weak("Connect to your chosen station with its access code first.");
+            ui.weak("Connect to your chosen station first. Protected stations also need their access code.");
         }
         if self.pending.is_some() {
             ui.spinner();
@@ -835,6 +850,7 @@ mod tests {
                 library_id,
                 root: root.canonicalize().unwrap(),
                 ui_root: root.clone(),
+                password_required: true,
                 secret: crate::playlist_sync_secret::seal(b"test-secret").unwrap(),
             },
         )
@@ -954,6 +970,19 @@ mod tests {
         );
         assert_eq!(player.run.settings.playlists[0].name, "Newly saved");
         assert_eq!(player.dj_browser.playlists[0].1.name, "Newly saved normal");
+    }
+    #[test]
+    fn open_lan_binding_needs_no_credential_but_protected_binding_still_does() {
+        let (_dir, mut binding) = fixture();
+        binding.secret.clear();
+        assert!(Transport::new(&binding).is_err());
+        binding.password_required = false;
+        assert!(Transport::new(&binding).unwrap().password.is_empty());
+        let mut old = serde_json::to_value(&binding).unwrap();
+        old.as_object_mut().unwrap().remove("password_required");
+        let old: Binding = serde_json::from_value(old).unwrap();
+        assert!(old.password_required);
+        assert!(Transport::new(&old).is_err());
     }
     #[test]
     fn three_way_conflicts_and_deletions_are_never_guessed() {
@@ -1135,13 +1164,23 @@ mod tests {
     }
     impl Server {
         fn start() -> Self {
+            Self::start_password(Some("test-secret"))
+        }
+        fn start_password(password: Option<&str>) -> Self {
             let (dir, mut binding) = fixture();
+            binding.password_required = password.is_some();
+            binding.secret = match password {
+                Some(value) if !value.is_empty() => {
+                    crate::playlist_sync_secret::seal(value.as_bytes()).unwrap()
+                }
+                _ => Vec::new(),
+            };
             let config = dir.path().join("server");
             std::fs::create_dir(&config).unwrap();
             let station = amp_cast::Cast::with_identity(
                 binding.root.clone(),
                 amp_core::scan(&binding.root).unwrap(),
-                Some("test-secret".into()),
+                password.map(str::to_owned),
                 binding.server_id.clone(),
                 "station".into(),
                 "Fixture".into(),
@@ -1177,6 +1216,46 @@ mod tests {
         fn drop(&mut self) {
             let _ = self.stop.take().unwrap().send(());
             self.thread.take().unwrap().join().unwrap();
+        }
+    }
+    #[test]
+    fn open_lan_real_backend_syncs_without_code_and_still_pins_authority() {
+        let server = Server::start_password(None);
+        assert!(server.binding.secret.is_empty());
+        assert!(Transport::new(&server.binding).unwrap().get().is_ok());
+        let mut wrong = server.binding.clone();
+        wrong.server_id = "not-the-selected-server".into();
+        assert!(Transport::new(&wrong).unwrap().get().is_err());
+        wrong = server.binding.clone();
+        wrong.library_id = "not-the-selected-library".into();
+        assert!(Transport::new(&wrong).unwrap().get().is_err());
+        let root = server._dir.path().join("open-copy");
+        std::fs::create_dir_all(root.join("ampdj")).unwrap();
+        std::fs::copy(
+            server.binding.root.join("ampdj/library.json"),
+            root.join("ampdj/library.json"),
+        )
+        .unwrap();
+        let mut binding = server.binding.clone();
+        binding.root = root.canonicalize().unwrap();
+        binding.ui_root = binding.root.clone();
+        let doc = normal(&binding, "open-created", "Saved without a code");
+        hydrate(&binding, &doc, None).unwrap();
+        cycle(&binding, &server._dir.path().join("open-client")).unwrap();
+        assert_eq!(
+            local(&server.binding).unwrap()[&doc.document_id].document["name"],
+            "Saved without a code"
+        );
+    }
+    #[test]
+    fn protected_and_invalid_empty_backend_modes_still_reject_no_code_clients() {
+        for password in [Some("test-secret"), Some("")] {
+            let server = Server::start_password(password);
+            let mut unauthorized = server.binding.clone();
+            unauthorized.password_required = false;
+            unauthorized.secret.clear();
+            assert!(Transport::new(&unauthorized).unwrap().get().is_err());
+            assert!(!server.directory.join("playlist-sync/operations").exists());
         }
     }
     #[test]
