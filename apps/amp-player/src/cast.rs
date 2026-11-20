@@ -174,7 +174,7 @@ fn search_radio(query: &str) -> Result<Vec<Radio>, String> {
     Err(format!("Radio search unavailable: {last}"))
 }
 enum Command {
-    Connect(String, String),
+    Connect(String, String, u64),
     Start,
     Stop,
     Refresh,
@@ -182,6 +182,7 @@ enum Command {
     Share,
 }
 struct Update {
+    generation: u64,
     snapshot: Result<Snapshot, String>,
     control_error: Option<String>,
 }
@@ -189,6 +190,10 @@ pub struct Dashboard {
     dlna: crate::dlna::Output,
     pub normalize: bool,
     pending_live: Option<std::time::Instant>,
+    live_binding: Option<(String, String)>,
+    pending_binding: Option<(String, String)>,
+    connection_generation: u64,
+    connected_password: String,
     attempted_host: bool,
     pub(super) google: crate::google_cast::Output,
     listen_after_play: bool,
@@ -233,6 +238,10 @@ impl Default for Dashboard {
                     .and_then(|v| v.as_bool())
                     .unwrap_or(false),
             pending_live: None,
+            live_binding: None,
+            pending_binding: None,
+            connection_generation: 0,
+            connected_password: String::new(),
             attempted_host: false,
             google: Default::default(),
             listen_after_play: false,
@@ -264,7 +273,11 @@ impl Default for Dashboard {
         };
         if std::env::var("AMP_CAST_AUTOCONNECT").as_deref() == Ok("1") {
             dashboard.connected_address = dashboard.address.trim().into();
-            dashboard.send(Command::Connect(dashboard.address.clone(), String::new()));
+            dashboard.send(Command::Connect(
+                dashboard.address.clone(),
+                String::new(),
+                0,
+            ));
         }
         dashboard
     }
@@ -292,11 +305,16 @@ impl Dashboard {
         }
     }
     pub fn request_live(&mut self, player_only: bool) {
-        if self.live_active || self.pending_live.is_some() {
+        if self.radio.is_some() {
+            self.live_status = "Stop receiving the station before sending live audio.".into();
+            return;
+        }
+        if self.live_active || self.sending() {
             return;
         }
         self.live_player_only = player_only;
         self.pending_live = Some(std::time::Instant::now());
+        self.pending_binding = Some(("127.0.0.1:8787".into(), self.password.clone()));
         self.attempted_host = false;
         self.live_status = "Connecting to local broadcast service…".into();
         self.address = "127.0.0.1:8787".into();
@@ -305,6 +323,7 @@ impl Dashboard {
         self.send(Command::Connect(
             self.address.clone(),
             self.password.clone(),
+            0,
         ));
     }
     pub fn prepare_live(&mut self, root: &std::path::Path) {
@@ -313,6 +332,7 @@ impl Dashboard {
         };
         if started.elapsed() > Duration::from_secs(30) {
             self.pending_live = None;
+            self.pending_binding = None;
             self.live_status = format!(
                 "Could not start local broadcast: {}. Check the Cast server and retry.",
                 self.message
@@ -330,6 +350,7 @@ impl Dashboard {
             self.live_status = self.message.clone();
         } else if !self.busy && self.snapshot.is_some() {
             self.pending_live = None;
+            self.pending_binding = None;
             self.live_status =
                 "This Cast server does not support live audio. Update AMP Cast and retry.".into();
         }
@@ -340,6 +361,7 @@ impl Dashboard {
         ui.label(&self.live_status);
         if self.pending_live.is_some() && ui.button("Cancel connection").clicked() {
             self.pending_live = None;
+            self.pending_binding = None;
             self.live_status = "Broadcast connection cancelled".into();
         }
         if !self.live_active
@@ -348,14 +370,15 @@ impl Dashboard {
         {
             self.request_live(self.live_player_only);
         }
+        let cast_address = self.endpoint().0;
         self.google.show(
             ui,
-            &self.connected_address,
+            &cast_address,
             self.live_active && self.snapshot.as_ref().is_some_and(|s| s.status.running),
         );
         self.dlna.show(
             ui,
-            &self.connected_address,
+            &cast_address,
             self.live_active && self.snapshot.as_ref().is_some_and(|s| s.status.running),
         );
         if self.live_active && ui.button("Stop sending live audio").clicked() {
@@ -364,14 +387,41 @@ impl Dashboard {
         }
     }
     pub fn endpoint(&self) -> (String, String) {
-        (
-            if self.connected_address.is_empty() {
-                self.address.clone()
-            } else {
-                self.connected_address.clone()
-            },
-            self.password.clone(),
-        )
+        self.live_binding
+            .as_ref()
+            .or(self.pending_binding.as_ref())
+            .cloned()
+            .unwrap_or_else(|| {
+                (
+                    if self.connected_address.is_empty() {
+                        self.address.clone()
+                    } else {
+                        self.connected_address.clone()
+                    },
+                    self.connected_password.clone(),
+                )
+            })
+    }
+    fn sending(&self) -> bool {
+        self.live_binding.is_some() || self.pending_binding.is_some()
+    }
+    fn arm_live_start(&mut self) {
+        if self.radio.is_some() {
+            self.live_status = "Stop receiving the station before sending live audio.".into();
+            return;
+        }
+        if !self.sending() {
+            self.pending_binding = Some(self.endpoint());
+        }
+        self.live_action = Some(true);
+    }
+    pub fn live_started(&mut self) {
+        self.live_binding = self.pending_binding.take();
+    }
+    pub fn live_ended(&mut self) {
+        self.live_binding = None;
+        self.pending_binding = None;
+        self.pending_live = None;
     }
     fn ensure_worker(&mut self) {
         if self.tx.is_some() {
@@ -381,6 +431,7 @@ impl Dashboard {
         let (updates, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut client: Option<Client> = None;
+            let mut generation = 0;
             loop {
                 let command = match commands.recv_timeout(Duration::from_secs(2)) {
                     Ok(command) => command,
@@ -389,13 +440,15 @@ impl Dashboard {
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
                 let mut control_error = None;
-                if let Command::Connect(address, password) = command {
+                if let Command::Connect(address, password, next_generation) = command {
+                    generation = next_generation;
                     match Client::new(&address, password) {
                         Ok(value) => client = Some(value),
                         Err(error) => {
                             client = None;
                             if updates
                                 .send(Update {
+                                    generation,
                                     snapshot: Err(error),
                                     control_error: None,
                                 })
@@ -431,6 +484,7 @@ impl Dashboard {
                 if let Some(client) = &client
                     && updates
                         .send(Update {
+                            generation,
                             snapshot: client.read(),
                             control_error,
                         })
@@ -443,7 +497,26 @@ impl Dashboard {
         self.tx = Some(tx);
         self.rx = Some(rx);
     }
-    fn send(&mut self, command: Command) {
+    fn send(&mut self, mut command: Command) {
+        if let Command::Connect(address, password, generation) = &mut command {
+            if self.live_binding.is_some()
+                || (self.pending_binding.is_some()
+                    && self.endpoint() != (address.trim().into(), password.clone()))
+            {
+                let (bound_address, _) = self.endpoint();
+                self.connected_address = bound_address;
+                self.message = "Stop sending live audio before changing stations.".into();
+                return;
+            }
+            self.connection_generation = self.connection_generation.wrapping_add(1);
+            *generation = self.connection_generation;
+            self.connected_address = address.trim().into();
+            self.connected_password = password.clone();
+            self.snapshot = None;
+        } else if self.sending() && !matches!(command, Command::Refresh) {
+            self.message = "Stop sending live audio before controlling another source.".into();
+            return;
+        }
         self.ensure_worker();
         match self.tx.as_ref().unwrap().send(command) {
             Ok(()) => {
@@ -476,6 +549,9 @@ impl Dashboard {
         }
 
         while let Some(update) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            if update.generation != self.connection_generation {
+                continue;
+            }
             self.busy = false;
             match update.snapshot {
                 Ok(snapshot) => {
@@ -497,6 +573,12 @@ impl Dashboard {
         }
     }
     fn host(&mut self, root: &std::path::Path, smart: bool) {
+        if self.live_binding.is_some()
+            || (self.pending_binding.is_some() && (smart || self.endpoint().0 != "127.0.0.1:8787"))
+        {
+            self.message = "Stop sending live audio before hosting another station.".into();
+            return;
+        }
         let result = (|| -> Result<std::process::Child, String> {
             let binary = std::env::current_exe()
                 .map_err(failure)?
@@ -564,6 +646,7 @@ impl Dashboard {
                 self.send(Command::Connect(
                     self.address.clone(),
                     self.password.clone(),
+                    0,
                 ));
                 self.message = "Starting your station. Reading the library…".into();
             }
@@ -571,6 +654,10 @@ impl Dashboard {
         }
     }
     fn listen(&mut self, url: &str) {
+        if self.sending() {
+            self.message = "Stop sending live audio before receiving a station.".into();
+            return;
+        }
         if let Some(mut previous) = self.radio.take() {
             let _ = previous.kill();
             let _ = previous.wait();
@@ -707,6 +794,7 @@ impl Dashboard {
                 self.send(Command::Connect(
                     self.address.clone(),
                     self.password.clone(),
+                    0,
                 ));
             }
             let mut play = None;
@@ -735,6 +823,7 @@ impl Dashboard {
                         self.send(Command::Connect(
                             self.address.clone(),
                             self.password.clone(),
+                            0,
                         ));
                     }
                 });
@@ -765,7 +854,7 @@ impl Dashboard {
                 .clicked()
             {
                 if supported {
-                    self.live_action = Some(true);
+                    self.arm_live_start();
                 } else {
                     self.request_live(self.live_player_only);
                 }
@@ -782,6 +871,7 @@ impl Dashboard {
                     self.send(Command::Connect(
                         self.address.clone(),
                         self.password.clone(),
+                        0,
                     ));
                 }
                 if self.host.is_none()
@@ -828,7 +918,10 @@ impl Dashboard {
                 }
             } else {
                 ui.label(&self.hosting);
-                if ui.button("Stop my station").clicked() {
+                if ui
+                    .add_enabled(!self.sending(), egui::Button::new("Stop my station"))
+                    .clicked()
+                {
                     if let Some(mut child) = self.host.take() {
                         let _ = child.kill();
                         let _ = child.wait();
@@ -917,14 +1010,15 @@ impl Dashboard {
             self.listen(&url);
         }
         ui.separator();
+        let cast_address = self.endpoint().0;
         self.google.show(
             ui,
-            &self.connected_address,
+            &cast_address,
             self.snapshot.as_ref().is_some_and(|s| s.status.running),
         );
         self.dlna.show(
             ui,
-            &self.connected_address,
+            &cast_address,
             self.snapshot.as_ref().is_some_and(|s| s.status.running),
         );
         if self.radio.is_some()
@@ -977,6 +1071,107 @@ impl Drop for Dashboard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn mock_dashboard() -> (Dashboard, mpsc::Receiver<Command>, mpsc::Sender<Update>) {
+        let (tx, commands) = mpsc::channel();
+        let (updates, rx) = mpsc::channel();
+        let dashboard = Dashboard {
+            tx: Some(tx),
+            rx: Some(rx),
+            ..Default::default()
+        };
+        (dashboard, commands, updates)
+    }
+    fn live_snapshot() -> Snapshot {
+        Snapshot {
+            status: Status {
+                capabilities: serde_json::json!({"live_dj":true}),
+                running: true,
+                ..Default::default()
+            },
+            queue: Queue::default(),
+            manifest: None,
+        }
+    }
+    #[test]
+    fn active_live_binding_keeps_quick_cast_on_original_endpoint_and_auth() {
+        let (mut dashboard, commands, _) = mock_dashboard();
+        dashboard.send(Command::Connect(
+            "server-a:8787".into(),
+            "secret-a".into(),
+            0,
+        ));
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Command::Connect(_, _, 1)
+        ));
+        dashboard.arm_live_start();
+        dashboard.live_started();
+        dashboard.live_active = true;
+        // Reproduce address/access-code edits and a station selection from another pane.
+        dashboard.address = "server-b:8787".into();
+        dashboard.password = "secret-b".into();
+        dashboard.connected_address = dashboard.address.clone();
+        dashboard.send(Command::Connect(
+            dashboard.address.clone(),
+            dashboard.password.clone(),
+            0,
+        ));
+        dashboard.request_live(true);
+        assert_eq!(
+            dashboard.endpoint(),
+            ("server-a:8787".into(), "secret-a".into())
+        );
+        assert_eq!(dashboard.connected_address, "server-a:8787");
+        assert!(
+            commands.try_recv().is_err(),
+            "no reconnect/restart may reach the sender or station"
+        );
+        dashboard.send(Command::Play("unrelated".into()));
+        assert!(
+            commands.try_recv().is_err(),
+            "a sending app cannot switch into receiver control"
+        );
+    }
+    #[test]
+    fn pending_live_rejects_station_retarget_and_ignores_old_worker_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut dashboard, commands, updates) = mock_dashboard();
+        dashboard.send(Command::Connect("server-b:8787".into(), "b".into(), 0));
+        commands.recv().unwrap();
+        dashboard.request_live(false);
+        assert!(
+            matches!(commands.recv().unwrap(), Command::Connect(a, _, 2) if a == "127.0.0.1:8787")
+        );
+        dashboard.send(Command::Connect("server-b:8787".into(), "b".into(), 0));
+        assert!(commands.try_recv().is_err());
+        updates
+            .send(Update {
+                generation: 1,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        dashboard.prepare_live(temp.path());
+        assert!(
+            dashboard.live_action.is_none(),
+            "old server live capability cannot activate pending source"
+        );
+        assert!(dashboard.snapshot.is_none());
+        updates
+            .send(Update {
+                generation: 2,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        dashboard.prepare_live(temp.path());
+        assert_eq!(dashboard.live_action, Some(true));
+        assert_eq!(dashboard.endpoint().0, "127.0.0.1:8787");
+        dashboard.live_started();
+        assert_eq!(dashboard.endpoint().0, "127.0.0.1:8787");
+    }
     #[test]
     fn live_start_waits_for_capability_and_times_out_readably() {
         let temp = tempfile::tempdir().unwrap();
@@ -1036,7 +1231,7 @@ mod tests {
         );
         dashboard.poll();
         assert!(dashboard.tx.is_none(), "Passive polling must stay dormant");
-        dashboard.send(Command::Connect(address.clone(), "test-password".into()));
+        dashboard.send(Command::Connect(address.clone(), "test-password".into(), 0));
         assert!(dashboard.tx.is_some());
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while dashboard.snapshot.is_none() && std::time::Instant::now() < deadline {

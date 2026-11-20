@@ -3170,11 +3170,18 @@ impl Player {
                     )
                 })();
                 match result {
-                    Ok(broadcast) => self.live_mix = Some(broadcast),
-                    Err(error) => self.cast.live_status = error,
+                    Ok(broadcast) => {
+                        self.cast.live_started();
+                        self.live_mix = Some(broadcast);
+                    }
+                    Err(error) => {
+                        self.cast.live_ended();
+                        self.cast.live_status = error;
+                    }
                 }
             } else {
                 self.live_mix = None;
+                self.cast.live_ended();
                 if let Some(audio) = &self.audio {
                     audio.stop_broadcast_tap();
                 }
