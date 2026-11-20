@@ -435,25 +435,55 @@ mod tests {
         .map(Into::into)
         .collect()
     }
-    fn wait_for_audio(directory: &Path) {
+    fn wait_for_audio(directory: &Path, session: &Session) -> Result<(), String> {
         let deadline = Instant::now() + Duration::from_secs(5);
+        let mut probe_error = String::new();
         while Instant::now() < deadline {
-            if std::fs::read_dir(directory)
-                .unwrap()
-                .filter_map(Result::ok)
-                .any(|entry| {
-                    entry
-                        .file_name()
-                        .to_string_lossy()
-                        .starts_with(".amp-recording-")
-                        && entry.metadata().is_ok_and(|m| m.len() > 16384)
-                })
-            {
-                return;
+            // Never mask an early FFmpeg exit behind the file-readiness timeout.
+            match session.events.try_recv() {
+                Ok(Event::Finished(Err(error))) => return Err(error),
+                Ok(Event::Finished(Ok(path))) => {
+                    return Err(format!("Capture ended before Stop: {}", path.display()));
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    return Err("Capture worker disconnected before writing audio".into());
+                }
+                Ok(Event::Started) | Err(mpsc::TryRecvError::Empty) => {}
+            }
+            for entry in std::fs::read_dir(directory).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                if !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".amp-recording-")
+                {
+                    continue;
+                }
+                // Windows directory entries can cache a writer's old EOF until its handle
+                // closes. Read through a freshly opened file, not DirEntry::metadata().
+                let probe = (|| -> std::io::Result<bool> {
+                    let mut file = std::fs::File::open(entry.path())?;
+                    if file.seek(SeekFrom::End(0))? <= 16384 {
+                        return Ok(false);
+                    }
+                    file.seek(SeekFrom::Start(16384))?;
+                    let mut byte = [0u8; 1];
+                    file.read_exact(&mut byte)?;
+                    Ok(true)
+                })();
+                match probe {
+                    Ok(true) => return Ok(()),
+                    Ok(false) => {}
+                    Err(error) => probe_error = error.to_string(),
+                }
             }
             std::thread::sleep(Duration::from_millis(50));
         }
-        panic!("Generated FFmpeg source did not write capture audio within five seconds");
+        let _ = session.stop.send(());
+        let result = finished(session);
+        Err(format!(
+            "Generated FFmpeg source did not write capture audio within five seconds; last file probe: {probe_error}; capture result after Stop: {result:?}"
+        ))
     }
     fn started(session: &Session) {
         match session
@@ -510,7 +540,7 @@ mod tests {
         let output = directory.path().join("recording.wav");
         let session = capture(output.clone(), generated());
         started(&session);
-        wait_for_audio(directory.path());
+        wait_for_audio(directory.path(), &session).unwrap();
         let before = Instant::now();
         session.stop.send(()).unwrap();
         assert_eq!(finished(&session).unwrap(), output);
@@ -541,7 +571,7 @@ mod tests {
         let racing = directory.path().join("racing.wav");
         let session = capture(racing.clone(), generated());
         started(&session);
-        wait_for_audio(directory.path());
+        wait_for_audio(directory.path(), &session).unwrap();
         std::fs::write(&racing, b"created during recording").unwrap();
         session.stop.send(()).unwrap();
         let error = finished(&session).unwrap_err();
@@ -567,7 +597,9 @@ mod tests {
             .map(Into::into)
             .collect();
         let session = capture(output.clone(), invalid);
-        let error = finished(&session).unwrap_err();
+        started(&session);
+        // The readiness helper must return the actual FFmpeg error, not a generic timeout.
+        let error = wait_for_audio(directory.path(), &session).unwrap_err();
         assert!(
             error.contains("amp_invalid_capture_filter"),
             "stderr detail missing: {error}"
@@ -576,7 +608,7 @@ mod tests {
         let output = directory.path().join("closed.wav");
         let session = capture(output.clone(), generated());
         started(&session);
-        wait_for_audio(directory.path());
+        wait_for_audio(directory.path(), &session).unwrap();
         let mut recorder = Recorder::default();
         assert!(recorder.session.replace(session).is_none());
         // Detach only the event receiver so completion remains observable after UI disposal.
@@ -601,7 +633,7 @@ mod tests {
         let output = directory.path().join("exit.wav");
         let session = capture(output.clone(), generated());
         started(&session);
-        wait_for_audio(directory.path());
+        wait_for_audio(directory.path(), &session).unwrap();
         let process = session.process.clone();
         let mut recorder = Recorder::default();
         assert!(recorder.session.replace(session).is_none());

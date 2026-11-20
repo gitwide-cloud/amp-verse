@@ -32,3 +32,6 @@ Requires FFmpeg built with PulseAudio input and a PulseAudio/PipeWire Pulse serv
 - **Not yet tested on physical Windows/Linux capture devices.** Device permissions, malformed device names, disconnection and audibility still need hardware validation.
 
 Publication checks a bounded RIFF chunk parser for actual complete stereo 24-bit/48 kHz audio frames, not file/header size alone. Zero-duration captures are rejected; recorded silence with real frames is retained.
+
+
+Windows fixture readiness reads actual bytes through a fresh file handle rather than cached directory-entry size. A same-device generated-audio probe verified that directory size could remain zero while a fresh handle read 262144 bytes, with the private staging handle still open and FFmpeg exiting successfully. The production staging ownership is unchanged. Readiness keeps its five-second limit and returns the capture worker's actual early-exit diagnostics; it does not silently discard completion failures.
