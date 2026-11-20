@@ -145,7 +145,7 @@ async fn bootstrap(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respons
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({"browser_session_persistent":cast.config_dir.lock().unwrap().is_some(),"tracks":cast.tracks.len(),"capabilities":{"library":true,"preparation":true,"waveform":true,"lab_export":true,"playlists":true,"smart_playlists":true,"dj":false,"stems":false,"arrangement":false},"modules":[{"id":"library","available":true},{"id":"preparation","available":true},{"id":"lab","available":true},{"id":"dj","available":false},{"id":"stems","available":false},{"id":"arrangement","available":false}]})).into_response()
+    Json(json!({"password_required":cast.password.is_some(),"browser_session_persistent":cast.config_dir.lock().unwrap().is_some(),"library_id":cast.library_id,"server_name":cast.station_name,"smart_playlist_template":amp_core::show::Settings::default().playlists.into_iter().next(),"tracks":cast.tracks.len(),"capabilities":{"library":true,"preparation":true,"waveform":true,"lab_export":true,"playlists":true,"smart_playlists":true,"dj":false,"stems":false,"arrangement":false},"modules":[{"id":"library","available":true},{"id":"preparation","available":true},{"id":"lab","available":true},{"id":"dj","available":false},{"id":"stems","available":false},{"id":"arrangement","available":false}]})).into_response()
 }
 async fn tracks(
     State(cast): State<Arc<Cast>>,
@@ -176,7 +176,7 @@ async fn tracks(
         })
         .collect();
     let saved = store().lock().unwrap();
-    let rows:Vec<_>=matches.iter().skip(offset).take(limit).map(|(id,t)|{let p=saved.edits.get(&format!("{}:{id}",cast.server_id)).unwrap_or(&t.preparation);json!({"id":id,"title":t.title,"path":t.path,"bpm":p.bpm,"key":p.key,"duration":p.analysis.as_ref().map(|a|a.duration),"cue_in":p.cue_in,"cue_out":p.cue_out,"artist":p.extensions.get("artist"),"album":p.extensions.get("album")})}).collect();
+    let rows:Vec<_>=matches.iter().skip(offset).take(limit).map(|(id,t)|{let p=saved.edits.get(&format!("{}:{id}",cast.server_id)).unwrap_or(&t.preparation);json!({"id":id,"title":t.title,"path":player_control::portable_path(&t.path),"bpm":p.bpm,"key":p.key,"duration":p.analysis.as_ref().map(|a|a.duration),"cue_in":p.cue_in,"cue_out":p.cue_out,"artist":p.extensions.get("artist"),"album":p.extensions.get("album")})}).collect();
     Json(json!({"tracks":rows,"total":matches.len(),"offset":offset,"limit":limit})).into_response()
 }
 async fn preparation(
@@ -279,7 +279,7 @@ fn byte_range(value: Option<&str>, len: u64) -> Result<(u64, u64, bool), ()> {
     }
     Ok((start, end, true))
 }
-async fn file_response(file: PathBuf, headers: HeaderMap, download: bool) -> Response {
+pub(super) async fn file_response(file: PathBuf, headers: HeaderMap, download: bool) -> Response {
     let mime = match file
         .extension()
         .and_then(|e| e.to_str())
@@ -651,6 +651,37 @@ async fn export_audio(
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
+fn raw_smart_settings(cast: &Cast) -> Result<Value, String> {
+    let path = cast.root.join("ampdj/smart-playlists.json");
+    let bytes = if let Some(bytes) = amp_core::catalog_db::read(&path)? {
+        Some(bytes)
+    } else {
+        match std::fs::read(&path) {
+            Ok(bytes) => Some(bytes),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                match std::fs::read(cast.root.join(".ampverse/show.json")) {
+                    Ok(bytes) => Some(bytes),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(_) => return Err("Cannot read legacy Smart playlist settings".into()),
+                }
+            }
+            Err(_) => return Err("Cannot read Smart playlist settings".into()),
+        }
+    };
+    let mut value = match bytes {
+        Some(bytes) => {
+            if bytes.len() > 4 * 1024 * 1024 {
+                return Err("Smart settings exceed supported size".into());
+            }
+            serde_json::from_slice(&bytes).map_err(|_| "Cannot read Smart playlist settings")?
+        }
+        None => {
+            serde_json::to_value(amp_core::show::Settings::default()).map_err(|e| e.to_string())?
+        }
+    };
+    amp_core::coordination::adopt_legacy(&mut value)?;
+    Ok(value)
+}
 async fn playlists(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
@@ -669,7 +700,7 @@ async fn playlists(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respons
                 }
             }
         }
-        let settings = amp_core::show::Settings::load(&cast.root)?;
+        let settings = raw_smart_settings(&cast)?;
         Ok(json!({"playlists":lists,"smart_revision":settings}))
     })
     .await;
@@ -680,6 +711,8 @@ async fn playlists(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respons
 }
 #[derive(Deserialize)]
 struct PlaylistEdit {
+    library_id: Option<String>,
+    track_paths: Option<Vec<String>>,
     id: Option<String>,
     name: String,
     #[serde(default)]
@@ -690,18 +723,39 @@ struct PlaylistEdit {
 async fn save_playlist(
     State(cast): State<Arc<Cast>>,
     headers: HeaderMap,
-    Json(e): Json<PlaylistEdit>,
+    Json(mut e): Json<PlaylistEdit>,
 ) -> Response {
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if let Some(paths) = e.track_paths.take() {
+        if e.library_id.as_deref() != cast.library_id.as_deref() || cast.library_id.is_none() {
+            return err(
+                StatusCode::CONFLICT,
+                "Library changed. Refresh before saving this playlist.",
+            );
+        }
+        if paths.len() > 20000 {
+            return err(StatusCode::BAD_REQUEST, "Playlist has too many songs.");
+        }
+        let Some(indices) = paths
+            .iter()
+            .map(|path| player_control::track_index(&cast, path))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return err(
+                StatusCode::CONFLICT,
+                "A selected song left this library. Refresh before saving.",
+            );
+        };
+        e.tracks = indices;
     }
     if e.name.trim().is_empty() || e.name.len() > 200 || e.tracks.len() > 20000 {
         return err(StatusCode::BAD_REQUEST, "Invalid playlist");
     }
     let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
         if let Some(mut rules) = e.rules {
-            let mut settings = amp_core::show::Settings::load(&cast.root)?;
-            let current = serde_json::to_value(&settings).map_err(|e| e.to_string())?;
+            let mut current = raw_smart_settings(&cast)?;
             if e.revision.as_ref() != Some(&current) {
                 return Err("Smart playlists changed; reload settings revision".into());
             }
@@ -712,13 +766,30 @@ async fn save_playlist(
                 return Err("Invalid playlist ID".into());
             }
             rules.id = id.into();
-            if let Some(p) = settings.playlists.iter_mut().find(|p| p.id == id) {
-                *p = rules
+            let rule_value = serde_json::to_value(&rules).map_err(|e| e.to_string())?;
+            let entries = current["playlists"]
+                .as_array_mut()
+                .ok_or("Invalid Smart playlist container")?;
+            if let Some(existing) = entries.iter_mut().find(|p| p["id"] == id) {
+                existing
+                    .as_object_mut()
+                    .ok_or("Invalid Smart playlist")?
+                    .extend(rule_value.as_object().ok_or("Invalid rules")?.clone());
             } else {
-                settings.playlists.push(rules)
+                entries.push(rule_value);
             }
+            let settings: amp_core::show::Settings =
+                serde_json::from_value(current.clone()).map_err(|e| e.to_string())?;
             settings.validate()?;
-            settings.save(&cast.root)?;
+            let library = cast
+                .library_id
+                .as_deref()
+                .ok_or("Library identity unavailable")?;
+            amp_core::coordination::save_document(
+                &cast.root.join("ampdj/smart-playlists.json"),
+                &current,
+                library,
+            )?;
             Ok(json!({"id":format!("smart_{id}")}))
         } else {
             let id =
@@ -1075,6 +1146,53 @@ mod api_tests {
             )
             .await
             .unwrap()
+    }
+    #[tokio::test]
+    async fn smart_creation_preserves_opaque_container_rules_hints_version_and_rejects_stale_revision()
+     {
+        let (root, _cast, app) = fixture();
+        let path = root.path().join("ampdj/smart-playlists.json");
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut original = serde_json::to_value(amp_core::show::Settings::default()).unwrap();
+        original["version"] = json!(2);
+        original["opaque_container"] = json!({"provider":"keep"});
+        original["playlists"][0]["opaque_rule"] = json!([1, 2, 3]);
+        original["playlists"][0]["source_library"] = json!("foreign-library");
+        original["playlists"][0]["source_root_hint"] = json!("generated-foreign-source");
+        amp_core::coordination::atomic_write(&path, &original).unwrap();
+        let snapshot =
+            value(read(&app, "/api/studio/playlists").await).await["smart_revision"].clone();
+        let rules =
+            serde_json::to_value(amp_core::show::Settings::default().playlists.remove(0)).unwrap();
+        let response = write(
+            &app,
+            "/api/studio/playlists",
+            json!({"name":"New Smart","rules":rules,"revision":snapshot}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = raw_smart_settings(&_cast).unwrap();
+        assert_eq!(saved["version"], 2);
+        assert_eq!(saved["opaque_container"], original["opaque_container"]);
+        assert_eq!(
+            saved["playlists"][0]["opaque_rule"],
+            original["playlists"][0]["opaque_rule"]
+        );
+        assert_eq!(saved["playlists"][0]["source_library"], "foreign-library");
+        assert_eq!(
+            saved["playlists"][0]["source_root_hint"],
+            "generated-foreign-source"
+        );
+        assert_eq!(saved["playlists"].as_array().unwrap().len(), 2);
+        let response = write(
+            &app,
+            "/api/studio/playlists",
+            json!({"name":"Stale Smart","rules":rules,"revision":snapshot}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        let after = raw_smart_settings(&_cast).unwrap();
+        assert_eq!(saved, after);
     }
     async fn ticket(app: &Router) -> String {
         let response = app

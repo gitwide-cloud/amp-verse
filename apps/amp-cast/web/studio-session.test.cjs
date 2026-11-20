@@ -1,11 +1,11 @@
 const test=require('node:test'),assert=require('node:assert/strict'),fs=require('node:fs'),vm=require('node:vm');
 function page(initiallySignedIn=false,emptyFile=false){
- class Element {constructor(id=''){this.id=id;this.children=[];this.value='';this.textContent='';this.dataset={};this.classList={toggle(){}};}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}setAttribute(){}focus(){this.focused=true;}querySelector(){return null;}pause(){}load(){}removeAttribute(){}get options(){return this.children;}}
+ class Element {constructor(id=''){this.id=id;this.children=[];this.value='';this.textContent='';this.dataset={};this.classList={toggle(){}};}append(...nodes){this.children.push(...nodes);}replaceChildren(...nodes){this.children=nodes;}setAttribute(){}focus(){this.focused=true;}querySelector(){return null;}pause(){}async play(){this.played=true;}load(){}removeAttribute(){}get options(){return this.children;}}
  const elements=new Map(),get=id=>{if(!elements.has(id))elements.set(id,new Element(id));return elements.get(id);};
- let signedIn=initiallySignedIn,failPlaylists=false;
+ let signedIn=initiallySignedIn,failPlaylists=false,serverPlaying=false;
  const calls=[];
  const response=(status,data)=>({status,ok:status>=200&&status<300,text:async()=>typeof data==='string'?data:JSON.stringify(data),json:async()=>data});
- const fetch=async(url,options)=>{calls.push({url,options});assert.equal(options.credentials,'same-origin');if(url==='/api/studio/session'){if(options.headers['x-amp-password']!=='pairing-code')return response(401,'');signedIn=true;return response(200,{signed_in:true});}if(url==='/api/studio/session/logout'){signedIn=false;return response(204,{});}if(url==='/api/status')return response(200,{running:false,listeners:0});if(!signedIn)return response(401,'');if(url==='/api/studio/bootstrap')return response(200,{capabilities:{library:true}});if(url==='/api/station/playlists')return failPlaylists?response(503,{error:'Saved playlists are busy. Wait a moment and retry.'}):response(200,{playlists:[]});if(url.endsWith('/audio')&&options.method==='HEAD')return response(emptyFile?422:200,{});if(url.startsWith('/api/studio/tracks'))return response(200,{tracks:emptyFile?[{id:0,title:'Empty fixture'}]:[],total:emptyFile?1:0});throw Error('Unexpected route '+url);};
+ const fetch=async(url,options)=>{calls.push({url,options});assert.equal(options.credentials,'same-origin');if(url==='/api/studio/session'){if(options.headers['x-amp-password']!=='pairing-code')return response(401,'');signedIn=true;return response(200,{signed_in:true});}if(url==='/api/studio/session/logout'){signedIn=false;return response(204,{});}if(url==='/api/status')return response(200,{running:serverPlaying,source:serverPlaying?'player_queue':'',listeners:0,now_playing:serverPlaying?'Generated song':null});if(!signedIn)return response(401,'');if(url==='/api/studio/bootstrap')return response(200,{capabilities:{library:true},library_id:'fixture-library'});if(url==='/api/station/playlists')return failPlaylists?response(503,{error:'Saved playlists are busy. Wait a moment and retry.'}):response(200,{playlists:[]});if(url.startsWith('/api/player/audio?')&&options.method==='HEAD')return response(emptyFile?422:200,{});if(url.startsWith('/api/player/playlist?'))return response(200,{library_id:'fixture-library',kind:'playlist',selection_mode:'ordered',tracks:[{path:'artist/song.wav',title:'Generated song'},{path:'artist/song.wav',title:'Generated song'}]});if(url==='/api/player/play'){serverPlaying=true;return response(204,{});}if(url==='/api/player/queue')return response(204,{});if(url==='/api/stop'){serverPlaying=false;return response(204,{});}if(url.startsWith('/api/studio/tracks'))return response(200,{tracks:emptyFile?[{id:0,path:'empty.wav',title:'Empty fixture'}]:[{id:17,path:'artist/song.wav',title:'Generated song'}],total:1});throw Error('Unexpected route '+url);};
  const sandbox={document:{getElementById:get,createElement:()=>new Element(),querySelectorAll:()=>[]},window:{addEventListener(){},confirm:()=>true},location:{hash:''},history:{replaceState(){}},fetch,setTimeout(){},Audio:Element,URL,console};
  vm.runInNewContext(fs.readFileSync(__dirname+'/studio.js','utf8'),sandbox);
  return {get,calls,setFail:()=>{failPlaylists=true;},settle:()=>new Promise(resolve=>setImmediate(resolve))};
@@ -26,7 +26,20 @@ test('selecting an empty audio file gives repair guidance instead of starting si
  function find(n){if(n.textContent==='Play'&&n.onclick)return n;for(const c of n.children||[]){const result=find(c);if(result)return result;}}
  const button=find(p.get('tracks'));assert(button);await button.onclick();await p.settle();
  assert.match(p.get('message').textContent,/audio file is empty.*repair/i);
- assert(p.calls.some(c=>c.url==='/api/studio/tracks/0/audio'&&c.options.method==='HEAD'));
+ assert(p.calls.some(c=>c.url==='/api/player/audio?library_id=fixture-library&path=empty.wav'&&c.options.method==='HEAD'));
  assert.equal(p.get('player-audio').src,undefined);
  assert.equal(p.get('access-panel').open,false);
+});
+
+test('Library Play and Queue honor Server speakers with stable paths and explicit Stop',async()=>{
+ const p=page(true);await p.settle();p.get('player-output').value='server';p.get('player-output').onchange();assert.equal(p.get('remote-output').value,'server');
+ const buttons=p.get('tracks').children[0].children[3].children[0].children;
+ await buttons.find(b=>b.textContent==='Play').onclick();
+ const play=p.calls.find(c=>c.url==='/api/player/play');assert.deepEqual(JSON.parse(play.options.body),{library_id:'fixture-library',tracks:['artist/song.wav'],server_speakers:true});assert.equal(p.get('player-audio').played,undefined);
+ await buttons.find(b=>b.textContent==='Queue').onclick();const queue=p.calls.find(c=>c.url==='/api/player/queue');assert.deepEqual(JSON.parse(queue.options.body),{library_id:'fixture-library',tracks:['artist/song.wav']});
+ await p.get('player-server-stop').onclick();assert(p.calls.some(c=>c.url==='/api/stop'));assert.equal(p.get('message').textContent,'Server playback stopped.');
+});
+
+test('This device saved playlist streams privately without changing the global station',async()=>{
+ const p=page(true);await p.settle();p.get('player-output').value='device';p.get('player-playlist').value='normal_fixture';await p.get('player-playlist-start').onclick();assert(p.calls.some(c=>c.url==='/api/player/playlist?library_id=fixture-library&playlist_id=normal_fixture'));assert(!p.calls.some(c=>c.url==='/api/player/play'||c.url==='/api/stop'));assert.equal(p.get('player-audio').played,true);assert.equal(p.get('player-audio').src,'/api/player/audio?library_id=fixture-library&path=artist%2Fsong.wav');assert.equal(p.get('queue').children.length,1);
 });

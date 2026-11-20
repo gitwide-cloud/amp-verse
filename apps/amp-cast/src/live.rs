@@ -54,6 +54,8 @@ async fn start_live(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respon
     station.source = "live_dj".into();
     station.now_playing = Some("Live DJ mix".into());
     station.error = None;
+    station.player_failures = 0;
+    station.player_last_issue = None;
     station.live_token = Some(token.clone());
     station.live_next_sequence = 0;
     station.live_last_hash = None;

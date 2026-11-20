@@ -57,7 +57,7 @@ pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
                 .iter()
                 .filter_map(|path| cast.tracks.iter().position(|t| &t.path == path))
                 .collect();
-            result.push(json!({"id":format!("normal_{}",path.file_stem().unwrap_or_default().to_string_lossy()),"name":p.name,"kind":"playlist","tracks":tracks}));
+            result.push(json!({"id":format!("normal_{}",path.file_stem().unwrap_or_default().to_string_lossy()),"name":p.name,"kind":"playlist","unavailable":p.tracks.len().saturating_sub(tracks.len()),"tracks":tracks}));
         }
     }
     Ok(result)

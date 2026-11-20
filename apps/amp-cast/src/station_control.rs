@@ -183,79 +183,91 @@ async fn launch(
     }
 }
 pub(super) fn stop_output(cast: &Cast) {
-    if let Some(mut child) = cast.server_output.lock().unwrap().take() {
-        let _ = child.kill();
-        let _ = child.wait();
+    *cast.server_output_error.lock().unwrap() = None;
+    if let Some(mut output) = cast.server_output.lock().unwrap().take() {
+        output.stop();
     }
 }
 pub(super) fn output_running(cast: &Cast) -> bool {
-    let mut output = cast.server_output.lock().unwrap();
-    if let Some(child) = output.as_mut() {
-        matches!(child.try_wait(), Ok(None))
-    } else {
-        false
+    let mut slot = cast.server_output.lock().unwrap();
+    if slot.as_mut().is_some_and(|output| output.running()) {
+        return true;
     }
+    if let Some(mut output) = slot.take() {
+        *cast.server_output_error.lock().unwrap() = output.error();
+        output.stop();
+    }
+    false
+}
+pub(super) async fn probe_output() -> Result<(), String> {
+    let mut command = amp_core::command("ffplay");
+    command.args([
+        "-nodisp",
+        "-autoexit",
+        "-loglevel",
+        "error",
+        "-f",
+        "s16le",
+        "-ar",
+        "44100",
+        "-ac",
+        "2",
+        "-i",
+        "pipe:0",
+    ]);
+    probe_output_command(command).await
+}
+async fn probe_output_command(command: std::process::Command) -> Result<(), String> {
+    use tokio::io::AsyncWriteExt;
+    let message = "Server speakers are unavailable. Select This device, or enable an audio device for the server account and retry.";
+    let mut child=tokio::process::Command::from(command).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null()).kill_on_drop(true).spawn().map_err(|_|"Server audio player is unavailable. Install FFplay on the server, or select This device.".to_string())?;
+    let mut input = child.stdin.take().ok_or(message.to_string())?;
+    let write = tokio::time::timeout(
+        std::time::Duration::from_secs(2),
+        input.write_all(&[0; 8820]),
+    )
+    .await;
+    drop(input);
+    let status = tokio::time::timeout(std::time::Duration::from_secs(3), child.wait()).await;
+    if !matches!(write, Ok(Ok(()))) || !matches!(status,Ok(Ok(exit)) if exit.success()) {
+        let _ = child.kill().await;
+        let _ = child.wait().await;
+        return Err(message.into());
+    }
+    Ok(())
 }
 async fn output_start(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let _operation = cast.operation.lock().await;
+    if let Err(message) = probe_output().await {
+        *cast.server_output_error.lock().unwrap() = Some(message.clone());
+        return (StatusCode::SERVICE_UNAVAILABLE, message).into_response();
+    }
+    output_start_unlocked(cast.clone()).await
+}
+pub(super) async fn output_start_unlocked(cast: Arc<Cast>) -> Response {
     if !cast.station.lock().await.running {
         return (StatusCode::CONFLICT, "Start a station first").into_response();
     }
     if output_running(&cast) {
         return StatusCode::NO_CONTENT.into_response();
     }
-    let Some(address) = *cast.listen_address.lock().unwrap() else {
-        return StatusCode::SERVICE_UNAVAILABLE.into_response();
-    };
-    let url = format!("http://{}/listen.mp3", local_listener_address(address));
     let mut command = amp_core::command("ffplay");
-    command
-        .args([
-            "-nodisp",
-            "-autoexit",
-            "-loglevel",
-            "error",
-            "-f",
-            "mp3",
-            "-i",
-            "pipe:0",
-        ])
-        .stdin(std::process::Stdio::piped())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    match command.spawn() {
-        Ok(mut child) => {
-            let Some(mut input) = child.stdin.take() else {
-                return StatusCode::SERVICE_UNAVAILABLE.into_response();
-            };
-            std::thread::spawn(move || {
-                use std::io::{Read, Write};
-                let agent: ureq::Agent = ureq::Agent::config_builder()
-                    .proxy(None)
-                    .max_redirects(0)
-                    .build()
-                    .into();
-                if let Ok(mut response) = agent.get(url).call() {
-                    let mut source = response.body_mut().as_reader();
-                    let mut buffer = [0u8; 8192];
-                    while let Ok(n) = source.read(&mut buffer) {
-                        if n == 0 || input.write_all(&buffer[..n]).is_err() {
-                            break;
-                        }
-                    }
-                }
-            });
-            *cast.server_output.lock().unwrap() = Some(child);
-            StatusCode::NO_CONTENT.into_response()
-        }
-        Err(e) => (
-            StatusCode::SERVICE_UNAVAILABLE,
-            format!("Server sound output unavailable (FFplay): {e}"),
-        )
-            .into_response(),
+    command.args([
+        "-nodisp",
+        "-autoexit",
+        "-loglevel",
+        "error",
+        "-f",
+        "mp3",
+        "-i",
+        "pipe:0",
+    ]);
+    match server_output::Output::spawn(command,cast.audio.subscribe()) {
+        Ok(output)=>{*cast.server_output.lock().unwrap()=Some(output);*cast.server_output_error.lock().unwrap()=None;StatusCode::NO_CONTENT.into_response()},
+        Err(_)=>(StatusCode::SERVICE_UNAVAILABLE,"Server speakers could not start. Check FFplay and the server audio device, or select This device.").into_response(),
     }
 }
 async fn output_stop(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
@@ -356,5 +368,23 @@ mod playlist_error_tests {
                     .contains(&root.path().to_string_lossy().to_string())
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod output_device_tests {
+    #[tokio::test]
+    async fn unavailable_output_child_is_reaped_and_error_offers_this_device() {
+        #[cfg(windows)]
+        let mut command = std::process::Command::new("cmd");
+        #[cfg(windows)]
+        command.args(["/c", "exit", "1"]);
+        #[cfg(not(windows))]
+        let mut command = std::process::Command::new("sh");
+        #[cfg(not(windows))]
+        command.args(["-c", "exit 1"]);
+        let error = super::probe_output_command(command).await.unwrap_err();
+        assert!(error.contains("This device"));
+        assert!(error.contains("Server speakers"));
     }
 }

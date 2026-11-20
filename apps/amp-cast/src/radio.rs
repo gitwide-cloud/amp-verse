@@ -288,6 +288,135 @@ async fn prepare_next(
         errors.last().map_or("Playlist empty", String::as_str)
     ))
 }
+pub(super) async fn validate_selection(
+    cast: Arc<Cast>,
+    selection: &mut serde_json::Value,
+) -> Result<(), String> {
+    let indices: Vec<usize> = selection["tracks"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter_map(|v| v.as_u64().map(|v| v as usize))
+        .collect();
+    let mut profile: Option<SmartPlaylist> =
+        serde_json::from_value(selection["rules"].clone()).ok();
+    let finite = selection["finite"] == true;
+    let mut cursor = 0;
+    let mut failures = selection["unavailable"].as_u64().unwrap_or(0);
+    for (occurrence, &ordered) in indices.iter().take(32).enumerate() {
+        let index = if finite {
+            ordered
+        } else {
+            pick(
+                &cast,
+                profile.as_ref(),
+                &indices,
+                &mut cursor,
+                None,
+                &[],
+                profile.as_ref().and_then(|p| p.target_energy),
+            )?
+        };
+        let result = probe_track(&cast, index).await;
+        if result
+            .as_ref()
+            .is_err_and(|error| error == "Audio decoder unavailable")
+        {
+            return Err("Audio decoder unavailable".into());
+        }
+        if result.is_ok() {
+            if finite {
+                selection["start_occurrence"] = serde_json::json!(occurrence);
+                selection["failed_occurrences"] = serde_json::json!(failures);
+            }
+            return Ok(());
+        }
+        failures += 1;
+        if let Some(profile) = &mut profile {
+            profile.excluded.push(show::song_id(&cast.tracks[index]));
+        }
+    }
+    Err("No playable songs found in the first 32 playlist occurrences".into())
+}
+async fn probe_track(cast: &Cast, index: usize) -> Result<(), String> {
+    let track = cast.tracks.get(index).ok_or("Song unavailable")?;
+    let path = amp_core::resolve(&cast.root, &track.path).map_err(|_| "Song unavailable")?;
+    let mut command = amp_core::command("ffmpeg");
+    command
+        .args(["-nostdin", "-v", "fatal", "-i"])
+        .arg(path)
+        .args([
+            "-t", "0.05", "-vn", "-ac", "2", "-ar", "44100", "-f", "f32le", "pipe:1",
+        ]);
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(8),
+        tokio::process::Command::from(command)
+            .kill_on_drop(true)
+            .stdin(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .output(),
+    )
+    .await
+    .map_err(|_| "Audio check timed out")?
+    .map_err(|_| "Audio decoder unavailable")?;
+    if !output.status.success() || output.stdout.is_empty() {
+        return Err("No playable audio".into());
+    }
+    Ok(())
+}
+fn finite_next(cast: &Cast, occurrence: usize) -> Option<usize> {
+    cast.selection
+        .lock()
+        .unwrap()
+        .as_ref()?
+        .get("tracks")?
+        .as_array()?
+        .get(occurrence)?
+        .as_u64()
+        .map(|i| i as usize)
+}
+fn finish_or_next(cast: &Cast, occurrence: usize) -> Option<usize> {
+    let mut selection = cast.selection.lock().unwrap();
+    let selected = selection.as_mut()?;
+    let next = selected["tracks"]
+        .as_array()?
+        .get(occurrence)
+        .and_then(|v| v.as_u64())
+        .map(|i| i as usize);
+    if next.is_none() {
+        selected["queue_closed"] = serde_json::json!(true);
+    }
+    next
+}
+async fn prepare_finite(
+    cast: Arc<Cast>,
+    mut occurrence: usize,
+    owner: u64,
+) -> Result<Option<(Decoded, usize)>, String> {
+    for _ in 0..32 {
+        let Some(index) = finish_or_next(&cast, occurrence) else {
+            return Ok(None);
+        };
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(120),
+            decode(cast.clone(), index, None, None, None),
+        )
+        .await
+        {
+            Ok(Ok(decoded)) => return Ok(Some((decoded, occurrence))),
+            _ => {
+                let mut station = cast.station.lock().await;
+                if station.generation != owner {
+                    return Err("Player owner changed".into());
+                }
+                station.player_failures += 1;
+                station.player_last_issue=Some("Skipped a queued song with unavailable or invalid audio. Its saved playlist reference was kept.".into());
+                occurrence += 1;
+            }
+        }
+    }
+    Err("Too many unavailable queued songs in a row. Playback stopped; repair the source and retry.".into())
+}
 pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String> {
     let selection = cast.selection.lock().unwrap().clone();
     let indices: Vec<usize> = selection
@@ -299,6 +428,11 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
                 .collect()
         })
         .unwrap_or_else(|| (0..cast.tracks.len()).collect());
+    let finite = selection.as_ref().is_some_and(|v| v["finite"] == true);
+    let mut occurrence = selection
+        .as_ref()
+        .and_then(|v| v["start_occurrence"].as_u64())
+        .unwrap_or(0) as usize;
     let mut profile: Option<SmartPlaylist> = selection
         .as_ref()
         .and_then(|v| serde_json::from_value(v["rules"].clone()).ok());
@@ -314,17 +448,25 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
         &recent,
         target,
     )?;
-    let mut current = prepare_next(
-        cast.clone(),
-        first,
-        profile.clone(),
-        indices.clone(),
-        None,
-        recent.clone(),
-        target,
-        None,
-    )
-    .await?;
+    let mut current = if finite {
+        let (decoded, actual) = prepare_finite(cast.clone(), occurrence, owner)
+            .await?
+            .ok_or("No playable songs remain")?;
+        occurrence = actual;
+        decoded
+    } else {
+        prepare_next(
+            cast.clone(),
+            first,
+            profile.clone(),
+            indices.clone(),
+            None,
+            recent.clone(),
+            target,
+            None,
+        )
+        .await?
+    };
     if profile.is_none() {
         cursor = indices
             .iter()
@@ -398,7 +540,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             let _ = sender.send(Bytes::copy_from_slice(&buffer[..n]));
         }
     });
-    let output_guard = AbortTask(output_task);
+    let mut output_guard = AbortTask(output_task);
     let mut clock = Clock {
         limiter: amp_core::limiter::LookaheadLimiter::new(RATE as u32),
         start: tokio::time::Instant::now(),
@@ -414,6 +556,40 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             }
             station.now_playing = Some(cast.tracks[current.index].title.clone());
             station.current_index = Some(current.index);
+        }
+        if finite {
+            // Occurrences retain normal order and duplicates; only invalid audio
+            // is skipped, explicitly counted without changing saved references.
+            let pending = finite_next(&cast, occurrence + 1).map(|_| {
+                let source = cast.clone();
+                AbortTask(tokio::spawn(async move {
+                    prepare_finite(source, occurrence + 1, owner).await
+                }))
+            });
+            let remaining = current.frames.saturating_sub(consumed);
+            emit(&mut current, remaining, &mut input, &mut clock).await?;
+            let next = if let Some(mut task) = pending {
+                (&mut task.0)
+                    .await
+                    .map_err(|_| "Queued song preparation stopped")??
+            } else {
+                prepare_finite(cast.clone(), occurrence + 1, owner).await?
+            };
+            if let Some((next, actual)) = next {
+                current = next;
+                occurrence = actual;
+                consumed = 0;
+                continue;
+            }
+            input
+                .shutdown()
+                .await
+                .map_err(|_| "Encoder could not finish")?;
+            drop(input);
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(5), encoder.wait()).await;
+            let _ =
+                tokio::time::timeout(std::time::Duration::from_secs(2), &mut output_guard.0).await;
+            return Ok(());
         }
         let requested = cast.mix.lock().unwrap().clone();
         if requested.revision != mix_revision {

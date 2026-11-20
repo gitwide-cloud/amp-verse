@@ -4,10 +4,12 @@ pub mod config;
 mod hls;
 mod knowledge;
 mod live;
+mod player_control;
 mod playlist_sync;
 mod podcasts_web;
 mod radio;
 mod recovery;
+mod server_output;
 pub mod sharing;
 mod station_control;
 pub mod studio;
@@ -51,13 +53,16 @@ struct Station {
     current_index: Option<usize>,
     mix_revision: u64,
     error: Option<String>,
+    player_failures: usize,
+    player_last_issue: Option<String>,
     #[serde(skip)]
     worker: Option<JoinHandle<()>>,
 }
 pub struct Cast {
     operation: Mutex<()>,
     pub listen_address: std::sync::Mutex<Option<std::net::SocketAddr>>,
-    server_output: std::sync::Mutex<Option<std::process::Child>>,
+    server_output: std::sync::Mutex<Option<server_output::Output>>,
+    server_output_error: std::sync::Mutex<Option<String>>,
     server_id: String,
     library_id: Option<String>,
     pub config_dir: std::sync::Mutex<Option<PathBuf>>,
@@ -100,6 +105,7 @@ impl Cast {
             operation: Mutex::new(()),
             listen_address: std::sync::Mutex::new(None),
             server_output: std::sync::Mutex::new(None),
+            server_output_error: std::sync::Mutex::new(None),
             library_id: amp_core::coordination::library_id(&root).ok(),
             config_dir: std::sync::Mutex::new(None),
             server_id,
@@ -175,6 +181,7 @@ impl Cast {
 pub fn router(cast: Arc<Cast>) -> Router {
     Router::new()
         .merge(playlist_sync::routes())
+        .merge(player_control::routes())
         .route(
             "/",
             get(|| async { Html(include_str!("../web/studio.html")) }),
@@ -248,7 +255,7 @@ async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
             .pause_for_radio
             .load(std::sync::atomic::Ordering::Relaxed);
     Json(
-        serde_json::json!({"hls":hls,"hls_url":"/api/audio/hls/master.m3u8","mix_requested":cast.mix.lock().unwrap().clone(),"mix_applied_revision":station.mix_revision,"library_id":cast.library_id,"source":station.source,"current_source":if station.source=="live_dj" {serde_json::json!("Player/DJ master")} else {cast.selection.lock().unwrap().as_ref().map_or(serde_json::Value::Null,|v|v["name"].clone())},"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"host_master_launch":true,"server_output_control":true,"live_upload_sequence":true,"live_guarded_resume":true,"playlist_playback":true,"google_cast":false,"hls":hls["ready"],"reliable_audio":1,"dual_path":true,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":station.name.as_ref().unwrap_or(&cast.station_name),"analysis":analysis,"running":station.running && (station.source!="live_dj" || station.audio_ready),"on_air":station.running && station.audio_ready,"preparing":station.running && !station.audio_ready,"server_output":station_control::output_running(&cast),"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count()+cast.recovery.listeners(),"password_required":cast.password.is_some()}),
+        serde_json::json!({"hls":hls,"hls_url":"/api/audio/hls/master.m3u8","mix_requested":cast.mix.lock().unwrap().clone(),"mix_applied_revision":station.mix_revision,"library_id":cast.library_id,"source":station.source,"current_source":if station.source=="live_dj" {serde_json::json!("Player/DJ master")} else {cast.selection.lock().unwrap().as_ref().map_or(serde_json::Value::Null,|v|v["name"].clone())},"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"host_master_launch":true,"server_output_control":true,"live_upload_sequence":true,"live_guarded_resume":true,"playlist_playback":true,"player_queue":1,"player_track_refs":"library_path_v1","private_audio":"library_path_v1","playlist_snapshot":"library_path_v1","google_cast":false,"hls":hls["ready"],"reliable_audio":1,"dual_path":true,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":station.name.as_ref().unwrap_or(&cast.station_name),"analysis":analysis,"running":station.running && (station.source!="live_dj" || station.audio_ready),"on_air":station.running && station.audio_ready,"preparing":station.running && !station.audio_ready,"server_output":station_control::output_running(&cast),"server_output_error":cast.server_output_error.lock().unwrap().clone(),"now_playing":station.now_playing,"current_index":station.current_index,"player_failures":station.player_failures,"player_last_issue":station.player_last_issue,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count()+cast.recovery.listeners(),"password_required":cast.password.is_some()}),
     )
 }
 async fn pause_analysis(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
@@ -310,8 +317,29 @@ async fn start_unlocked(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Re
     station.audio_ready = false;
     station.generation = station.generation.wrapping_add(1);
     let owner = station.generation;
-    station.source = "smart_radio".into();
+    station.source = if cast
+        .selection
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|v| v["finite"] == true)
+    {
+        "player_queue"
+    } else {
+        "smart_radio"
+    }
+    .into();
     station.error = None;
+    station.player_failures = cast
+        .selection
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|v| v["failed_occurrences"].as_u64())
+        .unwrap_or(0) as usize;
+    station.player_last_issue = (station.player_failures > 0).then(|| {
+        "Skipped unavailable playlist songs before starting; saved references were kept.".into()
+    });
     let worker_cast = cast.clone();
     let task = tokio::spawn(async move {
         let outcome = broadcast_tracks(worker_cast.clone(), owner).await;
@@ -324,6 +352,9 @@ async fn start_unlocked(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Re
         station.current_index = None;
         station.error = outcome.err();
         station.worker = None;
+        if station.source == "player_queue" {
+            station_control::stop_output(&worker_cast);
+        }
     });
     station.worker = Some(task);
     StatusCode::NO_CONTENT.into_response()
