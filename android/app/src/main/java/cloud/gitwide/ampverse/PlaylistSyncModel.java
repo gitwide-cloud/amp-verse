@@ -91,7 +91,7 @@ final class PlaylistSyncModel {
         JSONObject base=entry.getJSONObject("desired_base_document"),proposed=entry.getJSONObject("desired").getJSONObject("document"),current=copy(entry.getJSONObject("current").getJSONObject("document"));
         Set<String> keys=new HashSet<>();Iterator<String> b=base.keys(),p=proposed.keys();while(b.hasNext())keys.add(b.next());while(p.hasNext())keys.add(p.next());
         JSONObject merged=copy(current);for(String key:keys){Object before=base.opt(key),after=proposed.opt(key);if(equal(before,after))continue;if(!equal(current.opt(key),before)&&!equal(current.opt(key),after))throw new JSONException("Both versions changed "+key+". Keep this conflict for review, or use the server version.");if(proposed.has(key))merged.put(key,after);else merged.remove(key);}
-        entry.getJSONObject("desired").put("document",merged).put("revision",entry.getJSONObject("current").get("revision")).remove("new_document");entry.put("desired_base_document",current);
+        entry.getJSONObject("desired").put("document",merged).put("revision",entry.getJSONObject("current").get("revision")).put("document_version",entry.getJSONObject("current").getInt("document_version")).remove("new_document");entry.put("desired_base_document",current);
         entry.remove("pending");entry.remove("blocked");entry.remove("blocked_message");entry.remove("other_local_draft");
     }
     static JSONArray orderedReferences(JSONObject envelope)throws JSONException {return new JSONArray(envelope.getJSONObject("document").getJSONArray("tracks").toString());}
@@ -101,4 +101,3 @@ final class PlaylistSyncModel {
         return out;
     }
 }
-

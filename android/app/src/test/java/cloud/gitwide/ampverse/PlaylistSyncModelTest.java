@@ -79,5 +79,9 @@ public class PlaylistSyncModelTest {
     @Test public void invalidSavedNameCannotPoisonTheDurableOutbox()throws Exception {
         JSONObject s=state(),original=normal("Old",1);PlaylistSyncModel.pull(s,snapshot(original));JSONObject before=PlaylistSyncModel.copy(s);try{PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","é".repeat(150)));fail();}catch(JSONException expected){}assertTrue(PlaylistSyncModel.equal(before,s));assertNull(PlaylistSyncModel.next(s));
     }
-}
 
+    @Test public void reviewedSmartMergePreservesNewServerFieldsAndSchemaVersion()throws Exception {
+        JSONObject s=state(),original=normal("Old",1).put("document_id","smart_saved").put("kind","smart");PlaylistSyncModel.pull(s,snapshot(original));PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","Phone"));JSONObject op=PlaylistSyncModel.next(s);PlaylistSyncModel.reply(s,op,409,new JSONObject().put("status","uncertain"));
+        JSONObject remote=PlaylistSyncModel.copy(original).put("revision",new JSONObject().put("revision",2)).put("document_version",2);remote.getJSONObject("document").put("new_server_rule",new JSONObject().put("preserve",true));PlaylistSyncModel.pull(s,snapshot(remote));PlaylistSyncModel.reviewKeepDraft(s,"smart_saved",remote);JSONObject reviewed=PlaylistSyncModel.next(s);assertEquals(2,reviewed.getInt("document_version"));assertTrue(reviewed.getJSONObject("document").getJSONObject("new_server_rule").getBoolean("preserve"));assertEquals("Phone",reviewed.getJSONObject("document").getString("name"));
+    }
+}

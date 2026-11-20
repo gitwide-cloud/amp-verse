@@ -24,4 +24,3 @@ final class PlaylistSyncHttp {
     }
     JSONObject snapshot()throws Exception {Reply r=request("/api/sync/v1/playlists",null);if(r.code!=200)throw new IOException(r.code==401||r.code==403?"Playlist access rejected; reconnect with the private access code":"Playlist server unavailable (HTTP "+r.code+")");return r.body;}
 }
-
