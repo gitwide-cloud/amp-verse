@@ -412,7 +412,10 @@ fn hydrate(binding: &Binding, doc: &Document, expected: Option<&Document>) -> Re
         Kind::Smart => binding.root.join("ampdj/smart-playlists.json"),
     };
     checked(&binding.root, &target)?;
-    let before = read(&target)?;
+    let mut before = read(&target)?;
+    if let Some(current) = &mut before {
+        amp_core::coordination::adopt_legacy(current)?;
+    }
     let mut value = match doc.kind {
         Kind::Normal => {
             let current=before.as_ref().map(|v|{let mut wire=clean(v.clone());wire["tracks"]=json!(v["tracks"].as_array().ok_or("Invalid local tracks")?.iter().map(|p|{let relative=p.as_str().ok_or("Invalid local path")?.replace('\\',"/");Ok(json!({"library_id":binding.library_id,"track_key":format!("song_{:x}",Sha256::digest(relative.as_bytes())),"relative_path":relative}))}).collect::<Result<Vec<_>,String>>()?);Ok::<_,String>(wire)}).transpose()?;
@@ -632,7 +635,10 @@ fn view(binding: &Binding) -> Result<SavedView, String> {
                     .map(|t| t.relative_path)
                     .collect::<Vec<_>>()
             );
-            let p = read(&path)?;
+            let mut p = read(&path)?;
+            if let Some(current) = &mut p {
+                amp_core::coordination::adopt_legacy(current)?;
+            }
             if let Some(rev) = p.as_ref().and_then(|v| v.get("_amp_sync")) {
                 value["_amp_sync"] = rev.clone();
             }
@@ -869,6 +875,28 @@ mod tests {
             before,
             "Already canonical shared data must not be rewritten or report conflict"
         );
+    }
+    #[test]
+    fn legacy_saved_documents_keep_guarded_baselines_without_requiring_audio() {
+        let (_dir, binding) = fixture();
+        let file = path(&binding.root, "normal_legacy").unwrap();
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(
+            &file,
+            serde_json::to_vec(&json!({"version":1,"name":"Legacy","tracks":["missing/song.mp3"]}))
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(view(&binding).unwrap().normal[0].1.sync.is_some());
+        let expected = local(&binding).unwrap().remove("normal_legacy").unwrap();
+        let mut incoming = expected.clone();
+        incoming.document["name"] = json!("Updated from server");
+        hydrate(&binding, &incoming, Some(&expected)).unwrap();
+        assert_eq!(
+            local(&binding).unwrap()["normal_legacy"].document["name"],
+            "Updated from server"
+        );
+        assert!(read(&file).unwrap().unwrap()["_amp_sync"].is_object());
     }
     #[test]
     fn offline_saved_changes_are_durable_without_attempting_publication() {

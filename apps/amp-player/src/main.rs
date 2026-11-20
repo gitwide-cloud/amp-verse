@@ -3234,18 +3234,19 @@ impl eframe::App for Player {
         self.checkpoint(true);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        if self.organizer.moving() {
+            if let Some(destination) = self.organizer.show(ui, &self.root, false, || {}) {
+                self.connect_music_root(destination);
+            }
+            return;
+        }
+
         if let Some(saved) = self.playlist_sync.poll(&self.root) {
             self.dj_browser.refresh_sync_saved(
                 saved,
                 &mut self.run.settings,
                 &mut self.show_editor,
             );
-        }
-        if self.organizer.moving() {
-            if let Some(destination) = self.organizer.show(ui, &self.root, false, || {}) {
-                self.connect_music_root(destination);
-            }
-            return;
         }
 
         if !self.control_attempted && self.screenshot_view.is_empty() {
