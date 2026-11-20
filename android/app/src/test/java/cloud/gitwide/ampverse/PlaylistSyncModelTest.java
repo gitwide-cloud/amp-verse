@@ -102,4 +102,8 @@ public class PlaylistSyncModelTest {
             assertTrue(PlaylistSyncModel.equal(op,PlaylistSyncModel.next(s)));
         }
     }
+    @Test public void newNormalAndSmartDocumentsUseExplicitCreateAndContainerBaseline()throws Exception {
+        JSONObject s=state();JSONObject normal=normal("New",0).put("document_id","normal_new").put("revision",JSONObject.NULL).put("new_document",true);PlaylistSyncModel.save(s,normal,normal.getJSONObject("document"));JSONObject create=PlaylistSyncModel.next(s);assertEquals("create",create.getString("action"));assertTrue(create.isNull("base_revision"));
+        JSONObject smartState=state(),smart=normal("Smart",4).put("document_id","smart_new").put("kind","smart").put("document_version",2).put("new_document",true);PlaylistSyncModel.save(smartState,smart,smart.getJSONObject("document"));JSONObject smartCreate=PlaylistSyncModel.next(smartState);assertEquals("create",smartCreate.getString("action"));assertEquals(4,smartCreate.getJSONObject("base_revision").getInt("revision"));assertEquals(2,smartCreate.getInt("document_version"));
+    }
 }

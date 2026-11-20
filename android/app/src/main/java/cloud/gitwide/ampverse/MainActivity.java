@@ -152,10 +152,10 @@ public final class MainActivity extends Activity {
         }else if(module.equals("AMP Remote")){
             remotePanel=new RemotePanel(this,appearance);page.addView(remotePanel);
         }else if(module.equals("AMP Cast")){
-            castPanel=new CastPanel(this,appearance,new CastPanel.Listener(){public boolean playlistSyncAvailable(){return true;}public void playlistSync(CastClient selected){selected.withPrivateAuthorization((base,secret,server,library)->PlaylistSyncUi.authorize(MainActivity.this,base,secret,server,library));}
+            castPanel=new FullCastPanel(this,appearance,new CastPanel.Listener(){public boolean playlistSyncAvailable(){return true;}public void playlistSync(CastClient selected){selected.withPrivateAuthorization((base,secret,server,library)->PlaylistSyncUi.authorize(MainActivity.this,base,secret,server,library));}
                 public void listen(String url,String name){
                     if(player==null){message="Playback service is still connecting. Try Listen again.";castPanel.phoneFeedback(message);refresh();return;}
-                    player.setMediaItem(new MediaItem.Builder().setMediaId("amp-radio").setUri(url).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle(name).build()).build());
+                    PlaybackService.switchToPlayer();player.setMediaItem(new MediaItem.Builder().setMediaId("amp-radio").setUri(url).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle(name).build()).build());
                     player.setRepeatMode(Player.REPEAT_MODE_OFF);player.setShuffleModeEnabled(false);player.prepare();player.play();message="Phone listening requested: "+name;castPanel.phoneFeedback(message);refresh();
                 }
                 public void playlist(java.util.List<MediaItem> items){if(player==null||items.isEmpty()){message="No offline songs available.";return;}player.setMediaItems(items);player.setRepeatMode(Player.REPEAT_MODE_OFF);player.prepare();player.play();message="Playing offline station playlist";refresh();}
