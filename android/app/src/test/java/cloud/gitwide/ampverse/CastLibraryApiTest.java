@@ -41,4 +41,7 @@ public class CastLibraryApiTest {
    f.done.get(5,TimeUnit.SECONDS);for(String request:f.requests){assertTrue(request.contains("x-amp-server: server-a"));assertTrue(request.contains("x-amp-library: library-a"));assertFalse(request.contains("x-amp-password:"));}
   }
  }
+ @Test public void savedLibrarySnapshotUsesExactSelectedServerAndLibraryHeaders()throws Exception {
+  try(Fixture f=new Fixture(status("station-A"),"{\"documents\":[]}")){CastClient c=f.client();c.connect();c.get("/api/sync/v1/playlists");f.done.get(5,TimeUnit.SECONDS);String request=f.requests.get(1);assertTrue(request.startsWith("GET /api/sync/v1/playlists"));assertTrue(request.contains("x-amp-server: server-a"));assertTrue(request.contains("x-amp-library: library-a"));}
+ }
 }

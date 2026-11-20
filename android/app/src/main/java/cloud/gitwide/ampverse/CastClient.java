@@ -90,6 +90,7 @@ final class CastClient {
         connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(4000);connection.setReadTimeout(path.equals("/api/player/play")?35000:6000);
         try {
             if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);
+            if(path.startsWith("/api/sync/")){connection.setRequestProperty("x-amp-server",serverId);connection.setRequestProperty("x-amp-library",libraryId);}
             if(command){connection.setRequestMethod("POST");connection.setRequestProperty("x-amp-server",serverId);connection.setRequestProperty("x-amp-station",stationId);if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);connection.setDoOutput(true);if(body!=null)connection.setRequestProperty("Content-Type","application/json");try(OutputStream output=connection.getOutputStream()){if(body!=null)output.write(body.toString().getBytes(StandardCharsets.UTF_8));}}
             int code=connection.getResponseCode();
             if(code==401||code==403)throw new AuthorizationException(code);
