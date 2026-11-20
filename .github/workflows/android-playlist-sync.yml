@@ -2,7 +2,7 @@ name: Android playlist synchronization
 on:
   push:
     branches: ['feature/android-server-owner-flow']
-    paths: ['android/**', 'crates/amp-dj-policy/**', 'tools/build_android_dj.py', 'Cargo.*', '.github/workflows/android-playlist-sync.yml']
+    paths: ['android/**', 'docs/ANDROID_SERVER_LIBRARY.md', 'crates/amp-dj-policy/**', 'tools/build_android_dj.py', 'Cargo.*', '.github/workflows/android-playlist-sync.yml']
   workflow_dispatch:
 permissions:
   contents: read
