@@ -118,6 +118,26 @@ impl Membership {
     }
 }
 impl Browser {
+    pub(super) fn refresh_sync_saved(
+        &mut self,
+        view: crate::playlist_sync::SavedView,
+        settings: &mut amp_core::show::Settings,
+        editor: &mut crate::show_editor::Editor,
+    ) {
+        if let Some(fresh) = view.settings {
+            editor.refresh_saved(&fresh);
+            *settings = fresh.clone();
+            self.settings_snapshot = Some(std::sync::Arc::new(fresh));
+            self.membership = Membership::default();
+        }
+        for (path, playlist) in view.normal {
+            if let Some((_, old)) = self.playlists.iter_mut().find(|(p, _)| *p == path) {
+                *old = playlist;
+            } else {
+                self.playlists.push((path, playlist));
+            }
+        }
+    }
     fn capture(
         &mut self,
         root: &Path,
