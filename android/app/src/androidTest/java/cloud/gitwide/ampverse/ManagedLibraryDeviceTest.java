@@ -26,7 +26,9 @@ public class ManagedLibraryDeviceTest {
  }
  private MediaItem song(double bpm)throws Exception{return new MediaItem.Builder().setUri("content://example/song").setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setExtras(DjEngine.preparedExtras(new JSONObject().put("bpm",bpm).toString())).build()).build();}
  @Test public void sharedNativePolicyMatchesDesktopFixtures(){
-  assertEquals(1,SharedDjLogic.version());assertEquals(1.04,SharedDjLogic.tempoRate(130,1,125,.08),1e-10);assertEquals(1,SharedDjLogic.tempoRate(128,1,64,.08),0);assertEquals(8,SharedDjLogic.boundary(0,4,5),0);assertEquals(1.85,SharedDjLogic.fade(3,2),1e-10);assertEquals(.4,SharedDjLogic.pairCost(128,128,.7,.7,.7,8,9),1e-10);
+  assertEquals(1,SharedDjLogic.version());assertEquals(1.04,SharedDjLogic.tempoRate(130,1,125,.08),1e-10);assertEquals(1,SharedDjLogic.tempoRate(128,1,64,.08),0);assertEquals(8,SharedDjLogic.boundary(0,4,5),0);assertEquals(1.85,SharedDjLogic.fade(3,2),1e-10);assertEquals(.35,SharedDjLogic.pairCost(128,128,.7,.7,.7,8,9),1e-10);
+  assertEquals(.65,SharedDjLogic.pairCost(128,128,.7,.7,.7,8,21),1e-10);
+  assertEquals(.9,SharedDjLogic.pairCost(128,128,.7,.7,.7,8,25),1e-10);
  }
  @Test public void staleAutomaticAnalysisDoesNotDriveChangedAudio()throws Exception{
   MediaItem item=new MediaItem.Builder().setUri("content://example/changed").setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setExtras(DjEngine.preparedExtras("{\"sync_source_changed\":true,\"bpm\":128,\"cue_in\":5,\"manual_cues\":[{\"number\":3,\"seconds\":7}]}" )).build()).build();assertFalse(DjEngine.preparation(item).has("bpm"));assertEquals(0,DjLogic.cueIn(item));assertEquals(7000,PhoneCues.saved(DjEngine.preparation(item),2));

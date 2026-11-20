@@ -290,6 +290,26 @@ mod envelope_tests {
 mod harmonic_tests {
     use super::*;
     #[test]
+    fn pair_cost_ranks_camelot_neighbors_and_invalid_keys() {
+        // Isolate harmony by holding tempo and all energy inputs equal.
+        let cost = |key| pair_cost(128., 128., 0.7, 0.7, 0.7, key_code("8A"), key);
+        for (key, expected) in [
+            ("8A", 0.),
+            ("8B", 0.25),
+            ("9A", 0.35),
+            ("9B", 0.65),
+            ("unknown", 0.9),
+            ("10A", 0.95),
+            ("2B", 2.9),
+        ] {
+            assert!((cost(key_code(key)) - expected).abs() < 1e-10, "{key}");
+        }
+        for invalid in [-1, 0, 25] {
+            assert!((cost(invalid) - 0.9).abs() < 1e-10, "{invalid}");
+        }
+    }
+
+    #[test]
     fn f04_confidence_and_sounding_key_are_soft_costs() {
         assert_eq!(harmonic_cost(8, 9, 1., 1., 1., 1., true, true), 0.35);
         assert_eq!(sounding_key(8, 1.06, false), 3);
