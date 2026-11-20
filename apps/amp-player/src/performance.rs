@@ -2994,9 +2994,13 @@ mod tests {
             std::fs::create_dir(root.path().join(format!("source-{i}"))).unwrap();
             std::fs::copy(&fixture, root.path().join(format!("source-{i}/song.wav"))).unwrap();
         }
+        // Both Player instances need the same explicit supported fade. A fresh
+        // instance otherwise inherits the eight-second device preference,
+        // which correctly exceeds this fixture's five-second handoff wait.
+        const FIXTURE_FADE_SECONDS: f32 = 0.5;
         let mut player = normal_test_player(root.path());
         player.channel_gain = [0.; 6];
-        player.fade_seconds = 0.1;
+        player.fade_seconds = FIXTURE_FADE_SECONDS;
         player.run.transitions.enabled = false;
         let path = root.path().join("playlist.json");
         let list = amp_core::Playlist {
@@ -3066,6 +3070,7 @@ mod tests {
             p.loaded[p.active_deck()] == Some(0) && p.run.transition.is_none() && p.queue.len() == 2
         });
         assert_eq!(player.queue, [2, 1]);
+        assert_eq!(player.fade_seconds, FIXTURE_FADE_SECONDS);
         assert_eq!(
             serde_json::to_value(&player.playlist_snapshot.as_ref().unwrap().1).unwrap(),
             saved
@@ -3080,6 +3085,8 @@ mod tests {
         }
         let mut transferred = normal_test_player(root.path());
         transferred.channel_gain = [0.; 6];
+        transferred.fade_seconds = FIXTURE_FADE_SECONDS;
+        transferred.run.transitions.enabled = false;
         transferred.playback_owner = crate::playback_owner::Owner::Player;
         transferred.shuffle = true;
         let list = player.playlist_snapshot.as_ref().unwrap().1.clone();
@@ -3119,6 +3126,10 @@ mod tests {
             "owner transfer must not replay or skip the sounding song"
         );
         assert_eq!(transferred.queue, remaining);
+        assert_eq!(
+            transferred.fade_seconds, FIXTURE_FADE_SECONDS,
+            "Owner transfer preserves the explicit device fade"
+        );
         transferred.preload_smart().unwrap();
         let (manual_deck, manual_index) = transferred.run.preloaded.unwrap();
         let manual_id = show::song_id(&transferred.library.as_ref().unwrap().tracks[manual_index]);
@@ -3170,6 +3181,7 @@ mod tests {
             transferred.queue, remaining,
             "an explicit replacement must not consume an old reserved occurrence"
         );
+        assert_eq!(transferred.fade_seconds, FIXTURE_FADE_SECONDS);
         transferred
             .execute_control(Action::ManualLock { enabled: true })
             .unwrap();
