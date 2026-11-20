@@ -2,7 +2,7 @@
 use eframe::egui;
 use std::{
     ffi::OsString,
-    io::{Read, Write},
+    io::{Read, Seek, SeekFrom, Write},
     path::{Path, PathBuf},
     process::{Child, Stdio},
     sync::{Arc, Mutex, mpsc},
@@ -343,7 +343,7 @@ fn record(
             diagnostics(&stderr)
         ));
     }
-    if !std::fs::metadata(staging.path()).is_ok_and(|m| m.len() > 44) {
+    if !wav_has_audio(staging.path()).unwrap_or(false) {
         return Err(format!(
             "Capture produced no usable audio. {}",
             diagnostics(&stderr)
@@ -364,6 +364,62 @@ fn record(
         }
     }
 }
+// Inspect only bounded chunk headers, never load a potentially hours-long capture.
+// A valid WAV header can exceed 100 bytes even when it contains zero audio frames.
+fn wav_has_audio(path: &Path) -> std::io::Result<bool> {
+    let mut file = std::fs::File::open(path)?;
+    let length = file.metadata()?.len();
+    let mut header = [0u8; 12];
+    if length < 12 {
+        return Ok(false);
+    }
+    file.read_exact(&mut header)?;
+    if &header[..4] != b"RIFF" || &header[8..] != b"WAVE" {
+        return Ok(false);
+    }
+    let declared = u64::from(u32::from_le_bytes(header[4..8].try_into().unwrap())) + 8;
+    if declared < 12 || declared > length {
+        return Ok(false);
+    }
+    let length = declared;
+    let mut offset = 12u64;
+    let mut block_align = None;
+    for _ in 0..128 {
+        if offset.checked_add(8).is_none_or(|end| end > length) {
+            return Ok(false);
+        }
+        file.seek(SeekFrom::Start(offset))?;
+        let mut chunk = [0u8; 8];
+        file.read_exact(&mut chunk)?;
+        let size = u32::from_le_bytes(chunk[4..].try_into().unwrap()) as u64;
+        let start = offset + 8;
+        let Some(end) = start.checked_add(size).filter(|end| *end <= length) else {
+            return Ok(false);
+        };
+        if &chunk[..4] == b"fmt " {
+            if size < 16 {
+                return Ok(false);
+            }
+            let mut format = [0u8; 16];
+            file.read_exact(&mut format)?;
+            let encoding = u16::from_le_bytes(format[..2].try_into().unwrap());
+            let channels = u16::from_le_bytes(format[2..4].try_into().unwrap());
+            let rate = u32::from_le_bytes(format[4..8].try_into().unwrap());
+            let align = u16::from_le_bytes(format[12..14].try_into().unwrap());
+            let bits = u16::from_le_bytes(format[14..16].try_into().unwrap());
+            if !matches!(encoding, 1 | 0xfffe) || (channels, rate, bits, align) != (2, 48000, 24, 6)
+            {
+                return Ok(false);
+            }
+            block_align = Some(u64::from(align));
+        } else if &chunk[..4] == b"data" {
+            return Ok(block_align.is_some_and(|align| size >= align && size % align == 0));
+        }
+        offset = end + size % 2;
+    }
+    Ok(false)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -557,5 +613,65 @@ mod tests {
             "capture child must be reaped before exit acknowledgment"
         );
         assert!(wav_format(&output).3 > 0);
+    }
+    #[test]
+    fn recorder_rejects_header_only_and_truncated_audio() {
+        let directory = tempfile::tempdir().unwrap();
+        let fixture = directory.path().join("header-only.wav");
+        let mut bytes = b"RIFF\0\0\0\0WAVEfmt ".to_vec();
+        bytes.extend_from_slice(&16u32.to_le_bytes());
+        bytes.extend_from_slice(&1u16.to_le_bytes());
+        bytes.extend_from_slice(&2u16.to_le_bytes());
+        bytes.extend_from_slice(&48000u32.to_le_bytes());
+        bytes.extend_from_slice(&288000u32.to_le_bytes());
+        bytes.extend_from_slice(&6u16.to_le_bytes());
+        bytes.extend_from_slice(&24u16.to_le_bytes());
+        bytes.extend_from_slice(b"JUNK");
+        bytes.extend_from_slice(&64u32.to_le_bytes());
+        bytes.extend_from_slice(&[0; 64]);
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&0u32.to_le_bytes());
+        let riff_size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        assert!(bytes.len() > 100);
+        std::fs::write(&fixture, &bytes).unwrap();
+        assert!(
+            !wav_has_audio(&fixture).unwrap(),
+            "Header size is not audio payload"
+        );
+        let data_length = bytes.len() - 4;
+        bytes[data_length..].copy_from_slice(&6u32.to_le_bytes());
+        std::fs::write(&fixture, &bytes).unwrap();
+        assert!(
+            !wav_has_audio(&fixture).unwrap(),
+            "Declared bytes must actually exist"
+        );
+        bytes.extend_from_slice(&[0; 6]);
+        let riff_size = (bytes.len() - 8) as u32;
+        bytes[4..8].copy_from_slice(&riff_size.to_le_bytes());
+        std::fs::write(&fixture, &bytes).unwrap();
+        assert!(
+            wav_has_audio(&fixture).unwrap(),
+            "A complete silent audio frame is valid capture data"
+        );
+        let output = directory.path().join("empty-capture.wav");
+        let input = [
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:sample_rate=48000",
+            "-t",
+            "0",
+        ]
+        .into_iter()
+        .map(Into::into)
+        .collect();
+        let session = capture(output.clone(), input);
+        let error = finished(&session).unwrap_err();
+        assert!(error.contains("no usable audio"), "{error}");
+        assert!(
+            !output.exists(),
+            "Header-only capture must not be published"
+        );
     }
 }
