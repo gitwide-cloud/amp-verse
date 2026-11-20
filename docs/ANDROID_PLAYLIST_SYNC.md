@@ -40,3 +40,7 @@ The Cast panel exposes synchronization through an opt-in Listener capability/cal
 State reads go through AtomicFile recovery even when only its backup exists; reauthorization does not reset a recoverable outbox. A device storage fixture simulates backup-only process interruption and checks pending-operation preservation. The CI builds that instrumentation APK; it does not claim the device test was executed.
 
 Outgoing operations are checked against the complete 1 MiB wire limit before saving or assigning a pending operation ID, so an oversized edit cannot become a permanently unsendable pending request. Open editor data remains available for reducing the edit.
+
+Selection and publication are now fenced: a validated new binding commits only after an already-dispatched old request finishes; a fetch for an old binding cannot stage/send after another binding is selected. Pause remains responsive and is checked before staging and dispatch; an already-dispatched request may finish. The old authority's outbox is retained when its dispatch is skipped.
+
+Catalog loading commits only after every requested page succeeds with a consistent total and offset. Failed/partial pages leave the prior cache intact and retry on the next cycle; legacy unverified loaded flags are invalidated. The existing 2,000-row bounded-catalog policy remains explicit. Canonical acknowledgment kind, supported schema and library-bound numeric revision are validated before clearing an operation.

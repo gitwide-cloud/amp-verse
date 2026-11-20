@@ -71,6 +71,14 @@ final class PlaylistSyncModel {
         if(status==200&&response.optString("status").equals("applied")){
             authority(state,response);if(!response.getString("operation_id").equals(operation.getString("operation_id")))throw new JSONException("Wrong operation acknowledgment");
             JSONObject canonical=copy(response.getJSONObject("canonical"));
+            JSONObject revision=canonical.optJSONObject("revision");
+            Object ordinal=revision==null?null:revision.opt("revision");
+            Object schema=canonical.opt("document_version");int version=canonical.optInt("document_version",-1),requested=operation.getInt("document_version");
+            if(!(schema instanceof Number)||!schema.toString().matches("[0-9]+")||!canonical.optString("kind").equals(operation.getString("kind"))||version<requested||version>2
+                ||operation.getString("kind").equals("normal")&&version!=1
+                ||revision==null||!(ordinal instanceof Number)||!ordinal.toString().matches("[0-9]+")
+                ||!state.getString("library_id").equals(revision.optString("library_id")))
+                throw new JSONException("Canonical acknowledgment shape or library revision is invalid");
             if(!canonical.getString("document_id").equals(operation.getString("document_id"))||!equal(canonical.getJSONObject("document"),operation.getJSONObject("document")))throw new JSONException("Acknowledgment document differs from saved proposal");
             entry.put("baseline",canonical).put("current",canonical);entry.remove("pending");
             JSONObject desired=entry.optJSONObject("desired");

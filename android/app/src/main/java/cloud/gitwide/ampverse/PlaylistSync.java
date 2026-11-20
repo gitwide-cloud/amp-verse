@@ -16,6 +16,7 @@ import org.json.*;
 /** Automatic playlist-only synchronization while this app process is alive; resume retries durable work. */
 final class PlaylistSync {
     private static final Object LOCK=new Object();
+    private static final PlaylistSyncBoundary PUBLICATION=new PlaylistSyncBoundary();
     private static final ScheduledExecutorService WORK=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"amp-playlist-sync");t.setDaemon(true);return t;});
     private static final java.util.Set<Runnable> LISTENERS=new java.util.concurrent.CopyOnWriteArraySet<>();
     private static boolean started;static volatile String status="Choose an authorized Cast host to enable saved-playlist sync.";
@@ -38,25 +39,51 @@ final class PlaylistSync {
         PlaylistSyncHttp.Reply info=new PlaylistSyncHttp(normalized,password,"","").request("/api/status",null);
         if(info.code!=200)throw new IOException("Cannot verify selected server");String server=info.body.getString("server_id"),library=info.body.getString("library_id");if(server.isEmpty()||library.isEmpty())throw new IOException("Server identity unavailable");if(!server.equals(expectedServer)||!library.equals(expectedLibrary))throw new IOException("Selected host identity changed; reconnect before enabling playlist sync");
         PlaylistSyncHttp http=new PlaylistSyncHttp(normalized,password,server,library);JSONObject snapshot=http.snapshot();String key=hash(server+"\n"+library);
-        synchronized(LOCK){File stored=file(c,key,".json");boolean evidence=stored.exists()||new File(stored.getPath()+".bak").exists()||new File(stored.getPath()+".new").exists();JSONObject state=evidence?read(c,key):PlaylistSyncModel.state(server,library,UUID.randomUUID().toString());PlaylistSyncModel.pull(state,snapshot);state.put("base",normalized).put("enabled",true);write(c,key,state);credential(c,key,new JSONObject().put("base",normalized).put("password",password).put("server_id",server).put("library_id",library));if(!c.getSharedPreferences("playlist-sync-selection",0).edit().putString("active",key).commit())throw new IOException("Could not select saved server");}
+        PUBLICATION.select(()->{synchronized(LOCK){File stored=file(c,key,".json");boolean evidence=stored.exists()||new File(stored.getPath()+".bak").exists()||new File(stored.getPath()+".new").exists();JSONObject state=evidence?read(c,key):PlaylistSyncModel.state(server,library,UUID.randomUUID().toString());PlaylistSyncModel.pull(state,snapshot);state.put("base",normalized).put("enabled",true);write(c,key,state);credential(c,key,new JSONObject().put("base",normalized).put("password",password).put("server_id",server).put("library_id",library));if(!c.getSharedPreferences("playlist-sync-selection",0).edit().putString("active",key).commit())throw new IOException("Could not select saved server");}return null;});
         status="Saved playlists sync automatically; phone metadata stays local.";wake(c);changed();
     }
     static void pause(Context c)throws Exception {synchronized(LOCK){String key=active(c);JSONObject state=read(c,key);state.put("enabled",false);write(c,key,state);}status="Playlist sync paused; phone drafts retained.";changed();}
-    private static void cycle(Context c){String key=active(c);if(key.isEmpty())return;
-        try{JSONObject state,sealed; synchronized(LOCK){state=read(c,key);if(!state.optBoolean("enabled"))return;sealed=credential(c,key);}
+    private static boolean selected(Context c,String key,JSONObject state) {
+        return PlaylistSyncBoundary.selected(active(c),key,state.optBoolean("enabled"));
+    }
+    private static void cycle(Context c){
+        String key=active(c);if(key.isEmpty())return;
+        try{
+            JSONObject state,sealed;
+            synchronized(LOCK){state=read(c,key);if(!selected(c,key,state))return;sealed=credential(c,key);}
             PlaylistSyncHttp http=new PlaylistSyncHttp(sealed.getString("base"),sealed.getString("password"),state.getString("server_id"),state.getString("library_id"));
-            JSONObject snapshot=http.snapshot();synchronized(LOCK){state=read(c,key);if(!state.optBoolean("enabled"))return;PlaylistSyncModel.pull(state,snapshot);write(c,key,state);}
-            // One serialized operation per cycle keeps whole-smart-container CAS conservative.
-            JSONObject operation;synchronized(LOCK){state=read(c,key);operation=PlaylistSyncModel.next(state);if(operation!=null)write(c,key,state);}
-            if(operation!=null){PlaylistSyncHttp.Reply reply=http.request("/api/sync/v1/playlist-operations",operation);synchronized(LOCK){state=read(c,key);PlaylistSyncModel.reply(state,operation,reply.code,reply.body);write(c,key,state);}if(reply.code==401||reply.code==403)throw new IOException("Access code rejected; saved edits retained");}
-            refreshCatalog(c,key,http);status="Saved playlists checked automatically. Conflicts stay paused for review.";changed();
-        }catch(Exception e){status="Playlist sync paused/retrying: "+(e.getMessage()==null?"connection unavailable":e.getMessage());changed();}
+            JSONObject snapshot=http.snapshot();
+            synchronized(LOCK){state=read(c,key);if(!selected(c,key,state))return;PlaylistSyncModel.pull(state,snapshot);write(c,key,state);}
+            // Pause/selection are checked again before assigning a durable pending operation.
+            JSONObject operation;
+            synchronized(LOCK){state=read(c,key);if(!selected(c,key,state))return;operation=PlaylistSyncModel.next(state);if(operation!=null)write(c,key,state);}
+            if(operation!=null){
+                PlaylistSyncHttp.Reply reply=PUBLICATION.dispatch(()->{
+                    synchronized(LOCK){JSONObject latest=read(c,key);JSONObject entry=latest.getJSONObject("documents").optJSONObject(operation.getString("document_id"));JSONObject pending=entry==null?null:entry.optJSONObject("pending");
+                        return selected(c,key,latest)&&pending!=null&&operation.getString("operation_id").equals(pending.optString("operation_id"));
+                    }
+                },()->http.request("/api/sync/v1/playlist-operations",operation));
+                if(reply==null)return; // Old authority outbox is retained without publication.
+                synchronized(LOCK){state=read(c,key);PlaylistSyncModel.reply(state,operation,reply.code,reply.body);write(c,key,state);}
+                if(reply.code==401||reply.code==403)throw new IOException("Access code rejected; saved edits retained");
+            }
+            refreshCatalog(c,key,http);
+            synchronized(LOCK){if(!selected(c,key,read(c,key)))return;}
+            status="Saved playlists checked automatically. Conflicts stay paused for review.";changed();
+        }catch(Exception e){
+            if(!active(c).equals(key))return;
+            status="Playlist sync paused/retrying: "+(e.getMessage()==null?"connection unavailable":e.getMessage());changed();
+        }
     }
     private static void refreshCatalog(Context c,String key,PlaylistSyncHttp http)throws Exception {
-        synchronized(LOCK){if(read(c,key).optBoolean("catalog_loaded"))return;}
-        JSONObject catalog=new JSONObject();int total=0;
-        for(int offset=0;offset<2000;offset+=200){PlaylistSyncHttp.Reply r=http.request("/api/studio/tracks?offset="+offset+"&limit=200",null);if(r.code!=200)break;JSONArray rows=r.body.getJSONArray("tracks");total=r.body.optInt("total");for(int i=0;i<rows.length();i++){JSONObject row=rows.getJSONObject(i);String path=row.getString("path").replace('\\','/');if(path.startsWith("/")||path.contains(":")||Arrays.asList(path.split("/")).contains(".."))continue;String track="song_"+hash(path);catalog.put(track,new JSONObject().put("track_key",track).put("relative_path",path).put("library_id",http.library).put("title",row.optString("title",path)));}if(offset+rows.length()>=total)break;}
-        synchronized(LOCK){JSONObject s=read(c,key);JSONObject previous=s.getJSONObject("catalog");Iterator<String> oldKeys=previous.keys();while(oldKeys.hasNext()){String old=oldKeys.next();if(!catalog.has(old))catalog.put(old,previous.get(old));}s.put("catalog",catalog).put("catalog_loaded",true).put("catalog_truncated",total>2000);write(c,key,s);}
+        synchronized(LOCK){JSONObject current=read(c,key);if(!selected(c,key,current)||current.optBoolean("catalog_loaded")&&current.optBoolean("catalog_verified"))return;if(current.optBoolean("catalog_loaded")){current.put("catalog_loaded",false);write(c,key,current);}}
+        PlaylistSyncCatalog.Result result=PlaylistSyncCatalog.fetch(offset->http.request("/api/studio/tracks?offset="+offset+"&limit=200",null),http.library);
+        synchronized(LOCK){
+            JSONObject state=read(c,key);if(!selected(c,key,state))return;
+            JSONObject catalog=result.entries,previous=state.getJSONObject("catalog");Iterator<String> oldKeys=previous.keys();
+            while(oldKeys.hasNext()){String old=oldKeys.next();if(!catalog.has(old))catalog.put(old,previous.get(old));}
+            state.put("catalog",catalog).put("catalog_loaded",true).put("catalog_verified",true).put("catalog_truncated",result.truncated);write(c,key,state);
+        }
     }
     static JSONArray lists(Context c){JSONArray out=new JSONArray();String key=active(c);if(key.isEmpty())return out;try{synchronized(LOCK){JSONObject state=read(c,key),entries=state.getJSONObject("documents");Iterator<String> ids=entries.keys();while(ids.hasNext()){String id=ids.next();JSONObject e=entries.getJSONObject(id);if(!e.has("baseline")&&!e.has("desired"))continue;JSONObject v=PlaylistSyncModel.visible(e);JSONObject row=v.getString("kind").equals("smart")?PlaylistSyncModel.copy(v.getJSONObject("document")):new JSONObject();if(v.getString("kind").equals("smart")){row.put("energy",row.isNull("target_energy")?-1:(row.optDouble("target_energy",5.5)-1)/9);JSONObject plan=row.optJSONObject("energy_progression");if(plan!=null)plan.put("target",(plan.optDouble("target",7.3)-1)/9);for(String field:new String[]{"excluded","preferred"}){JSONArray normalized=new JSONArray(),refs=row.optJSONArray(field);if(refs!=null)for(int r=0;r<refs.length();r++){String mapped=state.getJSONObject("mappings").optString(refs.getString(r));if(!mapped.isEmpty())normalized.put(mapped);}row.put(field,normalized);}String recognition=state.getJSONObject("mappings").optString(row.optString("recognition_song"));row.put("recognition_song",recognition);}out.put(row.put("id","server-"+key.substring(0,12)+"-"+id).put("name",v.getJSONObject("document").optString("name",id)).put("smart",v.getString("kind").equals("smart")).put("_sync_binding",key).put("_sync_envelope",v).put("_sync_blocked",e.has("blocked")).put("_sync_pending",e.has("desired")||e.has("pending")));}}}catch(Exception e){status="Saved server playlists unavailable; retained state was not replaced.";}return out;}
     static void saved(Context c,JSONObject list,JSONObject document)throws Exception {String key=list.getString("_sync_binding");synchronized(LOCK){JSONObject state=read(c,key);PlaylistSyncModel.save(state,list.getJSONObject("_sync_envelope"),document);write(c,key,state);}wake(c);changed();}

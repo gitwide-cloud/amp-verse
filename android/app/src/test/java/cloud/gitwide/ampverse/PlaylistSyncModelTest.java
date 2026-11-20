@@ -10,7 +10,7 @@ public class PlaylistSyncModelTest {
     JSONObject normal(String name,int revision)throws Exception{return new JSONObject().put("document_id","normal_stable").put("kind","normal").put("document_version",1).put("revision",new JSONObject().put("revision",revision)).put("document",new JSONObject().put("version",1).put("name",name).put("companion_available",true).put("future",new JSONObject().put("keep",true)).put("tracks",new JSONArray().put(ref("a")).put(ref("missing")).put(ref("a"))));}
     JSONObject ref(String key)throws Exception{return new JSONObject().put("track_key",PlaylistSyncModel.trackKey(key+".mp3")).put("library_id","library").put("relative_path",key+".mp3");}
     JSONObject snapshot(JSONObject doc)throws Exception{return new JSONObject().put("protocol",1).put("server_id","server").put("library_id","library").put("smart_revision",new JSONObject().put("revision",1)).put("documents",new JSONArray().put(doc));}
-    JSONObject ack(JSONObject op,int revision)throws Exception{return new JSONObject().put("server_id","server").put("library_id","library").put("operation_id",op.getString("operation_id")).put("status","applied").put("canonical",new JSONObject().put("document_id",op.getString("document_id")).put("kind",op.getString("kind")).put("document_version",1).put("revision",new JSONObject().put("revision",revision)).put("document",PlaylistSyncModel.copy(op.getJSONObject("document"))));}
+    JSONObject ack(JSONObject op,int revision)throws Exception{return new JSONObject().put("server_id","server").put("library_id","library").put("operation_id",op.getString("operation_id")).put("status","applied").put("canonical",new JSONObject().put("document_id",op.getString("document_id")).put("kind",op.getString("kind")).put("document_version",1).put("revision",new JSONObject().put("revision",revision).put("library_id","library")).put("document",PlaylistSyncModel.copy(op.getJSONObject("document"))));}
     @Test public void pullPreservesDuplicatesAndUnresolvedMappingWithoutTouchingMedia()throws Exception{
         JSONObject s=state(),remote=normal("Server",1);PlaylistSyncModel.pull(s,snapshot(remote));JSONObject view=PlaylistSyncModel.visible(s.getJSONObject("documents").getJSONObject("normal_stable"));
         assertEquals(3,PlaylistSyncModel.orderedReferences(view).length());JSONObject mappings=new JSONObject().put(PlaylistSyncModel.trackKey("a.mp3"),"local-content-id");assertEquals(Arrays.asList("local-content-id","local-content-id"),PlaylistSyncModel.mappedNormal(view,mappings));assertEquals(3,remote.getJSONObject("document").getJSONArray("tracks").length());assertFalse(s.has("playback"));assertFalse(s.has("preparation"));
@@ -87,5 +87,19 @@ public class PlaylistSyncModelTest {
 
     @Test public void oversizedWireEditDoesNotBecomeAnUnsendablePendingOperation()throws Exception {
         JSONObject s=state(),original=normal("Old",1);PlaylistSyncModel.pull(s,snapshot(original));JSONObject before=PlaylistSyncModel.copy(s);JSONObject large=PlaylistSyncModel.copy(original.getJSONObject("document")).put("large_compatible_field","x".repeat(1024*1024));try{PlaylistSyncModel.save(s,original,large);fail();}catch(JSONException expected){}assertTrue(PlaylistSyncModel.equal(before,s));assertNull(PlaylistSyncModel.next(s));
+    }
+
+    @Test public void malformedCanonicalAckDoesNotClearTheDurableOperation()throws Exception {
+        for(String invalid:new String[]{"kind","version","version_type","revision","revision_type","library"}){
+            JSONObject s=state(),original=normal("Old",1);PlaylistSyncModel.pull(s,snapshot(original));PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","Phone"));JSONObject op=PlaylistSyncModel.next(s),reply=ack(op,2),canonical=reply.getJSONObject("canonical");
+            if(invalid.equals("kind"))canonical.put("kind","smart");
+            if(invalid.equals("version"))canonical.put("document_version",0);
+            if(invalid.equals("version_type"))canonical.put("document_version","1");
+            if(invalid.equals("revision"))canonical.put("revision","not an object");
+            if(invalid.equals("revision_type"))canonical.getJSONObject("revision").put("revision","2");
+            if(invalid.equals("library"))canonical.getJSONObject("revision").put("library_id","other");
+            try{PlaylistSyncModel.reply(s,op,200,reply);fail(invalid);}catch(JSONException expected){}
+            assertTrue(PlaylistSyncModel.equal(op,PlaylistSyncModel.next(s)));
+        }
     }
 }
