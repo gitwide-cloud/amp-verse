@@ -83,7 +83,10 @@ fn resolved_media_url(url: &str) -> Result<String, String> {
     let host = uri.host().ok_or("Missing station host")?;
     let host = host.trim_start_matches('[').trim_end_matches(']');
     let port = uri.port_u16().ok_or("Missing station port")?;
-    if host.parse::<IpAddr>().is_ok() {
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() {
+            return Err("The station has no address reachable by this Google speaker.".into());
+        }
         return Ok(url.into());
     }
     let addresses: Vec<_> = (host, port)
@@ -438,6 +441,8 @@ mod tests {
     }
     #[test]
     fn numeric_source_is_preserved_and_arbitrary_stream_urls_are_not_advertised() {
+        assert!(resolved_media_url("http://127.0.0.1:8787/listen.mp3").is_err());
+        assert!(resolved_media_url("http://0.0.0.0:8787/listen.mp3").is_err());
         assert_eq!(
             resolved_media_url("http://192.168.1.178:8787/listen.mp3").unwrap(),
             "http://192.168.1.178:8787/listen.mp3"
