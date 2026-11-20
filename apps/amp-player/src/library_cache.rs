@@ -6,6 +6,9 @@ use std::{
     io::{Read, Write},
     path::{Component, Path, PathBuf},
 };
+// Save and load must agree: a successful save must remain usable at restart.
+const MAX_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
+
 #[derive(Serialize, Deserialize)]
 pub struct Snapshot {
     version: u32,
@@ -129,13 +132,16 @@ fn valid_folder(folder: &amp_core::Folder, tracks: usize) -> bool {
         && folder.folders.iter().all(|f| valid_folder(f, tracks))
 }
 fn load_at(file: &Path, root: &Path) -> Option<Snapshot> {
+    load_at_with_limit(file, root, MAX_SNAPSHOT_BYTES)
+}
+fn load_at_with_limit(file: &Path, root: &Path, limit: u64) -> Option<Snapshot> {
     let mut bytes = Vec::new();
     std::fs::File::open(file)
         .ok()?
-        .take(128 * 1024 * 1024 + 1)
+        .take(limit.saturating_add(1))
         .read_to_end(&mut bytes)
         .ok()?;
-    if bytes.len() > 128 * 1024 * 1024 {
+    if bytes.len() as u64 > limit {
         return None;
     }
     let mut snapshot: Snapshot = serde_json::from_slice(&bytes).ok()?;
@@ -149,14 +155,49 @@ fn load_at(file: &Path, root: &Path) -> Option<Snapshot> {
 pub fn load(root: &Path) -> Option<Snapshot> {
     load_at(&path(root)?, root)
 }
+struct LimitedWriter<'a, W> {
+    inner: &'a mut W,
+    remaining: u64,
+}
+impl<W: Write> Write for LimitedWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() as u64 > self.remaining {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Library snapshot exceeds catalog size limit; previous catalog retained",
+            ));
+        }
+        let written = self.inner.write(bytes)?;
+        self.remaining -= written as u64;
+        Ok(written)
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
 fn save_at(file: &Path, root: &Path, snapshot: &Snapshot) -> Result<(), String> {
+    save_at_with_limit(file, root, snapshot, MAX_SNAPSHOT_BYTES)
+}
+fn save_at_with_limit(
+    file: &Path,
+    root: &Path,
+    snapshot: &Snapshot,
+    limit: u64,
+) -> Result<(), String> {
     if !valid(snapshot, root) {
         return Err("Invalid library snapshot".into());
     }
     let parent = file.parent().ok_or("Catalog folder unavailable")?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     let mut temp = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
-    serde_json::to_writer(&mut temp, snapshot).map_err(|e| e.to_string())?;
+    serde_json::to_writer(
+        LimitedWriter {
+            inner: &mut temp,
+            remaining: limit,
+        },
+        snapshot,
+    )
+    .map_err(|e| e.to_string())?;
     temp.flush().map_err(|e| e.to_string())?;
     temp.as_file().sync_all().map_err(|e| e.to_string())?;
     temp.persist(file).map_err(|e| e.to_string())?;
@@ -172,6 +213,112 @@ pub fn save(root: &Path, snapshot: &Snapshot) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_save_and_load_agree_and_oversize_keeps_complete_metadata() {
+        assert_eq!(MAX_SNAPSHOT_BYTES, 256 * 1024 * 1024);
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("offline-nas-root");
+        let file = dir.path().join("catalog.json");
+        let mut preparation = amp_core::Preparation {
+            bpm: Some(123.),
+            manual_override: true,
+            analysis: Some(amp_core::preparation::AnalysisInfo {
+                engine: "fixture-engine".into(),
+                duration: 180.,
+                tempo_confidence: 0.9,
+                key_confidence: 0.8,
+                reviewed: true,
+            }),
+            ..Default::default()
+        };
+        preparation.extensions.insert(
+            "opaque-analysis".into(),
+            serde_json::json!({"bins":[1,2,3],"keep":"all fields"}),
+        );
+        let mut snapshot = Snapshot {
+            version: 1,
+            root: root.clone(),
+            library: Library {
+                tracks: vec![amp_core::Track {
+                    path: "artist/album/song.mp3".into(),
+                    title: "Preserved title".into(),
+                    preparation,
+                }],
+                tree: amp_core::Folder {
+                    name: "music".into(),
+                    tracks: vec![0],
+                    folders: vec![],
+                },
+            },
+            sources: vec![amp_core::music_sources::Source {
+                id: "extra-source".into(),
+                root: "other-nas/music".into(),
+                library_id: "source-library".into(),
+                locations: Default::default(),
+            }],
+            settings: Some(amp_core::show::Settings::default()),
+            playlists: vec![(
+                root.join("ampdj/playlists/normal.json"),
+                Playlist {
+                    version: 1,
+                    name: "Duplicates retained".into(),
+                    tracks: vec![
+                        "artist/album/song.mp3".into(),
+                        "artist/album/song.mp3".into(),
+                    ],
+                    sync: None,
+                    companion_available: true,
+                },
+            )],
+        };
+        let expected = serde_json::to_value(&snapshot).unwrap();
+        let serialized = serde_json::to_vec(&snapshot).unwrap();
+        let limit = serialized.len() as u64;
+        save_at_with_limit(&file, &root, &snapshot, limit).unwrap();
+        assert_eq!(std::fs::metadata(&file).unwrap().len(), limit);
+        assert_eq!(
+            serde_json::to_value(load_at_with_limit(&file, &root, limit).unwrap()).unwrap(),
+            expected,
+            "No analysis, settings, source refs, or duplicate playlist members may be truncated"
+        );
+        assert!(load_at_with_limit(&file, &root, limit - 1).is_none());
+        assert!(
+            save_at_with_limit(&file, &root, &snapshot, limit - 1)
+                .unwrap_err()
+                .contains("catalog size limit")
+        );
+        assert_eq!(std::fs::read(&file).unwrap(), serialized);
+        snapshot.library.tracks[0]
+            .preparation
+            .extensions
+            .insert("larger-analysis".into(), serde_json::json!("x".repeat(256)));
+        assert!(
+            save_at_with_limit(&file, &root, &snapshot, limit)
+                .unwrap_err()
+                .contains("catalog size limit")
+        );
+        assert_eq!(
+            std::fs::read(&file).unwrap(),
+            serialized,
+            "Oversize replacement leaves previous complete cache byte-for-byte intact"
+        );
+        assert_eq!(
+            serde_json::to_value(load_at_with_limit(&file, &root, limit).unwrap()).unwrap(),
+            expected
+        );
+        let absent = dir.path().join("never-published.json");
+        assert!(save_at_with_limit(&absent, &root, &snapshot, limit).is_err());
+        assert!(
+            !absent.exists(),
+            "An oversize first save must not publish a partial cache"
+        );
+        assert_eq!(
+            std::fs::read_dir(dir.path()).unwrap().count(),
+            1,
+            "Failed temp writes clean up without leaving partial catalog files"
+        );
+    }
     #[test]
     fn offline_additional_source_cannot_replace_completed_catalog_but_empty_source_can() {
         let source = amp_core::music_sources::Source {
