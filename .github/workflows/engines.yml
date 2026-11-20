@@ -10,6 +10,7 @@ on:
       - 'Cargo.lock'
       - 'tests/sag65/**'
       - 'tools/check_chroma.py'
+      - 'deploy/install-windows-server.ps1'
       - '.github/workflows/engines.yml'
   pull_request:
     paths:
@@ -20,6 +21,7 @@ on:
       - 'Cargo.lock'
       - 'tests/sag65/**'
       - 'tools/check_chroma.py'
+      - 'deploy/install-windows-server.ps1'
       - '.github/workflows/engines.yml'
   workflow_dispatch:
 permissions:
@@ -96,6 +98,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then ext=.exe; else ext=; fi
           cp target/release/amp-cast$ext target/release/amp-prepare$ext target/release/amp-engine$ext engine-checkpoint/
           cp LICENSE THIRD_PARTY_NOTICES.md docs/SERVER_ANALYSIS_DATABASE.md engine-checkpoint/
+          if [ "${{ runner.os }}" = "Windows" ]; then cp deploy/install-windows-server.ps1 engine-checkpoint/; fi
           cp test-output/chroma/report.json engine-checkpoint/chroma-benchmark.json
           python -c "import hashlib,json,pathlib; d=pathlib.Path('engine-checkpoint'); files=[{'name':p.name,'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(d.iterdir()) if p.is_file()]; (d/'build.json').write_text(json.dumps({'commit':'${{ github.sha }}','os':'${{ runner.os }}','preview':True,'deployed':False,'files':files},indent=2))"
       - uses: actions/upload-artifact@v4
