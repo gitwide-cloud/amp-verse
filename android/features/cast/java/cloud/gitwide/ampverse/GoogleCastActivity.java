@@ -9,19 +9,28 @@ import com.google.android.gms.cast.framework.*;
 public final class GoogleCastActivity extends AppCompatActivity {
     private TextView status;
     private Appearance colors;
+    private com.google.android.gms.cast.framework.media.RemoteMediaClient observed;
+    private final com.google.android.gms.cast.framework.media.RemoteMediaClient.Callback mediaUpdates=new com.google.android.gms.cast.framework.media.RemoteMediaClient.Callback(){
+        @Override public void onStatusUpdated(){if(observed==null)return;MediaStatus media=observed.getMediaStatus();if(media==null)return;
+            if(media.getPlayerState()==MediaStatus.PLAYER_STATE_BUFFERING)status.setText("Receiver buffering host stream… Phone playback is unchanged.");
+            else if(media.getPlayerState()==MediaStatus.PLAYER_STATE_PLAYING)status.setText("Receiver reports playing the host stream. End-to-end delay is unmeasured.");
+            else if(media.getPlayerState()==MediaStatus.PLAYER_STATE_IDLE&&media.getIdleReason()==MediaStatus.IDLE_REASON_ERROR)status.setText("Receiver could not play the host stream. Check that the speaker can reach the host LAN address.");
+        }
+    };
+    private void observe(com.google.android.gms.cast.framework.media.RemoteMediaClient media){if(observed!=null)observed.unregisterCallback(mediaUpdates);observed=media;if(observed!=null)observed.registerCallback(mediaUpdates);}
     private final SessionManagerListener<CastSession> sessions=new SessionManagerListener<CastSession>() {
         public void onSessionStarting(CastSession s){status.setText("Connecting to speaker...");}
         public void onSessionStarted(CastSession s,String id){play();}
         public void onSessionStartFailed(CastSession s,int code){status.setText("Speaker connection failed: "+code);}
         public void onSessionEnding(CastSession s){}
-        public void onSessionEnded(CastSession s,int code){status.setText("Casting stopped");}
+        public void onSessionEnded(CastSession s,int code){observe(null);status.setText("Casting stopped");}
         public void onSessionResuming(CastSession s,String id){status.setText("Reconnecting to speaker...");}
         public void onSessionResumed(CastSession s,boolean suspended){status.setText("Speaker reconnected. Tap Play to resume this station.");}
         public void onSessionResumeFailed(CastSession s,int code){status.setText("Speaker reconnect failed: "+code);}
         public void onSessionSuspended(CastSession s,int reason){status.setText("Speaker disconnected; phone playback is unchanged.");}
     };
-    @Override protected void onResume(){super.onResume();try{CastContext.getSharedInstance(this).getSessionManager().addSessionManagerListener(sessions,CastSession.class);}catch(Exception ignored){}}
-    @Override protected void onPause(){try{CastContext.getSharedInstance(this).getSessionManager().removeSessionManagerListener(sessions,CastSession.class);}catch(Exception ignored){}super.onPause();}
+    @Override protected void onResume(){super.onResume();try{CastContext.getSharedInstance(this).getSessionManager().addSessionManagerListener(sessions,CastSession.class);CastSession current=CastContext.getSharedInstance(this).getSessionManager().getCurrentCastSession();if(current!=null){observe(current.getRemoteMediaClient());mediaUpdates.onStatusUpdated();}}catch(Exception ignored){}}
+    @Override protected void onPause(){try{CastContext.getSharedInstance(this).getSessionManager().removeSessionManagerListener(sessions,CastSession.class);}catch(Exception ignored){}observe(null);super.onPause();}
 
     @Override public void onCreate(Bundle state){
         super.onCreate(state);
@@ -29,7 +38,7 @@ public final class GoogleCastActivity extends AppCompatActivity {
         ScrollView scroll=new ScrollView(this);scroll.setBackgroundColor(colors.background);scroll.setOnApplyWindowInsetsListener((view,insets)->{view.setPadding(insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;});
         LinearLayout content=new LinearLayout(this);content.setOrientation(LinearLayout.VERTICAL);int pad=(int)(20*getResources().getDisplayMetrics().density);content.setPadding(pad,pad,pad,pad);scroll.addView(content);setContentView(scroll);
         TextView heading=new TextView(this);heading.setText("Google Home / Chromecast");heading.setTextSize(24);heading.setTextColor(colors.text);content.addView(heading);
-        status=new TextView(this);status.setText("Choose a speaker with the Cast button to play this station or live DJ broadcast.");status.setTextSize(17);status.setTextColor(colors.muted);content.addView(status);
+        status=new TextView(this);status.setText("The speaker reads the selected host’s LAN stream URL directly. This does not send phone audio. The speaker must be able to reach that host. Choose a speaker with the Cast button.");status.setTextSize(17);status.setTextColor(colors.muted);content.addView(status);
         try {
             CastContext.getSharedInstance(this);
             MediaRouteButton route=new MediaRouteButton(this);route.setContentDescription("Choose Google Cast speaker");content.addView(route,new LinearLayout.LayoutParams(pad*3,pad*3));CastButtonFactory.setUpMediaRouteButton(this,route);
@@ -47,7 +56,8 @@ public final class GoogleCastActivity extends AppCompatActivity {
             if(session==null||!session.isConnected()||session.getRemoteMediaClient()==null){status.setText("Choose a Google speaker first, then tap Play station on speaker.");return;}
             MediaMetadata metadata=new MediaMetadata(MediaMetadata.MEDIA_TYPE_MUSIC_TRACK);metadata.putString(MediaMetadata.KEY_TITLE,getIntent().getStringExtra("title"));
             MediaInfo media=new MediaInfo.Builder(url).setContentType("audio/mpeg").setStreamType(MediaInfo.STREAM_TYPE_LIVE).setMetadata(metadata).build();
-            session.getRemoteMediaClient().load(new MediaLoadRequestData.Builder().setMediaInfo(media).setAutoplay(true).build()).setResultCallback(result->status.setText(result.getStatus().isSuccess()?"Stream sent to speaker. Use the Cast button for playback controls.":"Speaker rejected the stream: "+result.getStatus().getStatusCode()));
+            observe(session.getRemoteMediaClient());
+            session.getRemoteMediaClient().load(new MediaLoadRequestData.Builder().setMediaInfo(media).setAutoplay(true).build()).setResultCallback(result->status.setText(result.getStatus().isSuccess()?"Receiver accepted the stream request; waiting for playback status.":"Speaker rejected the stream: "+result.getStatus().getStatusCode()));
         }catch(Exception error){status.setText("Could not cast: "+error.getMessage());}
     }
 }

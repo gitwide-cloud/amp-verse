@@ -41,11 +41,12 @@ public class CastDeviceTest {
                 device.findObject(By.text("Server settings / enter address")).click();
                 assertTrue(device.wait(Until.hasObject(By.text("Connect")),5000));
                 device.findObject(By.text("Connect")).click();
-                assertTrue(device.wait(Until.hasObject(By.text("Station connected")),12000));
-                device.findObject(By.text("Server settings / enter address")).click();
+                assertTrue(device.wait(Until.hasObject(By.textContains("control rejected")),12000));
+                Thread.sleep(5500);
+                assertTrue("Polling must preserve auth rejection",device.hasObject(By.textContains("control rejected")));
                 device.findObject(By.desc("AMP Cast admin password")).setText("test-secret");
                 device.findObject(By.text("Connect")).click();
-                assertTrue(device.wait(Until.hasObject(By.text("Station connected")),12000));
+                assertTrue(device.wait(Until.hasObject(By.text("Host connected. Choose a destination; no playback was started")),12000));
                 device.findObject(By.desc("Search station songs")).setText("zzzz-no-match");
                 assertTrue(device.wait(Until.hasObject(By.text("No songs match your search.")),3000));
                 device.findObject(By.desc("Search station songs")).setText("phone-test");
@@ -53,20 +54,28 @@ public class CastDeviceTest {
                 device.findObject(By.desc("Search station songs")).setText("");
                 scenario.onActivity(a->((android.view.inputmethod.InputMethodManager)a.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(a.getWindow().getDecorView().getWindowToken(),0));
                 device.findObject(By.text("Server settings / enter address")).click();
-                device.findObject(By.text("Start station")).click();
+                device.findObject(By.text("Start host station")).click();
                 assertTrue(device.wait(Until.hasObject(By.text("Station started")),12000));assertTrue(client.status().getBoolean("running"));
-                device.findObject(By.text("Listen on this phone")).click();
+                assertTrue(device.wait(Until.hasObject(By.text("Listen to host on this phone").enabled(true)),12000));
+                device.findObject(By.text("Listen to host on this phone")).click();
                 long until=System.currentTimeMillis()+12000;boolean[] active={false};
                 while(System.currentTimeMillis()<until){main(()->active[0]=player[0].isPlaying());if(active[0])break;Thread.sleep(100);}
                 assertTrue("Real server MP3 must play through phone service",active[0]);
                 device.findObject(By.text("Stop phone playback")).click();assertTrue(client.status().getBoolean("running"));
-                device.findObject(By.text("Stop station")).click();assertTrue(device.wait(Until.hasObject(By.text("Station stopped")),12000));assertFalse(client.status().getBoolean("running"));
+                device.findObject(By.text("Stop host program for all listeners")).click();assertTrue(device.wait(Until.hasObject(By.text("Station stopped")),12000));assertFalse(client.status().getBoolean("running"));
             }
         }finally {
             client.command(false);
             if(player[0]!=null)main(()->{player[0].stop();if(saved.isEmpty())player[0].clearMediaItems();else player[0].setMediaItems(saved,index[0],position[0]);player[0].setVolume(volume[0]);if(playing[0]&&!saved.isEmpty()){player[0].prepare();player[0].play();}player[0].release();});
             if(savedServer==null)prefs.edit().remove("cast-server").commit();else prefs.edit().putString("cast-server",savedServer).commit();
         }
+    }
+    @Test public void userEntryRejectsLocalButMockClientRemainsUsable()throws Exception {
+        for(String value:new String[]{"127.0.0.1:8787","localhost:8787","http://localhost.:8787","http://[::1]:8787","http://[0:0:0:0:0:0:0:1]:8787","http://[::]:8787","0.0.0.0:8787"}) {
+            try{CastClient.requireLanAddress(value);fail("LAN address required");}catch(java.io.IOException expected){assertTrue(expected.getMessage().contains("LAN"));}
+        }
+        CastClient.requireLanAddress("192.168.1.50:8787");
+        assertEquals("http://127.0.0.1:8787",new CastClient("127.0.0.1:8787","").base);
     }
     @Test public void rejectsAmbiguousServerAddresses()throws Exception {
         for(String value:new String[]{"file:///music","http://user:secret@localhost:8787","http://localhost:8787/api/status","http://localhost:8787?station=other"}){

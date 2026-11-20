@@ -17,9 +17,16 @@ final class CastClient {
         URI uri=new URI(input);
         if(!("http".equalsIgnoreCase(uri.getScheme())||"https".equalsIgnoreCase(uri.getScheme()))||uri.getHost()==null||uri.getUserInfo()!=null||uri.getQuery()!=null||uri.getFragment()!=null||!(uri.getPath().isEmpty()||uri.getPath().equals("/")))
             throw new IOException("Enter the server address, for example http://192.168.1.50:8787");
-        if(uri.getHost().equalsIgnoreCase("localhost")||uri.getHost().startsWith("127.")||uri.getHost().equals("[::1]")||uri.getHost().equals("::1"))
-            throw new IOException("That is this phone's loopback address. Enter the test host's LAN address; a server bound only to 127.0.0.1 is not reachable from this phone.");
         base=new URI(uri.getScheme().toLowerCase(),null,uri.getHost(),uri.getPort(),null,null,null).toString();this.password=password;
+    }
+    // User entry must use LAN addressing; direct clients retain loopback for isolated mock fixtures.
+    static void requireLanAddress(String address)throws Exception {
+        String input=address.trim();if(!input.contains("://"))input="http://"+input;
+        String host=new URI(input).getHost();if(host==null)throw new IOException("Enter a valid AMP host LAN address");
+        String literal=host.replace("[", "").replace("]", "");
+        boolean local=literal.equalsIgnoreCase("localhost")||literal.equalsIgnoreCase("localhost.")||literal.startsWith("127.")||literal.equals("0.0.0.0");
+        if(literal.contains(":")){InetAddress ip=InetAddress.getByName(literal);local|=ip.isLoopbackAddress()||ip.isAnyLocalAddress();}
+        if(local)throw new IOException("Enter the AMP host's LAN address. Loopback addresses refer to this phone; a host bound only to 127.0.0.1 cannot accept LAN connections.");
     }
     JSONObject connect()throws Exception {
         JSONObject status=get("/api/status");

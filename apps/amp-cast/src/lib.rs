@@ -369,6 +369,22 @@ mod tests {
         assert_eq!(station.current_index, Some(7));
     }
     #[tokio::test]
+    async fn android_host_commands_require_auth_and_advertise_support() {
+        let app = app(Some("secret".into()));
+        for path in ["/api/output/start", "/api/output/stop", "/api/live/launch"] {
+            let response = app.clone().oneshot(Request::post(path)
+                .header("content-type", "application/json")
+                .body(Body::from("{}")).unwrap()).await.unwrap();
+            assert_eq!(response.status(), 401, "{path}");
+        }
+        let response = app.oneshot(Request::get("/api/status").body(Body::empty()).unwrap()).await.unwrap();
+        let bytes = axum::body::to_bytes(response.into_body(), 65536).await.unwrap();
+        let status: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(status["capabilities"]["host_master_launch"], true);
+        assert_eq!(status["capabilities"]["server_output_control"], true);
+        assert_eq!(status["running"], false);
+    }
+    #[tokio::test]
     async fn password_control_and_public_listener() {
         let app = app(Some("secret".into()));
         let response = app
