@@ -303,6 +303,8 @@ struct Ledger {
     result: Option<Value>,
 }
 fn sync_parent(p: &Path) -> Result<(), String> {
+    #[cfg(not(unix))]
+    let _ = p;
     #[cfg(unix)]
     fs::File::open(p.parent().ok_or("Missing ledger parent")?)
         .and_then(|f| f.sync_all())
@@ -473,7 +475,11 @@ fn execute(c: &Cast, op: Operation) -> Result<(StatusCode, Value), String> {
                 ));
             }
             return Ok(if let Some(result) = old.result {
-                if let Err(e) = fs::File::open(&path)
+                // Windows FlushFileBuffers requires a handle opened with write access.
+                if let Err(e) = fs::OpenOptions::new()
+                    .read(true)
+                    .write(true)
+                    .open(&path)
                     .and_then(|f| f.sync_all())
                     .map_err(|e| e.to_string())
                     .and_then(|_| sync_parent(&path))
