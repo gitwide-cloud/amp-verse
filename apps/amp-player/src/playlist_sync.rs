@@ -566,6 +566,11 @@ fn cycle(binding: &Binding, directory: &Path) -> Result<String, String> {
                     };
                     let mut op = operation(binding, doc, revision, action);
                     if op.kind == Kind::Smart {
+                        // An empty settings-v2 snapshot has no document version. Create
+                        // with known-supported v2 so it cannot downgrade that container.
+                        if op.action == Action::Create {
+                            op.document_version = 2;
+                        }
                         op.document_version = op.document_version.max(
                             fresh
                                 .documents
@@ -1083,6 +1088,41 @@ mod tests {
             .unwrap();
         assert_eq!(settings["version"], 2);
         assert_eq!(settings["playlists"].as_array().unwrap().len(), 2);
+    }
+    #[test]
+    fn smart_create_preserves_an_empty_version_two_server_container() {
+        let server = Server::start();
+        amp_core::coordination::save_document(
+            &server.binding.root.join("ampdj/smart-playlists.json"),
+            &json!({"version":2,"playlists":[]}),
+            &server.binding.library_id,
+        )
+        .unwrap();
+        let root = server._dir.path().join("copy-empty-smart");
+        std::fs::create_dir_all(root.join("ampdj")).unwrap();
+        std::fs::copy(
+            server.binding.root.join("ampdj/library.json"),
+            root.join("ampdj/library.json"),
+        )
+        .unwrap();
+        let mut binding = server.binding.clone();
+        binding.root = root.canonicalize().unwrap();
+        let rules = amp_core::show::Settings::default().playlists.remove(0);
+        let doc = Document {
+            document_id: "smart_demo".into(),
+            kind: Kind::Smart,
+            document_version: 1,
+            revision: Value::Null,
+            document: serde_json::to_value(rules).unwrap(),
+        };
+        hydrate(&binding, &doc, None).unwrap();
+        cycle(&binding, &server._dir.path().join("empty-smart-client")).unwrap();
+        assert_eq!(
+            read(&server.binding.root.join("ampdj/smart-playlists.json"))
+                .unwrap()
+                .unwrap()["version"],
+            2
+        );
     }
     #[test]
     fn copied_library_pushes_once_and_retains_uncertain_pending_without_replay() {
