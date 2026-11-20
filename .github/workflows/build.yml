@@ -64,6 +64,11 @@ jobs:
           python tools/test_setup_lab_youtube.py
           python tools/setup_lab_youtube.py --dest test-output/lab-tools
       - run: python tools/test_engine_release_metadata.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify Studio browser session flow
+        run: node --test apps/amp-cast/web/studio-session.test.cjs
       - run: cargo fmt --all --check
       - name: Verify canonical desktop update and rollback
         if: runner.os == 'Windows'
@@ -116,6 +121,8 @@ jobs:
           python tests/sag65/generate_sag65_fixtures.py --out-dir target/sag65-fixtures
           cargo test -p amp-core -p amp-player -p amp-cast f10 --locked -- --ignored --nocapture --test-threads=1
           cargo test -p amp-core --test sag65_vectors --locked -- --nocapture --test-threads=1
+      - name: Verify finite server Player queues with generated real audio
+        run: cargo test -p amp-cast --lib player_control::tests::generated --locked -- --ignored --test-threads=1
       - name: Verify adaptive LAN audio with real codecs and lifecycle recovery
         run: cargo test -p amp-cast --lib hls::tests --locked -- --include-ignored --test-threads=1
       - name: Test actual deck playback with silent audio device
