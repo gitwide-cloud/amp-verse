@@ -17,6 +17,7 @@ final class CastClient {
     static final class HostUnavailableException extends IOException {
         HostUnavailableException(String message,Throwable cause){super(message,cause);}
     }
+    void withPrivateAuthorization(java.util.function.BiConsumer<String,String> action){action.accept(base,password);}
     boolean hasPassword(){return !password.isEmpty();}
     final String base;
     private final String password;
