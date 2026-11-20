@@ -302,6 +302,12 @@ async fn file_response(file: PathBuf, headers: HeaderMap, download: bool) -> Res
         Ok(m) => m.len(),
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
     };
+    if len == 0 {
+        return err(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "This audio file is empty. Choose another track, then repair or re-import the source in Library.",
+        );
+    }
     let (start, end, partial) =
         match byte_range(headers.get("range").and_then(|h| h.to_str().ok()), len) {
             Ok(r) => r,
@@ -814,6 +820,36 @@ mod api_tests {
     use super::*;
     use axum::http::Request;
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn empty_audio_is_a_source_error_instead_of_successful_silence() {
+        let (_root, cast, app) = fixture();
+        let file = path(&cast, 0).unwrap();
+        std::fs::write(&file, []).unwrap();
+        for method in ["GET", "HEAD"] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri("/api/studio/tracks/0/audio")
+                        .header("x-amp-password", "secret")
+                        .header("range", "bytes=0-63")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+            if method == "GET" {
+                let body = axum::body::to_bytes(response.into_body(), 4096)
+                    .await
+                    .unwrap();
+                let value: Value = serde_json::from_slice(&body).unwrap();
+                assert!(value["error"].as_str().unwrap().contains("empty"));
+            }
+        }
+        assert_eq!(std::fs::metadata(file).unwrap().len(), 0);
+    }
     #[tokio::test]
     async fn browser_session_sign_in_refresh_media_logout_and_csrf_are_scoped() {
         let (_root, cast, app) = fixture();
