@@ -51,7 +51,7 @@ jobs:
           SOURCES
           sources=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/amp-ubuntu.list" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0)
           sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" update
-          sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev ffmpeg xvfb
+          sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev libasound2-plugins pulseaudio pulseaudio-utils ffmpeg xvfb
       - name: Windows audio test dependencies
         if: runner.os == 'Windows'
         run: |
@@ -69,6 +69,37 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p amp-core raw_and_canonical_paths_share_preparation_and_catalog_keys --locked -- --nocapture
       - run: cargo test --workspace --locked
+      - name: Verify regular playlist AutoMix on a clocked silent output
+        if: runner.os == 'Linux'
+        shell: bash
+        env:
+          ALSA_CONFIG_PATH: ${{ runner.temp }}/amp-automix-asound.conf
+          PULSE_SERVER: unix:${{ runner.temp }}/amp-automix-pulse/native
+        run: |
+          python - <<'PYCONFIG'
+          import os
+          from pathlib import Path
+          runtime = Path(os.environ["RUNNER_TEMP"]) / "amp-automix-pulse"
+          runtime.mkdir(mode=0o700, exist_ok=True)
+          (runtime / "startup.pa").write_text(
+              "load-module module-native-protocol-unix socket=" + str(runtime / "native") + " auth-anonymous=1\n"
+              "load-module module-null-sink sink_name=amp_automix rate=48000 channels=2\n"
+              "set-default-sink amp_automix\n"
+          )
+          Path(os.environ["ALSA_CONFIG_PATH"]).write_text(
+              'pcm.!default { type pulse hint { show on description "AMP Verse CI silent output" } }\n'
+              'ctl.!default { type pulse }\n'
+          )
+          PYCONFIG
+          pulseaudio --daemonize=no --use-pid-file=no --exit-idle-time=-1 -n --file="$RUNNER_TEMP/amp-automix-pulse/startup.pa" --log-target="file:$RUNNER_TEMP/amp-automix-pulse/server.log" &
+          pulse_pid=$!
+          trap 'kill "$pulse_pid" 2>/dev/null || true; wait "$pulse_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..50}; do
+            if pactl info >/dev/null 2>&1; then break; fi
+            sleep 0.1
+          done
+          pactl info
+          cargo test -p amp-player --bin amp-player performance::tests::regular_playlist_automatic_preload_shuffle_cancel_and_handoff --locked -- --ignored --exact --test-threads=1 --nocapture
       - name: Verify supervised live sender recovers after a five-second outage
         run: cargo test -p amp-player --bin amp-player live_mix::tests::supervised_sender_recovers_current_pcm_after_five_second_transport_outage --locked -- --ignored --test-threads=1
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
