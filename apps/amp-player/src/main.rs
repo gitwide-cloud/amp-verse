@@ -3143,9 +3143,26 @@ impl Player {
                 });
         });
     }
+    fn clear_live_broadcast(&mut self) {
+        self.live_mix = None;
+        self.cast.live_ended();
+        if let Some(audio) = &self.audio {
+            audio.stop_broadcast_tap();
+        }
+        if let Some(audio) = &self.right_sample_audio {
+            audio.stop_broadcast_tap();
+        }
+    }
     fn update_live_broadcast(&mut self) {
         if self.cast.get().is_none() {
             return;
+        }
+        if let Some(broadcast) = &self.live_mix {
+            let running = broadcast.running();
+            let final_status = broadcast.status.lock().unwrap().clone();
+            if self.cast.finish_live_if_stopped(running, final_status) {
+                self.clear_live_broadcast();
+            }
         }
         self.follow_live_broadcast_owner();
         self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
@@ -3180,14 +3197,7 @@ impl Player {
                     }
                 }
             } else {
-                self.live_mix = None;
-                self.cast.live_ended();
-                if let Some(audio) = &self.audio {
-                    audio.stop_broadcast_tap();
-                }
-                if let Some(audio) = &self.right_sample_audio {
-                    audio.stop_broadcast_tap();
-                }
+                self.clear_live_broadcast();
                 self.cast.live_status = "Live DJ broadcast stopped".into();
             }
         }

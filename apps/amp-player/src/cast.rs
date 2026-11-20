@@ -416,12 +416,24 @@ impl Dashboard {
         self.live_action = Some(true);
     }
     pub fn live_started(&mut self) {
-        self.live_binding = self.pending_binding.take();
+        if let Some(binding) = self.pending_binding.take() {
+            self.live_binding = Some(binding);
+        }
     }
     pub fn live_ended(&mut self) {
         self.live_binding = None;
         self.pending_binding = None;
         self.pending_live = None;
+        self.live_active = false;
+    }
+    pub fn finish_live_if_stopped(&mut self, running: bool, final_status: String) -> bool {
+        if running {
+            return false;
+        }
+        self.live_ended();
+        self.live_action = None;
+        self.live_status = final_status;
+        true
     }
     fn ensure_worker(&mut self) {
         if self.tx.is_some() {
@@ -1093,6 +1105,41 @@ mod tests {
             queue: Queue::default(),
             manifest: None,
         }
+    }
+    #[test]
+    fn finished_source_releases_role_and_allows_new_endpoint_and_restart() {
+        let (mut dashboard, commands, _) = mock_dashboard();
+        dashboard.send(Command::Connect("server-a:8787".into(), "a".into(), 0));
+        commands.recv().unwrap();
+        dashboard.arm_live_start();
+        dashboard.live_started();
+        dashboard.live_active = true;
+        assert!(!dashboard.finish_live_if_stopped(true, "Reconnecting…".into()));
+        assert!(
+            dashboard.sending(),
+            "transient network recovery keeps its binding"
+        );
+        dashboard.live_started();
+        assert_eq!(
+            dashboard.endpoint(),
+            ("server-a:8787".into(), "a".into()),
+            "no pending binding must not erase a valid active binding"
+        );
+        assert!(
+            dashboard
+                .finish_live_if_stopped(false, "Live broadcast stopped: encoder failed".into())
+        );
+        assert!(!dashboard.sending());
+        assert!(!dashboard.live_active);
+        assert!(dashboard.live_status.contains("encoder failed"));
+        dashboard.send(Command::Connect("server-b:8787".into(), "b".into(), 0));
+        assert!(
+            matches!(commands.recv().unwrap(), Command::Connect(address, password, _) if address == "server-b:8787" && password == "b")
+        );
+        dashboard.arm_live_start();
+        assert_eq!(dashboard.live_action, Some(true));
+        dashboard.live_started();
+        assert_eq!(dashboard.endpoint(), ("server-b:8787".into(), "b".into()));
     }
     #[test]
     fn pending_local_host_uses_pinned_auth_while_manual_host_uses_edited_auth() {
