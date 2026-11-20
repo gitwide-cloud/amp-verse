@@ -3188,6 +3188,9 @@ impl Player {
 }
 impl eframe::App for Player {
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        if let Some(lab) = self.lab.get_mut() {
+            lab.shutdown();
+        }
         let path = self.loaded_track(0).and_then(|t| {
             self.loaded_origin[0]
                 .as_ref()
