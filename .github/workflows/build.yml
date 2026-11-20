@@ -65,6 +65,12 @@ jobs:
           python tools/setup_lab_youtube.py --dest test-output/lab-tools
       - run: python tools/test_engine_release_metadata.py
       - run: cargo fmt --all --check
+      - name: Verify canonical desktop update and rollback
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          powershell -NoProfile -File tools/test_install-tested-desktop.ps1
+          powershell -NoProfile -File tools/test_install-tested-desktop-transaction.ps1
       - name: Verify Windows raw and canonical metadata paths
         if: runner.os == 'Windows'
         run: cargo test -p amp-core raw_and_canonical_paths_share_preparation_and_catalog_keys --locked -- --nocapture
@@ -199,6 +205,8 @@ jobs:
         shell: bash
         run: |
           cp tools/install-tested-preview.ps1 tools/launch-tested-preview.ps1 dist/
+          cp tools/install-tested-desktop.ps1 tools/restore-tested-desktop.ps1 dist/
+          cp docs/tested-desktop-install.md dist/
           cp docs/tested-preview-install.md dist/
       - uses: actions/upload-artifact@v4
         with:
