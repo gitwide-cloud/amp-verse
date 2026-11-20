@@ -1088,11 +1088,9 @@ mod tests {
     fn mock_dashboard() -> (Dashboard, mpsc::Receiver<Command>, mpsc::Sender<Update>) {
         let (tx, commands) = mpsc::channel();
         let (updates, rx) = mpsc::channel();
-        let dashboard = Dashboard {
-            tx: Some(tx),
-            rx: Some(rx),
-            ..Default::default()
-        };
+        let mut dashboard = Dashboard::default();
+        dashboard.tx.replace(tx);
+        dashboard.rx.replace(rx);
         (dashboard, commands, updates)
     }
     fn live_snapshot() -> Snapshot {
