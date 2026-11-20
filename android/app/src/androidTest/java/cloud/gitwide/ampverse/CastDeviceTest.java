@@ -18,6 +18,8 @@ public class CastDeviceTest {
     private void main(Runnable action){InstrumentationRegistry.getInstrumentation().runOnMainSync(action);}
     private void showText(String text)throws Exception {new UiScrollable(new UiSelector().scrollable(true)).scrollIntoView(new UiSelector().text(text));}
     private void showDescription(String text)throws Exception {new UiScrollable(new UiSelector().scrollable(true)).scrollIntoView(new UiSelector().description(text));}
+    private void dialogButton(UiDevice device,String text)throws Exception {BySelector button=By.text(java.util.regex.Pattern.compile(java.util.regex.Pattern.quote(text),java.util.regex.Pattern.CASE_INSENSITIVE));assertTrue(device.wait(Until.hasObject(button),5000));device.findObject(button).click();}
+    private void hideKeyboard(UiDevice device)throws Exception {main(()->{for(android.app.Activity activity:androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED))((android.view.inputmethod.InputMethodManager)activity.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(activity.getWindow().getDecorView().getWindowToken(),0);});}
     private void top()throws Exception {new UiScrollable(new UiSelector().scrollable(true)).scrollToBeginning(30);}
     private void expand(UiDevice device,String title)throws Exception {showDescription(title);UiObject2 toggle=device.findObject(By.desc(title));if(toggle.getText().endsWith("+"))toggle.click();}
     @Test public void controlsSelectedServerAndListensThroughPhoneService()throws Exception {
@@ -44,26 +46,26 @@ public class CastDeviceTest {
             try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(intent)) {
                 expand(device,"Advanced");showText("Advanced · server address and password");
                 device.findObject(By.text("Advanced · server address and password")).click();
-                assertTrue(device.wait(Until.hasObject(By.text("Connect")),5000));
+                showText("Connect");assertTrue(device.wait(Until.hasObject(By.text("Connect")),5000));
                 device.findObject(By.desc("AMP Cast admin password")).setText("incorrect");
-                device.findObject(By.text("Connect")).click();top();
+                hideKeyboard(device);showText("Connect");device.findObject(By.text("Connect")).click();top();
                 assertTrue(device.wait(Until.hasObject(By.textContains("control rejected")),12000));
                 Thread.sleep(5500);
                 assertTrue("Polling must preserve auth rejection",device.hasObject(By.textContains("control rejected")));
                 showDescription("AMP Cast admin password");device.findObject(By.desc("AMP Cast admin password")).setText("test-secret");
-                device.findObject(By.text("Connect")).click();top();
+                hideKeyboard(device);showText("Connect");device.findObject(By.text("Connect")).click();top();
                 assertTrue(device.wait(Until.hasObject(By.text("Server connected and access verified. Choose an output; existing station playback is unchanged.")),12000));
                 expand(device,"Choose songs for a new playlist");
                 new UiScrollable(new UiSelector().scrollable(true)).scrollIntoView(new UiSelector().className("android.widget.CheckBox"));
                 device.findObject(By.clazz("android.widget.CheckBox")).click();
                 showText("Create playlist on server (1 songs)");device.findObject(By.text("Create playlist on server (1 songs)")).click();
                 String createdName="UI fixture "+UUID.randomUUID();
-                device.findObject(By.desc("New server playlist name")).setText(createdName);device.findObject(By.text("Save")).click();top();
+                device.findObject(By.desc("New server playlist name")).setText(createdName);dialogButton(device,"Save");top();
                 assertTrue(device.wait(Until.hasObject(By.text("Playlist saved and read back from server; station unchanged.")),12000));
                 assertFalse("Saving must not start station",client.status().getBoolean("running"));
                 showText("Browse playlists");device.findObject(By.text("Browse playlists")).click();
                 assertTrue(device.wait(Until.hasObject(By.text(createdName)),12000));device.findObject(By.text(createdName)).click();
-                showText("Play selected playlist");device.findObject(By.text("Play selected playlist")).click();device.findObject(By.text("Play")).click();top();
+                showText("Play selected playlist");device.findObject(By.text("Play selected playlist")).click();dialogButton(device,"Play");top();
                 assertTrue(device.wait(Until.hasObject(By.text("Playlist requested on server. Phone listening is a separate output.")),12000));
                 assertTrue(client.status().getBoolean("running"));
                 showText("Listen on this phone");assertTrue(device.wait(Until.hasObject(By.text("Listen on this phone").enabled(true)),12000));
@@ -85,9 +87,9 @@ public class CastDeviceTest {
                 main(()->otherActive[0]=player[0].isPlaying());assertTrue("Standalone stop IPC must preserve non-radio playback",otherActive[0]);
                 expand(device,"Advanced");
                 showText("Advanced · server address and password");device.findObject(By.text("Advanced · server address and password")).click();
-                showText("Connect");device.findObject(By.text("Connect")).click();top();top();
+                showText("Connect");hideKeyboard(device);showText("Connect");device.findObject(By.text("Connect")).click();top();
                 assertTrue(device.wait(Until.hasObject(By.text("Server connected and access verified. Choose an output; existing station playback is unchanged.")),12000));
-                showText("Stop station playback");device.findObject(By.text("Stop station playback")).click();device.findObject(By.text("Stop station")).click();top();assertTrue(device.wait(Until.hasObject(By.text("Station stopped")),12000));assertFalse(client.status().getBoolean("running"));
+                showText("Stop station playback");device.findObject(By.text("Stop station playback")).click();dialogButton(device,"Stop station");top();assertTrue(device.wait(Until.hasObject(By.text("Station stopped")),12000));assertFalse(client.status().getBoolean("running"));
             }
         }finally {
             android.content.SharedPreferences.Editor restoreSections=sections.edit().clear();for(Map.Entry<String,?> entry:savedSections.entrySet())if(entry.getValue() instanceof Boolean)restoreSections.putBoolean(entry.getKey(),(Boolean)entry.getValue());restoreSections.commit();
@@ -103,14 +105,14 @@ public class CastDeviceTest {
         CastClient client=new CastClient(url,password);org.json.JSONObject before=client.connect();
         Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
         android.content.SharedPreferences prefs=context.getSharedPreferences("settings",0);String previous=prefs.getString("cast-server",null);
-        UiDevice device=UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+        UiDevice device=UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());device.wakeUp();device.executeShellCommand("wm dismiss-keyguard");
         try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(new Intent(context,MainActivity.class).putExtra("module","AMP Cast").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))){
             assertTrue(device.wait(Until.hasObject(By.text("Find nearby servers")),5000));device.findObject(By.text("Find nearby servers")).click();
             String name=before.getString("station_name");assertTrue(device.wait(Until.hasObject(By.text(name)),12000));device.findObject(By.text(name)).click();
             if(before.optBoolean("password_required")){
-                assertTrue(device.wait(Until.hasObject(By.desc("Selected server password")),12000));device.findObject(By.desc("Selected server password")).setText("incorrect");device.findObject(By.text("Open Library")).click();top();
+                assertTrue(device.wait(Until.hasObject(By.desc("Selected server password")),12000));device.findObject(By.desc("Selected server password")).setText("incorrect");dialogButton(device,"Open Library");top();
                 assertTrue(device.wait(Until.hasObject(By.textContains("control rejected")),12000));
-                showText(name);device.findObject(By.text(name)).click();assertTrue(device.wait(Until.hasObject(By.desc("Selected server password")),12000));device.findObject(By.desc("Selected server password")).setText(password);device.findObject(By.text("Open Library")).click();
+                showText(name);device.findObject(By.text(name)).click();assertTrue(device.wait(Until.hasObject(By.desc("Selected server password")),12000));device.findObject(By.desc("Selected server password")).setText(password);dialogButton(device,"Open Library");
             }
             top();assertTrue(device.wait(Until.hasObject(By.text("Server connected and access verified. Choose an output; existing station playback is unchanged.")),12000));
             showText(name+" · Library");assertTrue(device.hasObject(By.text(name+" · Library")));
