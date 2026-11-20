@@ -1,6 +1,6 @@
 # Playlist synchronization protocol v1 — staged contract
 
-Status: design/staging only. No sync routes or automatic client synchronization are enabled by this document. Existing browser editing APIs remain unchanged.
+Status: conservative phase-1 source implementation on an isolated review branch, not installed. Playlist snapshot and operation routes exist; automatic client synchronization does not. Existing browser editing APIs remain unchanged.
 
 ## Authority and transport
 
@@ -53,4 +53,20 @@ An alternative first implementation may retain a server-private pending intent a
 
 ## Staged code
 
-crates/amp-core/src/playlist_sync_contract.rs defines pure wire types, bounded validation, canonical-authority checks, portable path/key binding, operation request digests and Applied/Uncertain receipt representations. No route registration, storage publication, runtime configuration or client synchronization was added. Its validator deliberately rejects deletion. Applied is a future wire representation, not evidence that publication is implemented. Tests exercise identity/path rejection, duplicate unresolved references, retained compatible fields, complete smart rules, request-digest binding and unsupported deletion. Crash recovery, packed storage, deletion races and end-to-end clients remain acceptance gates for a later implementation, not passing claims for this staged contract.
+crates/amp-core/src/playlist_sync_contract.rs defines pure wire types, bounded validation, canonical-authority checks, portable path/key binding, operation request digests and Applied/Uncertain receipt representations. The pure contract module itself performs no publication. The separate conservative server implementation below adds source routes and CAS publication on this review branch; no runtime installation or automatic client synchronization has occurred. Its validator deliberately rejects deletion. Applied is a future wire representation, not evidence that publication is implemented. Tests exercise identity/path rejection, duplicate unresolved references, retained compatible fields, complete smart rules, request-digest binding and unsupported deletion. The conservative API fixture tests below cover interrupted intents and packed storage. Atomic tombstones, exact crash completion, deletion races and end-to-end clients remain later acceptance gates.
+
+## Conservative API implemented on this branch
+
+apps/amp-cast/src/playlist_sync.rs registers the two proposed routes. Both require existing private authorization plus exact x-amp-server and x-amp-library headers; POST also validates authority in its body before creating ledger files. The current mounted library identity is checked without creating it.
+
+GET returns at most 1,000 canonical documents and 4 MiB of document JSON, with a content-derived snapshot token; oversized/unreadable snapshots fail explicitly rather than truncating or implying deletion. It is a collection of revisioned documents, not a transactional multi-document snapshot. Clients must CAS every update independently. Normal paths come from catalog-aware raw storage, not transient numeric indices; unresolved references and duplicates survive.
+
+POST stores operation intents under private AMP_CAST_CONFIG_DIR/playlist-sync/operations, synchronizing intent and its directory before attempting shared publication. An existing unacknowledged intent always returns409 uncertain, including after restart and when current content happens to equal the proposal. A successful existing core CAS followed by verified canonical readback permits atomic acknowledgment; repeated acknowledged requests re-sync and return the recorded result. Request-digest mismatch rejects operation-ID reuse. Ambiguous publication, readback or acknowledgment errors preserve intent/proposal and return uncertainty. This is NOT exactly-once crash completion.
+
+Normal create requires an absent baseline. Smart create in an existing Settings container requires that container's current revision, just like smart update; this preserves other definitions. The existing core save_document lock and catalog-aware atomic publication enforce final CAS. Full raw JSON is retained, including companion_available and compatible rule/document/container extensions. Unknown incompatible document schemas, cross-library source rules, are rejected rather than implicitly remapped. Existing source_root_hint values round-trip as opaque hints; this API cannot change them or introduce a hint on creation, and never interprets them as filesystem destinations.
+
+Delete remains unsupported and no tombstone advertisement is made. There is no automatic client retry worker, synchronization opt-in UI, metadata/preparation upload, ledger garbage collection or uncertain-operation resolution UI. Clients must preserve drafts and request explicit review/new operation after uncertainty.
+
+### Verified fixture coverage
+
+The server tests use temporary generated libraries/configuration only. They exercise packed and unpacked normal documents with unresolved duplicate tracks and extensions, smart updates and creates preserving other definitions/container extensions, exact acknowledged replay and digest mismatch, concurrent duplicate operations, stale CAS, interrupted intent before publication, interrupted publication followed by both identical canonical content and a later edit, authority/password rejection before ledger writes, unsupported deletion, changed mounted identity, and symlink containment. No process-kill/disk-failure hardware guarantee or automatic-client-sync acceptance is claimed.

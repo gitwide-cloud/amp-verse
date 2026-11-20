@@ -105,10 +105,15 @@ impl Operation {
             .strip_prefix(prefix)
             .filter(|id| token(id))
             .ok_or("Invalid document ID")?;
+        if self.action == Action::Update && self.base_revision.is_none() {
+            return Err("Update requires a baseline".into());
+        }
         if self.action == Action::Delete {
             return Err("Deletion unsupported until atomic tombstones are implemented".into());
         }
-        if (self.action == Action::Create) != self.base_revision.is_none() {
+        if self.kind == Kind::Normal
+            && (self.action == Action::Create) != self.base_revision.is_none()
+        {
             return Err("Create requires no baseline; update requires a baseline".into());
         }
         if self.base_revision.as_ref().is_some_and(|r| !r.is_object()) {
@@ -122,6 +127,9 @@ impl Operation {
             .as_ref()
             .and_then(Value::as_object)
             .ok_or("Expected complete playlist document")?;
+        if doc.keys().any(|k| k.starts_with("_amp_")) {
+            return Err("Storage-managed fields belong in the revision envelope".into());
+        }
         if doc
             .get("name")
             .and_then(Value::as_str)
@@ -163,9 +171,6 @@ impl Operation {
                 }
                 if rules.source_library.as_ref().is_some_and(|v| v != library) {
                     return Err("Smart rules require explicit source remapping".into());
-                }
-                if doc.get("source_root_hint").is_some_and(|v| !v.is_null()) {
-                    return Err("Absolute source hints are device-local".into());
                 }
                 if rules.folders.iter().any(|p| {
                     p.to_string_lossy()
