@@ -1,3 +1,7 @@
+> Deprecated installation path: for the single existing desktop installation, use
+> [the canonical updater](tested-desktop-install.md). This page documents historical
+> side-by-side previews only.
+
 # Tested Windows preview delivery
 
 This installer consumes extracted CI artifacts. It does not build the app, change

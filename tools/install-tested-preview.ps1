@@ -1,4 +1,5 @@
-# Install an extracted, verified CI preview without changing the existing app.
+# DEPRECATED: historical side-by-side installer. Use install-tested-desktop.ps1 for the canonical installation.
+# Retained only for compatibility; this old script still creates a separate preview.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)][string]$DesktopArtifact,
