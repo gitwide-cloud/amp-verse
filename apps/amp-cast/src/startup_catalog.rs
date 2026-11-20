@@ -2,16 +2,18 @@
 use amp_core::{Folder, Library};
 use serde::{Deserialize, Serialize};
 use std::{
-    io::Read,
+    io::{BufWriter, Read, Write},
     path::{Component, Path},
 };
 
 #[derive(Serialize, Deserialize)]
-struct Snapshot {
+struct Snapshot<T = Library> {
     version: u32,
     root: std::path::PathBuf,
-    library: Library,
+    library: T,
 }
+
+const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
 fn valid_folder(folder: &Folder, count: usize) -> bool {
     folder.tracks.iter().all(|&i| i < count)
         && folder.folders.iter().all(|f| valid_folder(f, count))
@@ -20,10 +22,10 @@ pub fn load(file: &Path, root: &Path) -> Option<Library> {
     let mut bytes = Vec::new();
     std::fs::File::open(file)
         .ok()?
-        .take(128 * 1024 * 1024 + 1)
+        .take(MAX_SNAPSHOT_BYTES + 1)
         .read_to_end(&mut bytes)
         .ok()?;
-    if bytes.len() > 128 * 1024 * 1024 {
+    if bytes.len() as u64 > MAX_SNAPSHOT_BYTES {
         return None;
     }
     let snapshot: Snapshot = match serde_json::from_slice(&bytes) {
@@ -58,14 +60,27 @@ pub fn load(file: &Path, root: &Path) -> Option<Library> {
     .then_some(snapshot.library)
 }
 pub fn save(file: &Path, root: &Path, library: &Library) -> Result<(), String> {
-    amp_core::coordination::atomic_write(
-        file,
+    let parent = file.parent().ok_or("Missing startup catalog directory")?;
+    let mut temporary = tempfile::NamedTempFile::new_in(parent).map_err(|e| e.to_string())?;
+    let mut writer = BufWriter::new(temporary.as_file_mut());
+    serde_json::to_writer(
+        &mut writer,
         &Snapshot {
             version: 1,
             root: root.into(),
-            library: library.clone(),
+            library,
         },
     )
+    .map_err(|e| e.to_string())?;
+    writer.flush().map_err(|e| e.to_string())?;
+    drop(writer);
+    let output = temporary.as_file();
+    if output.metadata().map_err(|e| e.to_string())?.len() > MAX_SNAPSHOT_BYTES {
+        return Err("Startup catalog exceeds the cache size limit".into());
+    }
+    output.sync_all().map_err(|e| e.to_string())?;
+    temporary.persist(file).map_err(|e| e.to_string())?;
+    Ok(())
 }
 #[cfg(test)]
 mod tests {
@@ -92,6 +107,8 @@ mod tests {
             },
         };
         save(&file, dir.path(), &library).unwrap();
+        let compact = std::fs::read(&file).unwrap();
+        assert!(!compact.contains(&b'\n'));
         assert!(load(&file, dir.path()).is_some());
         assert!(load(&file, &dir.path().join("other")).is_none());
         library.tracks.push(amp_core::Track {
