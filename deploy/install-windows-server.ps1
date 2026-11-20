@@ -12,7 +12,7 @@ $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.os -ne 'Windows' -or $manifest.commit -notmatch '^[0-9a-f]{40}$') {
     throw 'Use a verified Windows standalone server package.'
 }
-$packageFiles = @('amp-cast.exe', 'amp-engine.exe', 'amp-prepare.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md')
+$packageFiles = @('amp-cast.exe', 'amp-engine.exe', 'amp-prepare.exe', 'LICENSE', 'THIRD_PARTY_NOTICES.md', 'show-windows-server-access.ps1', 'Show Server Access Code.cmd')
 foreach ($name in $packageFiles) {
     $entry = @($manifest.files | Where-Object name -ceq $name)
     $source = Join-Path $PSScriptRoot $name

@@ -66,3 +66,15 @@ This workstation has neither Docker nor WSL installed. Local verification uses W
 A Cast HTTP listener on a non-loopback IPv4 address also listens on UDP 18787. Clients send AMPVERSE_CAST_DISCOVER_V1 and receive versioned server/station identity, station name and HTTP port. Discovery never joins a session or starts playback/analysis. Loopback HTTP listeners are not advertised. AMP_CAST_DISCOVERY_PORT=0 disables discovery; AMP_CAST_ADVERTISE_PORT overrides the HTTP port in replies for mapped deployments. The default is the actual HTTP listener port. Replies are limited to private/link-local/loopback IPv4 sources and rate limited.
 
 Allow UDP 18787 and the configured HTTP port on the trusted LAN. Docker Compose exposes discovery on the same configured bind address and advertises AMP_PORT. Broadcast traversal across Docker/NAT, VLANs and firewalls is not guaranteed; use a manual server URL when discovery cannot reach the server. No physical LAN or NAS deployment is implied by loopback smoke tests.
+
+### Existing Windows server access code
+
+The standalone Windows package includes **Show Server Access Code.cmd**. Run it on
+the server PC, signed in as the Windows user who originally configured the server.
+It opens the existing CurrentUser-DPAPI-protected code in a local dialog; it does
+not reset the password, copy it to the clipboard, write plaintext, or print it to
+the terminal. Enter the code only in your own Studio sign-in screen. The helper
+uses the private LOCALAPPDATA/AMPVerse/StandaloneServer folder by default. Custom
+deployments can run show-windows-server-access.ps1 with its ConfigDirectory
+parameter. An absent or unreadable code gives an explanation and changes nothing.
+This is initial pairing/recovery, not a background tray manager or account creation.
