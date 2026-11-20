@@ -75,5 +75,9 @@ public class PlaylistSyncModelTest {
     @Test public void overlappingLocalEditorsRetainBothRatherThanBlindlyOverwrite()throws Exception {
         JSONObject s=state(),original=normal("Old",1);PlaylistSyncModel.pull(s,snapshot(original));PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","First"));JSONObject pending=PlaylistSyncModel.next(s);PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","Second"));PlaylistSyncModel.reply(s,pending,200,ack(pending,2));assertNull(PlaylistSyncModel.next(s));JSONObject entry=s.getJSONObject("documents").getJSONObject("normal_stable");assertEquals("First",entry.getJSONObject("other_local_draft").getJSONObject("document").getString("name"));assertEquals("Second",entry.getJSONObject("desired").getJSONObject("document").getString("name"));
     }
+
+    @Test public void invalidSavedNameCannotPoisonTheDurableOutbox()throws Exception {
+        JSONObject s=state(),original=normal("Old",1);PlaylistSyncModel.pull(s,snapshot(original));JSONObject before=PlaylistSyncModel.copy(s);try{PlaylistSyncModel.save(s,original,PlaylistSyncModel.copy(original.getJSONObject("document")).put("name","é".repeat(150)));fail();}catch(JSONException expected){}assertTrue(PlaylistSyncModel.equal(before,s));assertNull(PlaylistSyncModel.next(s));
+    }
 }
 

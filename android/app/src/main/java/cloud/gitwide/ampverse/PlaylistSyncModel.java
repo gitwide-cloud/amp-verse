@@ -37,6 +37,8 @@ final class PlaylistSyncModel {
         for(String key:keys){if(equal(base.opt(key),proposed.opt(key)))continue;if(!equal(current.opt(key),base.opt(key))&&!equal(current.opt(key),proposed.opt(key)))throw new JSONException("Both drafts changed "+key);if(proposed.has(key))merged.put(key,proposed.get(key));else merged.remove(key);}return merged;
     }
     static void save(JSONObject state,JSONObject original,JSONObject document)throws JSONException {
+        String name=document.optString("name");if(name.trim().isEmpty()||name.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>200)throw new JSONException("Playlist names must be 1–200 UTF-8 bytes");
+        if(original.getString("kind").equals("normal")&&document.getJSONArray("tracks").length()>20000)throw new JSONException("Too many playlist references");
         if(!original.optBoolean("new_document")&&equal(original.getJSONObject("document"),document))return;
         String id=original.getString("document_id");JSONObject entries=state.getJSONObject("documents"),entry=entries.optJSONObject(id);
         if(entry==null){entry=new JSONObject();entries.put(id,entry);}

@@ -4,7 +4,7 @@ This is a client implementation for the authenticated phase-1 server API. It is 
 
 ## Enable and ownership
 
-Connect to the desired Cast host with its private access code, then choose **Enable saved-playlist sync**. The client verifies the server/library IDs through authenticated snapshot access. The saved binding is independent of station IDs and discovery. Changing Cast stations does not redirect synchronization. Each server/library pair keeps a separate private state file; selecting another pair does not erase previous drafts.
+Connect to the desired Cast host with its private access code, then choose **Enable saved-playlist sync**. The client pins the already-selected Cast server/library IDs and verifies them again through authenticated snapshot access before saving credentials. The saved binding is independent of station IDs and discovery. Changing Cast stations does not redirect synchronization. Each server/library pair keeps a separate private state file; selecting another pair does not erase previous drafts.
 
 The existing selected-client credential is reused only after explicit consent. It is encrypted using Android Keystore AES-GCM with the authority-specific key as authenticated associated data. It is never placed in URLs, playback items, ordinary playlist preferences, logs or exported files. A changed access code must be authorized again. The application disables backup already; synchronization files use its no-backup private directory.
 
@@ -32,3 +32,5 @@ The searchable/add-song catalog is bounded to its first 2,000 server rows plus r
 
 Pure Java model fixtures cover authority isolation, missing/duplicate references, immutable unsaved editor snapshots, durable operation replay after restart, uncertain/conflict pause, field-level review safety, own-Ack/newer-edit reconciliation, smart raw extension preservation and numeric normalization. The branch workflow builds/lints Full and Lite, runs Full unit tests (including the shared model), and compiles Cast/Remote companions. Lite unit compilation is not requested because preexisting shared Lab unit tests refer to Full-only classes; this follows the existing Android workflow's Full-unit convention.
 
+
+Repeated unchanged saves do not generate publication/revision churn. Overlapping local editors retain both saved proposals instead of silently replacing one. Explicit conflict review is fenced to the exact version displayed; a newer server version requires reopening review. Invalid names and oversized reference lists fail before durable outbox changes.
