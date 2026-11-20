@@ -988,6 +988,7 @@ impl Player {
                     if play {
                         self.claim_playback(owner, deck, false);
                     }
+                    self.run.regular_deck_replaced(deck);
                     self.cancel_deck_automation(deck);
                     if deck == 0 && !play {
                         self.auto = false;

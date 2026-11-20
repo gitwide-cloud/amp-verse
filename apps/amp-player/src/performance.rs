@@ -163,6 +163,19 @@ impl Run {
             reservation: None,
         });
     }
+    pub(super) fn regular_deck_replaced(&mut self, deck: usize) {
+        if let Some(regular) = &mut self.regular
+            && regular
+                .reservation
+                .as_ref()
+                .is_some_and(|reservation| reservation.deck == deck)
+        {
+            regular.reservation = None;
+            // An explicit source replacement is not an implicit start of the queued
+            // first occurrence, even when it happens to name the same song.
+            regular.unstarted = false;
+        }
+    }
     pub(super) fn recent_songs(&self) -> Vec<String> {
         self.recent.iter().cloned().collect()
     }
@@ -718,7 +731,8 @@ impl Player {
         }
         let engine = self.audio.as_mut().unwrap();
         engine.load(d, &self.root, &track, execution == Execution::PlayNow)?;
-        engine.set_rate(d, rate);
+        self.run.regular_deck_replaced(d);
+        self.audio.as_ref().unwrap().set_rate(d, rate);
         if execution != Execution::LoadOnly {
             self.claim_playback(
                 crate::playback_owner::Owner::Dj,
@@ -950,6 +964,29 @@ impl Player {
                 .into();
         self.run.failure = Some(self.status.clone());
         true
+    }
+    fn start_reserved_regular(&mut self, deck: usize, index: usize) -> Result<(), String> {
+        let reservation = self.run.regular.as_mut().and_then(|regular| {
+            if regular
+                .reservation
+                .as_ref()
+                .is_some_and(|r| r.deck == deck && r.index == index)
+            {
+                regular.reservation.take()
+            } else {
+                None
+            }
+        });
+        let result = self.call_track(index, None, Deck::PHYSICAL[deck], Execution::PlayNow);
+        if let Some(mut reservation) = reservation
+            && let Some(regular) = &mut self.run.regular
+        {
+            if result.is_ok() {
+                reservation.started = Instant::now();
+            }
+            regular.reservation = Some(reservation);
+        }
+        result
     }
     fn reserve_regular(&mut self, deck: usize, slot: usize, index: usize) {
         if let Some(regular) = &mut self.run.regular {
@@ -1932,7 +1969,7 @@ impl Player {
                 {
                     self.preload_smart()?;
                     let (d, i) = self.run.preloaded.unwrap();
-                    self.call_track(i, None, Deck::PHYSICAL[d], Execution::PlayNow)?;
+                    self.start_reserved_regular(d, i)?;
                 }
                 self.run.auto = enabled;
                 if enabled {
@@ -2868,6 +2905,24 @@ mod tests {
         );
     }
     #[test]
+    fn regular_manual_replacement_releases_same_song_occurrence_without_consuming_it() {
+        let root = tempfile::tempdir().unwrap();
+        let mut player = normal_test_player(root.path());
+        player
+            .run
+            .load_regular_playlist("Reserved duplicates".into());
+        player.queue = vec![0, 1, 0];
+        player.loaded[1] = Some(0);
+        player.reserve_regular(1, 2, 0);
+        player.run.preloaded = Some((1, 0));
+        player.run.regular_deck_replaced(0);
+        assert!(player.run.regular.as_ref().unwrap().reservation.is_some());
+        player.run.regular_deck_replaced(1);
+        assert!(!player.run.regular.as_ref().unwrap().unstarted);
+        player.complete_change(1);
+        assert_eq!(player.queue, [0, 1, 0]);
+    }
+    #[test]
     fn regular_shuffle_selects_remaining_members_without_consuming_failed_attempts() {
         let root = tempfile::tempdir().unwrap();
         let mut player = normal_test_player(root.path());
@@ -3035,6 +3090,57 @@ mod tests {
             "owner transfer must not replay or skip the sounding song"
         );
         assert_eq!(transferred.queue, remaining);
+        transferred.preload_smart().unwrap();
+        let (manual_deck, manual_index) = transferred.run.preloaded.unwrap();
+        let manual_id = show::song_id(&transferred.library.as_ref().unwrap().tracks[manual_index]);
+        assert!(
+            transferred
+                .execute_control(Action::CallSong {
+                    song: manual_id.clone(),
+                    cue: Some("missing-explicit-cue".into()),
+                    deck: Deck::PHYSICAL[manual_deck],
+                    execution: Execution::LoadOnly,
+                })
+                .is_err()
+        );
+        assert!(
+            transferred
+                .run
+                .regular
+                .as_ref()
+                .unwrap()
+                .reservation
+                .is_some(),
+            "failed replacement keeps the original valid preload"
+        );
+        transferred
+            .execute_control(Action::CallSong {
+                song: manual_id,
+                cue: None,
+                deck: Deck::PHYSICAL[manual_deck],
+                execution: Execution::LoadOnly,
+            })
+            .unwrap();
+        assert!(
+            transferred
+                .run
+                .regular
+                .as_ref()
+                .unwrap()
+                .reservation
+                .is_none(),
+            "same-song manual replacement is not the old queue transaction"
+        );
+        transferred
+            .execute_control(Action::MixNext { immediate: true })
+            .unwrap();
+        wait(&mut transferred, |p| {
+            p.active_deck() == manual_deck && p.run.pending.is_none() && p.run.transition.is_none()
+        });
+        assert_eq!(
+            transferred.queue, remaining,
+            "an explicit replacement must not consume an old reserved occurrence"
+        );
         transferred
             .execute_control(Action::ManualLock { enabled: true })
             .unwrap();
