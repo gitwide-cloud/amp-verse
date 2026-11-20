@@ -77,6 +77,10 @@ jobs:
         if: runner.os == 'Windows'
         run: cargo test -p amp-core raw_and_canonical_paths_share_preparation_and_catalog_keys --locked -- --nocapture
       - run: cargo test --workspace --locked
+      - name: Prepare exact shipped pipe-only receiver codec fixture
+        run: python tools/setup_receiver_ffplay.py
+      - name: Verify HTTP receiver with pipe-only FFplay and silent audio
+        run: cargo test -p amp-player --bin amp-player station_receiver::tests::network_disabled_ffplay_decodes_http_via_pipe --locked -- --ignored --exact --test-threads=1 --nocapture
       - name: Verify regular playlist AutoMix on a clocked silent output
         if: runner.os == 'Linux'
         shell: bash

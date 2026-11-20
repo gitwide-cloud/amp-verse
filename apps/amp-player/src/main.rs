@@ -37,7 +37,9 @@ mod live_mix;
 mod mashup;
 mod media_lookup;
 mod mix_schedule;
+mod output_admission;
 mod startup_index;
+mod station_receiver;
 use dj_engine as mixer;
 #[path = "performance.rs"]
 mod dj_logic;
@@ -145,6 +147,7 @@ fn capture(ctx: &egui::Context, path: PathBuf) {
 }
 
 struct Player {
+    output_admission: std::sync::Arc<output_admission::Gate>,
     workspace: workspace::Workspace,
     playback_owner: playback_owner::Owner,
     player_sequence: player_sequence::Sequence,
@@ -256,6 +259,7 @@ impl Default for Player {
             .unwrap_or_default();
         let source_roots = startup_index::sources(&root);
         Self {
+            output_admission: Default::default(),
             workspace: Default::default(),
             playback_owner: Default::default(),
             player_sequence: Default::default(),
@@ -920,6 +924,7 @@ impl Player {
         }
     }
     fn ensure_audio(&mut self) -> Result<(), String> {
+        self.output_admission.local_allowed()?;
         if self.podcasts.get().is_some_and(|p| p.cache.purging()) {
             return Err("Podcast cleanup is finishing; try playback again in a moment.".into());
         }
@@ -3126,6 +3131,9 @@ impl Player {
         self.cast.live_player_only = player_only;
     }
     fn cast_ui(&mut self, ui: &mut egui::Ui) {
+        let local_active = self.library_preview_blocked() || self.smart_preview.active();
+        self.cast.local_playback_active = local_active;
+        self.cast.output_gate = self.output_admission.clone();
         self.follow_live_broadcast_owner();
         self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
         if let Some(broadcast) = &self.live_mix {
@@ -3228,6 +3236,15 @@ impl eframe::App for Player {
         self.checkpoint(true);
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        let _output_scope = output_admission::scope(self.output_admission.clone());
+        if self.output_admission.leased() {
+            self.run.auto = false;
+        }
+        let local_active = self.library_preview_blocked() || self.smart_preview.active();
+        if let Some(cast) = self.cast.get_mut() {
+            cast.local_playback_active = local_active;
+            cast.output_gate = self.output_admission.clone();
+        }
         if self.organizer.moving() {
             if let Some(destination) = self.organizer.show(ui, &self.root, false, || {}) {
                 self.connect_music_root(destination);
@@ -4654,5 +4671,35 @@ mod window_tests {
             frame(&ctx, &mut player, press);
         }
         assert_eq!(player.layout.parent[1], None);
+    }
+    #[test]
+    fn local_ui_and_remote_engine_admission_reports_receiver_owner() {
+        let mut player = Player::default();
+        let _lease = player
+            .output_admission
+            .acquire(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert!(
+            player
+                .ensure_audio()
+                .unwrap_err()
+                .contains("Stop listening")
+        );
+        assert!(
+            player
+                .execute_control(control::Action::Play {
+                    deck: control::Deck::default()
+                })
+                .unwrap_err()
+                .contains("Stop listening")
+        );
+        assert!(
+            player.audio.is_none(),
+            "Denied playback must not create another device engine"
+        );
+        assert!(
+            player.queue.is_empty(),
+            "Admission denial must not rewrite the queue"
+        );
     }
 }

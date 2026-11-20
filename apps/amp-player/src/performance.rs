@@ -1183,6 +1183,35 @@ impl Player {
         }
     }
     pub(super) fn execute_control(&mut self, action: Action) -> Result<(), String> {
+        if self.output_admission.leased()
+            && matches!(
+                &action,
+                Action::Play { .. }
+                    | Action::QuantizedLaunch { .. }
+                    | Action::Sampler { .. }
+                    | Action::SideSampler { .. }
+                    | Action::AutoDj { enabled: true }
+                    | Action::AutoDjPause { paused: false }
+                    | Action::StartLiveBroadcast { .. }
+                    | Action::LoadPlaylist { .. }
+                    | Action::LoadSmartPlaylist { .. }
+                    | Action::RecallMusicScene { .. }
+                    | Action::CallSong { .. }
+                    | Action::Recognition { .. }
+                    | Action::NextSong { .. }
+                    | Action::PlayerNext
+                    | Action::Previous
+                    | Action::MixNext { .. }
+                    | Action::AutoFade
+                    | Action::RestartCue { .. }
+                    | Action::CueDeck {
+                        operation: crate::side_deck::Operation::Play,
+                        ..
+                    }
+            )
+        {
+            return self.output_admission.local_allowed();
+        }
         match action {
             Action::SaveMusicScene { name } => self.save_music_scene(&name)?,
             Action::RecallMusicScene { scene, execution } => {

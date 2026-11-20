@@ -209,6 +209,7 @@ pub struct Dashboard {
     snapshot: Option<Snapshot>,
     busy: bool,
     message: String,
+    last_poll_error: Option<String>,
     section: usize,
     search: String,
     discovery: Option<mpsc::Receiver<Result<Vec<amp_core::discovery::Found>, String>>>,
@@ -219,7 +220,9 @@ pub struct Dashboard {
     download: Option<mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     radio_job: Option<mpsc::Receiver<Result<Vec<Radio>, String>>>,
     radio_results: Vec<Radio>,
-    radio: Option<std::process::Child>,
+    radio: Option<crate::station_receiver::Receiver>,
+    pub local_playback_active: bool,
+    pub output_gate: std::sync::Arc<crate::output_admission::Gate>,
 }
 impl Default for Dashboard {
     fn default() -> Self {
@@ -256,6 +259,7 @@ impl Default for Dashboard {
             rx: None,
             snapshot: None,
             busy: false,
+            last_poll_error: None,
             message:
                 "Search LAN or broadcast stations, or host a Smart Station to share your playlists."
                     .into(),
@@ -270,6 +274,8 @@ impl Default for Dashboard {
             radio_job: None,
             radio_results: Vec::new(),
             radio: None,
+            local_playback_active: false,
+            output_gate: crate::output_admission::current(),
         };
         if std::env::var("AMP_CAST_AUTOCONNECT").as_deref() == Ok("1") {
             dashboard.connected_address = dashboard.address.trim().into();
@@ -543,6 +549,13 @@ impl Dashboard {
     }
     pub fn poll(&mut self) {
         self.google.poll();
+        if let Some(receiver) = &mut self.radio {
+            let status = receiver.status();
+            if status.finished {
+                self.message = status.message;
+                self.radio = None;
+            }
+        }
         if let Some(rx) = &self.discovery
             && let Ok(result) = rx.try_recv()
         {
@@ -567,6 +580,11 @@ impl Dashboard {
             self.busy = false;
             match update.snapshot {
                 Ok(snapshot) => {
+                    if let Some(previous) = self.last_poll_error.take()
+                        && self.message == previous
+                    {
+                        self.message.clear();
+                    }
                     if let Some(error) = update
                         .control_error
                         .or_else(|| snapshot.status.error.clone())
@@ -579,7 +597,13 @@ impl Dashboard {
                 Err(error) => {
                     self.listen_after_play = false;
                     self.snapshot = None;
-                    self.message = error;
+                    if let Some(control_error) = update.control_error {
+                        self.last_poll_error = None;
+                        self.message = control_error;
+                    } else {
+                        self.last_poll_error = Some(error.clone());
+                        self.message = error;
+                    }
                 }
             }
         }
@@ -672,19 +696,20 @@ impl Dashboard {
             self.message = "Stop sending live audio before receiving a station.".into();
             return;
         }
-        if let Some(mut previous) = self.radio.take() {
-            let _ = previous.kill();
-            let _ = previous.wait();
+        if self.local_playback_active {
+            self.message =
+                "Pause local Player/DJ, previews and samples before listening to a station.".into();
+            return;
         }
-        let mut command = amp_core::command("ffplay");
-        command
-            .args(["-nodisp", "-autoexit", "-loglevel", "error", "-i", url])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        match command.spawn() {
-            Ok(child) => self.radio = Some(child),
-            Err(e) => self.message = format!("Could not play station: {e}"),
+        if let Some(previous) = &self.radio {
+            previous.stop();
+            self.message =
+                "Stopping the previous receiver. Choose Listen again when it finishes.".into();
+            return;
+        }
+        match crate::station_receiver::Receiver::start(url, self.output_gate.clone()) {
+            Ok(receiver) => self.radio = Some(receiver),
+            Err(error) => self.message = error,
         }
     }
     pub fn show(&mut self, ui: &mut egui::Ui, root: &std::path::Path, ready: bool) {
@@ -1035,12 +1060,11 @@ impl Dashboard {
             &cast_address,
             self.snapshot.as_ref().is_some_and(|s| s.status.running),
         );
-        if self.radio.is_some()
-            && ui.button("Stop listening").clicked()
-            && let Some(mut child) = self.radio.take()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
+        if let Some(receiver) = &mut self.radio {
+            ui.label(receiver.status().message);
+            if ui.button("Stop listening").clicked() {
+                receiver.stop();
+            }
         }
         if let Some((manifest, playlist)) = download
             && let Some(destination) = rfd::FileDialog::new()
@@ -1074,14 +1098,6 @@ impl Dashboard {
     }
 }
 
-impl Drop for Dashboard {
-    fn drop(&mut self) {
-        if let Some(mut radio) = self.radio.take() {
-            let _ = radio.kill();
-            let _ = radio.wait();
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1345,5 +1361,75 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+    #[test]
+    fn matching_success_clears_only_its_previous_poll_failure() {
+        let (mut dashboard, _, updates) = mock_dashboard();
+        let generation = dashboard.connection_generation;
+        updates
+            .send(Update {
+                generation,
+                snapshot: Err("old socket 10054".into()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        assert_eq!(dashboard.message, "old socket 10054");
+        updates
+            .send(Update {
+                generation: generation + 1,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        assert_eq!(
+            dashboard.message, "old socket 10054",
+            "Wrong-generation response must not clear anything"
+        );
+        updates
+            .send(Update {
+                generation,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        assert!(dashboard.message.is_empty());
+        updates
+            .send(Update {
+                generation,
+                snapshot: Err("old socket 10054".into()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        dashboard.message = "Explicit local action failed".into();
+        updates
+            .send(Update {
+                generation,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        assert_eq!(dashboard.message, "Explicit local action failed");
+        updates
+            .send(Update {
+                generation,
+                snapshot: Ok(live_snapshot()),
+                control_error: Some("Server rejected user command".into()),
+            })
+            .unwrap();
+        dashboard.poll();
+        updates
+            .send(Update {
+                generation,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        assert_eq!(dashboard.message, "Server rejected user command");
     }
 }

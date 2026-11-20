@@ -148,6 +148,9 @@ impl SideDeck {
         Ok(())
     }
     pub fn play(&mut self) -> Result<(), String> {
+        if let Some(audio) = &self.audio {
+            audio.controls.output_gate.local_allowed()?;
+        }
         if self.track.is_none() {
             if let Some(path) = self.config.path.clone() {
                 self.load(path)?;
