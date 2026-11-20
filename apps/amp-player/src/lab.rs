@@ -1,3 +1,5 @@
+#[path = "lab_recorder.rs"]
+mod recorder;
 #[path = "lab_timeline.rs"]
 mod timeline;
 use amp_core::{
@@ -14,17 +16,27 @@ pub struct Arrangement {
     clips: Vec<Clip>,
     timeline: timeline::Timeline,
     editor: crate::lab_editor::Editor,
+    recorder: recorder::Recorder,
     youtube: crate::lab_youtube::Panel,
     tab: usize,
     demo_loaded: bool,
     status: String,
     job: Option<mpsc::Receiver<Result<String, String>>>,
 }
+impl Drop for Arrangement {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
 impl Arrangement {
+    pub(super) fn shutdown(&mut self) {
+        self.recorder.shutdown();
+    }
     pub fn take_sample(&mut self) -> Option<crate::sample_editor::Delivery> {
         self.editor.take_sample()
     }
     pub(super) fn stop_preview(&mut self) {
+        self.recorder.stop();
         self.editor.stop();
         self.timeline.stop();
     }
@@ -39,6 +51,12 @@ impl Arrangement {
             ui.set_min_size(ui.available_size());
             let action = crate::skin::heading(ui, "AMP Lab", true);
             self.editor.poll(ui.ctx());
+            self.recorder.poll(ui.ctx());
+            if let Some(path) = self.recorder.take_completed() {
+                self.timeline.stop();
+                self.tab = 0;
+                self.editor.load_path(path);
+            }
             if let Some(path) = self.youtube.poll(ui.ctx()) {
                 self.tab = 0;
                 self.timeline.stop();
@@ -71,6 +89,7 @@ impl Arrangement {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if self.tab == 0 {
+                        self.recorder.show(ui);
                         self.editor.show(ui, root, library);
                     } else {
                         self.content(ui, root, library);
