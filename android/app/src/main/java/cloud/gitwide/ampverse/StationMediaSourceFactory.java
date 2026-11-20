@@ -42,18 +42,9 @@ final class StationMediaSourceFactory implements MediaSource.Factory {
     }
     private MediaSource privateSource(MediaItem item){
         PrivateLibraryPlayback.Binding binding=PrivateLibraryPlayback.binding(item);
-        HttpUrl target=HttpUrl.get(item.localConfiguration.uri.toString());
-        OkHttpClient http=new OkHttpClient.Builder().proxy(Proxy.NO_PROXY).followRedirects(false).followSslRedirects(false)
-            .connectTimeout(5,TimeUnit.SECONDS).readTimeout(20,TimeUnit.SECONDS)
-            .addInterceptor(chain->{
-                if(binding==null)throw new IOException("Private library access expired; reopen the song");
-                HttpUrl base=HttpUrl.get(binding.base);
-                if(!base.scheme().equals(target.scheme())||!base.host().equals(target.host())||base.port()!=target.port()
-                    ||!target.encodedPath().equals("/api/player/audio")||!binding.library.equals(target.queryParameter("library_id"))
-                    ||!target.equals(chain.request().url()))throw new IOException("Private library source left its selected authority");
-                return chain.proceed(chain.request().newBuilder().header("x-amp-password",binding.password)
-                    .header("x-amp-server",binding.server).header("x-amp-library",binding.library).build());
-            }).build();
+        String target=item.localConfiguration.uri.toString();
+        OkHttpClient http= binding==null?new OkHttpClient.Builder().addInterceptor(chain->{throw new IOException("Private library access expired; reopen the song");}).build()
+            :PrivateLibraryHttp.create(binding.base,binding.password,binding.server,binding.library,target);
         DefaultMediaSourceFactory source=new DefaultMediaSourceFactory(new OkHttpDataSource.Factory(http));
         if(drm!=null)source.setDrmSessionManagerProvider(drm);if(errors!=null)source.setLoadErrorHandlingPolicy(errors);
         return source.createMediaSource(item);

@@ -27,7 +27,7 @@ public final class ModuleProvider extends ContentProvider {
             return result;
         });
         // Catalog reads, settings and queue construction never occupy the audio/UI thread.
-        if(Arrays.asList("hello","library","playlists","module_read","module_write","sync_cast","podcast_download","podcast_downloads","job","offline_lists","sampler_slots","playlist_sync_enable","playlist_sync_save","playlist_sync_create","player_private_prepare").contains(argument)){task.run();try{return task.get();}catch(Exception error){throw new IllegalStateException(error);}}
+        if(Arrays.asList("hello","library","playlists","module_read","module_write","sync_cast","podcast_download","podcast_downloads","job","offline_lists","sampler_slots","playlist_sync_enable","playlist_sync_save","playlist_sync_create","player_private_prepare","playlist_sync_access").contains(argument)){task.run();try{return task.get();}catch(Exception error){throw new IllegalStateException(error);}}
         new Handler(Looper.getMainLooper()).post(task);
         try{return task.get(5,TimeUnit.SECONDS);}catch(Exception error){task.cancel(false);throw new IllegalStateException("AMP Player is busy; retry the command",error);}
     }
@@ -52,6 +52,7 @@ public final class ModuleProvider extends ContentProvider {
             return new JSONObject().put("items",rows).put("total",matched);
         }
         if("playlists".equals(action)){JSONArray stored=PhonePlaylists.read(context),summary=new JSONArray();for(int i=0;i<stored.length();i++){JSONObject list=stored.getJSONObject(i);summary.put(new JSONObject().put("id",list.optString("id")).put("name",list.optString("name")).put("smart",list.optBoolean("smart")));}return new JSONObject().put("items",summary);}
+        if("playlist_sync_access".equals(action))return PlaylistSync.rememberedAccess(context,args.getString("base"),args.getString("server_id"),args.getString("library_id"));
         if("playlist_sync_enable".equals(action)){PlaylistSync.enable(context,args.getString("base"),args.getString("password"),args.getString("server_id"),args.getString("library_id"));return new JSONObject().put("message","Saved-playlist sync enabled");}
         if("playlist_sync_save".equals(action)){PlaylistSync.saveBound(context,args.getString("server_id"),args.getString("library_id"),args.getJSONObject("envelope"),args.getJSONObject("document"));return new JSONObject().put("message","Saved draft queued safely; conflicts require Library review");}
         if("playlist_sync_create".equals(action)){PlaylistSync.createBound(context,args.getString("server_id"),args.getString("library_id"),args.getBoolean("smart"),args.getString("name"));return new JSONObject().put("message","New playlist queued; refresh after synchronization");}
