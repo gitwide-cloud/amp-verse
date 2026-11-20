@@ -572,6 +572,7 @@ mod tests {
             let config = dir.path().join("private");
             fs::create_dir_all(&root).unwrap();
             fs::create_dir_all(&config).unwrap();
+            let root = root.canonicalize().unwrap();
             Self {
                 _dir: dir,
                 root,

@@ -194,9 +194,11 @@ impl Operation {
                 }) {
                     return Err("Smart folders must use portable relative paths".into());
                 }
-                let mut settings = crate::show::Settings::default();
-                settings.version = self.document_version;
-                settings.playlists = vec![rules];
+                let settings = crate::show::Settings {
+                    version: self.document_version,
+                    playlists: vec![rules],
+                    ..Default::default()
+                };
                 settings.validate()?;
             }
         }
