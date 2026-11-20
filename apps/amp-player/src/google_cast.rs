@@ -1,7 +1,7 @@
 //! Native Cast V2 output; no analysis engine or Python is required.
 use eframe::egui;
 use std::{
-    net::{IpAddr, UdpSocket},
+    net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -72,6 +72,39 @@ pub(super) fn stream_url(address: &str, device: &str) -> Result<String, String> 
     };
     Ok(format!("http://{host}:{port}/listen.mp3"))
 }
+// A Windows-friendly short hostname may resolve on this PC but not on a
+// Google speaker. Resolve on the background Cast worker and advertise the actual
+// source address, never the receiver address or a hostname the receiver must guess.
+fn resolved_media_url(url: &str) -> Result<String, String> {
+    let uri: ureq::http::Uri = url.parse().map_err(|_| "Invalid station stream address")?;
+    if uri.scheme_str() != Some("http") || uri.path() != "/listen.mp3" || uri.query().is_some() {
+        return Err("Invalid station stream address".into());
+    }
+    let host = uri.host().ok_or("Missing station host")?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = uri.port_u16().ok_or("Missing station port")?;
+    if host.parse::<IpAddr>().is_ok() {
+        return Ok(url.into());
+    }
+    let addresses: Vec<_> = (host, port)
+        .to_socket_addrs()
+        .map_err(
+            |_| "Cannot find this AMP station on the network. Reconnect to the station and retry.",
+        )?
+        .collect();
+    media_url_from_addresses(&addresses)
+}
+fn media_url_from_addresses(addresses: &[SocketAddr]) -> Result<String, String> {
+    let usable =
+        |address: &&SocketAddr| !address.ip().is_loopback() && !address.ip().is_unspecified();
+    let address = addresses
+        .iter()
+        .filter(usable)
+        .find(|a| a.is_ipv4())
+        .or_else(|| addresses.iter().find(usable))
+        .ok_or("The station has no address reachable by this Google speaker.")?;
+    Ok(format!("http://{address}/listen.mp3"))
+}
 type ReceiverVolume = Arc<Mutex<Option<(Option<f32>, Option<bool>)>>>;
 struct Session {
     device: Device,
@@ -103,6 +136,7 @@ fn cast(device: Device, url: String) -> Session {
     let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
+            let url = resolved_media_url(&url)?;
             let ip = device
                 .host
                 .parse::<std::net::IpAddr>()
@@ -383,6 +417,35 @@ mod tests {
             stream_url("192.168.1.20:8787", "192.168.1.30").unwrap(),
             "http://192.168.1.20:8787/listen.mp3"
         );
+    }
+    #[test]
+    fn station_hostname_is_resolved_to_source_ipv4_for_speaker_playback() {
+        let addresses = [
+            "[fd00::20]:8787".parse().unwrap(),
+            "127.0.0.1:8787".parse().unwrap(),
+            "192.168.1.178:8787".parse().unwrap(),
+        ];
+        assert_eq!(
+            media_url_from_addresses(&addresses).unwrap(),
+            "http://192.168.1.178:8787/listen.mp3"
+        );
+        assert_eq!(
+            media_url_from_addresses(&addresses[..1]).unwrap(),
+            "http://[fd00::20]:8787/listen.mp3"
+        );
+        assert!(media_url_from_addresses(&["127.0.0.1:8787".parse().unwrap()]).is_err());
+        assert!(media_url_from_addresses(&["0.0.0.0:8787".parse().unwrap()]).is_err());
+    }
+    #[test]
+    fn numeric_source_is_preserved_and_arbitrary_stream_urls_are_not_advertised() {
+        assert_eq!(
+            resolved_media_url("http://192.168.1.178:8787/listen.mp3").unwrap(),
+            "http://192.168.1.178:8787/listen.mp3"
+        );
+        assert!(
+            resolved_media_url("http://192.168.1.178:8787/listen.mp3?password=private").is_err()
+        );
+        assert!(resolved_media_url("https://example.invalid/private").is_err());
     }
     #[test]
     #[ignore = "LAN discovery"]
