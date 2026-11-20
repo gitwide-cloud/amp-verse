@@ -1,4 +1,5 @@
 pub mod analysis_worker;
+mod browser_session;
 pub mod config;
 mod hls;
 mod knowledge;
@@ -167,6 +168,7 @@ impl Cast {
         }
         self.password.as_ref().is_none_or(|p| {
             headers.get("x-amp-password").and_then(|v| v.to_str().ok()) == Some(p.as_str())
+                || browser_session::authorized(self, headers)
         })
     }
 }

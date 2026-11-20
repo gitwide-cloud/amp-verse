@@ -69,8 +69,24 @@ async fn playlists(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respons
     let result = tokio::task::spawn_blocking(move || sharing::lists(&cast)).await;
     match result {
         Ok(Ok(lists)) => Json(serde_json::json!({"playlists":lists})).into_response(),
-        _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        Ok(Err(error)) => playlist_failure(&error),
+        Err(_) => playlist_failure("worker"),
     }
+}
+fn playlist_failure(error: &str) -> Response {
+    // Do not return raw filesystem/database errors: they may contain private paths.
+    let detail = if error.to_ascii_lowercase().contains("lock")
+        || error.to_ascii_lowercase().contains("busy")
+    {
+        "Saved playlists are busy. Wait a moment and retry; close another app that is updating this library if it persists."
+    } else {
+        "The server cannot read saved playlists. Check that its music folder is online and the server account can read the library metadata, then retry."
+    };
+    (
+        StatusCode::SERVICE_UNAVAILABLE,
+        Json(serde_json::json!({"code":"playlist_store_unavailable","error":detail})),
+    )
+        .into_response()
 }
 async fn play(
     State(cast): State<Arc<Cast>>,
@@ -88,7 +104,15 @@ async fn play(
     .await;
     let value = match selected {
         Ok(Ok(Some(value))) => value,
-        _ => return (StatusCode::NOT_FOUND, "Saved playlist unavailable").into_response(),
+        Ok(Ok(None)) => {
+            return (
+                StatusCode::NOT_FOUND,
+                "Saved playlist unavailable. Refresh the list and choose it again.",
+            )
+                .into_response();
+        }
+        Ok(Err(error)) => return playlist_failure(&error),
+        Err(_) => return playlist_failure("worker"),
     };
     if value["tracks"].as_array().is_none_or(|a| a.is_empty()) {
         return (StatusCode::CONFLICT, "Playlist has no available songs").into_response();
@@ -272,6 +296,64 @@ mod listener_address_tests {
             assert_eq!(
                 super::local_listener_address(bound.parse().unwrap()).to_string(),
                 expected
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod playlist_error_tests {
+    use super::*;
+    use axum::http::Request;
+    use tower::ServiceExt;
+    #[tokio::test]
+    async fn unreadable_saved_playlist_store_is_actionable_503_not_missing_404() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("ampdj")).unwrap();
+        std::fs::write(
+            root.path().join("ampdj/smart-playlists.json"),
+            b"invalid-json",
+        )
+        .unwrap();
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::Library {
+                tracks: vec![],
+                tree: amp_core::Folder {
+                    name: "test".into(),
+                    folders: vec![],
+                    tracks: vec![],
+                },
+            },
+            Some("secret".into()),
+        );
+        let app = routes().with_state(cast);
+        for (method, uri) in [
+            ("GET", "/api/station/playlists"),
+            ("POST", "/api/station/play/missing"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method(method)
+                        .uri(uri)
+                        .header("x-amp-password", "secret")
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE, "{uri}");
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            assert_eq!(value["code"], "playlist_store_unavailable");
+            assert!(value["error"].as_str().unwrap().contains("music folder"));
+            assert!(
+                !String::from_utf8_lossy(&body)
+                    .contains(&root.path().to_string_lossy().to_string())
             );
         }
     }
