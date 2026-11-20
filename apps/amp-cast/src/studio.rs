@@ -279,7 +279,16 @@ fn byte_range(value: Option<&str>, len: u64) -> Result<(u64, u64, bool), ()> {
     }
     Ok((start, end, true))
 }
-pub(super) async fn file_response(file: PathBuf, headers: HeaderMap, download: bool) -> Response {
+pub(super) enum Attachment {
+    Inline,
+    Original,
+    Export,
+}
+pub(super) async fn file_response(
+    file: PathBuf,
+    headers: HeaderMap,
+    attachment: Attachment,
+) -> Response {
     let mime = match file
         .extension()
         .and_then(|e| e.to_str())
@@ -294,6 +303,12 @@ pub(super) async fn file_response(file: PathBuf, headers: HeaderMap, download: b
         "ogg" | "opus" => "audio/ogg",
         _ => "application/octet-stream",
     };
+    let extension = file
+        .extension()
+        .and_then(|e| e.to_str())
+        .filter(|e| !e.is_empty() && e.len() <= 10 && e.bytes().all(|b| b.is_ascii_alphanumeric()))
+        .unwrap_or("bin")
+        .to_ascii_lowercase();
     let mut file = match tokio::fs::File::open(&file).await {
         Ok(f) => f,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
@@ -342,12 +357,23 @@ pub(super) async fn file_response(file: PathBuf, headers: HeaderMap, download: b
             format!("bytes {start}-{end}/{len}").parse().unwrap(),
         );
     }
-    if download {
-        h.insert(
-            "content-disposition",
-            "attachment; filename=amp-verse-export.mp3".parse().unwrap(),
-        );
-        h.insert("content-type", "audio/mpeg".parse().unwrap());
+    match attachment {
+        Attachment::Inline => {}
+        Attachment::Original => {
+            h.insert(
+                "content-disposition",
+                format!("attachment; filename=amp-verse-original.{extension}")
+                    .parse()
+                    .unwrap(),
+            );
+        }
+        Attachment::Export => {
+            h.insert(
+                "content-disposition",
+                "attachment; filename=amp-verse-export.mp3".parse().unwrap(),
+            );
+            h.insert("content-type", "audio/mpeg".parse().unwrap());
+        }
     }
     response
 }
@@ -361,7 +387,7 @@ async fn audio(
         return StatusCode::UNAUTHORIZED.into_response();
     }
     match path(&cast, id) {
-        Ok(file) => file_response(file, headers, false).await,
+        Ok(file) => file_response(file, headers, Attachment::Inline).await,
         Err(e) => err(StatusCode::NOT_FOUND, e),
     }
 }
@@ -644,7 +670,7 @@ async fn export_audio(
             file_response(
                 c.join("downloads/exports").join(format!("{id}.mp3")),
                 headers,
-                true,
+                Attachment::Export,
             )
             .await
         }

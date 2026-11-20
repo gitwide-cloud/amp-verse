@@ -2,7 +2,7 @@
 use super::*;
 use serde::Deserialize;
 use serde_json::{Value, json};
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Play {
     library_id: String,
@@ -52,16 +52,28 @@ async fn audio(
             "Song is no longer in this library. Refresh Library.",
         );
     };
-    let file = match amp_core::resolve(&cast.root, &track.path) {
-        Ok(file) => file,
-        Err(_) => {
-            return error(
-                StatusCode::NOT_FOUND,
-                "Song source is unavailable. Reconnect its music folder.",
-            );
-        }
-    };
-    studio::file_response(file, headers, reference.download).await
+    let path = track.path.clone();
+    let source = cast.clone();
+    let file =
+        match tokio::task::spawn_blocking(move || amp_core::resolve(&source.root, &path)).await {
+            Ok(Ok(file)) => file,
+            _ => {
+                return error(
+                    StatusCode::NOT_FOUND,
+                    "Song source is unavailable. Reconnect its music folder.",
+                );
+            }
+        };
+    studio::file_response(
+        file,
+        headers,
+        if reference.download {
+            studio::Attachment::Original
+        } else {
+            studio::Attachment::Inline
+        },
+    )
+    .await
 }
 #[derive(Deserialize)]
 struct PlaylistRef {
@@ -117,7 +129,7 @@ fn error(status: StatusCode, message: &str) -> Response {
 fn problem(status: StatusCode, message: &'static str) -> (StatusCode, &'static str) {
     (status, message)
 }
-fn indices(cast: &Cast, request: &Play) -> Result<Vec<usize>, (StatusCode, &'static str)> {
+fn indices_sync(cast: &Cast, request: &Play) -> Result<Vec<usize>, (StatusCode, &'static str)> {
     if cast.library_id.as_deref() != Some(request.library_id.as_str()) {
         return Err(problem(
             StatusCode::CONFLICT,
@@ -137,6 +149,37 @@ fn indices(cast: &Cast, request: &Play) -> Result<Vec<usize>, (StatusCode, &'sta
         if !file.metadata().is_ok_and(|m|m.is_file()&&m.len()>0) {return Err(problem(StatusCode::UNPROCESSABLE_ENTITY,"A selected song is empty or unavailable. Replace it before playing."));}
         Ok(index)
     }).collect()
+}
+async fn indices(cast: Arc<Cast>, request: Play) -> Result<Vec<usize>, (StatusCode, &'static str)> {
+    tokio::task::spawn_blocking(move || indices_sync(&cast, &request))
+        .await
+        .map_err(|_| {
+            problem(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "Song availability checking stopped. Check the music source and retry.",
+            )
+        })?
+}
+#[derive(Clone, Copy)]
+struct Intent {
+    generation: u64,
+    number: u64,
+}
+async fn begin_play(cast: &Cast) -> Intent {
+    let _operation = cast.operation.lock().await;
+    Intent {
+        generation: cast.station.lock().await.generation,
+        number: cast
+            .player_intent
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            + 1,
+    }
+}
+async fn current_intent(cast: &Cast, intent: Intent) -> bool {
+    cast.player_intent
+        .load(std::sync::atomic::Ordering::Relaxed)
+        == intent.number
+        && cast.station.lock().await.generation == intent.generation
 }
 fn shuffle(indices: &mut [usize]) {
     // Explicit shuffle only; each occurrence remains present exactly once.
@@ -184,7 +227,7 @@ async fn selection(cast: &Arc<Cast>, request: &Play) -> Result<Value, (StatusCod
             }
         }
     } else {
-        json!({"kind":"queue","name":"Player queue","tracks":indices(cast,request)?})
+        json!({"kind":"queue","name":"Player queue","tracks":indices(cast.clone(),request.clone()).await?})
     };
     let smart = selected["kind"] == "smart";
     let mut tracks: Vec<usize> = selected["tracks"]
@@ -220,6 +263,7 @@ async fn play(
     if !allowed(&cast, &headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
+    let intent = begin_play(&cast).await;
     let mut selected = match selection(&cast, &request).await {
         Ok(value) => value,
         Err(response) => return response.into_response(),
@@ -249,12 +293,33 @@ async fn play(
             "No playable songs were found in the first 32 selected occurrences. Repair their audio or choose another playlist; current playback was kept.",
         );
     }
+    finish_play(cast, headers, selected, request.server_speakers, intent).await
+}
+async fn finish_play(
+    cast: Arc<Cast>,
+    headers: HeaderMap,
+    selected: Value,
+    server_speakers: bool,
+    intent: Intent,
+) -> Response {
     let _operation = cast.operation.lock().await;
-    if request.server_speakers {
+    if !current_intent(&cast, intent).await {
+        return error(
+            StatusCode::CONFLICT,
+            "A newer playback or Stop request took priority. Current playback was kept.",
+        );
+    }
+    if server_speakers {
         if let Err(message) = station_control::probe_output().await {
             *cast.server_output_error.lock().unwrap() = Some(message.clone());
             return error(StatusCode::SERVICE_UNAVAILABLE, &message);
         }
+    }
+    if !current_intent(&cast, intent).await {
+        return error(
+            StatusCode::CONFLICT,
+            "A newer playback request took priority. Current playback was kept.",
+        );
     }
     cast.shutdown().await;
     *cast.selection.lock().unwrap() = Some(selected);
@@ -262,7 +327,7 @@ async fn play(
     if !response.status().is_success() {
         return response;
     }
-    if request.server_speakers {
+    if server_speakers {
         return station_control::output_start_unlocked(cast.clone()).await;
     }
     StatusCode::NO_CONTENT.into_response()
@@ -281,13 +346,20 @@ async fn queue(
             "Queue accepts ordered songs only. Choose output in Player.",
         );
     }
-    let tracks = match indices(&cast, &request) {
+    let expected_generation = cast.station.lock().await.generation;
+    let tracks = match indices(cast.clone(), request.clone()).await {
         Ok(indices) => indices,
         Err(response) => return response.into_response(),
     };
     let _operation = cast.operation.lock().await;
     {
         let station = cast.station.lock().await;
+        if station.generation != expected_generation {
+            return error(
+                StatusCode::CONFLICT,
+                "The server Player changed while songs were being checked. Current playback was kept; add them to the current queue explicitly.",
+            );
+        }
         if !station.running || station.source != "player_queue" {
             return error(
                 StatusCode::CONFLICT,
@@ -367,6 +439,72 @@ mod tests {
             )
             .await
             .unwrap()
+    }
+    #[tokio::test]
+    async fn paused_preflight_cannot_resurrect_after_stop_or_replace_a_new_owner_or_intent() {
+        for replacement in ["stop", "live", "intent"] {
+            let root = tempfile::tempdir().unwrap();
+            wave(&root.path().join("a.wav"), 440.);
+            let cast = Cast::new(
+                root.path().into(),
+                amp_core::scan(root.path()).unwrap(),
+                None,
+            );
+            let intent = begin_play(&cast).await;
+            let generation = intent.generation;
+            let (entered, waiting) = tokio::sync::oneshot::channel();
+            let (release, resume) = tokio::sync::oneshot::channel();
+            let pending = cast.clone();
+            let task = tokio::spawn(async move {
+                let _ = entered.send(());
+                resume.await.unwrap();
+                finish_play(
+                    pending,
+                    HeaderMap::new(),
+                    json!({"finite":true,"name":"Old request","tracks":[0]}),
+                    false,
+                    intent,
+                )
+                .await
+            });
+            waiting.await.unwrap();
+            if replacement == "intent" {
+                let _ = begin_play(&cast).await;
+            } else {
+                let uri = if replacement == "stop" {
+                    "/api/stop"
+                } else {
+                    "/api/live/start"
+                };
+                let response = crate::router(cast.clone())
+                    .oneshot(
+                        Request::builder()
+                            .method("POST")
+                            .uri(uri)
+                            .body(Body::empty())
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert!(response.status().is_success());
+            }
+            release.send(()).unwrap();
+            assert_eq!(task.await.unwrap().status(), StatusCode::CONFLICT);
+            {
+                let station = cast.station.lock().await;
+                if replacement == "live" {
+                    assert!(station.running);
+                    assert_eq!(station.source, "live_dj");
+                } else {
+                    assert!(!station.running);
+                }
+                if replacement != "intent" {
+                    assert!(station.generation > generation);
+                }
+                assert!(cast.selection.lock().unwrap().is_none());
+            }
+            cast.shutdown().await;
+        }
     }
     #[tokio::test]
     async fn stale_refs_and_invalid_sources_never_replace_existing_owner() {
@@ -525,7 +663,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::PARTIAL_CONTENT);
-        assert!(response.headers().contains_key("content-disposition"));
+        assert_eq!(response.headers()["content-type"], "audio/wav");
+        assert_eq!(
+            response.headers()["content-disposition"],
+            "attachment; filename=amp-verse-original.wav"
+        );
         let bytes = axum::body::to_bytes(response.into_body(), 1024)
             .await
             .unwrap();
@@ -607,6 +749,19 @@ mod tests {
             .save_in_library(&folder.join(format!("{id}.json")), root.path())
             .unwrap();
         }
+        let good_path = folder.join("good.json");
+        let raw = amp_core::catalog_db::read(&good_path)
+            .unwrap()
+            .unwrap_or_else(|| std::fs::read(&good_path).unwrap());
+        let mut document: Value = serde_json::from_slice(&raw).unwrap();
+        document["tracks"]
+            .as_array_mut()
+            .unwrap()
+            .insert(0, json!("missing.wav"));
+        amp_core::coordination::atomic_write(&good_path, &document).unwrap();
+        let original = amp_core::catalog_db::read(&good_path)
+            .unwrap()
+            .unwrap_or_else(|| std::fs::read(&good_path).unwrap());
         let app = super::routes().with_state(cast.clone());
         let snapshot = app
             .clone()
@@ -629,6 +784,7 @@ mod tests {
         )
         .unwrap();
         assert_eq!(value["selection_mode"], "ordered");
+        assert_eq!(value["unavailable"], 1);
         assert_eq!(
             value["tracks"]
                 .as_array()
@@ -678,21 +834,24 @@ mod tests {
             let station = cast.station.lock().await;
             if !station.running {
                 assert!(station.error.is_none(), "{:?}", station.error);
-                assert_eq!(station.player_failures, 1);
+                assert_eq!(station.player_failures, 2);
                 break;
             }
             drop(station);
             assert!(tokio::time::Instant::now() < deadline);
             tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-        let saved = amp_core::Playlist::load(&folder.join("good.json"), root.path()).unwrap();
+        let after = amp_core::catalog_db::read(&good_path)
+            .unwrap()
+            .unwrap_or_else(|| std::fs::read(&good_path).unwrap());
         assert_eq!(
-            saved.tracks,
-            vec![
-                PathBuf::from("broken.wav"),
-                PathBuf::from("a.wav"),
-                PathBuf::from("a.wav")
-            ]
+            after, original,
+            "read/play must preserve every savedreference byte"
+        );
+        let saved: Value = serde_json::from_slice(&after).unwrap();
+        assert_eq!(
+            saved["tracks"],
+            json!(["missing.wav", "broken.wav", "a.wav", "a.wav"])
         );
         assert_eq!(
             amp_core::Playlist::load(&folder.join("bad.json"), root.path())
@@ -710,6 +869,17 @@ mod tests {
         wave(&root.path().join("a.wav"), 440.);
         wave(&root.path().join("b.wav"), 660.);
         std::fs::write(root.path().join("broken.wav"), b"not audio").unwrap();
+        assert!(
+            amp_core::command("ffmpeg")
+                .args(["-v", "fatal", "-i"])
+                .arg(root.path().join("a.wav"))
+                .arg(root.path().join("original.flac"))
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
         let cast = Cast::new(
             root.path().into(),
             amp_core::scan(root.path()).unwrap(),
@@ -718,6 +888,35 @@ mod tests {
         let app = super::routes().with_state(cast.clone());
         let library = cast.library_id.clone().unwrap();
         let mut audio = cast.audio.subscribe();
+        let download = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!(
+                        "/api/player/audio?library_id={library}&path=original.flac&download=true"
+                    ))
+                    .header("x-amp-password", "secret")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(download.status(), StatusCode::OK);
+        assert_eq!(download.headers()["content-type"], "audio/flac");
+        assert_eq!(
+            download.headers()["content-disposition"],
+            "attachment; filename=amp-verse-original.flac"
+        );
+        let original = axum::body::to_bytes(download.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(&original[..4], b"fLaC");
+        assert_eq!(
+            &original[..],
+            std::fs::read(root.path().join("original.flac")).unwrap()
+        );
+        assert!(!cast.station.lock().await.running);
+
         let response = request(
             &app,
             "/api/player/play",

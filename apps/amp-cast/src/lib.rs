@@ -60,6 +60,7 @@ struct Station {
 }
 pub struct Cast {
     operation: Mutex<()>,
+    player_intent: std::sync::atomic::AtomicU64,
     pub listen_address: std::sync::Mutex<Option<std::net::SocketAddr>>,
     server_output: std::sync::Mutex<Option<server_output::Output>>,
     server_output_error: std::sync::Mutex<Option<String>>,
@@ -103,6 +104,7 @@ impl Cast {
         let (audio, _) = broadcast::channel(256);
         Arc::new(Self {
             operation: Mutex::new(()),
+            player_intent: std::sync::atomic::AtomicU64::new(0),
             listen_address: std::sync::Mutex::new(None),
             server_output: std::sync::Mutex::new(None),
             server_output_error: std::sync::Mutex::new(None),

@@ -25,6 +25,48 @@ async fn enable(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     cast.sharing.store(true, Relaxed);
     StatusCode::NO_CONTENT.into_response()
 }
+fn normal_playlist(cast: &Cast, path: &std::path::Path) -> Result<amp_core::Playlist, String> {
+    use std::io::Read;
+    const MAX: usize = 4 * 1024 * 1024;
+    let bytes = if let Some(bytes) = amp_core::catalog_db::read(path)? {
+        bytes
+    } else {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|_| "Playlist unavailable")?
+            .take(MAX as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Playlist unavailable")?;
+        bytes
+    };
+    if bytes.len() > MAX {
+        return Err("Playlist metadata exceeds supported size".into());
+    }
+    let mut playlist: amp_core::Playlist =
+        serde_json::from_slice(&bytes).map_err(|_| "Playlist metadata is invalid")?;
+    if playlist.version != 1 || playlist.tracks.len() > 20000 {
+        return Err("Playlist metadata is unsupported".into());
+    }
+    if playlist.sync.as_ref().is_some_and(|r| {
+        !r.library_id.is_empty() && Some(r.library_id.as_str()) != cast.library_id.as_deref()
+    }) {
+        return Err("Playlist belongs to another library".into());
+    }
+    for path in &mut playlist.tracks {
+        let portable = player_control::portable_path(path);
+        let library = cast.library_id.clone().unwrap_or_default();
+        let reference = amp_core::playlist_sync_contract::TrackRef {
+            library_id: library.clone(),
+            track_key: format!("song_{:x}", Sha256::digest(portable.as_bytes())),
+            relative_path: portable.clone(),
+        };
+        reference.validate(&library)?;
+        *path = PathBuf::from(portable);
+    }
+    // Availability is deliberately not validated here. Missing audio must not
+    // hide the rest of a saved playlist or rewrite its durable references.
+    Ok(playlist)
+}
 pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
     let mut result = Vec::new();
     let settings = amp_core::show::Settings::load(&cast.root)?;
@@ -40,6 +82,12 @@ pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
     }
     let mut files = amp_core::catalog_db::playlist_paths(&cast.root)?;
     files.sort();
+    let available: std::collections::HashMap<_, _> = cast
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (player_control::portable_path(&t.path), i))
+        .collect();
     for path in files.into_iter().take(1000) {
         if !path.starts_with(cast.root.join("ampdj/playlists")) {
             continue;
@@ -51,11 +99,11 @@ pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
         {
             continue;
         }
-        if let Ok(p) = amp_core::Playlist::load(&path, &cast.root) {
+        if let Ok(p) = normal_playlist(cast, &path) {
             let tracks: Vec<_> = p
                 .tracks
                 .iter()
-                .filter_map(|path| cast.tracks.iter().position(|t| &t.path == path))
+                .filter_map(|path| available.get(&player_control::portable_path(path)).copied())
                 .collect();
             result.push(json!({"id":format!("normal_{}",path.file_stem().unwrap_or_default().to_string_lossy()),"name":p.name,"kind":"playlist","unavailable":p.tracks.len().saturating_sub(tracks.len()),"tracks":tracks}));
         }
@@ -571,5 +619,24 @@ mod catalog_station_tests {
         let sources = lists(&cast).unwrap();
         assert!(sources.iter().any(|p| p["name"] == "Demo"));
         assert!(sources.iter().any(|p| p["name"] == "Saved normal"));
+    }
+}
+
+#[cfg(test)]
+mod normal_metadata_tests {
+    use super::*;
+    #[test]
+    fn oversized_raw_normal_document_is_rejected_without_rewriting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        let file = root.path().join("oversized.json");
+        let bytes = vec![b' '; 4 * 1024 * 1024 + 1];
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(normal_playlist(&cast, &file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
     }
 }
