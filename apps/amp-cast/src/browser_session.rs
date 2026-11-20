@@ -16,6 +16,8 @@ const MAX_BYTES: u64 = 128 * 1024;
 struct Grant {
     server: String,
     station: String,
+    #[serde(default)]
+    library: Option<String>,
     password: String,
     expires: u64,
 }
@@ -66,7 +68,7 @@ fn read(path: &std::path::Path) -> Result<Grants, ()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        if metadata.permissions().mode() & 0o022 != 0 {
+        if metadata.permissions().mode() & 0o077 != 0 {
             return Err(());
         }
     }
@@ -86,6 +88,7 @@ fn read(path: &std::path::Path) -> Result<Grants, ()> {
                 || !key.bytes().all(|b| b.is_ascii_hexdigit())
                 || g.server.len() > 128
                 || g.station.len() > 128
+                || g.library.as_ref().is_some_and(|id| id.len() > 128)
                 || g.password.len() != 64
         })
     {
@@ -134,6 +137,8 @@ pub(super) fn authorized(cast: &Cast, headers: &HeaderMap) -> bool {
     let matches = |g: &Grant| {
         g.server == cast.server_id
             && g.station == cast.station_id
+            && cast.library_id.is_some()
+            && g.library == cast.library_id
             && g.password == password(cast)
             && g.expires > now()
     };
@@ -161,6 +166,9 @@ fn cookie(value: &str, age: u64, headers: &HeaderMap) -> String {
     )
 }
 pub(super) fn login(cast: &Cast, headers: &HeaderMap) -> Result<String, StatusCode> {
+    if cast.library_id.is_none() {
+        return Err(StatusCode::SERVICE_UNAVAILABLE);
+    }
     let value = amp_core::coordination::token();
     mutate(cast, |values| {
         if let Some(old) = token(headers) {
@@ -179,6 +187,7 @@ pub(super) fn login(cast: &Cast, headers: &HeaderMap) -> Result<String, StatusCo
             Grant {
                 server: cast.server_id.clone(),
                 station: cast.station_id.clone(),
+                library: cast.library_id.clone(),
                 password: password(cast),
                 expires: now() + LIFETIME,
             },
@@ -246,9 +255,36 @@ mod tests {
         *restarted.config_dir.lock().unwrap() = Some(config.path().into());
         drop(first);
         assert!(authorized(&restarted, &h));
+        let old_library = restarted.library_id.clone();
+        Arc::get_mut(&mut restarted).unwrap().library_id = Some("different-library".into());
+        assert!(
+            !authorized(&restarted, &h),
+            "same server and station must not reuse a grant for another library"
+        );
+        Arc::get_mut(&mut restarted).unwrap().library_id = old_library;
         logout(&restarted, &h).unwrap();
         assert!(!authorized(&restarted, &h));
         assert!(read(&file(&restarted).unwrap()).unwrap().is_empty());
+    }
+    #[cfg(unix)]
+    #[test]
+    fn readable_by_others_store_is_rejected_without_rewriting_it() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = tempfile::tempdir().unwrap();
+        let config = tempfile::tempdir().unwrap();
+        let cast = cast(root.path());
+        *cast.config_dir.lock().unwrap() = Some(config.path().into());
+        let cookie = login(&cast, &HeaderMap::new()).unwrap();
+        let h = headers(&cookie);
+        let path = file(&cast).unwrap();
+        let before = std::fs::read(&path).unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        assert!(!authorized(&cast, &h));
+        assert_eq!(
+            login(&cast, &HeaderMap::new()),
+            Err(StatusCode::SERVICE_UNAVAILABLE)
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before);
     }
     #[test]
     fn oversized_session_store_fails_closed_and_preserves_previous_bytes() {

@@ -862,6 +862,24 @@ mod api_tests {
         );
         assert!(!set_cookie.contains("secret"));
         let cookie = set_cookie.split(';').next().unwrap().to_owned();
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/studio/session")
+                    .header("cookie", &cookie)
+                    .header("x-amp-password", "wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::UNAUTHORIZED,
+            "valid prior cookie cannot authorize a wrong explicit sign-in code"
+        );
         for uri in [
             "/api/studio/bootstrap",
             "/api/studio/tracks",
