@@ -40,10 +40,22 @@ public class CastPathsDeviceTest {
         if(view instanceof ViewGroup){ViewGroup group=(ViewGroup)view;for(int i=0;i<group.getChildCount();i++){T result=type(group.getChildAt(i),target);if(result!=null)return result;}}
         return null;
     }
-    private void visible(View view,String label){
-        assertNotNull(label,view);assertTrue(label+" must be shown",view.isShown());
-        view.requestRectangleOnScreen(new Rect(0,0,view.getWidth(),view.getHeight()),true);
-        Rect bounds=new Rect();assertTrue(label+" must occupy the visible viewport",view.getGlobalVisibleRect(bounds)&&!bounds.isEmpty());
+    private interface ViewQuery {View find(View root);}
+    private void visible(ActivityScenario<MainActivity> scenario,ViewQuery query,String label)throws Exception{
+        assertNotEquals("Layout waits must run on the instrumentation thread",android.os.Looper.getMainLooper(),android.os.Looper.myLooper());
+        long until=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(8);
+        AtomicBoolean ready=new AtomicBoolean();AtomicReference<String> last=new AtomicReference<>("not found");
+        while(System.nanoTime()<until){
+            // onActivity mutations only request a traversal; let the main looper
+            // and next frame finish before scrolling or checking viewport geometry.
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(a->{View view=query.find(a.getWindow().getDecorView());if(view!=null&&view.isShown()&&view.isLaidOut()&&!view.isLayoutRequested()&&view.getWidth()>0&&view.getHeight()>0)view.requestRectangleOnScreen(new Rect(0,0,view.getWidth(),view.getHeight()),true);});
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            scenario.onActivity(a->{View view=query.find(a.getWindow().getDecorView());Rect bounds=new Rect();boolean shown=view!=null&&view.isShown(),laidOut=shown&&view.isLaidOut()&&!view.isLayoutRequested()&&view.getWidth()>0&&view.getHeight()>0;ready.set(laidOut&&view.getGlobalVisibleRect(bounds)&&!bounds.isEmpty());last.set(view==null?"not found":"shown="+shown+", laidOut="+laidOut+", size="+view.getWidth()+"x"+view.getHeight()+", viewport="+bounds);});
+            if(ready.get())return;
+            Thread.sleep(25); // Instrumentation thread only; permits the next layout frame.
+        }
+        fail(label+" must occupy the visible viewport after layout: "+last.get());
     }
     private void assertFriendlyVisibleLabels(View view){
         if(view.isShown()&&view instanceof TextView){
@@ -103,7 +115,10 @@ public class CastPathsDeviceTest {
                     // Explicit foreground navigation also covers a restored Library default tab.
                     View root=activity.getWindow().getDecorView(),devices=tagged(root,"nav-devices");assertNotNull(devices);devices.performClick();
                     root=activity.getWindow().getDecorView();View cast=tagged(root,"nav-cast");assertNotNull(cast);if(!cast.isSelected())cast.performClick();
-                    root=activity.getWindow().getDecorView();visible(find(root,"AMP Radio · choose a server"),"Named server selection");
+                });
+                visible(scenario,root->find(root,"AMP Radio · choose a server"),"Named server selection");
+                scenario.onActivity(activity->{
+                    View root=activity.getWindow().getDecorView();
                     CastLibraryView library=type(root,CastLibraryView.class);assertNotNull(library);assertFalse("Unselected server Library must stay hidden",library.isShown());
                     TextView connect=find(root,"Connect");assertNotNull(connect);assertFalse("Manual Connect starts in Advanced",connect.isShown());
                     View address=described(root,"AMP Cast server address"),password=described(root,"AMP Cast admin password");assertNotNull(address);assertNotNull(password);assertFalse(address.isShown());assertFalse(password.isShown());
@@ -111,26 +126,38 @@ public class CastPathsDeviceTest {
                         TextView action=find(root,text);assertNotNull(text,action);assertFalse("Disconnected host action "+text,action.isEnabled());assertFalse("Legacy host action stays in Advanced "+text,action.isShown());
                     }
                     assertFriendlyVisibleLabels(root);
-                    TextView advanced=find(root,"Advanced connection settings");visible(advanced,"Advanced disclosure");advanced.performClick();visible(address,"Advanced server address");visible(password,"Advanced optional access code");visible(connect,"Advanced Connect");
-                    ((EditText)address).setText(fixture.address());((EditText)password).setText("");connect.performClick();
+                });
+                visible(scenario,root->find(root,"Advanced connection settings"),"Advanced disclosure");
+                scenario.onActivity(a->find(a.getWindow().getDecorView(),"Advanced connection settings").performClick());
+                visible(scenario,root->described(root,"AMP Cast server address"),"Advanced server address");
+                visible(scenario,root->described(root,"AMP Cast admin password"),"Advanced optional access code");
+                visible(scenario,root->find(root,"Connect"),"Advanced Connect");
+                scenario.onActivity(activity->{
+                    View root=activity.getWindow().getDecorView();
+                    ((EditText)described(root,"AMP Cast server address")).setText(fixture.address());((EditText)described(root,"AMP Cast admin password")).setText("");find(root,"Connect").performClick();
                     ((android.view.inputmethod.InputMethodManager)activity.getSystemService(Context.INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(root.getWindowToken(),0);
                 });
                 waitForLibrary(scenario);
-                InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+                visible(scenario,root->find(type(root,CastLibraryView.class),"Server Library"),"Selected server Library");
                 scenario.onActivity(activity->{
-                    View root=activity.getWindow().getDecorView();CastLibraryView library=type(root,CastLibraryView.class);visible(find(library,"Server Library"),"Selected server Library");
+                    View root=activity.getWindow().getDecorView();CastLibraryView library=type(root,CastLibraryView.class);
                     assertFalse("Address hides after selection",described(root,"AMP Cast server address").isShown());assertFalse("Connect hides after selection",find(root,"Connect").isShown());
-                    Spinner output=type(library,Spinner.class);visible(output,"Library output selector");assertEquals("Exactly Phone and Server outputs",2,output.getAdapter().getCount());
+                    Spinner output=type(library,Spinner.class);assertNotNull(output);assertEquals("Exactly Phone and Server outputs",2,output.getAdapter().getCount());
                     assertEquals("This phone · AMP Player",output.getAdapter().getItem(0).toString());assertEquals("Selected server · speakers",output.getAdapter().getItem(1).toString());assertEquals(0,output.getSelectedItemPosition());
-                    visible(find(library,"This phone · AMP Player"),"Selected Phone output");output.setSelection(1);
                 });
+                visible(scenario,root->type(type(root,CastLibraryView.class),Spinner.class),"Library output selector");
+                visible(scenario,root->find(type(root,CastLibraryView.class),"This phone · AMP Player"),"Selected Phone output");
+                scenario.onActivity(a->type(type(a.getWindow().getDecorView(),CastLibraryView.class),Spinner.class).setSelection(1));
+                visible(scenario,root->find(type(root,CastLibraryView.class),"Selected server · speakers"),"Selected Server output");
+                scenario.onActivity(a->{Spinner output=type(type(a.getWindow().getDecorView(),CastLibraryView.class),Spinner.class);assertEquals(1,output.getSelectedItemPosition());output.setSelection(0);});
+                visible(scenario,root->find(type(root,CastLibraryView.class),"This phone · AMP Player"),"Reselected Phone output");
+                for(String text:new String[]{"Stop","Remote","Search","New playlist","New Smart"})visible(scenario,root->find(type(root,CastLibraryView.class),text),"Library action "+text);
+                visible(scenario,root->described(root,"Advanced · station source and diagnostics"),"Advanced station disclosure");
+                scenario.onActivity(a->{View root=a.getWindow().getDecorView();assertFalse(find(root,"Start host station").isShown());described(root,"Advanced · station source and diagnostics").performClick();});
+                visible(scenario,root->find(root,"Start host station"),"Advanced station controls");
+                scenario.onActivity(a->described(a.getWindow().getDecorView(),"Advanced · station source and diagnostics").performClick());
                 InstrumentationRegistry.getInstrumentation().waitForIdleSync();
-                scenario.onActivity(activity->{
-                    View root=activity.getWindow().getDecorView();CastLibraryView library=type(root,CastLibraryView.class);Spinner output=type(library,Spinner.class);assertEquals(1,output.getSelectedItemPosition());visible(find(library,"Selected server · speakers"),"Selected Server output");output.setSelection(0);
-                    for(String text:new String[]{"Stop","Remote","Search","New playlist","New Smart"})visible(find(library,text),"Library action "+text);
-                    View legacy=described(root,"Advanced · station source and diagnostics");visible(legacy,"Advanced station disclosure");TextView oldHostAction=find(root,"Start host station");assertFalse(oldHostAction.isShown());legacy.performClick();visible(oldHostAction,"Advanced station controls");legacy.performClick();assertFalse(oldHostAction.isShown());
-                    assertFriendlyVisibleLabels(root);
-                });
+                scenario.onActivity(a->{View root=a.getWindow().getDecorView();assertFalse(find(root,"Start host station").isShown());assertFriendlyVisibleLabels(root);});
             }
             assertNull("Generated fixture had no unexpected requests",fixture.failure.get());
             synchronized(fixture.requests){assertFalse(fixture.requests.isEmpty());for(String request:fixture.requests)assertTrue("Browsing/output selection must not send playback or download commands: "+request,request.startsWith("GET "));}
