@@ -154,6 +154,8 @@ fn supervise<F: Fn() -> Command>(
         .timeout_resolve(Some(Duration::from_secs(2)))
         .timeout_connect(Some(Duration::from_secs(2)))
         .timeout_recv_response(Some(Duration::from_secs(2)))
+        .timeout_send_request(Some(Duration::from_secs(2)))
+        .timeout_per_write(Some(Duration::from_secs(2)))
         .timeout_per_read(Some(READ_TIMEOUT))
         .build()
         .into();
