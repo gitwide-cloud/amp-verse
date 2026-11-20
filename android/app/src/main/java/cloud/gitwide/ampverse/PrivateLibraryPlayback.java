@@ -23,6 +23,10 @@ final class PrivateLibraryPlayback {
   JSONArray paths=args.getJSONArray("tracks");CastLibraryModel.play(library,paths,false);
   String token=UUID.randomUUID().toString();List<MediaItem> items=new ArrayList<>();
   for(int i=0;i<paths.length();i++){String path=paths.getString(i);Uri uri=Uri.parse(c.base).buildUpon().path("/api/player/audio").appendQueryParameter("library_id",library).appendQueryParameter("path",path).build();items.add(new MediaItem.Builder().setMediaId("amp-private:"+token).setUri(uri).setMediaMetadata(new MediaMetadata.Builder().setTitle(path.substring(path.lastIndexOf('/')+1)).build()).build());}
+  String first=items.get(0).localConfiguration.uri.toString();
+  try(okhttp3.Response check=PrivateLibraryHttp.create(c.base,password,server,library,first).newCall(new okhttp3.Request.Builder().url(first).head().build()).execute()){
+   if(check.code()!=200&&check.code()!=206)throw new java.io.IOException("First saved reference is unavailable; phone playback was kept");
+  }
   synchronized(PrivateLibraryPlayback.class){if(bindings.size()>=16){String oldest=bindings.keySet().iterator().next();bindings.remove(oldest);prepared.remove(oldest);}bindings.put(token,new Binding(c.base,password,server,library,items));prepared.add(token);}
   return new JSONObject().put("token",token).put("count",items.size());
  }
