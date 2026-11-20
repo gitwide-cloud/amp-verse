@@ -13,6 +13,7 @@ on:
       - 'deploy/install-windows-server.ps1'
       - 'deploy/show-windows-server-access.ps1'
       - 'tools/test_windows_server_access.ps1'
+      - 'tools/test_windows_server_install.ps1'
       - 'deploy/Show Server Access Code.cmd'
       - '.github/workflows/engines.yml'
   pull_request:
@@ -27,6 +28,7 @@ on:
       - 'deploy/install-windows-server.ps1'
       - 'deploy/show-windows-server-access.ps1'
       - 'tools/test_windows_server_access.ps1'
+      - 'tools/test_windows_server_install.ps1'
       - 'deploy/Show Server Access Code.cmd'
       - '.github/workflows/engines.yml'
   workflow_dispatch:
@@ -103,6 +105,9 @@ jobs:
       - name: Verify private Windows access-code recovery
         if: runner.os == 'Windows'
         run: powershell.exe -NoProfile -File tools/test_windows_server_access.ps1
+      - name: Verify one existing Windows server install is reused
+        if: runner.os == 'Windows'
+        run: powershell.exe -NoProfile -File tools/test_windows_server_install.ps1
       - name: Build standalone server and analysis engine
         run: cargo build -p amp-cast -p amp-engine --release --locked
       - name: Stage source-identified engine build

@@ -78,3 +78,9 @@ uses the private LOCALAPPDATA/AMPVerse/StandaloneServer folder by default. Custo
 deployments can run show-windows-server-access.ps1 with its ConfigDirectory
 parameter. An absent or unreadable code gives an explanation and changes nothing.
 This is initial pairing/recovery, not a background tray manager or account creation.
+
+The Windows installer reuses a single existing Programs/AMP Verse Server folder,
+including historical version-suffixed folders. Multiple candidates require an
+explicit existing InstallDirectory instead of silently adding another copy.
+Running Cast/server processes and linked destinations are refused before copying.
+No process or playback is stopped automatically.

@@ -6,7 +6,29 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$destination = [IO.Path]::GetFullPath($InstallDirectory)
+# Historical test installs used a version suffix. Update the one existing server,
+# rather than creating a second installation when no destination was supplied.
+if (!$PSBoundParameters.ContainsKey('InstallDirectory')) {
+    $programs = Join-Path $env:LOCALAPPDATA 'Programs'
+    $known = @(Get-ChildItem -LiteralPath $programs -Directory -Filter 'AMP Verse Server*' -ErrorAction SilentlyContinue |
+        Where-Object { Test-Path -LiteralPath (Join-Path $_.FullName 'amp-cast.exe') -PathType Leaf })
+    if ($known.Count -gt 1) {
+        throw 'More than one server installation exists. Choose the existing server with -InstallDirectory; no new installation was created.'
+    }
+    if ($known.Count -eq 1) { $InstallDirectory = $known[0].FullName }
+}
+$destination = [IO.Path]::GetFullPath($InstallDirectory).TrimEnd('\')
+if (!$destination -or $destination -eq [IO.Path]::GetPathRoot($destination).TrimEnd('\')) {
+    throw 'A server installation folder is required; a volume root is not supported.'
+}
+$cursor = $destination
+while ($cursor) {
+    if ((Test-Path -LiteralPath $cursor) -and
+        ((Get-Item -Force -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'A linked server installation path is unsupported. Existing files were not changed.'
+    }
+    $cursor = Split-Path $cursor -Parent
+}
 $manifestPath = Join-Path $PSScriptRoot 'build.json'
 $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
 if ($manifest.os -ne 'Windows' -or $manifest.commit -notmatch '^[0-9a-f]{40}$') {
@@ -21,9 +43,18 @@ foreach ($name in $packageFiles) {
         throw "Package verification failed for $name."
     }
 }
+foreach ($name in $packageFiles + 'build.json') {
+    $target = Join-Path $destination $name
+    if (Test-Path -LiteralPath $target) {
+        $item = Get-Item -Force -LiteralPath $target
+        if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+            throw 'A linked or non-file server target is unsupported. Existing files were not changed.'
+        }
+    }
+}
 $exe = Join-Path $destination 'amp-cast.exe'
-if (Get-Process amp-cast -ErrorAction SilentlyContinue | Where-Object Path -eq $exe) {
-    throw 'Stop this AMP Verse Server after playback and analysis have settled, then run the installer again.'
+if (Get-Process amp-cast -ErrorAction SilentlyContinue) {
+    throw 'Close the existing AMP Verse Server after playback and analysis have settled, then rerun this installer for its existing folder. No second server was installed.'
 }
 
 $rules = @()
