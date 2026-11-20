@@ -17,11 +17,12 @@ final class CastClient {
     static final class HostUnavailableException extends IOException {
         HostUnavailableException(String message,Throwable cause){super(message,cause);}
     }
-    void withPrivateAuthorization(java.util.function.BiConsumer<String,String> action){action.accept(base,password);}
+    interface PlaylistAuthorization {void accept(String base,String password,String server,String library);}
+    void withPrivateAuthorization(PlaylistAuthorization action){action.accept(base,password,serverId,libraryId);}
     boolean hasPassword(){return !password.isEmpty();}
     final String base;
     private final String password;
-    private String serverId="",stationId="";
+    private String serverId="",stationId="",libraryId="";
     private boolean protectedAudio;
     private boolean adaptiveAudio;
     CastClient(String address,String password)throws Exception {
@@ -38,7 +39,7 @@ final class CastClient {
         JSONObject status=get("/api/status");
         String server=status.optString("server_id"),station=status.optString("station_id");
         if(server.isEmpty()||station.isEmpty())throw new IOException("This server needs an AMP Cast update before phone control is available");
-        serverId=server;stationId=station;protectedAudio=status.optJSONObject("capabilities")!=null&&status.getJSONObject("capabilities").optInt("reliable_audio")>=1;
+        serverId=server;stationId=station;libraryId=status.optString("library_id");protectedAudio=status.optJSONObject("capabilities")!=null&&status.getJSONObject("capabilities").optInt("reliable_audio")>=1;
         adaptiveAudio="/api/audio/hls/master.m3u8".equals(status.optString("hls_url"));return status;
     }
     JSONObject status()throws Exception {
