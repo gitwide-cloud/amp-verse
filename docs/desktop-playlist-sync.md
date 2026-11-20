@@ -26,7 +26,11 @@ A saved playlist already visible through the same physical NAS share is observed
 without POSTing another write or increasing its revision. Separate copies use
 remote revision compare-and-swap. First-pair differences, concurrent edits and
 unacknowledged publications are retained for review instead of choosing a winner.
-An uncertain operation is never automatically resubmitted under a new ID. Normal
+An uncertain operation is never automatically resubmitted under a new ID or
+cleared merely because content now matches (including when both files are missing).
+The first desktop client reports and retains these conflicts; an interactive
+resolution panel is not implemented. Retained outbox files should not be edited
+to force a retry without reviewing the server receipt and both saved versions. Normal
 ordered references, duplicates and missing audio entries remain in saved data;
 a missing member may still prevent loading that playlist for playback until it
 is available. Smart documents are transported/hydrated as raw JSON, retaining all

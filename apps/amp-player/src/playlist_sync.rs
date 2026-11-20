@@ -523,6 +523,7 @@ fn cycle(binding: &Binding, directory: &Path) -> Result<String, String> {
             local_doc.map(|d| &d.document),
             remote_doc.map(|d| &d.document),
         ) {
+            _ if record.conflict.is_some() || record.attempted => {}
             Decision::Equal => {
                 record.baseline = remote_doc.map(|d| d.document.clone());
                 record.revision = remote_doc.map_or(Value::Null, |d| d.revision.clone());
@@ -532,7 +533,6 @@ fn cycle(binding: &Binding, directory: &Path) -> Result<String, String> {
                 record.conflict = None;
                 synchronized += 1;
             }
-            _ if record.conflict.is_some() || record.attempted => {}
             Decision::Pull => {
                 let doc = remote_doc.unwrap();
                 match hydrate(binding, doc, local_doc) {
@@ -581,6 +581,14 @@ fn cycle(binding: &Binding, directory: &Path) -> Result<String, String> {
                                 .unwrap_or(1),
                         );
                     }
+                    if op.kind == Kind::Smart
+                        && let Some(hint) =
+                            canonical.and_then(|d| d.document.get("source_root_hint"))
+                    {
+                        // Preserve the server's opaque compatibility hint; never upload
+                        // a different device-local path from the desktop copy.
+                        op.document.as_mut().unwrap()["source_root_hint"] = hint.clone();
+                    }
                     op.validate(&binding.server_id, &binding.library_id)?;
                     record.pending = Some(op.clone());
                     record.attempted = true;
@@ -590,7 +598,7 @@ fn cycle(binding: &Binding, directory: &Path) -> Result<String, String> {
                     match outcome {
                         Ok(ack) => {
                             record.revision = ack["canonical"]["revision"].clone();
-                            record.baseline = Some(doc.document.clone());
+                            record.baseline = Some(ack["canonical"]["document"].clone());
                             record.desired = None;
                             record.pending = None;
                             record.attempted = false;
@@ -1123,6 +1131,90 @@ mod tests {
                 .unwrap()["version"],
             2
         );
+    }
+    #[test]
+    fn equal_or_both_missing_after_restart_never_clear_uncertain_intent() {
+        let server = Server::start();
+        let doc = normal(
+            &server.binding,
+            "uncertain-equal",
+            "Committed before lost receipt",
+        );
+        hydrate(&server.binding, &doc, None).unwrap();
+        let directory = server._dir.path().join("uncertain-client");
+        let operation = operation(&server.binding, &doc, doc.revision.clone(), Action::Update);
+        let mut state = State::default();
+        state.records.insert(
+            doc.document_id.clone(),
+            Record {
+                baseline: Some(json!({"name":"Older"})),
+                pending: Some(operation.clone()),
+                attempted: true,
+                ..Default::default()
+            },
+        );
+        save(&state_path(&server.binding, &directory), &state).unwrap();
+        cycle(&server.binding, &directory).unwrap();
+        let mut resumed = load_state(&state_path(&server.binding, &directory)).unwrap();
+        let saved = &resumed.records[&doc.document_id];
+        assert!(saved.attempted);
+        assert_eq!(saved.pending.as_ref().unwrap(), &operation);
+        let path = path(&server.binding.root, &doc.document_id).unwrap();
+        std::fs::remove_file(path).unwrap();
+        resumed.records.get_mut(&doc.document_id).unwrap().conflict =
+            Some("Uncertain retained".into());
+        save(&state_path(&server.binding, &directory), &resumed).unwrap();
+        cycle(&server.binding, &directory).unwrap();
+        let resumed = load_state(&state_path(&server.binding, &directory)).unwrap();
+        let saved = &resumed.records[&doc.document_id];
+        assert!(saved.attempted);
+        assert!(saved.conflict.is_some());
+        assert_eq!(saved.pending.as_ref().unwrap(), &operation);
+        assert!(!server.directory.join("playlist-sync/operations").exists());
+    }
+    #[test]
+    fn hinted_smart_name_edit_preserves_canonical_hint_not_a_local_path() {
+        let server = Server::start();
+        let mut rules =
+            serde_json::to_value(amp_core::show::Settings::default().playlists.remove(0)).unwrap();
+        rules["source_library"] = json!(server.binding.library_id);
+        rules["source_root_hint"] = json!("original-server-hint");
+        let doc = Document {
+            document_id: "smart_demo".into(),
+            kind: Kind::Smart,
+            document_version: 1,
+            revision: Value::Null,
+            document: rules,
+        };
+        hydrate(&server.binding, &doc, None).unwrap();
+        let root = server._dir.path().join("hint-copy");
+        std::fs::create_dir_all(root.join("ampdj")).unwrap();
+        std::fs::copy(
+            server.binding.root.join("ampdj/library.json"),
+            root.join("ampdj/library.json"),
+        )
+        .unwrap();
+        let mut binding = server.binding.clone();
+        binding.root = root.canonicalize().unwrap();
+        let directory = server._dir.path().join("hint-client");
+        cycle(&binding, &directory).unwrap();
+        let before = local(&binding).unwrap().remove("smart_demo").unwrap();
+        let mut edit = before.clone();
+        edit.document["name"] = json!("Renamed on desktop");
+        edit.document["source_root_hint"] = json!("different-desktop-hint");
+        hydrate(&binding, &edit, Some(&before)).unwrap();
+        cycle(&binding, &directory).unwrap();
+        let canonical = read(&server.binding.root.join("ampdj/smart-playlists.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(canonical["playlists"][0]["name"], "Renamed on desktop");
+        assert_eq!(
+            canonical["playlists"][0]["source_root_hint"],
+            "original-server-hint"
+        );
+        let saved = load_state(&state_path(&binding, &directory)).unwrap();
+        assert!(!saved.records["smart_demo"].attempted);
+        assert!(saved.records["smart_demo"].conflict.is_none());
     }
     #[test]
     fn copied_library_pushes_once_and_retains_uncertain_pending_without_replay() {
