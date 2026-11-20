@@ -572,6 +572,11 @@ impl Dashboard {
             }
         }
     }
+    fn host_password(&self) -> String {
+        self.pending_binding
+            .as_ref()
+            .map_or_else(|| self.password.clone(), |(_, password)| password.clone())
+    }
     fn host(&mut self, root: &std::path::Path, smart: bool) {
         if self.live_binding.is_some()
             || (self.pending_binding.is_some() && (smart || self.endpoint().0 != "127.0.0.1:8787"))
@@ -579,6 +584,7 @@ impl Dashboard {
             self.message = "Stop sending live audio before hosting another station.".into();
             return;
         }
+        let host_password = self.host_password();
         let result = (|| -> Result<std::process::Child, String> {
             let binary = std::env::current_exe()
                 .map_err(failure)?
@@ -619,7 +625,7 @@ impl Dashboard {
                 .arg(root)
                 .env("AMP_CAST_BIND", "0.0.0.0:8787")
                 .env("AMP_CAST_SMART_SHARING", if smart { "1" } else { "0" })
-                .env("AMP_CAST_PASSWORD", &self.password)
+                .env("AMP_CAST_PASSWORD", &host_password)
                 .env("AMP_CAST_CONFIG_DIR", &config)
                 .env("AMP_ANALYSIS_ENABLED", "0")
                 .stdout(log.try_clone().map_err(failure)?)
@@ -643,11 +649,7 @@ impl Dashboard {
                 .into();
                 self.address = "127.0.0.1:8787".into();
                 self.connected_address = self.address.clone();
-                self.send(Command::Connect(
-                    self.address.clone(),
-                    self.password.clone(),
-                    0,
-                ));
+                self.send(Command::Connect(self.address.clone(), host_password, 0));
                 self.message = "Starting your station. Reading the library…".into();
             }
             Err(e) => self.message = e,
@@ -1091,6 +1093,30 @@ mod tests {
             queue: Queue::default(),
             manifest: None,
         }
+    }
+    #[test]
+    fn pending_local_host_uses_pinned_auth_while_manual_host_uses_edited_auth() {
+        let (mut dashboard, commands, _) = mock_dashboard();
+        dashboard.password = "original-secret".into();
+        dashboard.request_live(false);
+        assert!(
+            matches!(commands.recv().unwrap(), Command::Connect(_, password, _) if password == "original-secret")
+        );
+        dashboard.password = "edited-secret".into();
+        let child_secret = dashboard.host_password();
+        assert_eq!(child_secret, "original-secret");
+        // These are the same arguments host() uses for its child and reconnect.
+        dashboard.send(Command::Connect("127.0.0.1:8787".into(), child_secret, 0));
+        assert!(
+            matches!(commands.recv().unwrap(), Command::Connect(_, password, _) if password == "original-secret")
+        );
+        assert_eq!(dashboard.endpoint().1, "original-secret");
+        dashboard.live_ended();
+        assert_eq!(
+            dashboard.host_password(),
+            "edited-secret",
+            "manual Host keeps its explicitly edited access code"
+        );
     }
     #[test]
     fn active_live_binding_keeps_quick_cast_on_original_endpoint_and_auth() {
