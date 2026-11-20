@@ -416,6 +416,12 @@ fn hydrate(binding: &Binding, doc: &Document, expected: Option<&Document>) -> Re
     let mut value = match doc.kind {
         Kind::Normal => {
             let current=before.as_ref().map(|v|{let mut wire=clean(v.clone());wire["tracks"]=json!(v["tracks"].as_array().ok_or("Invalid local tracks")?.iter().map(|p|{let relative=p.as_str().ok_or("Invalid local path")?.replace('\\',"/");Ok(json!({"library_id":binding.library_id,"track_key":format!("song_{:x}",Sha256::digest(relative.as_bytes())),"relative_path":relative}))}).collect::<Result<Vec<_>,String>>()?);Ok::<_,String>(wire)}).transpose()?;
+            if current
+                .as_ref()
+                .is_some_and(|v| semantic(v) == semantic(&doc.document))
+            {
+                return Ok(());
+            }
             if current.as_ref().map(semantic) != expected.map(|d| semantic(&d.document)) {
                 return Err("Local playlist changed while pulling; retained for review".into());
             }
@@ -437,6 +443,9 @@ fn hydrate(binding: &Binding, doc: &Document, expected: Option<&Document>) -> Re
                 .as_array_mut()
                 .ok_or("Invalid local Smart Playlists")?;
             let current = entries.iter().find(|v| v["id"] == doc.document["id"]);
+            if current.is_some_and(|v| semantic(v) == semantic(&doc.document)) {
+                return Ok(());
+            }
             if current.map(semantic) != expected.map(|d| semantic(&d.document)) {
                 return Err("Local playlist changed while pulling; retained for review".into());
             }
@@ -445,7 +454,8 @@ fn hydrate(binding: &Binding, doc: &Document, expected: Option<&Document>) -> Re
             } else {
                 entries.push(doc.document.clone());
             }
-            value["version"] = json!(doc.document_version);
+            value["version"] =
+                json!((value["version"].as_u64().unwrap_or(1) as u32).max(doc.document_version));
             value
         }
     };
@@ -551,7 +561,18 @@ fn cycle(binding: &Binding, directory: &Path) -> Result<String, String> {
                     } else {
                         Action::Create
                     };
-                    let op = operation(binding, doc, revision, action);
+                    let mut op = operation(binding, doc, revision, action);
+                    if op.kind == Kind::Smart {
+                        op.document_version = op.document_version.max(
+                            fresh
+                                .documents
+                                .iter()
+                                .filter(|d| d.kind == Kind::Smart)
+                                .map(|d| d.document_version)
+                                .max()
+                                .unwrap_or(1),
+                        );
+                    }
                     op.validate(&binding.server_id, &binding.library_id)?;
                     record.pending = Some(op.clone());
                     record.attempted = true;
@@ -693,10 +714,10 @@ impl Client {
             {
                 self.binding = None;
                 self.next = None;
-                if let Ok(directory) = config() {
-                    if let Err(error) = save(&directory.join("binding.json"), &Value::Null) {
-                        self.status = error;
-                    }
+                if let Ok(directory) = config()
+                    && let Err(error) = save(&directory.join("binding.json"), &Value::Null)
+                {
+                    self.status = error;
                 }
             }
         } else if let Some(candidate) = candidate {
@@ -841,6 +862,13 @@ mod tests {
             local(&binding).unwrap()[&first.document_id].document["name"],
             "Changed while network ran"
         );
+        let before = read(&path(&binding.root, &first.document_id).unwrap()).unwrap();
+        hydrate(&binding, &local_edit, Some(&expected)).unwrap();
+        assert_eq!(
+            read(&path(&binding.root, &first.document_id).unwrap()).unwrap(),
+            before,
+            "Already canonical shared data must not be rewritten or report conflict"
+        );
     }
     #[test]
     fn offline_saved_changes_are_durable_without_attempting_publication() {
@@ -871,8 +899,10 @@ mod tests {
     }
     #[test]
     fn saved_view_refresh_does_not_touch_playing_regular_reservations_or_smart_drafts() {
-        let mut player = crate::Player::default();
-        player.queue = vec![4, 4, 2];
+        let mut player = crate::Player {
+            queue: vec![4, 4, 2],
+            ..Default::default()
+        };
         player
             .run
             .load_regular_playlist("Current performance".into());
@@ -992,6 +1022,39 @@ mod tests {
             before
         );
         assert!(!server.directory.join("playlist-sync/operations").exists());
+    }
+    #[test]
+    fn copied_smart_create_does_not_downgrade_existing_server_container() {
+        let server = Server::start();
+        let rules = amp_core::show::Settings::default().playlists.remove(0);
+        let existing = Document {
+            document_id: "smart_demo".into(),
+            kind: Kind::Smart,
+            document_version: 2,
+            revision: Value::Null,
+            document: serde_json::to_value(&rules).unwrap(),
+        };
+        hydrate(&server.binding, &existing, None).unwrap();
+        let root = server._dir.path().join("copy-smart");
+        std::fs::create_dir_all(root.join("ampdj")).unwrap();
+        std::fs::copy(
+            server.binding.root.join("ampdj/library.json"),
+            root.join("ampdj/library.json"),
+        )
+        .unwrap();
+        let mut binding = server.binding.clone();
+        binding.root = root.canonicalize().unwrap();
+        let mut new = existing;
+        new.document_id = "smart_custom".into();
+        new.document_version = 1;
+        new.document["id"] = json!("custom");
+        hydrate(&binding, &new, None).unwrap();
+        cycle(&binding, &server._dir.path().join("smart-client")).unwrap();
+        let settings = read(&server.binding.root.join("ampdj/smart-playlists.json"))
+            .unwrap()
+            .unwrap();
+        assert_eq!(settings["version"], 2);
+        assert_eq!(settings["playlists"].as_array().unwrap().len(), 2);
     }
     #[test]
     fn copied_library_pushes_once_and_retains_uncertain_pending_without_replay() {
