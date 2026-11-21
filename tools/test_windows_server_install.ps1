@@ -28,11 +28,15 @@ try {
     New-Item -ItemType Directory -Path $legacy -Force | Out-Null
     [IO.File]::WriteAllText((Join-Path $legacy 'amp-cast.exe'), 'old-fixture')
     [IO.File]::WriteAllText((Join-Path $legacy 'settings.json'), 'retain-owner-profile-fixture')
+    New-Item -ItemType Directory -Path (Join-Path $legacy 'manager') | Out-Null
+    [IO.File]::WriteAllText((Join-Path $legacy 'manager\amp-server-manager.exe'), 'old-manager-fixture')
     $settingsHash = (Get-FileHash -LiteralPath (Join-Path $legacy 'settings.json')).Hash
     & (Join-Path $package 'install-windows-server.ps1')
     if ((Get-FileHash -LiteralPath (Join-Path $legacy 'amp-cast.exe')).Hash -ne (Get-FileHash -LiteralPath (Join-Path $package 'amp-cast.exe')).Hash) { throw 'Existing server was not updated' }
     if (Test-Path -LiteralPath (Join-Path $programs 'AMP Verse Server')) { throw 'Created a duplicate default installation' }
     if ((Get-FileHash -LiteralPath (Join-Path $legacy 'settings.json')).Hash -ne $settingsHash) { throw 'Existing settings changed' }
+    $backups = @(Get-ChildItem -LiteralPath $legacy -Directory -Filter 'rollback-*')
+    if ($backups.Count -ne 1 -or [IO.File]::ReadAllText((Join-Path $backups[0].FullName 'manager\amp-server-manager.exe')) -ne 'old-manager-fixture') { throw 'Previous manager rollback copy missing' }
     $installedManager = Join-Path $legacy 'manager\amp-server-manager.exe'
     if ((Get-FileHash $installedManager).Hash -ne (Get-FileHash $managerExe).Hash) { throw 'Matching manager not installed' }
     @{source_commit=('b'*40);files=$managerEntries} | ConvertTo-Json -Depth 5 | Set-Content (Join-Path $managerRoot 'build.json')
