@@ -7,6 +7,10 @@ license.workspace = true
 
 [dependencies]
 if-addrs = "0.15"
+mdns-sd = "=0.21.7"
+rust_cast = { version = "=0.21.0", features = ["cast"] }
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+protobuf = "=3.7.2"
 amp-core = { workspace = true, features = ["analysis"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -19,5 +23,6 @@ ureq = { version = "3", default-features = false, features = ["json"] }
 tempfile = "3"
 
 [dev-dependencies]
+rcgen = "0.13"
 tower = { version = "0.5", features = ["util"] }
 tempfile = "3"

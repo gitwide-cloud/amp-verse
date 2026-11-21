@@ -145,7 +145,7 @@ async fn bootstrap(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respons
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    Json(json!({"password_required":cast.password.is_some(),"browser_session_persistent":cast.config_dir.lock().unwrap().is_some(),"library_id":cast.library_id,"server_name":cast.station_name,"smart_playlist_template":amp_core::show::Settings::default().playlists.into_iter().next(),"tracks":cast.tracks.len(),"capabilities":{"library":true,"preparation":true,"waveform":true,"lab_export":true,"playlists":true,"smart_playlists":true,"dj":false,"stems":false,"arrangement":false},"modules":[{"id":"library","available":true},{"id":"preparation","available":true},{"id":"lab","available":true},{"id":"dj","available":false},{"id":"stems","available":false},{"id":"arrangement","available":false}]})).into_response()
+    Json(json!({"password_required":cast.password.is_some(),"browser_session_persistent":cast.config_dir.lock().unwrap().is_some(),"library_id":cast.library_id,"server_name":cast.station_name,"smart_playlist_template":amp_core::show::Settings::default().playlists.into_iter().next(),"tracks":cast.tracks.len(),"capabilities":{"library":true,"preparation":true,"waveform":true,"lab_export":true,"playlists":true,"smart_playlists":true,"google_cast":true,"google_cast_server_owned":true,"dj":false,"stems":false,"arrangement":false},"modules":[{"id":"library","available":true},{"id":"preparation","available":true},{"id":"lab","available":true},{"id":"dj","available":false},{"id":"stems","available":false},{"id":"arrangement","available":false}]})).into_response()
 }
 async fn tracks(
     State(cast): State<Arc<Cast>>,
