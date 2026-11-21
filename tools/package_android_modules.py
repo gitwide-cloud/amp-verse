@@ -44,7 +44,7 @@ def package(root, destination, variant, tag, sdk, java):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,100}", tag) or ".." in tag:
         raise ValueError("Invalid release tag")
     destination.mkdir(parents=True, exist_ok=True)
-    manifest = {"schema": 1, "api": 1, "android": {}, "editions": {}}
+    manifest = {"schema": 1, "api": 1, "release_channel": "beta", "beta": 1, "android": {}, "editions": {}}
     common_signer = None
     common_version = None
     for module in ("lite", "full", *IDS):
@@ -57,7 +57,7 @@ def package(root, destination, variant, tag, sdk, java):
             raise ValueError("APK output is missing or outside its build directory")
         entry = verified(apk, sdk, java)
         expected = "cloud.gitwide.ampverse" + ("" if module in ("lite", "full") else "." + module)
-        if entry["package_id"] != expected or not re.fullmatch(r"\d+\.\d+\.\d+", entry["version"]):
+        if entry["package_id"] != expected or not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-beta\.[1-9]\d*)?", entry["version"]):
             raise ValueError("Unexpected embedded APK identity or version")
         pair = entry["version"], entry["version_code"]
         if common_signer and common_signer != entry["signer_sha256"]:

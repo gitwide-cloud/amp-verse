@@ -31,10 +31,17 @@ final class ReleaseCheck {
         if(comparison==0)return "You have the latest published version ("+tag+").";
         return "Installed "+installed+" is newer than the latest published release ("+tag+").";
     }
+    static boolean betaVersion(String version){
+        return version!=null&&version.matches("[vV]?(?:0|[1-9][0-9]{0,7})\\.(?:0|[1-9][0-9]{0,7})\\.(?:0|[1-9][0-9]{0,7})-beta\\.[1-9][0-9]{0,7}");
+    }
+    private static int[] version(String value){
+        java.util.regex.Matcher match=java.util.regex.Pattern.compile("[vV]?((?:0|[1-9][0-9]{0,7}))\\.((?:0|[1-9][0-9]{0,7}))\\.((?:0|[1-9][0-9]{0,7}))(?:-beta\\.([1-9][0-9]{0,7}))?").matcher(value);
+        if(!match.matches())throw new IllegalArgumentException("Unsupported version tag");
+        return new int[]{Integer.parseInt(match.group(1)),Integer.parseInt(match.group(2)),Integer.parseInt(match.group(3)),match.group(4)==null?Integer.MAX_VALUE:Integer.parseInt(match.group(4))};
+    }
     static int compare(String left,String right){
-        String[] a=left.replaceFirst("^[vV]","").split("\\."),b=right.replaceFirst("^[vV]","").split("\\.");
-        if(a.length!=3||b.length!=3)throw new IllegalArgumentException("Unsupported version tag");
-        for(int i=0;i<3;i++)if(!a[i].matches("[0-9]{1,8}")||!b[i].matches("[0-9]{1,8}"))throw new IllegalArgumentException("Unsupported version tag");
-        for(int i=0;i<3;i++){int result=Integer.compare(Integer.parseInt(a[i]),Integer.parseInt(b[i]));if(result!=0)return result;}return 0;
+        int[] a=version(left),b=version(right);
+        for(int i=0;i<a.length;i++){int result=Integer.compare(a[i],b[i]);if(result!=0)return result;}
+        return 0;
     }
 }

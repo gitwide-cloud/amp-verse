@@ -1,4 +1,4 @@
-name: Android preview
+name: Android beta
 on:
   push:
     branches: [main]
@@ -29,7 +29,7 @@ jobs:
           gradle-version: '8.11.1'
       - run: gradle -p android :app:assembleLiteDebug :app:assembleFullDebug :app:assembleFullDebugAndroidTest :app:testFullDebugUnitTest :app:lintFullDebug :app:lintLiteDebug :amp-dj:assembleDebug :amp-dj:lintDebug :amp-lab:assembleDebug :amp-lab:lintDebug :amp-cast:assembleDebug :amp-cast:lintDebug :amp-podcasts:assembleDebug :amp-podcasts:lintDebug :amp-remote:assembleDebug :amp-remote:lintDebug
       - name: Package verified editions and signed companion APKs
-        run: python tools/package_android_modules.py --variant debug --release-tag "android-preview-${{ github.sha }}" --destination android-dist
+        run: python tools/package_android_modules.py --variant debug --release-tag "android-beta-${{ github.sha }}" --destination android-dist
       - uses: actions/upload-artifact@v4
         with:
           name: amp-verse-android-modules-${{ github.run_number }}

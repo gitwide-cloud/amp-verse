@@ -1,4 +1,4 @@
-"""Package CI-built unsigned previews for signing locally with the existing key.
+"""Package CI-built unsigned betas for signing locally with the existing key.
 Never reads or uploads a private signing key. Signed tag releases use the existing
 release pipeline; this artifact is deliberately not an installable update yet.
 """
@@ -23,7 +23,7 @@ def package(root, destination, sdk):
     shutil.copy2(signer, local_tools / "apksigner.jar")
     if (tools / "NOTICE.txt").is_file():
         shutil.copy2(tools / "NOTICE.txt", local_tools / "NOTICE.txt")
-    report = {"schema": 1, "kind": "unsigned-preview-requires-local-signing", "source_commit": os.environ.get("GITHUB_SHA", "local"), "build_tools": "35.0.0", "packages": []}
+    report = {"schema": 1, "kind": "unsigned-beta-requires-local-signing", "source_commit": os.environ.get("GITHUB_SHA", "local"), "build_tools": "35.0.0", "release_channel": "beta", "beta": 1, "packages": []}
     common_version = None
     for module in ("lite", "full", "dj", "lab", "cast", "podcasts", "remote"):
         folder = root / (f"app/build/outputs/apk/{module}/release" if module in ("lite", "full") else f"modules/{module}/build/outputs/apk/release")
@@ -40,7 +40,7 @@ def package(root, destination, sdk):
             raise ValueError("Could not inspect embedded APK identity")
         package_id, version_code, version = identity.groups()
         expected = "cloud.gitwide.ampverse" + ("" if module in ("lite", "full") else "." + module)
-        if package_id != expected or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        if package_id != expected or not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-beta\.[1-9]\d*)?", version):
             raise ValueError("Unexpected APK package identity/version")
         pair = version, int(version_code)
         if common_version is not None and pair != common_version:
@@ -57,7 +57,7 @@ def package(root, destination, sdk):
         (destination / (name + ".alignment.txt")).write_text("PASS: official build-tools 35 zipalign -c -P 16 4\n" + aligned.stdout + aligned.stderr)
         report["packages"].append({"edition": module, "name": name, "package_id": package_id, "version_code": int(version_code), "version": version, "sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "size": target.stat().st_size, "alignment_verified": True, "signed": False})
     (destination / "unsigned-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
-    (destination / "SIGNING_REQUIRED.md").write_text("""# Unsigned preview — local signing required
+    (destination / "SIGNING_REQUIRED.md").write_text("""# Unsigned beta — local signing required
 
 These APKs cannot be installed until signed. Keep the existing private keystore
 on the owner's computer; it was not uploaded to this build. Use the included

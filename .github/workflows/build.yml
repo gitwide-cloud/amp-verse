@@ -7,7 +7,7 @@ on:
   workflow_dispatch:
     inputs:
       android_preview:
-        description: Build unsigned Android preview artifacts for local signing (no release publication)
+        description: Build unsigned Android beta artifacts for local signing (no release publication)
         type: boolean
         default: false
 permissions:
@@ -199,7 +199,8 @@ jobs:
           mkdir -p dist/licenses/signalsmith
           cp -r apps/amp-player/vendor/signalsmith/* dist/licenses/signalsmith/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
-          cp -r docs dist/
+          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":1},indent=2)+"\n")'
+          python -c 'import shutil; shutil.copytree("docs", "dist/docs", ignore=shutil.ignore_patterns("tested-preview-install.md"))'
           cp -r licenses dist/
           mkdir -p dist/licenses/mp3-lab
           cp third-party/mp3-lab/LICENSE third-party/mp3-lab/PROVENANCE.md dist/licenses/mp3-lab/
@@ -213,14 +214,14 @@ jobs:
         run: |
           mkdir -p dist/setup
           cp tools/setup_lab_youtube.py dist/setup/
-      - name: Include tested preview installer
+      - name: Include canonical updater and legacy installer compatibility
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          cp tools/install-tested-preview.ps1 tools/launch-tested-preview.ps1 dist/
           cp tools/install-tested-desktop.ps1 tools/restore-tested-desktop.ps1 dist/
           cp docs/tested-desktop-install.md dist/
-          cp docs/tested-preview-install.md dist/
+          cp tools/launch-desktop.vbs dist/
+          cp docs/beta-install.md dist/
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.artifact }}-v${{ steps.package_version.outputs.version }}
@@ -234,7 +235,7 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then asset=amp-engine-windows-x86_64.exe; else asset=amp-engine-linux-x86_64; fi
           cp target/release/amp-engine${{ matrix.suffix }} "engine-dist/$asset"
           (cd engine-dist && sha256sum "$asset" > "$asset.sha256")
-          # Only stable release tags are auto-installable. Preview artifacts remain manual.
+          # Only stable release tags are auto-installable. Beta artifacts remain manual.
           if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
             if [ "${{ runner.os }}" = "Windows" ]; then platform=windows-x86_64; else platform=linux-x86_64; fi
             python tools/engine_release_metadata.py --directory engine-dist --platform "$platform" --release "$GITHUB_REF_NAME"
@@ -265,6 +266,7 @@ jobs:
           path: integrations/companion/*.tgz
 
   android-preview:
+    name: Android unsigned beta
     if: github.event_name == 'workflow_dispatch' && inputs.android_preview
     runs-on: ubuntu-24.04
     steps:
@@ -285,20 +287,20 @@ jobs:
       - uses: gradle/actions/setup-gradle@v4
         with:
           gradle-version: '8.11.1'
-      - name: Verify and assemble unsigned release previews
+      - name: Verify and assemble unsigned release betas
         run: |
-          test -z "$AMP_ANDROID_KEYSTORE" || { echo 'Preview job must not receive a private signing key.'; exit 1; }
+          test -z "$AMP_ANDROID_KEYSTORE" || { echo 'Beta job must not receive a private signing key.'; exit 1; }
           gradle -p android :app:assembleLiteRelease :app:assembleFullRelease :app:testFullReleaseUnitTest :app:lintFullRelease :app:lintLiteRelease :app:assembleFullDebugAndroidTest :amp-dj:assembleRelease :amp-dj:lintRelease :amp-lab:assembleRelease :amp-lab:lintRelease :amp-cast:assembleRelease :amp-cast:lintRelease :amp-podcasts:assembleRelease :amp-podcasts:lintRelease :amp-remote:assembleRelease :amp-remote:lintRelease
       - name: Package unsigned APKs and official local-signing tool
-        run: python android/tools/package_unsigned.py --destination android-preview-dist
+        run: python android/tools/package_unsigned.py --destination android-beta-dist
       - uses: actions/upload-artifact@v4
         with:
           name: amp-verse-android-unsigned-${{ github.sha }}
-          path: android-preview-dist/
+          path: android-beta-dist/
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: android-preview-test-reports-${{ github.sha }}
+          name: android-beta-test-reports-${{ github.sha }}
           path: |
             android/app/build/reports/
             android/app/build/outputs/androidTest-results/

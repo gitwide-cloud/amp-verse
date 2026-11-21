@@ -1,4 +1,4 @@
-name: Server-owned Google Cast candidates
+name: Server-owned Google Cast beta
 on:
   push:
     branches: ['feature/server-google-cast-20261120']
@@ -65,7 +65,7 @@ jobs:
         run: cargo clippy --locked -p amp-cast --all-targets -- -D warnings
       - name: Build the existing standalone server
         run: cargo build --locked --release -p amp-cast
-      - name: Package versioned candidate without configuration or credentials
+      - name: Package versioned beta without configuration or credentials
         shell: python
         run: |
           import datetime, hashlib, os, pathlib, platform, tarfile, tomllib, zipfile, json
@@ -77,7 +77,7 @@ jobs:
           out=root/'dist';out.mkdir()
           archive=out/(stem+('.zip' if windows else '.tar.gz'))
           manifest=out/'build.json'
-          manifest.write_text(json.dumps({'source_sha':os.environ['GITHUB_SHA'],'version':version,'platform':platform.system(),'architecture':'x86_64','binary_name':target.name,'binary_sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'built_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'feature':'server_owned_google_cast','candidate':True},indent=2)+'\n')
+          manifest.write_text(json.dumps({'source_sha':os.environ['GITHUB_SHA'],'version':version,'release_channel':'beta','beta':1,'platform':platform.system(),'architecture':'x86_64','binary_name':target.name,'binary_sha256':hashlib.sha256(target.read_bytes()).hexdigest(),'built_at_utc':datetime.datetime.now(datetime.timezone.utc).isoformat(),'feature':'server_owned_google_cast','candidate':True},indent=2)+'\n')
           files=[(target,target.name),(manifest,'build.json'),(root/'docs/SERVER_GOOGLE_CAST.md','SERVER_GOOGLE_CAST.md')]
           if windows:
               with zipfile.ZipFile(archive,'w',zipfile.ZIP_DEFLATED) as package:

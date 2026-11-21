@@ -134,7 +134,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!(
-        "AMP Cast prototype listening on http://{}",
+        "AMP Cast {} Beta 1 listening on http://{}",
+        env!("CARGO_PKG_VERSION"),
         listener.local_addr()?
     );
     axum::serve(listener, amp_cast::router(cast.clone()))
