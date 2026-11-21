@@ -1129,7 +1129,8 @@ mod tests {
                     (RECEIVER,"GET_STATUS") if self.polls==0=>self.events.push_back((RECEIVER.into(),json!({"type":"RECEIVER_STATUS","status":{"applications":[]}}))),
                     (RECEIVER,"LAUNCH")=>self.events.push_back((RECEIVER.into(),json!({"type":"RECEIVER_STATUS","status":{"applications":[{"appId":APP,"transportId":"transport","sessionId":"fresh"}]}}))),
                     (MEDIA,"LOAD")=>self.events.push_back((MEDIA.into(),json!({"type":"MEDIA_STATUS","status":[{"mediaSessionId":77,"playerState":"PLAYING"}]}))),
-                    (MEDIA,"GET_STATUS")=>{self.polls+=1;if !value["mediaSessionId"].is_null(){assert_eq!(value["mediaSessionId"],77);self.seen_id=true;}if self.buffer{self.events.push_back((MEDIA.into(),json!({"type":"MEDIA_STATUS","status":[{"mediaSessionId":77,"playerState":"BUFFERING"}]})));}},
+                    (MEDIA,"GET_STATUS")=>{self.polls+=1;if !value["mediaSessionId"].is_null(){assert_eq!(value["mediaSessionId"],77);self.seen_id=true;}
+                        if self.buffer{self.events.push_back((MEDIA.into(),json!({"type":"MEDIA_STATUS","status":[{"mediaSessionId":77,"playerState":"BUFFERING"}]})));}},
                     (HEARTBEAT,"PING")=>self.events.push_back((HEARTBEAT.into(),json!({"type":"PONG"}))),
                     _=>{}
                 }
