@@ -52,6 +52,41 @@ foreach ($name in $packageFiles + 'build.json') {
         }
     }
 }
+# Optional manager is packaged from this exact source, with a separate recursive
+# manifest. Validate before touching the existing installation.
+$managerFiles = @()
+$managerRoot = Join-Path $PSScriptRoot 'manager'
+if (Test-Path -LiteralPath $managerRoot) {
+    if ((Get-Item -Force -LiteralPath $managerRoot).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked manager package is unsupported.' }
+    $managerManifest = Get-Content -LiteralPath (Join-Path $managerRoot 'build.json') -Raw | ConvertFrom-Json
+    if ($managerManifest.source_commit -cne $manifest.commit) { throw 'Manager and server source commits differ.' }
+    $seen = @{}
+    foreach ($entry in $managerManifest.files) {
+        $relative = [string]$entry.path
+        if (!$relative -or [IO.Path]::IsPathRooted($relative) -or $relative -match '(^|[\\/])\.\.?([\\/]|$)|:' -or $relative -ieq 'build.json') { throw 'Unsafe manager manifest path.' }
+        $source = [IO.Path]::GetFullPath((Join-Path $managerRoot $relative))
+        if ($seen.ContainsKey($source)) { throw 'Duplicate manager manifest path.' }
+        $seen[$source] = $true
+        $cursor = $source
+        while ($cursor -and $cursor.Length -ge $managerRoot.Length) {
+            if ((Get-Item -Force -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint) { throw 'Linked manager source is unsupported.' }
+            $cursor = Split-Path $cursor -Parent
+        }
+        $file = Get-Item -LiteralPath $source
+        if ($file.PSIsContainer -or $file.Length -ne $entry.size -or
+            [string]$entry.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or (Get-FileHash -LiteralPath $source).Hash -ne $entry.sha256) { throw 'Manager package verification failed.' }
+        $target = Join-Path $destination ('manager\' + $relative)
+        $cursor = $target
+        while ($cursor -and $cursor.Length -ge $destination.Length) {
+            if ((Test-Path -LiteralPath $cursor) -and ((Get-Item -Force -LiteralPath $cursor).Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'Linked manager target is unsupported.' }
+            $cursor = Split-Path $cursor -Parent
+        }
+        $managerFiles += @{Source=$source; Target=$target; Hash=$entry.sha256}
+    }
+    if (!($managerManifest.files | Where-Object path -ceq 'amp-server-manager.exe')) { throw 'Manager executable is missing.' }
+    if (Get-Process amp-server-manager -ErrorAction SilentlyContinue) { throw 'Exit the manager before updating it. Server playback was not changed.' }
+}
+
 $exe = Join-Path $destination 'amp-cast.exe'
 if (Get-Process amp-cast -ErrorAction SilentlyContinue) {
     throw 'Close the existing AMP Verse Server after playback and analysis have settled, then rerun this installer for its existing folder. No second server was installed.'
@@ -89,6 +124,23 @@ if ($PSCmdlet.ShouldProcess($destination, "Install AMP Verse Server $($manifest.
         New-Item -ItemType Directory -Path $backup | Out-Null
         foreach ($name in $existing) {
             Copy-Item -LiteralPath (Join-Path $destination $name) -Destination $backup
+        }
+    }
+    if ($managerFiles.Count) {
+        $oldManager = Join-Path $destination 'manager'
+        if (Test-Path -LiteralPath $oldManager) {
+            if (!$backup) {
+                $backup = Join-Path $destination ('rollback-' + [guid]::NewGuid().ToString('N'))
+                New-Item -ItemType Directory -Path $backup | Out-Null
+            }
+            # Reject links anywhere in the old tree before recursive backup.
+            if (Get-ChildItem -LiteralPath $oldManager -Force -Recurse | Where-Object { $_.Attributes -band [IO.FileAttributes]::ReparsePoint }) { throw 'Linked existing manager tree is unsupported.' }
+            Copy-Item -LiteralPath $oldManager -Destination (Join-Path $backup 'manager') -Recurse
+        }
+        foreach ($file in $managerFiles) {
+            New-Item -ItemType Directory -Force -Path (Split-Path $file.Target -Parent) | Out-Null
+            Copy-Item -LiteralPath $file.Source -Destination $file.Target -Force
+            if ((Get-FileHash -LiteralPath $file.Target).Hash -ne $file.Hash) { throw 'Installed manager hash mismatch.' }
         }
     }
     foreach ($name in $packageFiles + 'build.json') {

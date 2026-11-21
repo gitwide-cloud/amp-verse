@@ -9,3 +9,7 @@ __pycache__/
 /integrations/companion/pkg/
 
 /integrations/companion/*.tgz
+
+# Optional .NET Windows server manager
+apps/amp-server-manager/**/bin/
+apps/amp-server-manager/**/obj/
