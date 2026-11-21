@@ -371,7 +371,7 @@ async fn stream(State(c): State<Arc<Cast>>, Path(token): Path<String>) -> Respon
     }
     let body = async_stream::stream! {loop{
      if !c.google_cast.valid(&token){break}
-     tokio::select!{chunk=rx.recv()=>match chunk{Ok(bytes)=>yield Ok::<Bytes,std::io::Error>(bytes),Err(_)=>break},_=tokio::time::sleep(Duration::from_millis(250))=>{if !c.station.lock().await.running{break}}}
+     tokio::select!{chunk=rx.recv()=>match chunk{Ok(bytes)=>yield Ok::<Bytes,std::io::Error>(bytes),Err(broadcast::error::RecvError::Lagged(_))=>continue,Err(broadcast::error::RecvError::Closed)=>break},_=tokio::time::sleep(Duration::from_millis(250))=>{if !c.station.lock().await.running{break}}}
     }};
     (
         [
@@ -455,6 +455,9 @@ fn control(device: Device, url: String, shared: Arc<Shared>) -> Result<(), Strin
     let mut socket = TcpStream::connect_timeout(&device.address, Duration::from_secs(3))
         .map_err(|_| "The selected Google speaker is unreachable on this LAN.")?;
     socket
+        .set_nodelay(true)
+        .map_err(|_| "Cannot configure the speaker connection.")?;
+    socket
         .set_read_timeout(Some(Duration::from_millis(500)))
         .map_err(|_| "Cannot bound the speaker connection.")?;
     socket
@@ -511,12 +514,41 @@ fn phase(shared: &Shared, state: &str, message: &str) {
     v.message = message.into();
     v.confirmed_playing = false;
 }
+#[derive(Clone, Copy)]
+struct Limits {
+    opening: Duration,
+    silence: Duration,
+    poll: Duration,
+    stale: Duration,
+    buffering: Duration,
+    stop: Duration,
+}
 fn session(
     wire: &mut impl Wire,
     url: &str,
     shared: &Shared,
     opening: Duration,
     silence: Duration,
+) -> Result<(), String> {
+    session_with_limits(
+        wire,
+        url,
+        shared,
+        Limits {
+            opening,
+            silence,
+            poll: Duration::from_secs(5),
+            stale: Duration::from_secs(15),
+            buffering: Duration::from_secs(30),
+            stop: Duration::from_secs(2),
+        },
+    )
+}
+fn session_with_limits(
+    wire: &mut impl Wire,
+    url: &str,
+    shared: &Shared,
+    limits: Limits,
 ) -> Result<(), String> {
     wire.send(
         CONNECTION,
@@ -527,16 +559,28 @@ fn session(
     wire.send(
         RECEIVER,
         "receiver-0",
-        json!({"type":"LAUNCH","appId":APP,"requestId":1}),
+        json!({"type":"GET_STATUS","requestId":1}),
     )?;
-    phase(shared, "launching", "Opening Google Cast audio receiver.");
+    phase(
+        shared,
+        "inspecting",
+        "Checking Google speaker receiver ownership.",
+    );
     let began = Instant::now();
     let mut seen = Instant::now();
     let mut ping = Instant::now();
     let mut app: Option<(String, String)> = None;
+    let mut inspected = false;
+    let mut launching = false;
+    let mut prior: Option<String> = None;
+    let mut releasing: Option<Instant> = None;
     let mut stopping: Option<Instant> = None;
     let mut loaded_at: Option<Instant> = None;
     let mut played = false;
+    let mut media_session = None;
+    let mut last_media: Option<Instant> = None;
+    let mut buffering: Option<Instant> = None;
+    let mut request_id = 10u64;
     loop {
         if shared.cancel.load(Relaxed) && stopping.is_none() {
             shared.valid.store(false, Relaxed);
@@ -552,7 +596,7 @@ fn session(
                     "stopping",
                     "Stop sent to Google speaker; waiting for confirmation.",
                 );
-            } else {
+            } else if !launching {
                 phase(
                     shared,
                     "stopped",
@@ -561,7 +605,7 @@ fn session(
                 return Ok(());
             }
         }
-        if stopping.is_some_and(|t| t.elapsed() > Duration::from_secs(2)) {
+        if stopping.is_some_and(|t| t.elapsed() > limits.stop) {
             phase(
                 shared,
                 "stopped",
@@ -569,20 +613,54 @@ fn session(
             );
             return Ok(());
         }
-        if app.is_none() && began.elapsed() > opening {
+        if releasing.is_some_and(|t| t.elapsed() > limits.stop) {
+            return Err("The speaker did not release its previous Cast session. Retry after stopping that controller.".into());
+        }
+        if app.is_none() && began.elapsed() > limits.opening {
             return Err("Speaker did not open its audio receiver in time.".into());
         }
-        if !played && loaded_at.is_some_and(|t| t.elapsed() > Duration::from_secs(30)) {
+        if !played && loaded_at.is_some_and(|t| t.elapsed() > limits.buffering) {
             return Err(
                 "Speaker did not confirm media playback in time. Check server LAN access.".into(),
             );
         }
-        if seen.elapsed() > silence {
+        if seen.elapsed() > limits.silence {
             return Err("Speaker heartbeat timed out. Check the private LAN connection.".into());
         }
-        if ping.elapsed() > Duration::from_secs(5) {
+        if ping.elapsed() > limits.poll {
             wire.send(HEARTBEAT, "receiver-0", json!({"type":"PING"}))?;
+            if stopping.is_none()
+                && let Some((transport, _)) = &app
+            {
+                let mut request = json!({"type":"GET_STATUS","requestId":request_id});
+                request_id += 1;
+                if let Some(id) = media_session {
+                    request["mediaSessionId"] = json!(id);
+                }
+                wire.send(MEDIA, transport, request)?;
+                wire.send(
+                    RECEIVER,
+                    "receiver-0",
+                    json!({"type":"GET_STATUS","requestId":request_id}),
+                )?;
+                request_id += 1;
+            }
             ping = Instant::now();
+        }
+        if stopping.is_none() {
+            if buffering.is_some_and(|t| t.elapsed() > limits.buffering) {
+                return Err("Google speaker buffered for too long. Check its LAN access and restart this Cast output.".into());
+            }
+            if last_media.is_some_and(|t| t.elapsed() > limits.stale) {
+                phase(
+                    shared,
+                    "unconfirmed",
+                    "Speaker media status is stale; playback is not confirmed.",
+                );
+                if last_media.is_some_and(|t| t.elapsed() > limits.buffering) {
+                    return Err("Google speaker stopped confirming media status. Check the LAN and restart Cast.".into());
+                }
+            }
         }
         let Some((namespace, value)) = wire.receive()? else {
             continue;
@@ -591,21 +669,44 @@ fn session(
         match (namespace.as_str(),value["type"].as_str().unwrap_or("")){
    (HEARTBEAT,"PING")=>wire.send(HEARTBEAT,"receiver-0",json!({"type":"PONG"}))?,
    (RECEIVER,"LAUNCH_ERROR")|(MEDIA,"LOAD_FAILED")|(MEDIA,"LOAD_CANCELLED")|(MEDIA,"INVALID_REQUEST")=>return Err("Google speaker rejected this stream. Check that it can reach the server on this private LAN.".into()),
-   (CONNECTION,"CLOSE")=>return Err("Google speaker closed this Cast session.".into()),
+   (CONNECTION,"CLOSE")=>{if stopping.is_some(){phase(shared,"stopped","Google speaker disconnected after Stop; receiver absence was not confirmed.");return Ok(())}return Err("Google speaker closed this Cast session.".into())},
    (RECEIVER,"RECEIVER_STATUS")=>{
     let applications=value["status"]["applications"].as_array();
     if stopping.is_some() {
      let owned=app.as_ref().map(|(_,id)|id.as_str());
      if !applications.is_some_and(|a|a.iter().any(|a|a["sessionId"].as_str()==owned)){let mut v=shared.view.lock().unwrap();v.state="stopped".into();v.confirmed_stopped=true;v.confirmed_playing=false;v.message="Google speaker confirmed this Cast session stopped.".into();return Ok(())}
-    }else if app.is_none()&&let Some(active)=applications.and_then(|a|a.iter().find(|a|a["appId"]==APP)){
-     let transport=active["transportId"].as_str().ok_or("Speaker omitted its receiver transport.")?.to_owned();let id=active["sessionId"].as_str().ok_or("Speaker omitted its receiver session.")?.to_owned();
-     wire.send(CONNECTION,&transport,json!({"type":"CONNECT","origin":{}}))?;
-     wire.send(MEDIA,&transport,json!({"type":"LOAD","requestId":2,"sessionId":id,"autoplay":true,"currentTime":0,"media":{"contentId":url,"contentType":"audio/mpeg","streamType":"LIVE"}}))?;
-     app=Some((transport,id));loaded_at=Some(Instant::now());phase(shared,"loading","Speaker accepted the receiver; waiting for media playback confirmation.");
-    }else if let Some((_,id))=&app && !applications.is_some_and(|a|a.iter().any(|a|a["sessionId"]==*id)){return Err("Another controller replaced this speaker session.".into())}
+    }else if app.is_none(){
+     if !inspected{
+      inspected=true;
+      if let Some(old)=applications.and_then(|a|a.iter().find(|a|a["appId"]==APP)){
+       let id=old["sessionId"].as_str().ok_or("Speaker omitted its previous session identity.")?.to_owned();
+       wire.send(RECEIVER,"receiver-0",json!({"type":"STOP","sessionId":id,"requestId":2}))?;
+       prior=Some(id);releasing=Some(Instant::now());phase(shared,"releasing","Releasing the previous sender's Google Cast receiver.");
+      }else{
+       wire.send(RECEIVER,"receiver-0",json!({"type":"LAUNCH","appId":APP,"requestId":3}))?;launching=true;phase(shared,"launching","Opening a server-owned Google Cast receiver.");
+      }
+     }else if releasing.is_some(){
+      if !applications.is_some_and(|a|a.iter().any(|a|a["sessionId"].as_str()==prior.as_deref())){
+       releasing=None;wire.send(RECEIVER,"receiver-0",json!({"type":"LAUNCH","appId":APP,"requestId":3}))?;launching=true;phase(shared,"launching","Opening a fresh server-owned Google Cast receiver.");
+      }
+     }else if launching&&let Some(active)=applications.and_then(|a|a.iter().find(|a|a["appId"]==APP)){
+      let transport=active["transportId"].as_str().ok_or("Speaker omitted its receiver transport.")?.to_owned();let id=active["sessionId"].as_str().ok_or("Speaker omitted its receiver session.")?.to_owned();
+      if prior.as_deref()==Some(id.as_str()){return Err("Speaker reused the old sender session. Stop the old controller and retry server Cast.".into())}
+      app=Some((transport.clone(),id.clone()));launching=false;
+      if !shared.cancel.load(Relaxed){
+       wire.send(CONNECTION,&transport,json!({"type":"CONNECT","origin":{}}))?;
+       wire.send(MEDIA,&transport,json!({"type":"LOAD","requestId":4,"sessionId":id,"autoplay":true,"currentTime":0,"media":{"contentId":url,"contentType":"audio/mpeg","streamType":"LIVE"}}))?;
+       loaded_at=Some(Instant::now());phase(shared,"loading","Speaker accepted the fresh receiver; waiting for playback confirmation.");
+      }
+     }
+    }else if let Some((_,id))=&app && applications.is_some() && !applications.is_some_and(|a|a.iter().any(|a|a["sessionId"]==*id)){return Err("Another controller replaced this speaker session.".into())}
    },
    (MEDIA,"MEDIA_STATUS")=>if stopping.is_none()&&app.is_some()&&let Some(entry)=value["status"].as_array().and_then(|a|a.first()){
-    let state=entry["playerState"].as_str().unwrap_or("UNKNOWN");played|=state=="PLAYING";let mut v=shared.view.lock().unwrap();v.player_state=Some(state.into());v.confirmed_playing=state=="PLAYING";v.state=state.to_ascii_lowercase();v.message=match state{"PLAYING"=>"Speaker reports PLAYING. Physical audibility has not been verified.","BUFFERING"=>"Google speaker is buffering the server stream.","PAUSED"=>"Google speaker reports paused.",_=>"Google speaker is idle."}.into();
+    last_media=Some(Instant::now());media_session=entry["mediaSessionId"].as_i64().or(media_session);
+    if let Some(content)=entry["media"]["contentId"].as_str()&&content!=url{return Err("Another controller changed this speaker media.".into())}
+    let state=entry["playerState"].as_str().unwrap_or("UNKNOWN");
+    if state=="BUFFERING"{if buffering.is_none(){buffering=Some(Instant::now());}}else{buffering=None;}
+played|=state=="PLAYING";let mut v=shared.view.lock().unwrap();v.player_state=Some(state.into());v.confirmed_playing=state=="PLAYING";v.state=state.to_ascii_lowercase();v.message=match state{"PLAYING"=>"Speaker reports PLAYING. Physical audibility has not been verified.","BUFFERING"=>"Google speaker is buffering the server stream.","PAUSED"=>"Google speaker reports paused.",_=>"Google speaker is idle."}.into();
     if state=="IDLE"{
      if entry["idleReason"]=="ERROR"{return Err("Google speaker could not decode the server stream.".into())}
      if entry["idleReason"]=="INTERRUPTED"{return Err("Another controller interrupted this speaker stream.".into())}
@@ -843,6 +944,22 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()["content-type"], "audio/mpeg");
+        assert!(!response.headers().contains_key("content-length"));
+        let reconnect = app
+            .clone()
+            .oneshot(
+                Request::get("/api/google-cast/stream/fixture-capability")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reconnect.status(), StatusCode::OK);
+        drop(reconnect);
+        for _ in 0..300 {
+            cast.audio.send(Bytes::from_static(b"x")).unwrap();
+        }
         let body = tokio::spawn(async move { to_bytes(response.into_body(), 1024).await.unwrap() });
         cast.audio
             .send(Bytes::from_static(b"generated-mp3-fixture"))
@@ -863,7 +980,11 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        assert_eq!(bytes, b"generated-mp3-fixture"[..]);
+        assert!(bytes.ends_with(b"generated-mp3-fixture"));
+        assert!(
+            bytes.len() > b"generated-mp3-fixture".len(),
+            "Minor lag must skip old MP3 chunks rather than close the stream"
+        );
         assert_eq!(
             app.oneshot(
                 Request::get("/api/google-cast/stream/fixture-capability")
@@ -903,6 +1024,10 @@ mod tests {
             events: std::collections::VecDeque::from([
                 (
                     RECEIVER.into(),
+                    json!({"type":"RECEIVER_STATUS","status":{"applications":[]}}),
+                ),
+                (
+                    RECEIVER.into(),
                     json!({"type":"RECEIVER_STATUS","status":{"applications":[{"appId":APP,"transportId":"transport","sessionId":"session"}]}}),
                 ),
                 (MEDIA.into(), json!({"type":"LOAD_FAILED"})),
@@ -935,6 +1060,116 @@ mod tests {
         );
         assert!(began.elapsed() < Duration::from_secs(1));
         assert!(!state.view.lock().unwrap().confirmed_playing);
+    }
+    #[test]
+    fn receiver_transport_close_during_stop_is_detached_without_false_confirmation() {
+        struct Closing {
+            events: std::collections::VecDeque<(String, Value)>,
+            state: Arc<Shared>,
+        }
+        impl Wire for Closing {
+            fn send(&mut self, ns: &str, _: &str, v: Value) -> Result<(), String> {
+                if ns == RECEIVER && v["type"] == "STOP" {
+                    self.events
+                        .push_back((CONNECTION.into(), json!({"type":"CLOSE"})))
+                }
+                Ok(())
+            }
+            fn receive(&mut self) -> Result<Option<(String, Value)>, String> {
+                if let Some(value) = self.events.pop_front() {
+                    Ok(Some(value))
+                } else {
+                    self.state.cancel.store(true, Relaxed);
+                    Ok(None)
+                }
+            }
+        }
+        let state = shared();
+        let mut wire = Closing {
+            state: state.clone(),
+            events: std::collections::VecDeque::from([
+                (
+                    RECEIVER.into(),
+                    json!({"type":"RECEIVER_STATUS","status":{"applications":[]}}),
+                ),
+                (
+                    RECEIVER.into(),
+                    json!({"type":"RECEIVER_STATUS","status":{"applications":[{"appId":APP,"transportId":"transport","sessionId":"fresh"}]}}),
+                ),
+                (
+                    MEDIA.into(),
+                    json!({"type":"MEDIA_STATUS","status":[{"playerState":"PLAYING"}]}),
+                ),
+            ]),
+        };
+        session(
+            &mut wire,
+            "http://192.168.1.9/stream",
+            &state,
+            Duration::from_secs(1),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+        let view = state.view.lock().unwrap();
+        assert_eq!(view.state, "stopped");
+        assert!(!view.confirmed_stopped);
+        assert!(!view.confirmed_playing);
+    }
+    #[test]
+    fn periodic_media_poll_expires_cached_playing_and_bounds_prolonged_buffering() {
+        struct Polling {
+            events: std::collections::VecDeque<(String, Value)>,
+            buffer: bool,
+            polls: usize,
+            seen_id: bool,
+        }
+        impl Wire for Polling {
+            fn send(&mut self, namespace: &str, _: &str, value: Value) -> Result<(), String> {
+                match (namespace,value["type"].as_str().unwrap_or("")){
+                    (RECEIVER,"GET_STATUS") if self.polls==0=>self.events.push_back((RECEIVER.into(),json!({"type":"RECEIVER_STATUS","status":{"applications":[]}}))),
+                    (RECEIVER,"LAUNCH")=>self.events.push_back((RECEIVER.into(),json!({"type":"RECEIVER_STATUS","status":{"applications":[{"appId":APP,"transportId":"transport","sessionId":"fresh"}]}}))),
+                    (MEDIA,"LOAD")=>self.events.push_back((MEDIA.into(),json!({"type":"MEDIA_STATUS","status":[{"mediaSessionId":77,"playerState":"PLAYING"}]}))),
+                    (MEDIA,"GET_STATUS")=>{self.polls+=1;if !value["mediaSessionId"].is_null(){assert_eq!(value["mediaSessionId"],77);self.seen_id=true;}if self.buffer{self.events.push_back((MEDIA.into(),json!({"type":"MEDIA_STATUS","status":[{"mediaSessionId":77,"playerState":"BUFFERING"}]})));}},
+                    (HEARTBEAT,"PING")=>self.events.push_back((HEARTBEAT.into(),json!({"type":"PONG"}))),
+                    _=>{}
+                }
+                Ok(())
+            }
+            fn receive(&mut self) -> Result<Option<(String, Value)>, String> {
+                std::thread::sleep(Duration::from_millis(1));
+                Ok(self.events.pop_front())
+            }
+        }
+        for buffer in [false, true] {
+            let state = shared();
+            let mut wire = Polling {
+                events: Default::default(),
+                buffer,
+                polls: 0,
+                seen_id: false,
+            };
+            let limits = Limits {
+                opening: Duration::from_millis(100),
+                silence: Duration::from_millis(100),
+                poll: Duration::from_millis(2),
+                stale: Duration::from_millis(5),
+                buffering: Duration::from_millis(15),
+                stop: Duration::from_millis(5),
+            };
+            let error = session_with_limits(&mut wire, "http://192.168.1.9/stream", &state, limits)
+                .unwrap_err();
+            assert!(wire.polls >= 2);
+            assert!(wire.seen_id);
+            assert!(!state.view.lock().unwrap().confirmed_playing);
+            assert!(
+                error.contains(if buffer {
+                    "buffered"
+                } else {
+                    "confirming media"
+                }),
+                "{error}"
+            );
+        }
     }
     fn read_message(stream: &mut impl Read) -> (String, Value) {
         let mut header = [0; 4];
@@ -986,22 +1221,47 @@ mod tests {
             socket
                 .set_write_timeout(Some(Duration::from_secs(5)))
                 .unwrap();
+            socket.set_nonblocking(false).unwrap();
+            socket.set_nodelay(true).unwrap(); // Windows accepted sockets inherit listener mode.
+            let config = Arc::new(config);
             let mut tls = rustls::StreamOwned::new(
-                rustls::ServerConnection::new(Arc::new(config)).unwrap(),
+                rustls::ServerConnection::new(config.clone()).unwrap(),
                 socket,
             );
             let mut loaded = false;
             let mut pong = false;
+            let mut released = false;
+            let current = || json!({"type":"RECEIVER_STATUS","status":{"applications":[{"appId":APP,"transportId":"fixture-transport","sessionId":"fixture-session"}]}});
             loop {
                 let (namespace, data) = read_message(&mut tls);
                 match (namespace.as_str(), data["type"].as_str().unwrap_or("")) {
-                    (RECEIVER, "LAUNCH") => {
-                        assert_eq!(data["appId"], APP);
+                    (RECEIVER, "GET_STATUS") => response(
+                        &mut tls,
+                        RECEIVER,
+                        if loaded {
+                            current()
+                        } else if released {
+                            json!({"type":"RECEIVER_STATUS","status":{"applications":[]}})
+                        } else {
+                            json!({"type":"RECEIVER_STATUS","status":{"applications":[{"appId":APP,"transportId":"old-laptop-transport","sessionId":"old-laptop-session"}]}})
+                        },
+                    ),
+                    (RECEIVER, "STOP") if !loaded => {
+                        assert_eq!(data["sessionId"], "old-laptop-session");
+                        released = true;
                         response(
                             &mut tls,
                             RECEIVER,
-                            json!({"type":"RECEIVER_STATUS","status":{"applications":[{"appId":APP,"transportId":"fixture-transport","sessionId":"fixture-session"}]}}),
+                            json!({"type":"RECEIVER_STATUS","status":{"applications":[]}}),
                         );
+                    }
+                    (RECEIVER, "LAUNCH") => {
+                        assert!(
+                            released,
+                            "Fresh server session must first release the old DMR"
+                        );
+                        assert_eq!(data["appId"], APP);
+                        response(&mut tls, RECEIVER, current());
                     }
                     (MEDIA, "LOAD") => {
                         assert_eq!(data["sessionId"], "fixture-session");
@@ -1024,9 +1284,83 @@ mod tests {
                         response(
                             &mut tls,
                             MEDIA,
-                            json!({"type":"MEDIA_STATUS","status":[{"playerState":"PLAYING"}]}),
+                            json!({"type":"MEDIA_STATUS","status":[{"mediaSessionId":77,"playerState":"PLAYING"}]}),
+                        );
+                        // A second actual TLS sender models closing the old laptop after new LOAD.
+                        let stale = std::thread::spawn(move || {
+                            let socket =
+                                TcpStream::connect_timeout(&address, Duration::from_secs(2))
+                                    .unwrap();
+                            socket
+                                .set_read_timeout(Some(Duration::from_secs(3)))
+                                .unwrap();
+                            socket
+                                .set_write_timeout(Some(Duration::from_secs(3)))
+                                .unwrap();
+                            let client = rustls::ClientConfig::builder()
+                                .dangerous()
+                                .with_custom_certificate_verifier(Arc::new(
+                                    rust_cast::NoCertificateVerification {},
+                                ))
+                                .with_no_client_auth();
+                            let conn = rustls::ClientConnection::new(
+                                Arc::new(client),
+                                rustls::pki_types::ServerName::IpAddress(address.ip().into()),
+                            )
+                            .unwrap();
+                            let mut old = rustls::StreamOwned::new(conn, socket);
+                            old.write_all(&encoded(RECEIVER,"receiver-0",&json!({"type":"STOP","requestId":99,"sessionId":"old-laptop-session"})).unwrap()).unwrap();
+                            let (_, status) = read_message(&mut old);
+                            assert_eq!(
+                                status["status"]["applications"][0]["sessionId"],
+                                "fixture-session"
+                            );
+                        });
+                        let until = Instant::now() + Duration::from_secs(3);
+                        let old_socket = loop {
+                            match listener.accept() {
+                                Ok((socket, _)) => break socket,
+                                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                                    assert!(Instant::now() < until);
+                                    std::thread::sleep(Duration::from_millis(5));
+                                }
+                                Err(e) => panic!("{e}"),
+                            }
+                        };
+                        old_socket.set_nonblocking(false).unwrap();
+                        old_socket.set_nodelay(true).unwrap();
+                        old_socket
+                            .set_read_timeout(Some(Duration::from_secs(3)))
+                            .unwrap();
+                        old_socket
+                            .set_write_timeout(Some(Duration::from_secs(3)))
+                            .unwrap();
+                        let mut old = rustls::StreamOwned::new(
+                            rustls::ServerConnection::new(config.clone()).unwrap(),
+                            old_socket,
+                        );
+                        let (ns, stop) = read_message(&mut old);
+                        assert_eq!(ns, RECEIVER);
+                        assert_eq!(stop["type"], "STOP");
+                        assert_eq!(stop["sessionId"], "old-laptop-session");
+                        assert_ne!(stop["sessionId"], "fixture-session");
+                        response(&mut old, RECEIVER, current());
+                        stale.join().unwrap();
+                        response(&mut tls, RECEIVER, current());
+                        response(
+                            &mut tls,
+                            MEDIA,
+                            json!({"type":"MEDIA_STATUS","status":[{"mediaSessionId":77,"playerState":"PLAYING"}]}),
                         );
                         response(&mut tls, HEARTBEAT, json!({"type":"PING"}));
+                    }
+                    (MEDIA, "GET_STATUS") => {
+                        assert_eq!(data["mediaSessionId"], 77);
+                        response(
+                            &mut tls,
+                            MEDIA,
+                            json!({"type":"MEDIA_STATUS","status":[{"mediaSessionId":77,"playerState":"PLAYING"}]}),
+                        );
                     }
                     (HEARTBEAT, "PONG") => {
                         pong = true;
