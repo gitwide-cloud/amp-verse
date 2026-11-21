@@ -208,10 +208,10 @@ pub(super) async fn probe_output() -> Result<(), String> {
         "error",
         "-f",
         "s16le",
-        "-ar",
+        "-sample_rate",
         "44100",
-        "-ac",
-        "2",
+        "-ch_layout",
+        "stereo",
         "-i",
         "pipe:0",
     ]);
