@@ -460,22 +460,55 @@ mod tests {
         let attempts = Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let spawned = attempts.clone();
         let mut receiver = Receiver::with_decoder(&url, move || {
-            spawned.fetch_add(1, Ordering::SeqCst);
-            child_command("fail")
+            let attempt = spawned.fetch_add(1, Ordering::SeqCst);
+            // Only the original decoder fails. Keep its replacement alive so
+            // this test verifies cancellation/reaping, not exhaustion of five
+            // deliberately failing children racing a separate counter read.
+            child_command(if attempt == 0 { "fail" } else { "stall" })
         })
         .unwrap();
         let started = Instant::now();
-        while attempts.load(Ordering::SeqCst) < 2 {
-            assert!(started.elapsed() < Duration::from_secs(4));
-            assert!(!receiver.status().finished);
+        loop {
+            // Read the counter first: Listening must then belong to the
+            // replacement, after its spawn and pump setup have completed.
+            let count = attempts.load(Ordering::SeqCst);
+            let status = receiver.status();
+            assert!(
+                !status.finished,
+                "Receiver ended before replacement was listening: attempts={count}, status={}",
+                status.message
+            );
+            if count >= 2 && status.message == "Listening to station." {
+                break;
+            }
+            assert!(
+                started.elapsed() < Duration::from_secs(4),
+                "Replacement did not start: attempts={count}, status={}",
+                status.message
+            );
             thread::sleep(Duration::from_millis(10));
         }
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "Exactly one live replacement must be established before cancellation"
+        );
         receiver.stop();
-        await_finished(&mut receiver, Duration::from_secs(3));
+        let finished = await_finished(&mut receiver, Duration::from_secs(3));
+        assert_eq!(finished.message, "Listening stopped.");
+        assert!(
+            receiver.worker.is_none(),
+            "Cancellation must join the reaper after the replacement was reaped"
+        );
         stop.store(true, Ordering::Release);
         server.join().unwrap();
-        assert!(attempts.load(Ordering::SeqCst) >= 2);
+        assert_eq!(
+            attempts.load(Ordering::SeqCst),
+            2,
+            "Cancellation must not launch a further decoder"
+        );
     }
+
     #[test]
     #[ignore = "Real FFmpeg/FFplay codec test with SDL dummy audio; hosted CI supplies exact shipped Windows executable"]
     fn network_disabled_ffplay_decodes_http_via_pipe() {
