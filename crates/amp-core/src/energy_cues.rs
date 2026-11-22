@@ -67,8 +67,7 @@ pub(super) fn outro(energy: &[f64], first: usize, last: usize) -> f64 {
     let span = end - start;
     breakdowns(energy, first, last)
         .into_iter()
-        .filter(|seconds| *seconds >= start + span * 0.7 && *seconds <= end - 2.)
-        .next_back()
+        .rfind(|seconds| *seconds >= start + span * 0.7 && *seconds <= end - 2.)
         .unwrap_or((end - (span * 0.1).min(8.)).max(start))
 }
 /// Strongest sustained four-second window, rather than an isolated amplitude peak.
