@@ -75,8 +75,10 @@ fn read_pcm(reader: &mut impl Read, frames: usize) -> Result<Vec<f32>, String> {
         return Err("Incomplete stereo stem input".into());
     }
     let samples: Vec<_> = bytes[..n]
-        .chunks_exact(4)
-        .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|v| f32::from_le_bytes(*v))
         .collect();
     if samples.iter().any(|v| !v.is_finite()) {
         return Err("Invalid stem input PCM".into());
@@ -106,6 +108,30 @@ struct Output {
     rate: u32,
 }
 impl Output {
+    fn inference_budget(
+        &self,
+        controls: &crate::mixer::Controls,
+        deck: usize,
+        generation: u64,
+        first: bool,
+    ) -> Duration {
+        if first
+            || !controls.play[deck].load(Relaxed)
+            || controls.deck_generation[deck].load(Relaxed) != generation
+        {
+            return Duration::from_secs(20);
+        }
+        let speed = controls.effective_rate(deck).abs();
+        let speed = if speed.is_finite() {
+            f64::from(speed.max(0.01))
+        } else {
+            1.
+        };
+        let emitted = self.input_frame as f64 / RATE as f64;
+        let consumed = controls.position[deck].load(Relaxed) as f64 / self.rate.max(1) as f64;
+        // Allow time to publish the retained original before the playback ring empties.
+        Duration::from_secs_f64(((emitted - consumed) / speed - 0.25).clamp(0.1, 20.))
+    }
     fn emit(
         &mut self,
         parts: &Parts,
@@ -250,7 +276,8 @@ pub(crate) fn decode(
         let mut parts = if degraded {
             [pcm, vec![0.; frames * 2], vec![0.; frames * 2]]
         } else {
-            match crate::onnx_stem_worker::separate(pcm, stop.clone()) {
+            let budget = output.inference_budget(&controls, deck, generation, first);
+            match crate::onnx_stem_worker::separate(pcm, stop.clone(), budget) {
                 Ok(parts) => parts,
                 Err(error) => {
                     if stop.load(Relaxed) {
@@ -329,6 +356,45 @@ mod tests {
         assert_eq!(count, 22);
         assert_eq!(out.input_frame, 20);
     }
+    #[test]
+    fn inference_deadline_follows_buffer_tempo_and_source_generation() {
+        let controls = crate::mixer::Controls::default();
+        controls.play[0].store(true, Relaxed);
+        controls.deck_generation[0].store(7, Relaxed);
+        controls.position[0].store(48000 * 2, Relaxed);
+        let out = Output {
+            input_frame: (RATE * 10) as u64,
+            output_frame: 0,
+            rate: 48000,
+        };
+        assert_eq!(
+            out.inference_budget(&controls, 0, 7, false),
+            Duration::from_secs_f64(7.75)
+        );
+        controls.rate[0].store(2f32.to_bits(), Relaxed);
+        assert_eq!(
+            out.inference_budget(&controls, 0, 7, false),
+            Duration::from_secs_f64(3.75)
+        );
+        assert_eq!(
+            out.inference_budget(&controls, 0, 8, false),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            out.inference_budget(&controls, 0, 7, true),
+            Duration::from_secs(20)
+        );
+        controls.position[0].store(48000 * 11, Relaxed);
+        assert_eq!(
+            out.inference_budget(&controls, 0, 7, false),
+            Duration::from_millis(100)
+        );
+        controls.play[0].store(false, Relaxed);
+        assert_eq!(
+            out.inference_budget(&controls, 0, 7, false),
+            Duration::from_secs(20)
+        );
+    }
 }
 
 #[cfg(test)]
@@ -358,8 +424,10 @@ mod live_acceptance {
         assert!(original.status.success());
         let expected: Vec<f32> = original
             .stdout
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
         let (mut producer, mut consumer) = rtrb::RingBuffer::new(32768);
         let stop = Arc::new(AtomicBool::new(false));

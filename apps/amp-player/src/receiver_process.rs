@@ -114,6 +114,11 @@ mod windows_owner {
         core::HRESULT,
     };
     pub(super) struct Handle(pub HANDLE);
+    // SAFETY: this non-Clone owner contains only real kernel job, thread or
+    // snapshot handles created below, never pseudo handles or window handles.
+    // Those kernel handles can be transferred between OS threads. Ownership
+    // still closes each handle exactly once; shared Decoder access uses Mutex.
+    unsafe impl Send for Handle {}
     impl Drop for Handle {
         fn drop(&mut self) {
             let _ = unsafe { CloseHandle(self.0) };

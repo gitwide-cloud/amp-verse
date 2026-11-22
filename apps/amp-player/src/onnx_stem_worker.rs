@@ -40,7 +40,6 @@ struct Config {
     provider: String,
     cuda_dll_dir: Option<PathBuf>,
     script: &'static str,
-    timeout: Duration,
 }
 impl Config {
     fn environment() -> Result<Self, String> {
@@ -101,7 +100,6 @@ impl Config {
             provider,
             cuda_dll_dir,
             script: include_str!("../../../tools/stem_onnx_window.py"),
-            timeout: REQUEST_TIMEOUT,
         })
     }
     fn expected_provider(&self) -> &str {
@@ -155,7 +153,13 @@ impl Broker {
         }
         self.finished.load(Ordering::Acquire)
     }
-    fn submit(&self, pcm: Vec<f32>, cancel: Arc<AtomicBool>, config: Config) -> Reply {
+    fn submit(
+        &self,
+        pcm: Vec<f32>,
+        cancel: Arc<AtomicBool>,
+        config: Config,
+        budget: Duration,
+    ) -> Reply {
         validate_input(&pcm)?;
         if cancel.load(Ordering::Acquire) {
             return Err("Stem window cancelled".into());
@@ -165,7 +169,7 @@ impl Broker {
         }
         let (reply, rx) = mpsc::sync_channel(1);
         let state = Arc::new(AtomicU8::new(PENDING));
-        let deadline = Instant::now() + config.timeout;
+        let deadline = Instant::now() + budget.min(REQUEST_TIMEOUT);
         let request = Request {
             pcm: Arc::new(pcm),
             cancel: cancel.clone(),
@@ -181,8 +185,14 @@ impl Broker {
             mpsc::TrySendError::Disconnected(_) => "Stem supervisor stopped".to_owned(),
         })?;
         loop {
-            if Instant::now() >= deadline {
-                cancel.store(true, Ordering::Release);
+            if Instant::now() >= deadline
+                && state
+                    .compare_exchange(PENDING, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
+                    .is_ok()
+            {
+                return Err(
+                    "Stem window timed out in the queue; original audio remains available".into(),
+                );
             }
             if (cancel.load(Ordering::Acquire) || self.stopping.load(Ordering::Acquire))
                 && state
@@ -198,6 +208,8 @@ impl Broker {
                         || self.stopping.load(Ordering::Acquire)
                     {
                         Err("Stem window cancelled".into())
+                    } else if Instant::now() >= deadline {
+                        Err("Stem window timed out; original audio remains available".into())
                     } else {
                         result
                     };
@@ -219,14 +231,15 @@ pub(crate) fn configured() -> bool {
 /// Blocking BACKGROUND API. Never call from the render/audio/UI thread.
 /// Interleaved stereo44.1k f32; vocals, instruments=(bass+other), drums. No disk cache.
 /// At most one inference + two queued input windows; overload rejects immediately.
-pub(crate) fn separate(pcm: Vec<f32>, cancel: Arc<AtomicBool>) -> Reply {
+/// Budget includes queue time; expiry never cancels the caller's deck/source token.
+pub(crate) fn separate(pcm: Vec<f32>, cancel: Arc<AtomicBool>, budget: Duration) -> Reply {
     validate_input(&pcm)?;
     let config = Config::environment()?;
     BROKER
         .get_or_init(Broker::start)
         .as_ref()
         .map_err(Clone::clone)?
-        .submit(pcm, cancel, config)
+        .submit(pcm, cancel, config, budget)
 }
 /// App-exit only: bounded (three seconds) cancellation/reap acknowledgement.
 /// Normal deck Stop must use its cancellation token, not block the UI here.
@@ -454,6 +467,14 @@ fn broker_loop(rx: mpsc::Receiver<Request>, stopping: Arc<AtomicBool>) -> bool {
     }
 }
 fn process_window(worker: &mut Option<Worker>, work: &Request, stopping: &AtomicBool) -> Reply {
+    if work.cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire) {
+        return Err("Stem window cancelled before inference".into());
+    }
+    if Instant::now() >= work.deadline {
+        return Err(
+            "Stem window timed out before inference; original audio remains available".into(),
+        );
+    }
     if worker
         .as_ref()
         .is_some_and(|w| w.poisoned || w.config != work.config)
@@ -470,7 +491,7 @@ fn process_window(worker: &mut Option<Worker>, work: &Request, stopping: &Atomic
             + if active.warmed {
                 WARM_TIMEOUT
             } else {
-                work.config.timeout
+                REQUEST_TIMEOUT
             },
     );
     let id = format!("window-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
@@ -545,7 +566,7 @@ fn exchange(
         .map_err(|e| format!("Request header: {e}"))?;
     let mut bytes = [0u8; 8192];
     for chunk in pcm.chunks(2048) {
-        for (sample, out) in chunk.iter().zip(bytes.chunks_exact_mut(4)) {
+        for (sample, out) in chunk.iter().zip(bytes.as_chunks_mut::<4>().0.iter_mut()) {
             out.copy_from_slice(&sample.to_le_bytes());
         }
         input
@@ -589,7 +610,9 @@ fn exchange(
             .read_exact(&mut raw)
             .map_err(|e| format!("Truncated stem PCM: {e}"))?;
         let samples: Vec<f32> = raw
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|v| f32::from_le_bytes([v[0], v[1], v[2], v[3]]))
             .collect();
         if !samples.iter().all(|v| v.is_finite()) {
@@ -652,7 +675,6 @@ while True:
             provider: "cpu".into(),
             cuda_dll_dir: None,
             script: FAKE,
-            timeout: Duration::from_secs(5),
         }
     }
     fn token() -> Arc<AtomicBool> {
@@ -676,9 +698,16 @@ while True:
         let broker = Broker::start().unwrap();
         let config = config("good".into());
         let first = broker
-            .submit(vec![0.25; 4], token(), config.clone())
+            .submit(
+                vec![0.25; 4],
+                token(),
+                config.clone(),
+                Duration::from_secs(1),
+            )
             .unwrap();
-        let second = broker.submit(vec![0.5; 4], token(), config).unwrap();
+        let second = broker
+            .submit(vec![0.5; 4], token(), config, Duration::from_secs(2))
+            .unwrap();
         assert_eq!(first, [vec![1.; 4], vec![7.; 4], vec![2.; 4]]);
         assert_eq!(
             second[0],
@@ -776,7 +805,7 @@ while True:
         }
         assert!(
             broker
-                .submit(vec![0.; 2], token(), cfg.clone())
+                .submit(vec![0.; 2], token(), cfg.clone(), Duration::from_secs(5))
                 .unwrap_err()
                 .contains("queue is full")
         );
@@ -789,7 +818,8 @@ while True:
         };
         let cancel = token();
         let flag = cancel.clone();
-        let handle = thread::spawn(move || broker.submit(vec![0.; 2], flag, cfg));
+        let handle =
+            thread::spawn(move || broker.submit(vec![0.; 2], flag, cfg, Duration::from_secs(5)));
         let queued = rx.recv_timeout(Duration::from_secs(3)).unwrap();
         assert_eq!(queued.state.load(Ordering::Acquire), PENDING);
         cancel.store(true, Ordering::Release);
@@ -802,7 +832,7 @@ while True:
     }
     fn request(config: Config, cancel: Arc<AtomicBool>) -> Request {
         let (reply, _) = mpsc::sync_channel(1);
-        let deadline = Instant::now() + config.timeout;
+        let deadline = Instant::now() + Duration::from_secs(5);
         Request {
             pcm: Arc::new(vec![0.; 4]),
             cancel,
@@ -905,7 +935,9 @@ while True:
         let broker = Arc::new(Broker::start().unwrap());
         let background = broker.clone();
         let cfg = config(marker.clone());
-        let handle = thread::spawn(move || background.submit(vec![0.; 4], token(), cfg));
+        let handle = thread::spawn(move || {
+            background.submit(vec![0.; 4], token(), cfg, Duration::from_secs(5))
+        });
         let pid = wait_for_child(&marker);
         let begin = Instant::now();
         assert!(broker.shutdown());
@@ -916,13 +948,12 @@ while True:
     #[test]
     fn fake_timeout_stops_worker_and_stderr_is_bounded_and_nul_free() {
         let directory = tempfile::tempdir().unwrap();
-        let mut cfg = config(directory.path().join("hang"));
-        cfg.timeout = Duration::from_millis(250);
+        let cfg = config(directory.path().join("hang"));
+        let mut work = request(cfg, token());
+        work.deadline = Instant::now() + Duration::from_millis(250);
         let mut worker = None;
         let begin = Instant::now();
-        assert!(
-            process_window(&mut worker, &request(cfg, token()), &AtomicBool::new(false)).is_err()
-        );
+        assert!(process_window(&mut worker, &work, &AtomicBool::new(false)).is_err());
         assert!(worker.is_none());
         assert!(begin.elapsed() < Duration::from_secs(4));
         let result = process_window(
@@ -934,5 +965,47 @@ while True:
         assert!(!error.contains('\0'));
         assert!(error.len() < 1400);
         assert!(worker.is_none());
+    }
+    #[test]
+    fn queued_deadline_does_not_cancel_deck_or_allow_late_inference() {
+        let (tx, rx) = mpsc::sync_channel(1);
+        let broker = Broker {
+            tx,
+            stopping: token(),
+            finished: token(),
+        };
+        let cancel = token();
+        let flag = cancel.clone();
+        let cfg = config("good".into());
+        let handle =
+            thread::spawn(move || broker.submit(vec![0.; 2], flag, cfg, Duration::from_millis(80)));
+        let queued = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(handle.join().unwrap().unwrap_err().contains("timed out"));
+        assert!(
+            !cancel.load(Ordering::Acquire),
+            "queue expiry must preserve original-audio fallback"
+        );
+        assert_eq!(queued.state.load(Ordering::Acquire), CANCELLED);
+    }
+    #[test]
+    fn active_deadline_reaps_worker_without_cancelling_deck_fallback() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("hang");
+        let broker = Arc::new(Broker::start().unwrap());
+        let background = broker.clone();
+        let cancel = token();
+        let flag = cancel.clone();
+        let cfg = config(marker.clone());
+        let handle = thread::spawn(move || {
+            background.submit(vec![0.; 4], flag, cfg, Duration::from_secs(1))
+        });
+        let pid = wait_for_child(&marker);
+        assert!(handle.join().unwrap().unwrap_err().contains("timed out"));
+        assert!(
+            !cancel.load(Ordering::Acquire),
+            "active expiry must preserve original-audio fallback"
+        );
+        assert!(broker.shutdown());
+        wait_descendant_stopped(pid);
     }
 }

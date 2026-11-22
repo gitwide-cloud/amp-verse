@@ -217,6 +217,7 @@ jobs:
           python tools/test_live_stems.py --unit
           # CI verifies correctness/storage; actual device two-deck timing is measured separately.
           python tools/test_live_stems.py --module dist/addons/stems-live --requests 3 --max-pair-seconds 30
+          python tools/verify_live_stem_player.py --module dist/addons/stems-live
       - name: Package official AMP Lab YouTube tools
         shell: bash
         run: |

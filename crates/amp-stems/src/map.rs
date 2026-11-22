@@ -70,7 +70,9 @@ impl ActivityMap {
             model_sha256: bytes[40..72].try_into().unwrap(),
             duration_ms: u32::from_le_bytes(bytes[72..76].try_into().unwrap()),
             segments: bytes[HEADER..]
-                .chunks_exact(12)
+                .as_chunks::<12>()
+                .0
+                .iter()
                 .map(|s| Segment {
                     start_ms: u32::from_le_bytes(s[..4].try_into().unwrap()),
                     end_ms: u32::from_le_bytes(s[4..8].try_into().unwrap()),

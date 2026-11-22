@@ -71,8 +71,10 @@ pub fn read_request(input: &mut impl Read) -> Result<Option<Request>> {
         .read_exact(&mut bytes)
         .map_err(|_| "Truncated stereo PCM")?;
     let pcm: Vec<f32> = bytes
-        .chunks_exact(4)
-        .map(|v| f32::from_le_bytes(v.try_into().unwrap()))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|v| f32::from_le_bytes(*v))
         .collect();
     if pcm.iter().any(|v| !v.is_finite()) {
         return Err("Non-finite source PCM".into());
@@ -124,7 +126,7 @@ pub fn write_parts(
     let mut bytes = [0u8; 8192];
     for part in parts {
         for chunk in part.chunks(2048) {
-            for (v, b) in chunk.iter().zip(bytes.chunks_exact_mut(4)) {
+            for (v, b) in chunk.iter().zip(bytes.as_chunks_mut::<4>().0.iter_mut()) {
                 b.copy_from_slice(&v.to_le_bytes());
             }
             output
@@ -155,11 +157,13 @@ fn statistics(audio: &[f32]) -> Result<(f64, f64)> {
         return Err("Invalid bounded stereo source".into());
     }
     let frames = audio.len() / 2;
-    let mono = |v: &[f32]| (v[0] as f64 + v[1] as f64) * 0.5;
-    let mean = audio.chunks_exact(2).map(mono).sum::<f64>() / frames as f64;
+    let mono = |v: &[f32; 2]| (v[0] as f64 + v[1] as f64) * 0.5;
+    let mean = audio.as_chunks::<2>().0.iter().map(mono).sum::<f64>() / frames as f64;
     let variance = if frames > 1 {
         audio
-            .chunks_exact(2)
+            .as_chunks::<2>()
+            .0
+            .iter()
             .map(|v| (mono(v) - mean).powi(2))
             .sum::<f64>()
             / (frames - 1) as f64

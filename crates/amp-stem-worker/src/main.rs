@@ -23,7 +23,7 @@ impl Config {
         let mut requests = 0;
         let mut memory_mib = 3072;
         let mut seen = std::collections::HashSet::new();
-        for pair in args.chunks_exact(2) {
+        for pair in args.as_chunks::<2>().0 {
             let flag = pair[0].to_str().ok_or("Invalid option")?;
             if !seen.insert(flag) {
                 return Err("Duplicate option".into());
