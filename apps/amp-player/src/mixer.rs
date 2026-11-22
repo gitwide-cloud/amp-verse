@@ -2103,11 +2103,10 @@ impl Engine {
         let stem_knobs = runtime_stem_knobs(&track.preparation, original)?;
         let onnx = !original
             && self.controls.on_demand_stems[deck].load(Relaxed)
-            && track
+            && !track
                 .preparation
                 .extensions
-                .get("podcast_stream_url")
-                .is_none();
+                .contains_key("podcast_stream_url");
         if onnx && !crate::onnx_stem_worker::configured() {
             return Err("On-demand stem worker/model is not configured".into());
         }
