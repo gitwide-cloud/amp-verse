@@ -54,6 +54,9 @@ impl SmartCycle {
             return vec![];
         }
         if pool.is_subset(&self.played) {
+            if p.fallback == show::Fallback::Stop {
+                return Vec::new();
+            }
             self.played.clear();
             self.seed = self.seed.wrapping_add(0x9e3779b97f4a7c15);
         }
@@ -154,6 +157,40 @@ mod tests {
             next
         );
         assert_eq!(cycle.ranked("two", &p, &tracks, None, None, None).len(), 3);
+    }
+    #[test]
+    fn stop_fallback_finishes_full_pool_without_resetting_or_repeating() {
+        for count in [1, 2, 9] {
+            let tracks = tracks(count);
+            let mut p = show::Settings::default().playlists.remove(0);
+            p.recent_repeat = 1;
+            p.fallback = show::Fallback::Stop;
+            let mut cycle = SmartCycle::default();
+            let mut current = None;
+            let mut heard = HashSet::new();
+            for _ in 0..count {
+                let next = cycle.ranked("l", &p, &tracks, current, None, None)[0];
+                assert!(heard.insert(next));
+                cycle.played("l", &p.id, &tracks[next]);
+                current = Some(next);
+            }
+            assert!(
+                cycle
+                    .ranked("l", &p, &tracks, current, None, None)
+                    .is_empty()
+            );
+            assert!(
+                cycle
+                    .ranked("l", &p, &tracks, current, None, None)
+                    .is_empty(),
+                "a repeated query must not restart a completed Stop cycle"
+            );
+            p.fallback = show::Fallback::RelaxRecent;
+            let next = cycle.ranked("l", &p, &tracks, current, None, None)[0];
+            if count > 1 {
+                assert_ne!(Some(next), current);
+            }
+        }
     }
     #[test]
     fn all_failed_or_no_eligible_candidates_stop_without_relaxing_into_repeats() {
