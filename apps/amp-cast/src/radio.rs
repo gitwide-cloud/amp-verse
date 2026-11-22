@@ -852,6 +852,8 @@ mod reliability_tests {
         let ids: Vec<_> = (0..cast.tracks.len()).collect();
         *cast.selection.lock().unwrap() =
             Some(serde_json::json!({"kind":"smart","rules":profile,"tracks":ids}));
+        let mut audio = cast.audio.subscribe();
+        let mut emitted = 0;
         let response = router(cast.clone())
             .oneshot(
                 axum::http::Request::post("/api/start")
@@ -864,6 +866,9 @@ mod reliability_tests {
         let mut heard = Vec::new();
         let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
         while heard.len() < 7 {
+            while let Ok(chunk) = audio.try_recv() {
+                emitted += chunk.len();
+            }
             {
                 let station = cast.station.lock().await;
                 assert!(station.running, "{:?}", station.error);
@@ -888,6 +893,10 @@ mod reliability_tests {
             "repeat before the playable pool completed: {heard:?}"
         );
         assert_ne!(heard[5], heard[6]);
+        assert!(
+            emitted > 1000,
+            "the cycle must emit real encoded audio, not only rotate metadata"
+        );
     }
     #[tokio::test]
     #[ignore = "requires FFmpeg; real encoded short-session test, no receiver hardware"]

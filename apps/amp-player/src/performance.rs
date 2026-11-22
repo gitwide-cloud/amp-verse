@@ -793,6 +793,12 @@ impl Player {
             return;
         }
         let deck = self.active_deck();
+        let pair = self.pair();
+        if self.audio.as_ref().is_some_and(|a| {
+            (deck == pair[0] && a.fader() >= 1. - 1e-4) || (deck == pair[1] && a.fader() <= 1e-4)
+        }) {
+            return;
+        }
         if self.run.preloaded.is_some_and(|(d, _)| d == deck) {
             return;
         }
@@ -2956,6 +2962,30 @@ mod tests {
             "prefetch is not playback"
         );
         player.run.preloaded = None;
+        // A transport running on the closed side is headphone cue, not master play.
+        player
+            .audio
+            .as_ref()
+            .unwrap()
+            .set_fader(1. - (deck % 2) as f32);
+        player.audio.as_ref().unwrap().controls.play[deck].store(true, Relaxed);
+        player.commit_smart_audible();
+        assert_eq!(
+            player
+                .run
+                .smart_cycle
+                .ranked(
+                    &root.path().to_string_lossy(),
+                    &profile,
+                    &player.library.as_ref().unwrap().tracks,
+                    None,
+                    None,
+                    None
+                )
+                .len(),
+            3,
+            "headphone cue must not consume a Smart cycle member"
+        );
         player.audio.as_mut().unwrap().stop(deck);
         let mut heard = std::collections::HashSet::new();
         let mut active = deck;
