@@ -13,6 +13,9 @@ class CastPanel extends LinearLayout {
     final Activity activity;
     private final Appearance colors;
     final Listener listener;
+    private final CastHostSession hostSession;
+    private android.net.ConnectivityManager connectivity;
+    private android.net.ConnectivityManager.NetworkCallback networkCallback;
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     final TextView status,now,queue;
     private TextView capabilityNote,diagnostics;
@@ -35,9 +38,9 @@ class CastPanel extends LinearLayout {
     private final java.util.List<TextView> feedbackViews=new java.util.ArrayList<>();
     private String stationName="AMP Cast";
     private final android.os.Handler handler=new android.os.Handler(android.os.Looper.getMainLooper());
-    private final Runnable poll=new Runnable(){public void run(){if(closed)return;if(client!=null&&!busy&&!polling)refresh(false);handler.postDelayed(this,3000);}};
+    private final Runnable poll=new Runnable(){public void run(){if(closed)return;if(!busy&&!polling){if(client!=null&&verified)refresh(false);else resumeConnection();}handler.postDelayed(this,3000);}};
     CastPanel(Activity activity,Appearance colors,Listener listener) {
-        super(activity);this.activity=activity;this.colors=colors;this.listener=listener;
+        super(activity);this.activity=activity;this.colors=colors;this.listener=listener;this.hostSession=CastHostSession.get(activity);
         setOrientation(VERTICAL);setPadding(dp(10),dp(10),dp(10),dp(10));setBackground(Chrome.panel(colors,false));
         addView(label("AMP Radio · choose a server",20));
         addView(label("Discovery and manual connection only select a host. They do not start or stop playback.",14));
@@ -54,10 +57,10 @@ class CastPanel extends LinearLayout {
         addView(connectionFields);connectionFields.setVisibility(GONE);
         address=field("http://192.168.1.50:8787",false);address.setContentDescription("AMP Cast server address");address.setText(activity.getSharedPreferences("settings",Context.MODE_PRIVATE).getString("cast-server",""));
         password=field("Optional admin password",true);password.setContentDescription("AMP Cast admin password");
-        connect=action("Connect",()->connect());connectionFields.addView(connect);diagnostics=label("",14);connectionFields.addView(diagnostics);
+        connect=action("Connect",()->connect());connectionFields.addView(connect);connectionFields.addView(action("Disconnect selected host",this::disconnectHost));diagnostics=label("",14);connectionFields.addView(diagnostics);
         status=label("Not connected. Find a nearby AMP host, or open Advanced connection settings to connect manually.",14);addView(status);
         now=label("No station selected",18);addView(now);
-        libraryView=new CastLibraryView(activity,colors,listener,()->client,this::downloadSaved);addView(libraryView);
+        libraryView=new CastLibraryView(activity,colors,listener,()->verified?client:null,this::downloadSaved);addView(libraryView);
         stationControls=new LinearLayout(activity);stationControls.setOrientation(VERTICAL);addView(stationControls);
         localNote=path("Local listening · host → this phone");
         stationControls.addView(label("These destinations receive the selected host’s program, not this phone’s music. Buffered output may be delayed.",14));
@@ -91,6 +94,11 @@ class CastPanel extends LinearLayout {
         search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int a,int c,int d){}public void onTextChanged(CharSequence t,int a,int b,int c){renderQueue();}public void afterTextChanged(android.text.Editable t){}});
         addView(action("Help",()->new android.app.AlertDialog.Builder(activity).setTitle("Radio help").setMessage("Station access selects a host without changing playback. Local listening plays its stream here. Server speakers play it on the host audio output. Remote desktop broadcast changes the host source to its desktop Player/DJ master. Google Cast asks a Google speaker to fetch the host stream. Sending this phone’s own playback is not implemented. Internet radio and offline playlists are separate listening choices.").setPositiveButton("Done",null).show()));enabled(false);
         if(listener.playlistSyncAvailable())addView(action("Enable saved-playlist sync",()->{CastClient selected=client;if(selected==null||!verified){Toast.makeText(activity,"Connect to an authorized host first",Toast.LENGTH_LONG).show();return;}listener.playlistSync(selected);}));
+        renderServers(hostSession.selection.merge(java.util.Collections.emptyList()));
+        CastHostSelection.Host saved=hostSession.selection.selected();
+        if(saved!=null){address.setText(saved.base);status.setText("Reconnecting to selected host…");now.setText("Selected host · "+saved.base);}
+        watchNetwork();
+        handler.post(this::resumeConnection);
         handler.postDelayed(poll,3000);
     }
     int dp(int n){return (int)(n*getResources().getDisplayMetrics().density);}
@@ -150,11 +158,11 @@ class CastPanel extends LinearLayout {
     private void connect(){connect(null);}
     private void connect(String expectedIdentity){
         if(busy||closed)return;
-        final String url=address.getText().toString(),secret=password.getText().toString();client=null;verified=false;running=false;preparing=false;passwordRequired=false;authRejected=false;sharingVisible=false;pollFailed=false;recoveryFeedback=null;sharedFeedback.setText("");hostError="";sharedFingerprint="";serverOutputRunning=false;stationName="AMP Cast";tracks=new JSONArray();sharedLists.removeAllViews();now.setText("No station selected");for(TextView feedback:feedbackViews)feedback.setText("");hostLaunchSupported=false;serverOutputSupported=false;playlistSupported=false;enabled(false);
-        work(()->{CastClient initial=new CastClient(url,secret);JSONObject first=initial.connect();String restored=secret;
+        final long selectionGeneration=hostSession.selection.generation();final String url=address.getText().toString(),secret=password.getText().toString();client=null;verified=false;running=false;preparing=false;passwordRequired=false;authRejected=false;sharingVisible=false;pollFailed=false;recoveryFeedback=null;sharedFeedback.setText("");hostError="";sharedFingerprint="";serverOutputRunning=false;stationName="AMP Cast";tracks=new JSONArray();sharedLists.removeAllViews();now.setText("No station selected");for(TextView feedback:feedbackViews)feedback.setText("");hostLaunchSupported=false;serverOutputSupported=false;playlistSupported=false;enabled(false);
+        work(()->{CastClient initial=new CastClient(url,secret);JSONObject first=initial.connect();verifyIdentity(first,expectedIdentity);String restored=secret;
             if(restored.isEmpty())try{restored=ModuleRpc.call(activity,"playlist_sync_access",new JSONObject().put("base",initial.base).put("server_id",first.getString("server_id")).put("library_id",first.getString("library_id"))).getString("password");}catch(Exception unavailable){}
-            final CastClient candidate=restored.equals(secret)?initial:new CastClient(url,restored);final JSONObject snapshot=candidate==initial?first:candidate.connect();String identity=snapshot.optString("server_id")+"/"+snapshot.optString("station_id");if(expectedIdentity!=null&&!expectedIdentity.equals(identity))throw new java.io.IOException("Station changed. Search again before connecting.");JSONObject list=candidate.playlist(),manifest=sharedManifest(candidate,snapshot);
-            activity.runOnUiThread(()->{if(closed)return;client=candidate;connectionFields.setVisibility(GONE);activity.getSharedPreferences("settings",Context.MODE_PRIVATE).edit().putString("cast-server",candidate.base).putString("cast-server-id",snapshot.optString("server_id")).putString("cast-station-id",snapshot.optString("station_id")).apply();render(snapshot,list);renderShared(manifest);libraryView.bind(candidate,snapshot);});return "Host connected. Public listening is independent of admin access; no playback was started.";});
+            final CastClient candidate=restored.equals(secret)?initial:new CastClient(url,restored);final JSONObject snapshot=candidate==initial?first:candidate.connect();verifyIdentity(snapshot,expectedIdentity);JSONObject list=candidate.playlist(),manifest=sharedManifest(candidate,snapshot);
+            activity.runOnUiThread(()->{if(closed||!hostSession.selection.current(selectionGeneration))return;client=candidate;connectionFields.setVisibility(GONE);hostSession.remember(candidate,snapshot.optString("server_id"),snapshot.optString("station_id"));renderServers(hostSession.selection.merge(java.util.Collections.emptyList()));render(snapshot,list);renderShared(manifest);libraryView.bind(candidate,snapshot);});return "Host connected. Public listening is independent of admin access; no playback was started.";});
     }
     private void readStatus(CastClient selected)throws Exception {
         JSONObject snapshot=selected.status(),list=selected.playlist(),manifest=sharedManifest(selected,snapshot);
@@ -171,7 +179,7 @@ class CastPanel extends LinearLayout {
             try{snapshot=selected.status();list=selected.playlist();manifest=sharedManifest(selected,snapshot);}catch(Exception e){failure=e;}
             final JSONObject state=snapshot,tracks=list,shared=manifest;final Exception error=failure;
             activity.runOnUiThread(()->{polling=false;if(closed||client!=selected||version!=operationVersion)return;
-                if(error!=null){verified=false;pollFailed=true;reportTo("Host status unavailable: "+error.getMessage(),null);}
+                if(error!=null){verified=false;pollFailed=true;hostSession.selection.failed(android.os.SystemClock.elapsedRealtime());reportTo("Host status unavailable: "+error.getMessage(),null);}
                 else {boolean recovered=!verified||pollFailed;pollFailed=false;render(state,tracks);renderShared(shared);if(recovered){reportTo("Host connection recovered. Status is current; no command was repeated."+(hostError.isEmpty()?"":"\nHost program: "+hostError),recoveryFeedback);recoveryFeedback=null;}}
                 enabled(client!=null);
             });
@@ -179,7 +187,7 @@ class CastPanel extends LinearLayout {
     }
     private void command(boolean launch){final CastClient selected=client;if(selected==null||!verified||(launch&&!playlistSupported))return;work(()->{selected.command(launch);JSONObject snapshot=selected.status(),list=selected.playlist();activity.runOnUiThread(()->{if(!closed&&client==selected)render(snapshot,list);});return launch?"Start requested; see current host state.":"Stop requested; see current host state.";});}
     private void render(JSONObject snapshot,JSONObject list){
-        verified=true;pollFailed=false;
+        verified=true;pollFailed=false;hostSession.selection.recovered();
         JSONObject capabilities=snapshot.optJSONObject("capabilities");
         hostLaunchSupported=capabilities!=null&&capabilities.optBoolean("host_master_launch",false);
         serverOutputSupported=capabilities!=null&&capabilities.optBoolean("server_output_control",false);
@@ -220,33 +228,93 @@ class CastPanel extends LinearLayout {
         if(total>200)text.append("Showing 200 of ").append(total).append(" matches. Refine your search.");
         queue.setText(text.length()==0?(client==null?"Find a server to see its music.":query.isEmpty()?"No songs in this station yet.":"No songs match your search."):text.toString());
     }
-    void findServers() {
-        work(() -> {
-            java.util.List<CastDiscovery.Server> servers = CastDiscovery.find();
-            activity.runOnUiThread(() -> {
-                if (closed) return;
-                serverList.removeAllViews();
-                java.util.Map<String, Integer> counts = new java.util.HashMap<>();
-                for (CastDiscovery.Server server : servers) {
-                    counts.merge(server.name, 1, Integer::sum);
+    private static void verifyIdentity(JSONObject snapshot,String expected)throws java.io.IOException {
+        CastHostReconnect.verify(snapshot,expected);
+    }
+    /** A screen can be replaced at any time. Reverify, never replay a command or auto-listen. */
+    void resumeConnection(){
+        if(closed||busy||polling)return;
+        final CastHostSelection.Host saved=hostSession.selection.selected();
+        if(saved==null||!hostSession.selection.retryDue(android.os.SystemClock.elapsedRealtime()))return;
+        if(client!=null&&verified){refresh(false);return;}
+        polling=true;verified=false;enabled(client!=null);
+        final long generation=hostSession.selection.generation(),version=operationVersion;
+        worker.execute(()->{
+            CastClient candidate=null;JSONObject snapshot=null,list=null,manifest=null;Exception failure=null;
+            try{
+                String base=saved.base;
+                if(hostSession.selection.discoveryDue()){
+                    java.util.List<CastDiscovery.Server> fresh=CastDiscovery.find();
+                    final java.util.List<CastDiscovery.Server> known=hostSession.selection.merge(fresh);
+                    activity.runOnUiThread(()->{if(!closed&&hostSession.selection.current(generation))renderServers(known);});
+                    for(CastDiscovery.Server server:fresh)if(saved.identity().equals(server.id)){base=server.url;break;}
                 }
-                java.util.Map<String, Integer> shown = new java.util.HashMap<>();
-                for (CastDiscovery.Server server : servers) {
-                    String name = server.name.trim().isEmpty() ? "AMP Verse Server" : server.name;
-                    if (counts.get(server.name) > 1) {
-                        name += " (" + shown.merge(server.name, 1, Integer::sum) + ")";
-                    }
-                    serverList.addView(action(name, () -> {
-                        address.setText(server.url);
-                        password.setText("");
-                        connect(server.id);
-                    }));
+                CastHostReconnect.Verified restored=CastHostReconnect.restore(base,saved.identity(),hostSession.client());
+                candidate=restored.client;snapshot=restored.status;
+                list=candidate.playlist();manifest=sharedManifest(candidate,snapshot);
+            }catch(Exception error){failure=error;}
+            final CastClient restored=candidate;final JSONObject state=snapshot,items=list,shared=manifest;final Exception error=failure;
+            activity.runOnUiThread(()->{
+                polling=false;
+                if(closed||version!=operationVersion||!hostSession.selection.current(generation))return;
+                if(error!=null){
+                    verified=false;pollFailed=true;hostSession.selection.failed(android.os.SystemClock.elapsedRealtime());
+                    status.setText("Selected host retained · reconnecting automatically. "+error.getMessage());
+                    now.setText("Selected host · "+saved.base+" · temporarily unavailable");
+                }else{
+                    client=restored;address.setText(restored.base);
+                    hostSession.remember(restored,state.optString("server_id"),state.optString("station_id"));
+                    render(state,items);renderShared(shared);libraryView.bind(restored,state);
+                    status.setText("Selected host reconnected. No playback was started or repeated.");
                 }
+                enabled(client!=null);
             });
-            return servers.isEmpty()
-                    ? "No AMP Verse servers found. Check that both devices are on the same private network and the server allows LAN connections."
-                    : "Choose a server to connect.";
         });
     }
-    void close(){if(libraryView!=null)libraryView.close();closed=true;handler.removeCallbacksAndMessages(null);worker.shutdownNow();}
+    private void disconnectHost(){
+        operationVersion++;hostSession.disconnect();client=null;verified=false;running=false;preparing=false;
+        password.setText("");address.setText("");sharedLists.removeAllViews();sharedFingerprint="";sharingVisible=false;
+        tracks=new JSONArray();renderQueue();libraryView.setVisibility(GONE);renderServers(hostSession.selection.merge(java.util.Collections.emptyList()));now.setText("No station selected");enabled(false);
+        status.setText("Host selection cleared. Existing phone playback and server playback were not changed.");
+    }
+    private void watchNetwork(){
+        try{
+            connectivity=(android.net.ConnectivityManager)activity.getSystemService(Context.CONNECTIVITY_SERVICE);
+            networkCallback=new android.net.ConnectivityManager.NetworkCallback(){
+                private void changed(){handler.post(()->{
+                    if(closed)return;
+                    android.net.Network active=connectivity.getActiveNetwork();
+                    String signature=active==null?"offline":active.toString();
+                    if(hostSession.selection.networkChanged(signature)){verified=false;resumeConnection();}
+                });}
+                @Override public void onAvailable(android.net.Network network){changed();}
+                @Override public void onLost(android.net.Network network){changed();}
+                @Override public void onCapabilitiesChanged(android.net.Network network,android.net.NetworkCapabilities capabilities){changed();}
+            };
+            connectivity.registerDefaultNetworkCallback(networkCallback);
+        }catch(RuntimeException unavailable){networkCallback=null;}
+    }
+    private void renderServers(java.util.List<CastDiscovery.Server> servers){
+        serverList.removeAllViews();
+        CastHostSelection.Host saved=hostSession.selection.selected();
+        if(saved!=null)serverList.addView(label("Selected host · "+saved.base+" · retained across navigation",14));
+        java.util.Map<String,Integer> counts=new java.util.HashMap<>(),shown=new java.util.HashMap<>();
+        for(CastDiscovery.Server server:servers)counts.merge(server.name,1,Integer::sum);
+        for(CastDiscovery.Server server:servers){
+            String name=server.name.trim().isEmpty()?"AMP Verse Server":server.name;
+            if(counts.get(server.name)>1)name+=" ("+shown.merge(server.name,1,Integer::sum)+")";
+            serverList.addView(action(name,()->{address.setText(server.url);password.setText("");connect(server.id);}));
+        }
+    }
+    void findServers() {
+        work(()->{
+            java.util.List<CastDiscovery.Server> fresh=CastDiscovery.find();
+            final java.util.List<CastDiscovery.Server> known=hostSession.selection.merge(fresh);
+            activity.runOnUiThread(()->{if(!closed)renderServers(known);});
+            return fresh.isEmpty()
+                ?"No servers replied this time. Last known hosts and your selected host are retained; check the network or retry."
+                :"Choose a server to connect. Previously selected host is unchanged.";
+        });
+    }
+    void close(){if(connectivity!=null&&networkCallback!=null)try{connectivity.unregisterNetworkCallback(networkCallback);}catch(RuntimeException ignored){}if(libraryView!=null)libraryView.close();closed=true;handler.removeCallbacksAndMessages(null);worker.shutdownNow();}
 }
