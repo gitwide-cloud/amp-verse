@@ -155,10 +155,15 @@ fn canonical_within(root: &Path, target: &Path) -> bool {
         target.next().is_some_and(|actual| {
             #[cfg(windows)]
             {
-                expected
-                    .as_os_str()
-                    .as_encoded_bytes()
-                    .eq_ignore_ascii_case(actual.as_os_str().as_encoded_bytes())
+                match (expected, actual) {
+                    (std::path::Component::Prefix(a), std::path::Component::Prefix(b)) => a
+                        .as_os_str()
+                        .as_encoded_bytes()
+                        .eq_ignore_ascii_case(b.as_os_str().as_encoded_bytes()),
+                    // Canonical normal components use their actual stored spelling.
+                    // Keep case-sensitive Windows directories distinct.
+                    _ => expected == actual,
+                }
             }
             #[cfg(not(windows))]
             {
@@ -921,12 +926,16 @@ mod tests {
         let unc = Path::new(r"\\?\UNC\LAGnas\Public\plex\music");
         assert!(canonical_within(
             unc,
-            Path::new(r"\\?\UNC\lagnas\public\plex\MUSIC\ampdj")
+            Path::new(r"\\?\UNC\lagnas\public\plex\music\ampdj")
         ));
         assert!(!canonical_within(
             unc,
             Path::new(r"\\?\UNC\lagnas\public\plex\music-other\ampdj")
         ));
+        assert!(
+            !canonical_within(unc, Path::new(r"\\?\UNC\lagnas\public\plex\MUSIC\ampdj")),
+            "Canonical case-sensitive sibling names must stay distinct"
+        );
         assert!(!canonical_within(
             unc,
             Path::new(r"\\?\UNC\lagnas\private\plex\music\ampdj")
