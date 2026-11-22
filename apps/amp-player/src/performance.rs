@@ -625,6 +625,7 @@ impl Player {
             return Err("Auto Fade requires the opposite deck".into());
         }
         let mut track = self.fresh_track(index)?;
+        let mut automatic_section = false;
         if let Some(cue) = cue {
             track.preparation.cue_in = self.cue_seconds(index, cue)?;
         } else if paired
@@ -656,6 +657,7 @@ impl Player {
             )
         {
             track.preparation.cue_in = seconds;
+            automatic_section = true;
         }
         track.preparation.validate()?;
         self.ensure_audio()?;
