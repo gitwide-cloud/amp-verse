@@ -31,7 +31,15 @@ fn worker_process(command: std::process::Command) -> process_wrap::std::CommandW
     wrapped.wrap(process_wrap::std::ProcessGroup::leader());
     wrapped
 }
+// The legacy full-library WAV/archive implementation is withdrawn after a storage
+// incident. Do not re-enable it through an environment override or an installed
+// add-on. A bounded on-demand engine needs independent acceptance first.
+const STORAGE_DISABLED: &str = "Stem preparation is temporarily disabled: the legacy engine retained duplicate uncompressed audio. Original music and normal analysis are unaffected.";
+fn preparation_permitted() -> Result<(), String> {
+    Err(STORAGE_DISABLED.into())
+}
 pub(crate) fn runtime() -> Option<PathBuf> {
+    preparation_permitted().ok()?;
     if let Some(path) = std::env::var_os("AMP_STEM_PYTHON")
         .map(PathBuf::from)
         .filter(|p| p.is_file())
@@ -115,6 +123,9 @@ pub fn ready(source: &Path) -> Option<[PathBuf; 3]> {
     ready_in(&cache_root()?, source)
 }
 pub(crate) fn relocate_cached(source: &Path, destination: &Path) -> Result<(), String> {
+    if preparation_permitted().is_err() {
+        return Ok(());
+    }
     let Some(cache) = cache_root() else {
         return Ok(());
     };
@@ -137,6 +148,7 @@ pub(crate) fn relocate_cached(source: &Path, destination: &Path) -> Result<(), S
     Ok(())
 }
 fn restore_cached(cache: &Path, source: &Path) -> Result<bool, String> {
+    preparation_permitted()?;
     let archive = cache.join("stems.ampdb");
     if !archive.is_file() {
         return Ok(false);
@@ -210,6 +222,10 @@ fn prepare(
     cancel: &AtomicBool,
     process: &Process,
 ) -> Result<(), String> {
+    if cancel.load(Relaxed) {
+        return Err("Stem preparation canceled".into());
+    }
+    preparation_permitted()?;
     fs::create_dir_all(cache).map_err(|e| e.to_string())?;
     if !crate::preparation_speed::wait(Some(cancel)) {
         return Err("Stem preparation canceled".into());
@@ -497,12 +513,13 @@ impl Panel {
             ui.label("Prepared stems available");
         }
         if runtime().is_none() && !prepared {
-            ui.weak("Install the stem separator add-on to prepare this song.");
+            ui.weak(STORAGE_DISABLED);
         }
         ui.label(&self.status[0]);
         prepared
     }
     pub fn library(&mut self, ui: &mut egui::Ui, root: &Path) {
+        ui.label(STORAGE_DISABLED);
         if let Some(rx) = &self.batch_rx {
             while let Ok((done, total, title)) = rx.try_recv() {
                 self.batch_progress = (done, total);
@@ -577,7 +594,7 @@ impl Panel {
         } else if ui
             .add_enabled(
                 !root.as_os_str().is_empty() && self.job.is_none() && runtime().is_some(),
-                egui::Button::new("Prepare library stems"),
+                egui::Button::new("Library-wide stem preparation withdrawn"),
             )
             .clicked()
             && let (Some(cache), Some(python)) = (cache_root(), runtime())
@@ -652,7 +669,7 @@ impl Panel {
         }
         if runtime().is_none() {
             ui.hyperlink_to(
-                "Install the stem separator add-on",
+                "Stem processing withdrawn — storage incident",
                 "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md",
             );
         }
@@ -716,7 +733,7 @@ impl Panel {
             );
         });
         if !active && !vertical {
-            ui.small("Prepare stems in Library");
+            ui.small("Stem processing disabled pending storage-safe replacement");
         }
         (previous != self.level[deck]).then_some(self.level[deck])
     }
@@ -804,7 +821,7 @@ impl Panel {
             }
             if runtime().is_none() {
                 ui.hyperlink_to(
-                    "Install the stem separator add-on",
+                    "Stem processing withdrawn — storage incident",
                     "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md",
                 );
             }
@@ -855,6 +872,29 @@ pub fn remix_gains(knobs: [f32; 3]) -> [f32; 3] {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn withdrawn_preparation_cannot_create_cache_or_launch_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("must-not-exist");
+        let cancel = AtomicBool::new(false);
+        let process = Arc::new(Mutex::new(None));
+        let error = prepare(
+            &cache,
+            Path::new("missing.wav"),
+            Path::new("missing-python"),
+            &cancel,
+            &process,
+        )
+        .unwrap_err();
+        assert_eq!(error, STORAGE_DISABLED);
+        assert!(!cache.exists());
+        assert!(process.lock().unwrap().is_none());
+        assert!(runtime().is_none());
+        assert_eq!(
+            restore_cached(&cache, Path::new("missing.wav")).unwrap_err(),
+            STORAGE_DISABLED
+        );
+    }
     #[cfg(windows)]
     #[test]
     #[ignore = "requires the installed Windows stem Python runtime"]
@@ -983,12 +1023,8 @@ mod tests {
         assert!(result.unwrap_err().contains("canceled"));
         assert!(ready_in(&cache, &source).is_none());
         assert_eq!(digest(&source).unwrap(), before);
-        assert!(!fs::read_dir(&cache).unwrap().any(|p| {
-            p.unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".pending-")
-        }));
+        // Cancellation now returns before creating even an empty cache directory.
+        assert!(!cache.exists());
     }
     #[test]
     fn cache_invalidation_and_incomplete_outputs_fail_closed() {
