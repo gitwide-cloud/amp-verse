@@ -1,5 +1,8 @@
 package cloud.gitwide.ampverse;
 import android.content.Context;
+import android.content.BroadcastReceiver;
+import android.content.Intent;
+import android.content.IntentFilter;
 import android.media.*;
 import android.os.*;
 import androidx.media3.common.*;
@@ -28,14 +31,26 @@ final class VinylScratch {
     private final Context context;private final ExoPlayer[] decks;private final Consumer<String> message;private final Barrier owner;
     private final Handler main=new Handler(Looper.getMainLooper());private final Slot[] slots={new Slot(),new Slot(),new Slot(),new Slot()};
     private final ExecutorService preparation=Executors.newSingleThreadExecutor(r->{Thread t=new Thread(r,"amp-vinyl-prepare");t.setDaemon(true);return t;});
-    private final Object gate=new Object();private boolean pump,closed;private long nextToken;private VinylDecoder decoder;
+    private final BroadcastReceiver routeReceiver=new BroadcastReceiver(){
+        @Override public void onReceive(Context ignored,Intent intent){
+            if(!closed&&AudioManager.ACTION_AUDIO_BECOMING_NOISY.equals(intent.getAction()))pauseAll();
+        }
+    };
+    private final Object gate=new Object();private boolean pump,closed,routeRegistered;private long nextToken;private VinylDecoder decoder;
     VinylScratch(Context context,ExoPlayer[] decks,Consumer<String> message){this(context,decks,message,Runnable::run);}
-    VinylScratch(Context context,ExoPlayer[] decks,Consumer<String> message,Barrier owner){this.context=context.getApplicationContext();this.decks=decks;this.message=message;this.owner=owner;}
+    VinylScratch(Context context,ExoPlayer[] decks,Consumer<String> message,Barrier owner){this.context=context.getApplicationContext();this.decks=decks;this.message=message;this.owner=owner;
+        try{
+            IntentFilter route=new IntentFilter(AudioManager.ACTION_AUDIO_BECOMING_NOISY);
+            if(Build.VERSION.SDK_INT>=33)this.context.registerReceiver(routeReceiver,route,Context.RECEIVER_NOT_EXPORTED);
+            else this.context.registerReceiver(routeReceiver,route);
+            routeRegistered=true;
+        }catch(RuntimeException unavailable){routeRegistered=false;}
+    }
     private String key(int deck){MediaItem item=decks[deck].getCurrentMediaItem();return item==null||item.localConfiguration==null?"":item.mediaId+"\n"+item.localConfiguration.uri;}
     boolean busy(int deck){return slots[deck].session!=null;}
     boolean any(){for(int i=0;i<4;i++)if(busy(i))return true;return false;}
     void gain(int deck,float value){Session s=slots[deck].session;if(s!=null)s.gain=Math.max(0,Math.min(1,value));}
-    boolean ready(int deck){Slot slot=slots[deck];return !closed&&slot.window!=null&&slot.key.equals(key(deck))&&slot.window.covers(decks[deck].getCurrentPosition(),0);}
+    boolean ready(int deck){Slot slot=slots[deck];return !closed&&routeRegistered&&slot.window!=null&&slot.key.equals(key(deck))&&slot.window.covers(decks[deck].getCurrentPosition(),0);}
     void prepare(int deck){
         if(closed||busy(deck)||!VinylDecoder.available())return;ExoPlayer player=decks[deck];MediaItem item=player.getCurrentMediaItem();
         if(item==null||item.localConfiguration==null)return;String key=key(deck),scheme=item.localConfiguration.uri.getScheme();
@@ -61,6 +76,7 @@ final class VinylScratch {
     }
     boolean begin(int deck){
         if(closed||busy(deck))return false;
+        if(!routeRegistered){message.accept("Scratch route protection is unavailable. Current playback was not changed; reopen DJ and retry.");return false;}
         if(!VinylDecoder.available()){message.accept("Real vinyl scratch requires AMP Verse Full with the local-audio decoder. Open or update Full DJ; no seek imitation was used.");return false;}
         MediaItem source=decks[deck].getCurrentMediaItem();
         if(source==null||source.localConfiguration==null||!("file".equals(source.localConfiguration.uri.getScheme())||"content".equals(source.localConfiguration.uri.getScheme()))){message.accept("Scratch needs a local or downloaded song. Current playback was not changed.");return false;}
@@ -91,7 +107,10 @@ final class VinylScratch {
     void releaseAll(){for(int i=0;i<4;i++)end(i,true);}
     void pauseAll(){for(int i=0;i<4;i++)end(i,false);}
     void cancelAll(){for(int i=0;i<4;i++)invalidate(i);}
-    void close(){closed=true;cancelAll();preparation.shutdownNow();}
+    void close(){
+        if(closed)return;closed=true;cancelAll();preparation.shutdownNow();
+        if(routeRegistered){routeRegistered=false;try{context.unregisterReceiver(routeReceiver);}catch(IllegalArgumentException alreadyRemoved){}}
+    }
     private void voice(Session session){
         String error=null;AudioTrack track=null;
         try{
