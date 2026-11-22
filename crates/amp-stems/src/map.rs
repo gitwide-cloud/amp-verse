@@ -2,9 +2,9 @@
 //! It can schedule vocal-aware mixing or request live inference, never mute a voice by itself.
 const MAGIC: &[u8; 8] = b"AMPACT01";
 const HEADER: usize = 80;
-pub const MAX_RECORD_BYTES: usize = 4096;
+pub const MAX_RECORD_BYTES: usize = 448;
 pub const MAX_SEGMENTS: usize = (MAX_RECORD_BYTES - HEADER) / 12;
-pub const DEFAULT_CATALOG_BYTES: u64 = 100_000_000;
+pub const DEFAULT_CATALOG_BYTES: u64 = 10_000_000;
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
     InvalidIdentity,
@@ -134,9 +134,9 @@ mod tests {
     }
     #[test]
     fn exact_roundtrip_and_corruption_rejected() {
-        let m = map(100);
+        let m = map(20);
         let b = m.encode().unwrap();
-        assert_eq!(b.len(), 1280);
+        assert_eq!(b.len(), 320);
         assert_eq!(ActivityMap::decode(&b).unwrap(), m);
         assert!(ActivityMap::decode(&b[..b.len() - 1]).is_err());
         let mut bad = b.clone();
@@ -144,13 +144,13 @@ mod tests {
         assert!(ActivityMap::decode(&bad).is_err());
     }
     #[test]
-    fn twenty_thousand_largest_maps_stay_under100mb() {
+    fn twenty_thousand_largest_maps_stay_under10mb() {
         let b = map(MAX_SEGMENTS).encode().unwrap();
         let mut budget = CatalogBudget::default();
         for _ in 0..20000 {
             budget.reserve_record(b.len()).unwrap();
         }
-        assert_eq!(budget.accounted_bytes(), 82_720_020);
+        assert_eq!(budget.accounted_bytes(), 9_760_020);
         assert!(budget.accounted_bytes() < DEFAULT_CATALOG_BYTES);
     }
     #[test]

@@ -5,7 +5,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const DECKS: usize = 6;
 pub const DEFAULT_PCM_BUDGET: usize = 64 * 1024 * 1024;
-pub const MAX_SECONDS: u64 = 6;
+pub const MAX_SECONDS: u64 = 11;
 
 #[derive(Debug, PartialEq, Eq)]
 pub enum Error {
