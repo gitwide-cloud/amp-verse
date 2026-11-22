@@ -90,7 +90,7 @@ public final class ModuleProvider extends ContentProvider {
             case "state":break;
             case "load":{MediaItem selected=selection.items().get(0);dj.load(deck,selected,DjLogic.cueIn(selected));break;}
             case "play":dj.play(deck);break;
-            case "pause":dj.decks[deck].pause();break;
+            case "pause":dj.pause(deck);break;
             case "cue":dj.stop(deck);break;
             case "seek":dj.seek(deck,args.getLong("position"));break;
             case "fader":{double value=args.getDouble("value");if(!Double.isFinite(value)||value<0||value>1)throw new IllegalArgumentException("Crossfader must be between A and B");dj.setFader((float)value);break;}

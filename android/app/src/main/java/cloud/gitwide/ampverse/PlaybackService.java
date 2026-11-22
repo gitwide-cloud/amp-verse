@@ -26,6 +26,13 @@ public final class PlaybackService extends MediaSessionService {
     private boolean hlsReady;
     private final android.os.Handler handler=new android.os.Handler(android.os.Looper.getMainLooper());
     static void claimDj(){if(instance!=null){instance.djOwner=true;if(instance.session!=null)instance.session.getPlayer().pause();}}
+    static void claimDjForScratch(Runnable afterPause){
+        PlaybackService service=instance;
+        if(service==null||service.session==null){afterPause.run();return;}
+        service.djOwner=true;Player player=service.session.getPlayer();player.pause();
+        if(player instanceof ExoPlayer) ((ExoPlayer)player).createMessage((type,payload)->service.handler.post(afterPause)).send();
+        else service.handler.post(afterPause);
+    }
     private void claimPlayer(){if(djOwner){djOwner=false;if(dj!=null)dj.pauseForPlayer();}}
     static void switchToPlayer(){if(instance!=null)instance.adoptDjPlaylist();}
     static String owner(){return instance!=null&&instance.djOwner?"dj":"player";}

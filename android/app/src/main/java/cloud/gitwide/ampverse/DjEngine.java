@@ -36,6 +36,7 @@ final class DjEngine {
     int fadeSeconds=3;
     private int mixOutgoing;
     private boolean mixing,closed;
+    private VinylScratch scratch;
     final List<MediaItem> autoQueue=new ArrayList<>();
     boolean auto;
     private final Set<String> requests=new LinkedHashSet<>();
@@ -59,9 +60,20 @@ final class DjEngine {
             decks[i].setAudioAttributes(new androidx.media3.common.AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(),false);
             decks[i].setHandleAudioBecomingNoisy(true);decks[i].setWakeMode(C.WAKE_MODE_LOCAL);
             final int deck=i;
-            decks[i].addListener(new Player.Listener(){@Override public void onPlayWhenReadyChanged(boolean ready,int reason){if(ready)PlaybackService.claimDj();}@Override public void onPlayerError(PlaybackException error){message=title(deck)+": "+error.getErrorCodeName();}});
-            MediaSession session=new MediaSession.Builder(service,decks[i]).setId("dj-"+i).build();sessions.add(session);service.addSession(session);
+            decks[i].addListener(new Player.Listener(){@Override public void onPlayWhenReadyChanged(boolean ready,int reason){if(ready){if(scratch!=null&&scratch.busy(deck))scratch.invalidate(deck);PlaybackService.claimDj();}}@Override public void onPlayerError(PlaybackException error){if(scratch!=null)scratch.invalidate(deck);message=title(deck)+": "+error.getErrorCodeName();}@Override public void onMediaItemTransition(MediaItem item,int reason){if(scratch!=null)scratch.invalidate(deck);}@Override public void onPositionDiscontinuity(Player.PositionInfo oldPosition,Player.PositionInfo newPosition,int reason){if(scratch!=null&&scratch.busy(deck))scratch.invalidate(deck);}});
+            // Remote/notification commands silence scratch before the normal player can run.
+            Player guarded=new ForwardingPlayer(decks[i]){
+                private void stopScratch(){if(scratch!=null)scratch.invalidate(deck);}
+                @Override public void play(){stopScratch();super.play();}
+                @Override public void pause(){stopScratch();super.pause();}
+                @Override public void setPlayWhenReady(boolean ready){stopScratch();super.setPlayWhenReady(ready);}
+                @Override public void seekTo(long position){stopScratch();super.seekTo(position);}
+                @Override public void seekTo(int index,long position){stopScratch();super.seekTo(index,position);}
+                @Override public void stop(){stopScratch();super.stop();}
+            };
+            MediaSession session=new MediaSession.Builder(service,guarded).setId("dj-"+i).build();sessions.add(session);service.addSession(session);
         }
+        scratch=new VinylScratch(service,decks,text->message=text,PlaybackService::claimDjForScratch);
         pool=new SoundPool.Builder().setMaxStreams(18).setAudioAttributes(new android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA).setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC).build()).build();
         pool.setOnLoadCompleteListener((sound,id,status)->{if(status==0)ready.add(id);else message="Effect could not be decoded. Try a short WAV or MP3.";});
         for(int side=0;side<2;side++) {
@@ -94,20 +106,23 @@ final class DjEngine {
     }
 
     String title(int deck){MediaItem item=decks[deck].getCurrentMediaItem();return item==null?"No track loaded":String.valueOf(item.mediaMetadata.title);}
-    boolean active(int deck){return decks[deck].getPlayWhenReady()&&decks[deck].getPlaybackState()!=Player.STATE_ENDED;}
+    boolean active(int deck){return scratch!=null&&scratch.busy(deck)||decks[deck].getPlayWhenReady()&&decks[deck].getPlaybackState()!=Player.STATE_ENDED;}
     void load(int deck,MediaItem item,long position) {
         if(active(deck)||(deck<2&&mixing)) {staged[deck]=item;stagedPosition[deck]=position;message="Replacement staged. Stop this deck, then Apply staged track.";return;}
+        if(scratch!=null)scratch.invalidate(deck);
         decks[deck].setPlaybackParameters(PlaybackParameters.DEFAULT);
         decks[deck].setMediaItem(item,Math.max(cueIn(item),position));decks[deck].prepare();decks[deck].pause();staged[deck]=null;checkpoint();message="Track prepared; press Play when ready.";
     }
     void apply(int deck){if(staged[deck]!=null&&!active(deck)){MediaItem item=staged[deck];long position=stagedPosition[deck];load(deck,item,position);}}
-    void play(int deck){if(decks[deck].getCurrentMediaItem()==null){message="Load a song first.";return;}if(deck<2&&manager.requestAudioFocus(focus)!=AudioManager.AUDIOFOCUS_REQUEST_GRANTED){message="Audio focus unavailable.";return;}if(decks[deck].getPlaybackState()==Player.STATE_IDLE)decks[deck].prepare();if(decks[deck].getPlaybackState()==Player.STATE_ENDED)decks[deck].seekTo(cueIn(decks[deck].getCurrentMediaItem()));decks[deck].play();}
-    void stop(int deck){if(deck<2)cancelMix();decks[deck].pause();decks[deck].seekTo(cueIn(decks[deck].getCurrentMediaItem()));}
-    void seek(int deck,long value){decks[deck].seekTo(Math.max(0,value));checkpoint();}
-    void setFader(float value){fader=Math.max(0,Math.min(1,value));decks[0].setVolume((float)Math.cos(fader*Math.PI/2)*master);decks[1].setVolume((float)Math.sin(fader*Math.PI/2)*master);}
+    void play(int deck){if(scratch!=null&&scratch.busy(deck)){message="Release the vinyl before changing transport.";return;}if(decks[deck].getCurrentMediaItem()==null){message="Load a song first.";return;}if(deck<2&&manager.requestAudioFocus(focus)!=AudioManager.AUDIOFOCUS_REQUEST_GRANTED){message="Audio focus unavailable.";return;}if(decks[deck].getPlaybackState()==Player.STATE_IDLE)decks[deck].prepare();if(decks[deck].getPlaybackState()==Player.STATE_ENDED)decks[deck].seekTo(cueIn(decks[deck].getCurrentMediaItem()));decks[deck].play();}
+    void pause(int deck){if(scratch!=null)scratch.end(deck,false);decks[deck].pause();}
+    void stop(int deck){if(scratch!=null)scratch.invalidate(deck);if(deck<2)cancelMix();decks[deck].pause();decks[deck].seekTo(cueIn(decks[deck].getCurrentMediaItem()));}
+    void seek(int deck,long value){if(scratch!=null)scratch.invalidate(deck);decks[deck].seekTo(Math.max(0,value));checkpoint();}
+    void setFader(float value){fader=Math.max(0,Math.min(1,value));decks[0].setVolume((float)Math.cos(fader*Math.PI/2)*master);decks[1].setVolume((float)Math.sin(fader*Math.PI/2)*master);if(scratch!=null){scratch.gain(0,decks[0].getVolume());scratch.gain(1,decks[1].getVolume());}}
     void cancelMix(){mixing=false;handler.removeCallbacks(mixTick);}
     boolean mixing(){return mixing;}
     void mixNext(){
+        if(scratch!=null&&scratch.any()){message="Release the vinyl before starting a mix.";return;}
         if(mixing){cancelMix();message="Automatic crossfade cancelled.";return;}
         mixOutgoing=fader<.5?0:1;int next=1-mixOutgoing;
         if(auto){
@@ -132,6 +147,7 @@ final class DjEngine {
     void queue(List<MediaItem> items,JSONObject rules){queue(items);try{autoRules=rules==null?new JSONObject():new JSONObject(rules.toString());}catch(JSONException e){autoRules=new JSONObject();}}
     void queue(List<MediaItem> items){autoRules=new JSONObject();autoSource.clear();autoSource.addAll(items);recentAuto.clear();auto=false;cancelMix();handler.removeCallbacks(autoTick);autoQueue.clear();requests.clear();autoQueue.addAll(items);nextAuto=0;message="Loaded "+items.size()+" songs for Auto DJ. Press Start Auto DJ.";}
     void auto(boolean enabled){
+        if(enabled&&scratch!=null&&scratch.any()){message="Release the vinyl before enabling Auto Mix.";return;}
         if(!enabled){auto=false;cancelMix();handler.removeCallbacks(autoTick);message="Auto DJ off; current playback retained.";return;}
         if(autoQueue.isEmpty()){message="Choose a playlist for Auto DJ first.";return;}
         if(active(0)&&active(1)){message="Stop one main deck before starting Auto DJ.";return;}
@@ -143,6 +159,7 @@ final class DjEngine {
     }
     private void advanceAuto(){
         if(!auto||closed)return;
+        if(scratch!=null&&scratch.any()){handler.postDelayed(autoTick,200);return;}
         if(!mixing){int current=fader<.5?0:1,other=1-current;
             if(nextAuto>=autoQueue.size()&&!refillAuto()){if(!active(current)){auto=false;message="Playlist finished.";}else handler.postDelayed(autoTick,200);return;}
             if(!active(other)){MediaItem next=autoQueue.get(nextAuto);MediaItem loaded=decks[other].getCurrentMediaItem();if(loaded==null||!next.mediaId.equals(loaded.mediaId)){load(other,next,DjLogic.entry(next,autoRules));}}
@@ -154,7 +171,7 @@ final class DjEngine {
     void mode(int side,boolean cue){cueMode[side]=cue;prefs.edit().putBoolean("cue-"+side,cue).apply();}
     void collapse(int side){collapsed[side]=!collapsed[side];prefs.edit().putBoolean("collapsed-"+side,collapsed[side]).apply();}
     void destination(int deck){destination=deck;prefs.edit().putInt("destination",deck).apply();}
-    void cueVolume(int side,float volume){decks[side+2].setVolume(volume);prefs.edit().putFloat("cue-volume-"+side,volume).apply();}
+    void cueVolume(int side,float volume){decks[side+2].setVolume(volume);if(scratch!=null)scratch.gain(side+2,volume);prefs.edit().putFloat("cue-volume-"+side,volume).apply();}
     void sampleVolume(int side,float volume){samplerVolume[side]=volume;prefs.edit().putFloat("sample-volume-"+side,volume).apply();for(int stream:streams[side])if(stream!=0)pool.setVolume(stream,volume,volume);}
     void assign(int side,int pad,String path,String name){
         assign(side,pad,path,name,loops[side][pad]);
@@ -175,11 +192,19 @@ final class DjEngine {
         if(playerRepeats())for(MediaItem item:autoSource){boolean included=false;for(MediaItem existing:result)if(existing.mediaId.equals(item.mediaId)){included=true;break;}if(!included)result.add(item);}
         return result;
     }
-    void pauseForPlayer(){auto(false);for(ExoPlayer deck:decks)deck.pause();for(int side=0;side<2;side++)for(int pad=0;pad<9;pad++)stopPad(side,pad);}
+    void pauseForPlayer(){if(scratch!=null)scratch.pauseAll();auto(false);for(ExoPlayer deck:decks)deck.pause();for(int side=0;side<2;side++)for(int pad=0;pad<9;pad++)stopPad(side,pad);}
     void stopPad(int side,int pad){if(streams[side][pad]!=0)pool.stop(streams[side][pad]);streams[side][pad]=0;}
     void clearPad(int side,int pad){SamplerStore.clear(prefs,side,pad);stopPad(side,pad);pool.unload(sampleIds[side][pad]);ready.remove(sampleIds[side][pad]);sampleIds[side][pad]=0;samples[side][pad]="";names[side][pad]="PAD "+(pad+1);}
     void loop(int side,int pad,boolean value){SamplerStore.save(prefs,side,pad,samples[side][pad],names[side][pad],value);loops[side][pad]=value;if(streams[side][pad]!=0)pool.setLoop(streams[side][pad],value?-1:0);}
-    void pauseAll(){auto=false;handler.removeCallbacks(autoTick);cancelMix();for(ExoPlayer deck:decks)deck.pause();for(int s=0;s<2;s++)for(int p=0;p<9;p++)stopPad(s,p);}
+    void pauseAll(){if(scratch!=null)scratch.pauseAll();auto=false;handler.removeCallbacks(autoTick);cancelMix();for(ExoPlayer deck:decks)deck.pause();for(int s=0;s<2;s++)for(int p=0;p<9;p++)stopPad(s,p);}
+    void prepareScratch(){if(scratch!=null)for(int deck=0;deck<4;deck++)scratch.prepare(deck);}
+    boolean beginScratch(int deck){if(scratch==null)return false;if(!scratch.ready(deck))return scratch.begin(deck);if(manager.requestAudioFocus(focus)!=AudioManager.AUDIOFOCUS_REQUEST_GRANTED){message="Audio focus unavailable. Current playback was not changed.";return false;}if(!scratch.begin(deck))return false;cancelMix();return true;}
+    long scratchToken(int deck){return scratch==null?0:scratch.token(deck);}
+    void dragScratch(int deck,long token,double seconds){if(scratch!=null)scratch.drag(deck,token,seconds,System.nanoTime());}
+    void endScratch(int deck,long token,boolean resume){if(scratch!=null)scratch.end(deck,token,resume);}
+    void cancelScratches(){if(scratch!=null)scratch.pauseAll();}
+    void releaseScratches(){if(scratch!=null)scratch.releaseAll();}
+    long scratchPosition(int deck){return scratch==null?decks[deck].getCurrentPosition():scratch.position(deck);}
     void checkpoint(){SharedPreferences.Editor edit=prefs.edit();for(int i=0;i<4;i++){MediaItem item=decks[i].getCurrentMediaItem();if(item!=null&&item.localConfiguration!=null)edit.putString("prepared-uri-"+i,item.localConfiguration.uri.toString()).putString("prepared-title-"+i,String.valueOf(item.mediaMetadata.title)).putString("prepared-id-"+i,item.mediaId).putLong("prepared-position-"+i,decks[i].getCurrentPosition()).putString("prepared-metadata-"+i,preparation(item).toString());else edit.remove("prepared-uri-"+i).remove("prepared-title-"+i).remove("prepared-id-"+i).remove("prepared-position-"+i);}edit.apply();}
-    void close(PlaybackService service){closed=true;pauseAll();checkpoint();manager.abandonAudioFocusRequest(focus);for(MediaSession session:sessions){service.removeSession(session);session.release();}for(ExoPlayer deck:decks)deck.release();pool.release();}
+    void close(PlaybackService service){closed=true;if(scratch!=null)scratch.close();pauseAll();checkpoint();manager.abandonAudioFocusRequest(focus);for(MediaSession session:sessions){service.removeSession(session);session.release();}for(ExoPlayer deck:decks)deck.release();pool.release();}
 }
