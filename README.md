@@ -19,6 +19,7 @@ Android Full, Lite and the five companion modules use **0.3.2-beta.2 (code 38)**
 - Smart DJ works through the playable song pool before repeating; canceled preloads must leave a song eligible for its later audible turn.
 - When server sync is enabled, normal phone playlist creation uses that server; explicit phone-only drafts remain available. Existing local playlists can be published as reviewed copies with exact track mapping.
 - Playlist status distinguishes queued edits from server acknowledgment, and desktop sync canonicalizes NAS paths without weakening library-boundary checks.
+- Shared-playlist Add and phone-only playlist publication search the complete selected server catalog, including tracks beyond the phone's 2,000-entry cache. Search is read-only, identity-checked and cancellable; only an explicit song selection is cached.
 - The integrated regression covers phone-format normal/Smart Playlist edits reaching a real server API and an independent desktop sync client. Actual-device validation of this new Beta remains pending the GitHub update.
 
 This candidate still needs one successful full CI run on the final combined
