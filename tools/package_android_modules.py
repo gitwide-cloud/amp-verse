@@ -44,7 +44,7 @@ def package(root, destination, variant, tag, sdk, java):
     if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,100}", tag) or ".." in tag:
         raise ValueError("Invalid release tag")
     destination.mkdir(parents=True, exist_ok=True)
-    manifest = {"schema": 1, "api": 1, "release_channel": "beta", "beta": 1, "android": {}, "editions": {}}
+    manifest = {"schema": 1, "api": 1, "release_channel": "beta", "beta": 2, "android": {}, "editions": {}}
     common_signer = None
     common_version = None
     for module in ("lite", "full", *IDS):

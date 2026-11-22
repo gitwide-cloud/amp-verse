@@ -10,6 +10,25 @@ It takes inspiration from the music players many of us grew up with: **a classic
 
 > **Play your music. Mix your music. Take it with you.**
 
+## Beta 2 release candidate
+
+Desktop and server keep numeric base version **1.0.22** and report **Beta 2**.
+Android Full, Lite and the five companion modules use **0.3.2-beta.2 (code 38)**.
+
+- Android preserves the selected radio host across recreation and reconnects to that host with bounded retries.
+- Smart DJ works through the playable song pool before repeating; canceled preloads must leave a song eligible for its later audible turn.
+- Web/server playlist synchronization corrections are pending final integration and verification in this candidate.
+
+This candidate still needs one successful full CI run on the final combined
+source, including the generated Smart DJ cycle fixtures and Android reconnect
+unit tests, before release. Updates are intended for GitHub release assets and
+the existing updater; USB installation is not the release workflow.
+
+**Phone-to-server live audio broadcasting is still not implemented.** Android
+station listening and reconnect improvements do not add that feature. Existing
+profiles, app IDs, signing identities and internal `V1Preview` paths stay
+compatible; release branding does not migrate user data.
+
 ## What can you do with it?
 
 | | |

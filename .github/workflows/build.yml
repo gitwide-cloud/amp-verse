@@ -117,6 +117,7 @@ jobs:
           done
           pactl info
           cargo test -p amp-player --bin amp-player dj_logic::tests::regular_playlist_automatic_preload_shuffle_cancel_and_handoff --locked -- --ignored --exact --test-threads=1 --nocapture
+          cargo test -p amp-player --bin amp-player dj_logic::tests::smart_cycle_only_consumes_audible_loads_not_cancelled_preloads --locked -- --ignored --exact --test-threads=1
       - name: Verify supervised live sender recovers after a five-second outage
         run: cargo test -p amp-player --bin amp-player live_mix::tests::supervised_sender_recovers_current_pcm_after_five_second_transport_outage --locked -- --ignored --test-threads=1
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -125,6 +126,8 @@ jobs:
           python tests/sag65/generate_sag65_fixtures.py --out-dir target/sag65-fixtures
           cargo test -p amp-core -p amp-player -p amp-cast f10 --locked -- --ignored --nocapture --test-threads=1
           cargo test -p amp-core --test sag65_vectors --locked -- --nocapture --test-threads=1
+      - name: Verify Smart station full playable cycle with generated real audio
+        run: cargo test -p amp-cast --lib smart_cycle_station --locked -- --ignored --test-threads=1
       - name: Verify finite server Player queues with generated real audio
         run: cargo test -p amp-cast --lib player_control::tests::generated --locked -- --ignored --test-threads=1
       - name: Verify adaptive LAN audio with real codecs and lifecycle recovery
@@ -199,7 +202,7 @@ jobs:
           mkdir -p dist/licenses/signalsmith
           cp -r apps/amp-player/vendor/signalsmith/* dist/licenses/signalsmith/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
-          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":1},indent=2)+"\n")'
+          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":2},indent=2)+"\n")'
           python -c 'import shutil; shutil.copytree("docs", "dist/docs", ignore=shutil.ignore_patterns("tested-preview-install.md"))'
           cp -r licenses dist/
           mkdir -p dist/licenses/mp3-lab
@@ -290,7 +293,7 @@ jobs:
       - name: Verify and assemble unsigned release betas
         run: |
           test -z "$AMP_ANDROID_KEYSTORE" || { echo 'Beta job must not receive a private signing key.'; exit 1; }
-          gradle -p android :app:assembleLiteRelease :app:assembleFullRelease :app:testFullReleaseUnitTest :app:lintFullRelease :app:lintLiteRelease :app:assembleFullDebugAndroidTest :amp-dj:assembleRelease :amp-dj:lintRelease :amp-lab:assembleRelease :amp-lab:lintRelease :amp-cast:assembleRelease :amp-cast:lintRelease :amp-podcasts:assembleRelease :amp-podcasts:lintRelease :amp-remote:assembleRelease :amp-remote:lintRelease
+          gradle -p android :app:assembleLiteRelease :app:assembleFullRelease :app:testFullReleaseUnitTest :app:testFullDebugUnitTest :app:lintFullRelease :app:lintLiteRelease :app:assembleFullDebugAndroidTest :amp-dj:assembleRelease :amp-dj:lintRelease :amp-lab:assembleRelease :amp-lab:lintRelease :amp-cast:assembleRelease :amp-cast:lintRelease :amp-podcasts:assembleRelease :amp-podcasts:lintRelease :amp-remote:assembleRelease :amp-remote:lintRelease
       - name: Package unsigned APKs and official local-signing tool
         run: python android/tools/package_unsigned.py --destination android-beta-dist
       - uses: actions/upload-artifact@v4
