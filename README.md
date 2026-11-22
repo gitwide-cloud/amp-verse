@@ -15,17 +15,17 @@ It takes inspiration from the music players many of us grew up with: **a classic
 Desktop and server keep numeric base version **1.0.22** and report **Beta 3**.
 Android Full, Lite and the five companion modules use **0.3.2-beta.3 (code 39)**.
 
-This candidate targets scratch playback correctness on desktop and Android.
-The desktop regression reproduces an unintended rewind and stale forward audio
-when scratching. Android's wheel currently seeks; real PCM scratch processing
-is being implemented. These repairs are not claimed complete or device-tested
-by this branding change.
+- Desktop manual vinyl aligns to the audible cursor on touch, holds silently, follows hand direction and resumes without replaying queued scratch audio. Automated scratch-in and tape-brake timing are retained.
+- Android **Full** adds real forward/reverse PCM scratching for local or downloaded tracks, with bounded eight-second windows, shared EQ/gains and playback-thread ownership handoffs. Release uses the heard cursor and preserves pause and tempo changes.
+- Android Lite and the standalone companion DJ do not gain a real vinyl platter in this update. Unsupported sources and missing Full decoding produce explicit guidance instead of pretending repeated seeks are scratching.
+- Beta 2 playlist sync, server Library editing and radio reconnect fixes remain included. Existing installations, profiles and signing identity are retained.
 
-The final combined implementation still needs its targeted scratch regressions,
-one successful full CI run and reviewed GitHub packages before release. Updates
-use the existing installation and GitHub release assets; USB installation is not
-the release workflow. Beta 2's playlist sync, server Library editing and radio
-reconnect behavior remain part of the baseline.
+Targeted regressions cover actual desktop Key Lock delay, gesture/release races,
+EOF/underrun handling, bidirectional PCM, geometry and cancellation gates. A final
+combined source still requires successful platform CI and verified GitHub packages
+before release. Physical touch/audio latency acceptance follows installation;
+generated tests do not establish real-device audibility. Updates use GitHub release
+assets and the existing installation; USB installation is not the release workflow.
 
 **Phone-to-server live audio broadcasting is still not implemented.** Android
 station listening and reconnect improvements do not add that feature. Existing
