@@ -10,22 +10,22 @@ It takes inspiration from the music players many of us grew up with: **a classic
 
 > **Play your music. Mix your music. Take it with you.**
 
-## Beta 2 release candidate
+## Beta 3 release candidate
 
-Desktop and server keep numeric base version **1.0.22** and report **Beta 2**.
-Android Full, Lite and the five companion modules use **0.3.2-beta.2 (code 38)**.
+Desktop and server keep numeric base version **1.0.22** and report **Beta 3**.
+Android Full, Lite and the five companion modules use **0.3.2-beta.3 (code 39)**.
 
-- Android preserves the selected radio host across recreation and reconnects to that host with bounded retries.
-- Smart DJ works through the playable song pool before repeating; canceled preloads must leave a song eligible for its later audible turn.
-- When server sync is enabled, normal phone playlist creation uses that server; explicit phone-only drafts remain available. Existing local playlists can be published as reviewed copies with exact track mapping.
-- Playlist status distinguishes queued edits from server acknowledgment, and desktop sync canonicalizes NAS paths without weakening library-boundary checks.
-- Shared-playlist Add and phone-only playlist publication search the complete selected server catalog, including tracks beyond the phone's 2,000-entry cache. Search is read-only, identity-checked and cancellable; only an explicit song selection is cached.
-- The integrated regression covers phone-format normal/Smart Playlist edits reaching a real server API and an independent desktop sync client. Actual-device validation of this new Beta remains pending the GitHub update.
+This candidate targets scratch playback correctness on desktop and Android.
+The desktop regression reproduces an unintended rewind and stale forward audio
+when scratching. Android's wheel currently seeks; real PCM scratch processing
+is being implemented. These repairs are not claimed complete or device-tested
+by this branding change.
 
-This candidate still needs one successful full CI run on the final combined
-source, including the generated Smart DJ cycle fixtures and Android reconnect
-unit tests, before release. Updates are intended for GitHub release assets and
-the existing updater; USB installation is not the release workflow.
+The final combined implementation still needs its targeted scratch regressions,
+one successful full CI run and reviewed GitHub packages before release. Updates
+use the existing installation and GitHub release assets; USB installation is not
+the release workflow. Beta 2's playlist sync, server Library editing and radio
+reconnect behavior remain part of the baseline.
 
 **Phone-to-server live audio broadcasting is still not implemented.** Android
 station listening and reconnect improvements do not add that feature. Existing
@@ -72,7 +72,7 @@ The desktop and Android editions do not yet have identical features. See [Androi
 
 **[Browse releases](https://github.com/gitwide-cloud/amp-verse/releases)** · **[Builds and tests](https://github.com/gitwide-cloud/amp-verse/actions)**
 
-Download an available build for your platform from Releases. This is an actively developed project: check the release notes and workflow results before treating a preview as production-ready.
+Download an available build for your platform from Releases. This is an actively developed project: check the release notes and workflow results before treating a beta as production-ready.
 
 If you'd rather build from source, you'll need the Rust toolchain and the audio/runtime dependencies described in the project documentation.
 

@@ -23,7 +23,7 @@ def package(root, destination, sdk):
     shutil.copy2(signer, local_tools / "apksigner.jar")
     if (tools / "NOTICE.txt").is_file():
         shutil.copy2(tools / "NOTICE.txt", local_tools / "NOTICE.txt")
-    report = {"schema": 1, "kind": "unsigned-beta-requires-local-signing", "source_commit": os.environ.get("GITHUB_SHA", "local"), "build_tools": "35.0.0", "release_channel": "beta", "beta": 2, "packages": []}
+    report = {"schema": 1, "kind": "unsigned-beta-requires-local-signing", "source_commit": os.environ.get("GITHUB_SHA", "local"), "build_tools": "35.0.0", "release_channel": "beta", "beta": 3, "packages": []}
     common_version = None
     for module in ("lite", "full", "dj", "lab", "cast", "podcasts", "remote"):
         folder = root / (f"app/build/outputs/apk/{module}/release" if module in ("lite", "full") else f"modules/{module}/build/outputs/apk/release")
