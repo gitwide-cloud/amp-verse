@@ -65,12 +65,13 @@ impl SmartCycle {
         rules.excluded.extend(self.failed.iter().cloned());
         let mut ranked = show::ranked_with_snapshot(&rules, tracks, current, &[], target, snapshot);
         ranked.retain(|i| !self.played.contains(&show::song_id(&tracks[*i])));
-        if ranked.is_empty() && pool.len() == 1 {
-            if let Some(index) = tracks.iter().position(|t| {
+        if ranked.is_empty()
+            && pool.len() == 1
+            && let Some(index) = tracks.iter().position(|t| {
                 pool.contains(&show::song_id(t)) && !self.played.contains(&show::song_id(t))
-            }) {
-                ranked.push(index);
-            }
+            })
+        {
+            ranked.push(index);
         }
         // Vary the best mix-compatible unplayed window, rather than always
         // choosing the same deterministic catalog-index tie winner.
