@@ -590,6 +590,40 @@ mod tests {
 mod catalog_station_tests {
     use super::*;
     #[test]
+    fn server_clean_selection_excludes_explicit_and_unknown_after_saved_rule_reload() {
+        use amp_core::content_advisory::{Classification, set_manual};
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = amp_core::show::Settings::default();
+        settings.playlists[0]
+            .filters
+            .push(amp_core::smart_filters::Filter::new(
+                amp_core::smart_filters::Field::Clean,
+            ));
+        settings.save(root.path()).unwrap();
+        let mut library = amp_core::scan(root.path()).unwrap();
+        for (i, advisory) in [
+            Classification::Clean,
+            Classification::Explicit,
+            Classification::Unknown,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut preparation = amp_core::Preparation::default();
+            set_manual(&mut preparation, advisory);
+            library.tracks.push(Track {
+                path: format!("{i}.mp3").into(),
+                title: "Clean radio edit".into(),
+                preparation,
+            });
+        }
+        let cast = Cast::new(root.path().into(), library, None);
+        let sources = lists(&cast).unwrap();
+        let smart = sources.iter().find(|v| v["kind"] == "smart").unwrap();
+        assert_eq!(smart["tracks"], json!([0]));
+        assert_eq!(smart["rules"]["filters"][0]["field"], "Clean");
+    }
+    #[test]
     fn station_sources_read_database_documents_without_loose_json() {
         let root = tempfile::tempdir().unwrap();
         amp_core::show::Settings::default()

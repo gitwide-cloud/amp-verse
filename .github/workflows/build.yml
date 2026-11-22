@@ -1,7 +1,7 @@
 name: Build and verify AMP Verse
 on:
   push:
-    branches: [main]
+    branches: [main, codex/sag75-server-manager]
     tags: ['v*']
   pull_request:
   workflow_dispatch:
