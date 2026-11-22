@@ -233,6 +233,7 @@ impl Lane {
             .filter(|p| p.duration > 0. && !p.sections.is_empty());
         let mut choice = None;
         if let (Some(profile), Some(track)) = (&profile, track) {
+            let (start, out) = crate::manual_load::bounds(&track.preparation);
             for (index, section) in profile.sections.iter().enumerate() {
                 let section_rect = egui::Rect::from_min_max(
                     egui::pos2(
@@ -245,12 +246,7 @@ impl Lane {
                     ),
                 )
                 .intersect(rect);
-                let allowed = section.end
-                    > amp_core::energy_profile::entry_bound(&track.preparation)
-                    && track
-                        .preparation
-                        .cue_out
-                        .is_none_or(|out| section.start < out);
+                let allowed = section.end > start && out.is_none_or(|out| section.start < out);
                 let current = position >= section.start && position < section.end;
                 let hovered = response
                     .hover_pos()
@@ -306,11 +302,7 @@ impl Lane {
                         }
                     ));
                     if allowed && response.clicked() {
-                        choice = Some(
-                            section
-                                .start
-                                .max(amp_core::energy_profile::entry_bound(&track.preparation)),
-                        );
+                        choice = Some(section.start.max(start));
                     }
                 }
             }
@@ -612,7 +604,14 @@ mod tests {
     use super::*;
     #[test]
     fn strip_sections_click_their_start_and_protect_manual_cue_bounds() {
-        for (section_index, expected) in [(0usize, Some(5.)), (1, Some(10.))] {
+        for (manual, section_index, expected) in [
+            (true, 0usize, Some(5.)),
+            (true, 1, Some(10.)),
+            (true, 2, None),
+            (false, 0, Some(0.)),
+            (false, 1, Some(10.)),
+            (false, 2, Some(20.)),
+        ] {
             let ctx = egui::Context::default();
             let mut lane = Lane::default();
             let mut track = amp_core::Track {
@@ -620,9 +619,17 @@ mod tests {
                 title: "Sections".into(),
                 preparation: Default::default(),
             };
-            track.preparation.cue_in = 5.;
-            track.preparation.manual_override = true;
-            track.preparation.extensions.insert("energy_profile".into(),serde_json::json!({"version":1,"duration":20.,"step":1.,"curve":[],"sections":[{"id":"intro","name":"Beginning","start":0.,"end":10.,"energy":0.3},{"id":"drop","name":"High energy","start":10.,"end":20.,"energy":0.9}]}));
+            track.preparation.cue_in = if manual { 5. } else { 15. };
+            track.preparation.cue_out = Some(if manual { 15. } else { 16. });
+            track.preparation.manual_override = manual;
+            track.preparation.cues.push(amp_core::preparation::Cue {
+                id: "auto-in".into(),
+                kind: "boundary".into(),
+                seconds: 12.,
+                ..Default::default()
+            });
+            track.preparation.extensions.insert("energy_profile".into(),serde_json::json!({"version":1,"duration":30.,"step":1.,"curve":[],"sections":[{"id":"intro","name":"Beginning","start":0.,"end":10.,"energy":0.3},{"id":"drop","name":"High energy","start":10.,"end":20.,"energy":0.9},{"id":"end","name":"Ending","start":20.,"end":30.,"energy":0.5}]}));
+            let saved = track.preparation.clone();
             let mut point = egui::Pos2::ZERO;
             let mut chosen = None;
             for frame in 0..4 {
@@ -661,6 +668,10 @@ mod tests {
                 output.textures_delta.clear();
             }
             assert_eq!(chosen, expected);
+            assert_eq!(
+                track.preparation, saved,
+                "thumbnail must retain cue guidance and metadata"
+            );
         }
     }
     #[test]

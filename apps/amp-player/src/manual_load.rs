@@ -1,9 +1,14 @@
 //! Runtime-only cue policy for explicit manual loads. Auto DJ keeps its own planned ranges.
-pub(super) fn full_track(prep: &mut amp_core::Preparation) {
-    if !prep.manual_override {
-        prep.cue_in = 0.;
-        prep.cue_out = None;
+/// Allocation-free bounds for per-frame UI; generated cue landmarks are guidance only.
+pub(super) fn bounds(prep: &amp_core::Preparation) -> (f64, Option<f64>) {
+    if prep.manual_override {
+        (prep.cue_in, prep.cue_out)
+    } else {
+        (0., None)
     }
+}
+pub(super) fn full_track(prep: &mut amp_core::Preparation) {
+    (prep.cue_in, prep.cue_out) = bounds(prep);
 }
 pub(super) fn seek(prep: &mut amp_core::Preparation, cue: f64) -> Result<(), String> {
     if !cue.is_finite() || cue < 0. {
