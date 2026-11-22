@@ -17,6 +17,37 @@ pub(super) fn regular_playlist_id(path: &std::path::Path) -> String {
         sha2::Sha256::digest(path.to_string_lossy().as_bytes())
     )
 }
+/// Automatic target matching may choose an early section, never an outro.
+/// Explicit cue/manual selection is handled separately by call_track.
+fn automatic_energy_entry(p: &amp_core::Preparation, target: f64, minimum: f64) -> Option<f64> {
+    if p.manual_override
+        || !p.manual_cues.is_empty()
+        || p.analysis.as_ref().is_some_and(|a| a.reviewed)
+        || !amp_core::energy_profile::mixing_allowed(p)
+    {
+        return None;
+    }
+    let profile = amp_core::energy_profile::read(p)?;
+    let first = amp_core::energy_profile::entry_bound(p);
+    let end = p.cue_out.unwrap_or(profile.duration).min(profile.duration);
+    let limit = amp_core::cue_policy::automatic_entry_limit(first, end);
+    let section = profile.entry(target, first, end.min(limit + minimum), minimum)?;
+    p.cues
+        .iter()
+        .filter(|c| {
+            matches!(c.kind.as_str(), "drop" | "chorus" | "chorus_start")
+                && c.seconds >= first
+                && c.seconds <= limit
+                && c.seconds + minimum <= end
+        })
+        .min_by(|a, b| {
+            (a.seconds - section.start)
+                .abs()
+                .total_cmp(&(b.seconds - section.start).abs())
+        })
+        .map(|feature| feature.seconds)
+        .or(Some(section.start))
+}
 fn scratch_phrase(seconds: f32, flourish: bool) -> f32 {
     if !flourish {
         return if seconds < 0.09 { -0.65 } else { 0.8 };
@@ -594,7 +625,6 @@ impl Player {
             return Err("Auto Fade requires the opposite deck".into());
         }
         let mut track = self.fresh_track(index)?;
-        let mut automatic_section = false;
         if let Some(cue) = cue {
             track.preparation.cue_in = self.cue_seconds(index, cue)?;
         } else if paired
@@ -611,8 +641,6 @@ impl Player {
             track.preparation.cue_in = c.seconds;
         } else if paired
             && self.run.profile.is_some()
-            && amp_core::energy_profile::mixing_allowed(&track.preparation)
-            && let Some(profile) = amp_core::energy_profile::read(&track.preparation)
             && let Some(target) = self
                 .run
                 .progression
@@ -621,33 +649,13 @@ impl Player {
                 .or(self.run.target)
                 .map(|e| ((e - 1.) / 9.).clamp(0., 1.))
                 .or_else(|| self.exit_energy())
-            && let Some(section) = profile.entry(
+            && let Some(seconds) = automatic_energy_entry(
+                &track.preparation,
                 target,
-                amp_core::energy_profile::entry_bound(&track.preparation),
-                track.preparation.cue_out.unwrap_or(profile.duration),
                 (self.fade_seconds as f64 * 2.).max(8.),
             )
         {
-            track.preparation.cue_in = section.start;
-            automatic_section = true;
-        }
-        if automatic_section
-            && let Some(feature) = track
-                .preparation
-                .cues
-                .iter()
-                .filter(|c| {
-                    matches!(c.kind.as_str(), "drop" | "chorus" | "chorus_start")
-                        && c.seconds >= amp_core::energy_profile::entry_bound(&track.preparation)
-                        && track.preparation.cue_out.is_none_or(|end| c.seconds < end)
-                })
-                .min_by(|a, b| {
-                    (a.seconds - track.preparation.cue_in)
-                        .abs()
-                        .total_cmp(&(b.seconds - track.preparation.cue_in).abs())
-                })
-        {
-            track.preparation.cue_in = feature.seconds;
+            track.preparation.cue_in = seconds;
         }
         track.preparation.validate()?;
         self.ensure_audio()?;
@@ -2875,6 +2883,68 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn automatic_energy_entry_and_feature_snap_stay_early_without_restricting_manual_cues() {
+        use amp_core::energy_profile::{FIELD, Profile, Section};
+        use amp_core::preparation::Cue;
+        let profile = Profile {
+            version: 1,
+            duration: 150.,
+            step: 1.,
+            curve: vec![0.2; 150],
+            sections: vec![
+                Section {
+                    id: "intro".into(),
+                    name: "Intro".into(),
+                    start: 0.,
+                    end: 30.,
+                    energy: 0.2,
+                },
+                Section {
+                    id: "early".into(),
+                    name: "Early".into(),
+                    start: 30.,
+                    end: 80.,
+                    energy: 0.6,
+                },
+                Section {
+                    id: "outro".into(),
+                    name: "Late".into(),
+                    start: 132.,
+                    end: 150.,
+                    energy: 0.9,
+                },
+            ],
+        };
+        let mut p = amp_core::Preparation {
+            cue_out: Some(150.),
+            ..Default::default()
+        };
+        p.extensions
+            .insert(FIELD.into(), serde_json::to_value(profile).unwrap());
+        p.cues.push(Cue {
+            id: "late".into(),
+            kind: "drop".into(),
+            seconds: 132.,
+            ..Default::default()
+        });
+        assert_eq!(automatic_energy_entry(&p, 0.9, 8.), Some(30.));
+        p.cues.push(Cue {
+            id: "early-drop".into(),
+            kind: "drop".into(),
+            seconds: 42.,
+            ..Default::default()
+        });
+        assert_eq!(automatic_energy_entry(&p, 0.9, 8.), Some(42.));
+        p.manual_override = true;
+        p.cue_in = 132.;
+        assert_eq!(automatic_energy_entry(&p, 0.9, 8.), None);
+        assert_eq!(p.cue_in, 132.);
+        assert_eq!(p.cues[0].seconds, 132.);
+        p.manual_override = false;
+        p.manual_cues.push(p.cues[0].clone());
+        assert_eq!(automatic_energy_entry(&p, 0.9, 8.), None);
+    }
     fn normal_test_player(root: &std::path::Path) -> Player {
         Player {
             root: root.into(),

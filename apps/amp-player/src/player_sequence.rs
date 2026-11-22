@@ -157,11 +157,9 @@ impl Player {
     }
 }
 pub(super) fn normal_track(track: &mut amp_core::Track) {
-    if !track.preparation.manual_override && track.preparation.manual_cues.is_empty() {
-        track.preparation.cue_in = 0.;
-        track.preparation.cue_out = None;
-    }
+    crate::manual_load::full_track(&mut track.preparation);
 }
+
 #[cfg(test)]
 mod tests {
     use super::*;

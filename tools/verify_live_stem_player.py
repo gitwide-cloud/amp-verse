@@ -30,13 +30,18 @@ def main():
             output.setparams((2, 2, 44100, 0, 'NONE', 'not compressed'))
             output.writeframes(integers.tobytes() * 6)
         env['AMP_STEM_TEST_SOURCE'] = str(source)
-        subprocess.run([
-            'cargo', 'test', '-p', 'amp-player', '--bin', 'amp-player',
+        # Separate test processes: each exact acceptance owns a fresh shared model broker.
+        tests = [
             'onnx_stem_stream::live_acceptance::real_model_source_pipeline_preserves_mix_across_windows',
-            '--locked', '--', '--ignored', '--exact', '--test-threads=1', '--nocapture',
-        ], env=env, check=True)
+            'dj_engine::live_stem_acceptance::two_native_live_stem_decks_play_filters_and_cancel_independently',
+        ]
+        for test in tests:
+            subprocess.run([
+                'cargo', 'test', '-p', 'amp-player', '--bin', 'amp-player', test,
+                '--locked', '--', '--ignored', '--exact', '--test-threads=1', '--nocapture',
+            ], env=env, check=True)
         assert sorted(p.name for p in Path(directory).iterdir()) == [source.name]
-    print(json.dumps({'full_player_live_pipeline': 'passed', 'saved_stem_audio_files': 0}))
+    print(json.dumps({'full_player_live_pipeline': 'passed', 'concurrent_live_decks_with_different_filters': 'passed', 'cancel_one_other_continues': 'passed', 'saved_stem_audio_files': 0}))
 
 
 if __name__ == '__main__':

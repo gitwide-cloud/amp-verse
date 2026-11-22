@@ -34,6 +34,7 @@ mod lab_youtube;
 mod library_cache;
 mod library_organizer;
 mod live_mix;
+mod manual_load;
 mod mashup;
 mod media_lookup;
 mod mix_schedule;
@@ -976,22 +977,22 @@ impl Player {
             .and_then(|l| l.tracks.get(index))
             .cloned()
         {
-            let mut track = match self.fresh_track(index) {
+            let track = match self.fresh_track(index) {
                 Ok(track) => track,
                 Err(e) => {
                     self.status = e;
                     return;
                 }
             };
-            if owner == playback_owner::Owner::Player {
-                player_sequence::normal_track(&mut track);
-            }
+            // Keep analysis/hot-cue guidance in the snapshot; normalize only the playback copy.
+            let mut runtime = track.clone();
+            manual_load::full_track(&mut runtime.preparation);
             let result = self.ensure_audio().and_then(|_| {
                 let audio = self.audio.as_mut().unwrap();
                 if owner == playback_owner::Owner::Player {
-                    audio.load_original(deck, &self.root, &track, play)
+                    audio.load_original(deck, &self.root, &runtime, play)
                 } else {
-                    audio.load(deck, &self.root, &track, play)
+                    audio.load(deck, &self.root, &runtime, play)
                 }
             });
             if result.is_ok() {
@@ -1063,22 +1064,23 @@ impl Player {
             .and_then(|l| l.tracks.get(index))
             .cloned()
         {
-            let mut track = match self.fresh_track(index) {
+            let track = match self.fresh_track(index) {
                 Ok(track) => track,
                 Err(e) => {
                     self.status = e;
                     return;
                 }
             };
-            track.preparation.cue_in = seconds;
-            if track.preparation.cue_out.is_some_and(|out| out <= seconds) {
+            let mut runtime = track.clone();
+            if let Err(error) = manual_load::seek(&mut runtime.preparation, seconds) {
+                self.status = error;
                 return;
             }
             let result = self.ensure_audio().and_then(|_| {
                 self.audio
                     .as_mut()
                     .unwrap()
-                    .load(deck, &self.root, &track, true)
+                    .load_original(deck, &self.root, &runtime, true)
             });
             match result {
                 Ok(()) => {
@@ -2584,12 +2586,10 @@ impl Player {
             .ok_or("Audio file folder missing")?
             .to_path_buf();
         let mut preparation = amp_core::preparation::load(&path)?;
+        let saved_preparation = preparation.clone();
+        manual_load::full_track(&mut preparation);
         if let Some(cue) = cue {
-            let end = preparation.cue_out.or(preparation
-                .analysis
-                .as_ref()
-                .map(|analysis| analysis.duration));
-            preparation.cue_in = end.map_or(cue.max(0.), |end| cue.clamp(0., (end - 0.02).max(0.)));
+            manual_load::seek(&mut preparation, cue)?;
         }
         let track = amp_core::Track {
             path: path.file_name().ok_or("Audio filename missing")?.into(),
@@ -2624,7 +2624,9 @@ impl Player {
                 .iter()
                 .position(|track| track.path == relative)
         });
-        self.loaded_snapshot[deck] = Some(track);
+        let mut snapshot = track;
+        snapshot.preparation = saved_preparation;
+        self.loaded_snapshot[deck] = Some(snapshot);
         self.loaded_origin[deck] = Some(root);
         self.pending_load[deck] = None;
         self.status = format!(
@@ -2634,9 +2636,10 @@ impl Player {
         Ok(())
     }
     fn recue_deck(&mut self, deck: usize) {
-        if let Some(track) = self.loaded_track(deck).cloned()
+        if let Some(mut track) = self.loaded_track(deck).cloned()
             && let Some(audio) = &mut self.audio
         {
+            manual_load::full_track(&mut track.preparation);
             let root = self.loaded_origin[deck].as_deref().unwrap_or(&self.root);
             match audio.load(deck, root, &track, false) {
                 Err(error) => self.status = error,
@@ -2873,6 +2876,7 @@ impl Player {
             return;
         };
         let was_playing = audio.playing(deck);
+        manual_load::full_track(&mut track.preparation);
         let end = track.preparation.cue_out.or(track
             .preparation
             .analysis

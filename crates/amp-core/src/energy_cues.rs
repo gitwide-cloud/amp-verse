@@ -29,6 +29,65 @@ pub(super) fn breakdowns(energy: &[f64], first: usize, last: usize) -> Vec<f64> 
     }
     result
 }
+/// Earliest sustained audible entry. A transient or a late loud outro must not
+/// define the normal start of an otherwise quiet recording.
+pub(super) fn ease_in(energy: &[f64], first: usize, last: usize) -> f64 {
+    let hold = (RATE / BLOCK as f64 * 0.5).round() as usize;
+    let threshold = energy.iter().copied().fold(0., f64::max) * 0.01;
+    let at = (first..=last)
+        .find(|&at| {
+            at + hold <= last + 1
+                && energy[at..at + hold]
+                    .iter()
+                    .filter(|v| **v > threshold.max(0.0001))
+                    .count()
+                    >= hold * 4 / 5
+        })
+        .unwrap_or(first);
+    at as f64 * BLOCK as f64 / RATE
+}
+pub(super) fn entry_limit(start: f64, end: f64) -> f64 {
+    crate::cue_policy::automatic_entry_limit(start, end)
+}
+/// Prefer an early energy entrance, with a substantial part of the song left.
+/// Later drops stay selectable landmarks; they never become the default start.
+pub(super) fn default_entry(ease: f64, end: f64, candidates: &[(f64, &'static str)]) -> f64 {
+    let horizon = entry_limit(ease, end);
+    candidates
+        .iter()
+        .map(|(seconds, _)| *seconds)
+        .find(|seconds| *seconds >= ease && *seconds <= horizon)
+        .unwrap_or(ease)
+}
+/// An energy decrease near the ending is only an outro estimate, not a cue-out.
+/// Keep the actual audible end separately so default playback keeps the ending.
+pub(super) fn outro(energy: &[f64], first: usize, last: usize) -> f64 {
+    let start = first as f64 * BLOCK as f64 / RATE;
+    let end = (last + 1) as f64 * BLOCK as f64 / RATE;
+    let span = end - start;
+    breakdowns(energy, first, last)
+        .into_iter()
+        .filter(|seconds| *seconds >= start + span * 0.7 && *seconds <= end - 2.)
+        .next_back()
+        .unwrap_or((end - (span * 0.1).min(8.)).max(start))
+}
+/// Strongest sustained four-second window, rather than an isolated amplitude peak.
+/// This is an optional energy landmark; no rhythmic/semantic drop is inferred.
+pub(super) fn high_energy(energy: &[f64], first: usize, last: usize) -> Option<f64> {
+    let hold = (RATE / BLOCK as f64 * 4.).round() as usize;
+    if last + 1 < first + hold {
+        return None;
+    }
+    let mut sum = energy[first..first + hold].iter().sum::<f64>();
+    let mut best = (first, sum);
+    for at in first + 1..=last + 1 - hold {
+        sum += energy[at + hold - 1] - energy[at - 1];
+        if sum > best.1 {
+            best = (at, sum);
+        }
+    }
+    Some(best.0 as f64 * BLOCK as f64 / RATE)
+}
 pub(super) fn candidates(energy: &[f64], first: usize, last: usize) -> Vec<(f64, &'static str)> {
     let bin = (RATE / BLOCK as f64 / 2.).round() as usize;
     let bins: Vec<f64> = energy
@@ -91,7 +150,7 @@ pub(super) fn candidates(energy: &[f64], first: usize, last: usize) -> Vec<(f64,
             if opening {
                 "High-energy beginning"
             } else {
-                "High-energy drop"
+                "Energy rise · drop candidate"
             },
         ));
         if cues.len() == 16 {
@@ -103,6 +162,41 @@ pub(super) fn candidates(energy: &[f64], first: usize, last: usize) -> Vec<(f64,
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn late_outro_rise_is_a_landmark_not_the_default_entry() {
+        let mut e = vec![0.05; 15000];
+        e[13200..14800].fill(0.8);
+        let c = candidates(&e, 0, 14999);
+        assert!(c[0].0 > 130.);
+        let ease = ease_in(&e, 0, 14999);
+        assert!(default_entry(ease, 150., &c) < 1.);
+        assert!(high_energy(&e, 0, 14999).unwrap() > 130.);
+        assert!(outro(&e, 0, 14999) > 140.);
+    }
+    #[test]
+    fn early_drop_stays_selectable_but_long_intro_does_not_skip_the_song() {
+        let mut e = vec![0.05; 18000];
+        e[2000..4000].fill(0.8);
+        let c = candidates(&e, 0, 17999);
+        assert!((default_entry(ease_in(&e, 0, 17999), 180., &c) - 20.).abs() < 0.3);
+        e[2000..4000].fill(0.05);
+        e[10000..13000].fill(0.8);
+        let c = candidates(&e, 0, 17999);
+        assert!(c.iter().any(|(at, _)| *at > 99.));
+        assert!(default_entry(ease_in(&e, 0, 17999), 180., &c) < 1.);
+    }
+    #[test]
+    fn gradual_ambient_and_short_recordings_keep_a_valid_early_entry() {
+        let e: Vec<_> = (0..15000).map(|i| 0.02 + i as f64 / 15000. * 0.5).collect();
+        let c = candidates(&e, 0, 14999);
+        assert!(default_entry(ease_in(&e, 0, 14999), 150., &c) < 1.);
+        let mut short = vec![0.02; 500];
+        short[350..].fill(0.8);
+        let c = candidates(&short, 0, 499);
+        assert!(default_entry(ease_in(&short, 0, 499), 5., &c) <= 2.);
+        assert!(high_energy(&short, 0, 499).is_some());
+        assert!(high_energy(&[0.8; 30], 0, 29).is_none());
+    }
     #[test]
     fn sustained_breakdown_not_a_single_quiet_frame() {
         let mut e = vec![0.8; 6000];
@@ -118,7 +212,7 @@ mod tests {
         e[300] = 1.;
         e[2000..4000].fill(0.8);
         let c = candidates(&e, 0, 5999);
-        assert_eq!(c[0].1, "High-energy drop");
+        assert_eq!(c[0].1, "Energy rise · drop candidate");
         assert!((c[0].0 - 20.).abs() < 0.3, "{c:?}");
     }
     #[test]
@@ -131,7 +225,7 @@ mod tests {
         assert!(c[0].0 < 0.1);
         assert!(
             c.iter()
-                .any(|(s, label)| *s > 29. && *label == "High-energy drop")
+                .any(|(s, label)| *s > 29. && *label == "Energy rise · drop candidate")
         );
     }
     #[test]
@@ -139,7 +233,10 @@ mod tests {
         let mut e = vec![0.01; 3000];
         e[800] = 1.;
         let c = candidates(&e, 0, 2999);
-        assert!(c.iter().all(|(_, label)| *label != "High-energy drop"));
+        assert!(
+            c.iter()
+                .all(|(_, label)| *label != "Energy rise · drop candidate")
+        );
         assert!(candidates(&[0.; 3000], 0, 2999).is_empty());
         assert!(candidates(&[0.8; 30], 0, 29).is_empty());
     }

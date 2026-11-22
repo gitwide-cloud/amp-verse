@@ -5027,3 +5027,7 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+#[path = "mixer/live_stem_acceptance.rs"]
+mod live_stem_acceptance;

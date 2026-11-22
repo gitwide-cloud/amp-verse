@@ -213,7 +213,12 @@ pub fn preparations(
     }
     let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
     if crate::catalog_shards::active(root)? {
-        return crate::catalog_shards::preparations(root);
+        let mut preparations = crate::catalog_shards::preparations(root)?;
+        for preparation in preparations.values_mut() {
+            crate::cue_policy::repair_legacy_entry(preparation);
+            preparation.validate()?;
+        }
+        return Ok(preparations);
     }
     let db = open_read(root)?;
     let mut query = db
@@ -225,7 +230,8 @@ pub fn preparations(
     let mut result = std::collections::BTreeMap::new();
     for row in rows {
         let (key, value) = row.map_err(error)?;
-        let prep: crate::Preparation = serde_json::from_str(&value).map_err(error)?;
+        let mut prep: crate::Preparation = serde_json::from_str(&value).map_err(error)?;
+        crate::cue_policy::repair_legacy_entry(&mut prep);
         prep.validate()?;
         result.insert(key, prep);
     }

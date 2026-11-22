@@ -166,7 +166,7 @@ impl Player {
                     self.lab_open = pane == 3;
                 }
             }
-            ui.weak(format!("{} Beta 4", env!("CARGO_PKG_VERSION")));
+            ui.weak(format!("{} Beta 5", env!("CARGO_PKG_VERSION")));
             if ui
                 .button("Classic windows")
                 .on_hover_text("Return to the separate player and dockable windows")

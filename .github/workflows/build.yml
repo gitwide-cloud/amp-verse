@@ -204,7 +204,7 @@ jobs:
           mkdir -p dist/licenses/signalsmith
           cp -r apps/amp-player/vendor/signalsmith/* dist/licenses/signalsmith/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
-          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":4},indent=2)+"\n")'
+          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":5},indent=2)+"\n")'
           python -c 'import shutil; shutil.copytree("docs", "dist/docs", ignore=shutil.ignore_patterns("tested-preview-install.md"))'
           cp -r licenses dist/
           mkdir -p dist/licenses/mp3-lab
