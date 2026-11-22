@@ -17,7 +17,9 @@ Android Full, Lite and the five companion modules use **0.3.2-beta.2 (code 38)**
 
 - Android preserves the selected radio host across recreation and reconnects to that host with bounded retries.
 - Smart DJ works through the playable song pool before repeating; canceled preloads must leave a song eligible for its later audible turn.
-- Web/server playlist synchronization corrections are pending final integration and verification in this candidate.
+- When server sync is enabled, normal phone playlist creation uses that server; explicit phone-only drafts remain available. Existing local playlists can be published as reviewed copies with exact track mapping.
+- Playlist status distinguishes queued edits from server acknowledgment, and desktop sync canonicalizes NAS paths without weakening library-boundary checks.
+- The integrated regression covers phone-format normal/Smart Playlist edits reaching a real server API and an independent desktop sync client. Actual-device validation of this new Beta remains pending the GitHub update.
 
 This candidate still needs one successful full CI run on the final combined
 source, including the generated Smart DJ cycle fixtures and Android reconnect
