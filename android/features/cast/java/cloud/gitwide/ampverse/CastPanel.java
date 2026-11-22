@@ -96,7 +96,7 @@ class CastPanel extends LinearLayout {
         if(listener.playlistSyncAvailable())addView(action("Enable saved-playlist sync",()->{CastClient selected=client;if(selected==null||!verified){Toast.makeText(activity,"Connect to an authorized host first",Toast.LENGTH_LONG).show();return;}listener.playlistSync(selected);}));
         renderServers(hostSession.selection.merge(java.util.Collections.emptyList()));
         CastHostSelection.Host saved=hostSession.selection.selected();
-        if(saved!=null){address.setText(saved.base);status.setText("Reconnecting to selected host…");now.setText("Selected host · "+saved.base);}
+        if(saved!=null){address.setText(saved.base);status.setText("Reconnecting to selected host…");now.setText("Your selected server");}
         watchNetwork();
         handler.post(this::resumeConnection);
         handler.postDelayed(poll,3000);
@@ -260,7 +260,7 @@ class CastPanel extends LinearLayout {
                 if(error!=null){
                     verified=false;pollFailed=true;hostSession.selection.failed(android.os.SystemClock.elapsedRealtime());
                     status.setText("Selected host retained · reconnecting automatically. "+error.getMessage());
-                    now.setText("Selected host · "+saved.base+" · temporarily unavailable");
+                    now.setText("Your selected server is temporarily unavailable");
                 }else{
                     client=restored;address.setText(restored.base);
                     hostSession.remember(restored,state.optString("server_id"),state.optString("station_id"));
@@ -297,7 +297,7 @@ class CastPanel extends LinearLayout {
     private void renderServers(java.util.List<CastDiscovery.Server> servers){
         serverList.removeAllViews();
         CastHostSelection.Host saved=hostSession.selection.selected();
-        if(saved!=null)serverList.addView(label("Selected host · "+saved.base+" · retained across navigation",14));
+        if(saved!=null)serverList.addView(label("Your selected server · remembered across navigation",14));
         java.util.Map<String,Integer> counts=new java.util.HashMap<>(),shown=new java.util.HashMap<>();
         for(CastDiscovery.Server server:servers)counts.merge(server.name,1,Integer::sum);
         for(CastDiscovery.Server server:servers){
