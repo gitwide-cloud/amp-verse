@@ -176,6 +176,16 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    pub fn required_version(&self) -> u32 {
+        if self.playlists.iter().any(|p| p.requires_advisory()) {
+            3
+        } else if self.playlists.iter().any(|p| !p.filters.is_empty()) {
+            2
+        } else {
+            1
+        }
+    }
+
     pub fn resolve_sources(&mut self, root: &Path) {
         if self.playlists.iter().all(|p| p.source_library.is_none()) {
             for p in &mut self.playlists {

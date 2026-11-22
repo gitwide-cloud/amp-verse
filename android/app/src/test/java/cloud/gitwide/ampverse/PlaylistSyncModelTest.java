@@ -6,6 +6,21 @@ import org.json.*;
 import java.util.*;
 
 public class PlaylistSyncModelTest {
+    @Test public void cleanRuleSurvivesOpaqueSmartRenameAndVersionThreeAck()throws Exception{
+        JSONObject s=state(),remote=normal("Clean set",1).put("document_id","smart_clean").put("kind","smart").put("document_version",3);
+        JSONArray filters=new JSONArray().put(new JSONObject().put("type","Flag").put("field","Clean").put("value",true));
+        remote.getJSONObject("document").put("id","clean").put("filters",filters);
+        PlaylistSyncModel.pull(s,snapshot(remote));
+        JSONObject view=PlaylistSyncModel.visible(s.getJSONObject("documents").getJSONObject("smart_clean"));
+        PlaylistSyncModel.save(s,view,PlaylistSyncModel.copy(view.getJSONObject("document")).put("name","Renamed"));
+        JSONObject op=PlaylistSyncModel.next(s);assertEquals(3,op.getInt("document_version"));
+        assertTrue(PlaylistSyncModel.equal(filters,op.getJSONObject("document").getJSONArray("filters")));
+        JSONObject receipt=ack(op,2);receipt.getJSONObject("canonical").put("document_version",3);
+        PlaylistSyncModel.reply(s,op,200,receipt);assertNull(PlaylistSyncModel.next(s));
+        JSONObject durable=new JSONObject(s.toString());
+        assertTrue(PlaylistSyncModel.equal(filters,PlaylistSyncModel.visible(durable.getJSONObject("documents").getJSONObject("smart_clean")).getJSONObject("document").getJSONArray("filters")));
+    }
+
     JSONObject state()throws Exception{return PlaylistSyncModel.state("server","library","phone");}
     JSONObject normal(String name,int revision)throws Exception{return new JSONObject().put("document_id","normal_stable").put("kind","normal").put("document_version",1).put("revision",new JSONObject().put("revision",revision)).put("document",new JSONObject().put("version",1).put("name",name).put("companion_available",true).put("future",new JSONObject().put("keep",true)).put("tracks",new JSONArray().put(ref("a")).put(ref("missing")).put(ref("a"))));}
     JSONObject ref(String key)throws Exception{return new JSONObject().put("track_key",PlaylistSyncModel.trackKey(key+".mp3")).put("library_id","library").put("relative_path",key+".mp3");}

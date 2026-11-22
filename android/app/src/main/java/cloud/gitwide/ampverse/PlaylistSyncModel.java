@@ -74,7 +74,7 @@ final class PlaylistSyncModel {
             JSONObject revision=canonical.optJSONObject("revision");
             Object ordinal=revision==null?null:revision.opt("revision");
             Object schema=canonical.opt("document_version");int version=canonical.optInt("document_version",-1),requested=operation.getInt("document_version");
-            if(!(schema instanceof Number)||!schema.toString().matches("[0-9]+")||!canonical.optString("kind").equals(operation.getString("kind"))||version<requested||version>2
+            if(!(schema instanceof Number)||!schema.toString().matches("[0-9]+")||!canonical.optString("kind").equals(operation.getString("kind"))||version<requested||version>3
                 ||operation.getString("kind").equals("normal")&&version!=1
                 ||revision==null||!(ordinal instanceof Number)||!ordinal.toString().matches("[0-9]+")
                 ||!state.getString("library_id").equals(revision.optString("library_id")))

@@ -267,7 +267,7 @@ jobs:
 
   android-preview:
     name: Android unsigned beta
-    if: github.event_name == 'workflow_dispatch' && inputs.android_preview
+    if: (github.event_name == 'workflow_dispatch' && inputs.android_preview) || (github.event_name == 'push' && github.ref == 'refs/heads/codex/sag75-server-manager')
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
