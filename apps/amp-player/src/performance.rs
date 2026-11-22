@@ -807,6 +807,8 @@ impl Player {
                 && a.loaded(deck)
                 && a.controls.ready[deck].load(Relaxed)
                 && a.playing(deck)
+                && a.controls.position[deck].load(Relaxed) > 0
+                && !a.controls.phones_only[deck].load(Relaxed)
         }) {
             return;
         }
@@ -2901,11 +2903,11 @@ mod tests {
             let end = Instant::now() + Duration::from_secs(8);
             loop {
                 player.performance_tick();
-                if player
-                    .audio
-                    .as_ref()
-                    .is_some_and(|a| a.load_current(deck) && a.controls.ready[deck].load(Relaxed))
-                {
+                if player.audio.as_ref().is_some_and(|a| {
+                    a.load_current(deck)
+                        && a.controls.ready[deck].load(Relaxed)
+                        && (!a.playing(deck) || a.controls.position[deck].load(Relaxed) > 0)
+                }) {
                     break;
                 }
                 assert!(Instant::now() < end);
@@ -2962,13 +2964,28 @@ mod tests {
             "prefetch is not playback"
         );
         player.run.preloaded = None;
-        // A transport running on the closed side is headphone cue, not master play.
-        player
-            .audio
-            .as_ref()
-            .unwrap()
-            .set_fader(1. - (deck % 2) as f32);
-        player.audio.as_ref().unwrap().controls.play[deck].store(true, Relaxed);
+        // set_fader enqueues a mixer command. Confirm the rendered crossfader
+        // acknowledged closure before starting a headphone-only transport.
+        let pair = player.pair();
+        let side = pair.iter().position(|d| *d == deck).unwrap();
+        let closed = if side == 0 { 1. } else { 0. };
+        player.audio.as_ref().unwrap().set_fader(closed);
+        let end = Instant::now() + Duration::from_secs(5);
+        while (player.audio.as_ref().unwrap().fader() - closed).abs() > 1e-6 {
+            assert!(
+                Instant::now() < end,
+                "crossfader command was not acknowledged"
+            );
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        assert_eq!(player.pair(), pair);
+        assert_eq!(player.audio.as_ref().unwrap().fader(), closed);
+        player.audio.as_ref().unwrap().controls.cue[deck].store(true, Relaxed);
+        player.audio.as_ref().unwrap().play(deck).unwrap();
+        while player.audio.as_ref().unwrap().controls.position[deck].load(Relaxed) == 0 {
+            assert!(Instant::now() < end, "cue transport did not render");
+            std::thread::sleep(Duration::from_millis(5));
+        }
         player.commit_smart_audible();
         assert_eq!(
             player
@@ -2984,12 +3001,39 @@ mod tests {
                 )
                 .len(),
             3,
-            "headphone cue must not consume a Smart cycle member"
+            "rendered headphone cue must not consume a Smart cycle member"
         );
+        // Phones-only routing remains private even with the crossfader open.
+        player.audio.as_ref().unwrap().controls.phones_only[deck].store(true, Relaxed);
+        player.audio.as_ref().unwrap().set_fader(1. - closed);
+        while (player.audio.as_ref().unwrap().fader() - (1. - closed)).abs() > 1e-6 {
+            assert!(Instant::now() < end);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        player.commit_smart_audible();
+        assert_eq!(
+            player
+                .run
+                .smart_cycle
+                .ranked(
+                    &root.path().to_string_lossy(),
+                    &profile,
+                    &player.library.as_ref().unwrap().tracks,
+                    None,
+                    None,
+                    None
+                )
+                .len(),
+            3,
+            "phones-only routing must not consume a Smart cycle member"
+        );
+        player.audio.as_ref().unwrap().controls.phones_only[deck].store(false, Relaxed);
+        player.audio.as_ref().unwrap().controls.cue[deck].store(false, Relaxed);
         player.audio.as_mut().unwrap().stop(deck);
         let mut heard = std::collections::HashSet::new();
-        let mut active = deck;
+        let mut active_side = side;
         for _ in 0..3 {
+            let active = pair[active_side];
             let current = player.loaded[player.active_deck()];
             let index = player.run.smart_cycle.ranked(
                 &root.path().to_string_lossy(),
@@ -3005,7 +3049,7 @@ mod tests {
                 .unwrap();
             ready(&mut player, active);
             player.commit_smart_audible();
-            active = 1 - active;
+            active_side = 1 - active_side;
         }
         assert_eq!(heard.len(), 3);
         assert!(heard.contains(&first));
@@ -3018,9 +3062,14 @@ mod tests {
             player.commit_smart_audible();
         }
         player
-            .call_track(next, None, Deck::PHYSICAL[active], Execution::PlayNow)
+            .call_track(
+                next,
+                None,
+                Deck::PHYSICAL[pair[active_side]],
+                Execution::PlayNow,
+            )
             .unwrap();
-        ready(&mut player, active);
+        ready(&mut player, pair[active_side]);
         player.commit_smart_audible();
         let remaining = player.run.smart_cycle.ranked(
             &root.path().to_string_lossy(),
