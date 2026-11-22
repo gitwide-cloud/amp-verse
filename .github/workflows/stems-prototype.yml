@@ -1,0 +1,23 @@
+name: Bounded stem prototype
+on:
+  push:
+    branches: [feature/on-demand-stems-20261122]
+    paths: ['crates/amp-stems/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/stems-prototype.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  session:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: cargo fmt -p amp-stems --check
+      - run: cargo test -p amp-stems --locked
+      - run: cargo clippy -p amp-stems --all-targets --locked -- -D warnings
+      - run: cargo run -p amp-stems --example session_bench --release --locked

@@ -148,6 +148,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "amp-stems"
+version = "1.0.22"
+
+[[package]]
 name = "android-activity"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
