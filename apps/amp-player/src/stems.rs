@@ -1023,12 +1023,8 @@ mod tests {
         assert!(result.unwrap_err().contains("canceled"));
         assert!(ready_in(&cache, &source).is_none());
         assert_eq!(digest(&source).unwrap(), before);
-        assert!(!fs::read_dir(&cache).unwrap().any(|p| {
-            p.unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".pending-")
-        }));
+        // Cancellation now returns before creating even an empty cache directory.
+        assert!(!cache.exists());
     }
     #[test]
     fn cache_invalidation_and_incomplete_outputs_fail_closed() {
