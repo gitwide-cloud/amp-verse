@@ -17,6 +17,17 @@ use std::{
 };
 type Frame = [f32; 2];
 type DeckFrame = [f32; 6];
+fn stereo_frame(frame: DeckFrame, separated: bool, gain: [f32; 3], drums_only: bool) -> Frame {
+    if separated && drums_only {
+        [frame[4] * gain[2], frame[5] * gain[2]]
+    } else if separated {
+        std::array::from_fn(|ch| {
+            frame[ch] * gain[0] + frame[ch + 2] * gain[1] + frame[ch + 4] * gain[2]
+        })
+    } else {
+        [frame[0], frame[1]]
+    }
+}
 fn atom(v: f32) -> AtomicU32 {
     AtomicU32::new(v.to_bits())
 }
@@ -58,6 +69,7 @@ pub struct Controls {
     pub scratching: [AtomicBool; 6],
     pub scratch_rate: [AtomicU32; 6],
     vinyl_target: [AtomicU64; 6],
+    vinyl_anchor: [AtomicU64; 6],
     vinyl_follow: [AtomicBool; 6],
     pub section_state: [AtomicU32; 6],
     source_origin: [AtomicU64; 6],
@@ -168,6 +180,7 @@ impl Default for Controls {
             scratching: std::array::from_fn(|_| AtomicBool::new(false)),
             scratch_rate: std::array::from_fn(|_| atom(0.)),
             vinyl_target: std::array::from_fn(|_| AtomicU64::new(0)),
+            vinyl_anchor: std::array::from_fn(|_| AtomicU64::new(0)),
             vinyl_follow: std::array::from_fn(|_| AtomicBool::new(false)),
             section_state: std::array::from_fn(|_| AtomicU32::new(0)),
             source_origin: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -268,6 +281,9 @@ struct Voice {
     looped: Option<Loop>,
     pending_loop: Option<(u64, Vec<DeckFrame>)>,
     tail_frames: usize,
+    manual_vinyl: bool,
+    resume_fill: usize,
+    resume_origin: f64,
 }
 struct LevelFade {
     from: f32,
@@ -799,6 +815,12 @@ impl Mixer {
             return;
         }
         let c = &self.controls;
+        let scratch_active = std::array::from_fn::<_, 6, _>(|d| {
+            c.scratching[d].load(std::sync::atomic::Ordering::Acquire)
+        });
+        let manual_vinyl_block = std::array::from_fn::<_, 6, _>(|d| {
+            scratch_active[d] && c.vinyl_follow[d].load(std::sync::atomic::Ordering::Acquire)
+        });
         let rates = std::array::from_fn::<_, 6, _>(|d| {
             if c.tempo_recovery[d].load(Relaxed) {
                 if !c.key_lock[d].load(Relaxed)
@@ -824,9 +846,7 @@ impl Mixer {
                     }
                 }
             }
-            if c.scratching[d].load(Relaxed) {
-                get(&c.scratch_rate[d]).clamp(-4., 4.)
-            } else {
+            let normal_rate = {
                 if c.synced[d].load(Relaxed) && get(&c.bpm[d]) > 0. {
                     let tempo = get(&c.master_bpm) / get(&c.bpm[d]);
                     let seconds = (self.voices[d]
@@ -843,6 +863,17 @@ impl Mixer {
                 } else {
                     get(&c.rate[d]).clamp(0.5, 2.)
                 }
+            };
+            // Gesture changes are applied once per block. A release must use
+            // normal rate even if the UI's separate scratch flags are mid-update.
+            if !manual_vinyl_block[d]
+                && (self.voices[d].manual_vinyl || self.voices[d].resume_fill > 0)
+            {
+                normal_rate
+            } else if scratch_active[d] {
+                get(&c.scratch_rate[d]).clamp(-4., 4.)
+            } else {
+                normal_rate
             }
         });
 
@@ -1208,6 +1239,62 @@ impl Mixer {
                 if !source.primed {
                     continue;
                 }
+                let manual_vinyl = manual_vinyl_block[d];
+                // The UI publishes the audible cursor, not the look-ahead readhead.
+                // Align once, silently: chasing it backwards would play an unwanted rewind.
+                if manual_vinyl && !v.manual_vinyl {
+                    source.position = f64::from_bits(c.vinyl_anchor[d].load(Relaxed))
+                        .max(source.history_start as f64);
+                    v.manual_vinyl = true;
+                    v.resume_fill = 0;
+                    v.tail_frames = 0;
+                    if let Some(processor) = &mut source.key_lock {
+                        processor.reset_vinyl_delay();
+                    }
+                } else if !manual_vinyl && v.manual_vinyl {
+                    v.manual_vinyl = false;
+                    v.resume_origin = source.position;
+                    v.tail_frames = 0;
+                    if let Some(processor) = &mut source.key_lock {
+                        processor.reset_vinyl_delay();
+                        v.resume_fill = processor.latency;
+                    }
+                }
+                for stem in 0..3 {
+                    v.stem_mix[stem] +=
+                        (get(&c.stem_level[d][stem]).clamp(0., 1.) - v.stem_mix[stem]) * 0.004;
+                }
+                let stem_gain: [f32; 3] = std::array::from_fn(|stem| {
+                    (if get(&c.stem_level[d][stem]) == 0. {
+                        0.
+                    } else {
+                        v.stem_mix[stem]
+                    }) * if c.pair_indices().contains(&d) {
+                        stem_masks[d % 2][stem]
+                    } else {
+                        1.
+                    }
+                });
+                // Rebuild only the dry look-ahead with NEW forward frames. No old
+                // reversed tail, full-DSP burst, allocation, or duplicate voice.
+                while v.resume_fill > 0 {
+                    let next = match source.next(rates[d]) {
+                        Some(frame) => stereo_frame(frame, source.separated, stem_gain, false),
+                        None if source.done.load(std::sync::atomic::Ordering::Acquire) => {
+                            v.tail_frames += 1;
+                            [0.; 2]
+                        }
+                        None => break,
+                    };
+                    if let Some(processor) = &mut source.key_lock {
+                        processor.prime_vinyl_release(next);
+                    }
+                    v.resume_fill -= 1;
+                }
+                if v.resume_fill > 0 {
+                    c.underruns[d].fetch_add(1, Relaxed);
+                    continue;
+                }
                 let repeating = v.looped.as_ref().is_some_and(|l| !l.capturing);
                 let mut frame = if repeating {
                     let l = v.looped.as_mut().unwrap();
@@ -1290,35 +1377,13 @@ impl Mixer {
                         l.capturing = false;
                     }
                 }
-                for stem in 0..3 {
-                    v.stem_mix[stem] +=
-                        (get(&c.stem_level[d][stem]).clamp(0., 1.) - v.stem_mix[stem]) * 0.004;
-                }
-                // Apply masks AFTER smoothing user gains: zero means exactly zero.
-                let stem_gain: [f32; 3] = std::array::from_fn(|stem| {
-                    (if get(&c.stem_level[d][stem]) == 0. {
-                        0.
-                    } else {
-                        v.stem_mix[stem]
-                    }) * if c.pair_indices().contains(&d) {
-                        stem_masks[d % 2][stem]
-                    } else {
-                        1.
-                    }
-                });
-                let mut frame: Frame =
-                    if source.separated && scratch_read.is_some_and(|(deck, _)| deck == d) {
-                        [frame[4] * stem_gain[2], frame[5] * stem_gain[2]]
-                    } else if source.separated {
-                        std::array::from_fn(|ch| {
-                            frame[ch] * stem_gain[0]
-                                + frame[ch + 2] * stem_gain[1]
-                                + frame[ch + 4] * stem_gain[2]
-                        })
-                    } else {
-                        [frame[0], frame[1]]
-                    };
-                if let Some(key_lock) = &mut source.key_lock {
+                let mut frame = stereo_frame(
+                    frame,
+                    source.separated,
+                    stem_gain,
+                    scratch_read.is_some_and(|(deck, _)| deck == d),
+                );
+                if !manual_vinyl && let Some(key_lock) = &mut source.key_lock {
                     frame = key_lock.frame(
                         frame,
                         rates[d],
@@ -1434,17 +1499,253 @@ impl Mixer {
                 set(&c.scope[d][i], *value);
             }
             if let Some(s) = &self.voices[d].source {
-                let remaining_delay = s.key_lock.as_ref().map_or(0, |processor| {
-                    processor.latency.saturating_sub(self.voices[d].tail_frames)
-                });
-                let audible =
-                    (s.position - remaining_delay as f64 * c.effective_rate(d) as f64).max(0.);
+                let voice = &self.voices[d];
+                let remaining_delay = if voice.manual_vinyl {
+                    0
+                } else {
+                    s.key_lock.as_ref().map_or(0, |processor| {
+                        processor.latency.saturating_sub(voice.tail_frames)
+                    })
+                };
+                let audible = if voice.resume_fill > 0 {
+                    voice.resume_origin
+                } else {
+                    (s.position - remaining_delay as f64 * c.effective_rate(d) as f64).max(0.)
+                };
                 c.position[d].store(audible as u64, Relaxed);
             }
         }
         c.rendered.fetch_add(frames as u64, Relaxed);
     }
 }
+
+#[cfg(test)]
+mod vinyl_tests {
+    use super::*;
+    fn locked_source(frames: usize) -> Source {
+        let (mut producer, consumer) = RingBuffer::new(frames + 1);
+        for i in 0..frames {
+            let value = 0.1 + (i % 2000) as f32 / 20000.;
+            producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+        }
+        Source {
+            key_lock: Some(Box::new(crate::key_lock::Processor::new(48000).unwrap())),
+            ring: consumer,
+            duration: Arc::new(AtomicU64::new(frames as u64)),
+            done: Arc::new(AtomicBool::new(true)),
+            failed: Arc::new(AtomicBool::new(false)),
+            history: VecDeque::with_capacity(frames),
+            history_start: 0,
+            position: 0.,
+            primed: true,
+            separated: false,
+            stem_knobs: [0.; 3],
+        }
+    }
+    fn touch(c: &Controls, deck: usize, anchor: u64) {
+        c.vinyl_anchor[deck].store((anchor as f64).to_bits(), Relaxed);
+        c.vinyl_target[deck].store((anchor as f64).to_bits(), Relaxed);
+        c.vinyl_follow[deck].store(true, Relaxed);
+        c.scratching[deck].store(true, Relaxed);
+    }
+    #[test]
+    fn real_delay_touch_holds_without_ghost_rewind_and_release_resumes_once() {
+        for enabled in [false, true] {
+            let c = Arc::new(Controls::default());
+            c.key_lock[0].store(enabled, Relaxed);
+            let (tx, rx) = mpsc::channel();
+            let mut m = Mixer::new(48000, rx, c.clone());
+            tx.send(Command::Load(0, locked_source(100000), true, 1))
+                .unwrap();
+            tx.send(Command::Load(1, locked_source(100000), true, 1))
+                .unwrap();
+            m.render(16000, |_, _| {});
+            let anchor = c.position[0].load(Relaxed);
+            let other = c.position[1].load(Relaxed);
+            let latency = m.voices[0]
+                .source
+                .as_ref()
+                .unwrap()
+                .key_lock
+                .as_ref()
+                .unwrap()
+                .latency;
+            assert!(latency > 512);
+            touch(&c, 0, anchor);
+            m.render(1, |_, _| {});
+            assert_eq!(
+                m.voices[0].source.as_ref().unwrap().position,
+                anchor as f64,
+                "a stationary touch must align silently, never audibly rewind"
+            );
+            assert_eq!(c.position[0].load(Relaxed), anchor);
+            let mut peak = 0f32;
+            m.render(latency + 512, |i, frame| {
+                if i > 512 {
+                    peak = peak.max(frame[0].abs());
+                }
+            });
+            assert!(
+                peak < 0.00001,
+                "queued forward audio leaked into held vinyl: {peak}"
+            );
+            let target = anchor - 480;
+            c.vinyl_target[0].store((target as f64).to_bits(), Relaxed);
+            m.render(1000, |_, _| {});
+            assert!((c.position[0].load(Relaxed) as i64 - target as i64).abs() <= 1);
+            assert_eq!(
+                c.position[1].load(Relaxed),
+                other + 1 + latency as u64 + 512 + 1000
+            );
+            let held = m.voices[0].source.as_ref().unwrap().position;
+            c.vinyl_follow[0].store(false, Relaxed);
+            c.scratching[0].store(false, Relaxed);
+            m.render(1, |_, _| {});
+            assert!(
+                (c.position[0].load(Relaxed) as f64 - (held + 1.)).abs() <= 1.,
+                "release must resume the audible cursor, not replay scratch history"
+            );
+            assert_eq!(m.voices[0].resume_fill, 0);
+            let mut resumed = 0f32;
+            m.render(512, |i, frame| {
+                if i > 400 {
+                    resumed = resumed.max(frame[0].abs());
+                }
+            });
+            assert!(
+                resumed > 0.03,
+                "forward release must not wait through an empty delay"
+            );
+            // A second grab also aligns to the audible cursor after recovery.
+            let again = c.position[0].load(Relaxed);
+            touch(&c, 0, again);
+            m.render(1, |_, _| {});
+            assert_eq!(c.position[0].load(Relaxed), again);
+        }
+    }
+    #[test]
+    fn paused_vinyl_release_keeps_cursor_and_eof_drains_only_remaining_audio() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(48000, rx, c.clone());
+        tx.send(Command::Load(0, locked_source(48000), true, 1))
+            .unwrap();
+        m.render(40000, |_, _| {});
+        let anchor = c.position[0].load(Relaxed);
+        touch(&c, 0, anchor);
+        m.render(512, |_, _| {});
+        c.play[0].store(false, Relaxed);
+        c.scratching[0].store(false, Relaxed);
+        c.vinyl_follow[0].store(false, Relaxed);
+        m.render(512, |_, _| {});
+        assert_eq!(c.position[0].load(Relaxed), anchor);
+        c.play[0].store(true, Relaxed);
+        m.render(1, |_, _| {});
+        assert!((c.position[0].load(Relaxed) as i64 - anchor as i64 - 1).abs() <= 1);
+        let next = c.position[0].load(Relaxed);
+        touch(&c, 0, next);
+        m.render(1, |_, _| {});
+        c.vinyl_target[0].store(47900f64.to_bits(), Relaxed);
+        m.render(4000, |_, _| {});
+        let end = c.position[0].load(Relaxed);
+        assert!((end as i64 - 47900).abs() <= 1);
+        c.scratching[0].store(false, Relaxed);
+        c.vinyl_follow[0].store(false, Relaxed);
+        m.render(1, |_, _| {});
+        assert!(
+            (c.position[0].load(Relaxed) as i64 - end as i64 - 1).abs() <= 1,
+            "EOF zero padding must compensate published position"
+        );
+        m.render(500, |_, _| {});
+        assert!(!c.play[0].load(Relaxed));
+        assert!(c.finished[0].load(Relaxed));
+    }
+    #[test]
+    fn release_underrun_freezes_cursor_until_fresh_forward_delay_is_complete() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(48000, rx, c.clone());
+        let (mut producer, consumer) = RingBuffer::new(14001);
+        for _ in 0..14000 {
+            producer.push([0.2, 0.2, 0., 0., 0., 0.]).unwrap();
+        }
+        let done = Arc::new(AtomicBool::new(false));
+        let source = Source {
+            key_lock: Some(Box::new(crate::key_lock::Processor::new(48000).unwrap())),
+            ring: consumer,
+            duration: Arc::new(AtomicU64::new(24000)),
+            done: done.clone(),
+            failed: Arc::new(AtomicBool::new(false)),
+            history: VecDeque::with_capacity(30000),
+            history_start: 0,
+            position: 0.,
+            primed: true,
+            separated: false,
+            stem_knobs: [0.; 3],
+        };
+        tx.send(Command::Load(0, source, true, 1)).unwrap();
+        tx.send(Command::Load(1, locked_source(100000), true, 1))
+            .unwrap();
+        m.render(13000, |_, _| {});
+        let anchor = c.position[0].load(Relaxed);
+        touch(&c, 0, anchor);
+        m.render(1, |_, _| {});
+        c.vinyl_target[0].store(13900f64.to_bits(), Relaxed);
+        m.render(3000, |_, _| {});
+        let cursor = c.position[0].load(Relaxed);
+        let other = c.position[1].load(Relaxed);
+        c.scratching[0].store(false, Relaxed);
+        c.vinyl_follow[0].store(false, Relaxed);
+        m.render(128, |_, _| {});
+        assert!(m.voices[0].resume_fill > 0);
+        assert_eq!(c.position[0].load(Relaxed), cursor);
+        assert_eq!(c.position[1].load(Relaxed), other + 128);
+        assert!(c.play[0].load(Relaxed));
+        for _ in 0..10000 {
+            producer.push([0.2, 0.2, 0., 0., 0., 0.]).unwrap();
+        }
+        done.store(true, Relaxed);
+        m.render(1, |_, _| {});
+        assert_eq!(m.voices[0].resume_fill, 0);
+        assert!((c.position[0].load(Relaxed) as i64 - cursor as i64 - 1).abs() <= 1);
+    }
+    #[test]
+    fn mid_block_release_and_split_flags_never_prefill_at_scratch_rate() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(48000, rx, c.clone());
+        tx.send(Command::Load(0, locked_source(100000), true, 1))
+            .unwrap();
+        m.render(16000, |_, _| {});
+        let anchor = c.position[0].load(Relaxed);
+        touch(&c, 0, anchor);
+        m.render(1, |_, _| {});
+        m.render(64, |i, _| {
+            if i == 2 {
+                c.scratching[0].store(false, Relaxed);
+                c.vinyl_follow[0].store(false, Relaxed);
+            }
+        });
+        assert_eq!(
+            c.position[0].load(Relaxed),
+            anchor,
+            "gesture phase is stable throughout one callback"
+        );
+        m.render(1, |_, _| {});
+        assert_eq!(c.position[0].load(Relaxed), anchor + 1);
+        let again = c.position[0].load(Relaxed);
+        touch(&c, 0, again);
+        m.render(1, |_, _| {});
+        // Even a split-state old caller must not prime using stale negative rate.
+        c.vinyl_follow[0].store(false, Relaxed);
+        set(&c.scratch_rate[0], -1.);
+        m.render(1, |_, _| {});
+        assert_eq!(c.position[0].load(Relaxed), again + 1);
+        assert_eq!(m.voices[0].resume_fill, 0);
+        c.scratching[0].store(false, Relaxed);
+    }
+}
+
 pub struct Engine {
     _stream: cpal::Stream,
     monitor_stream: Option<cpal::Stream>,
@@ -2222,10 +2523,16 @@ impl Engine {
         );
     }
     pub fn scratch(&self, deck: usize, active: bool, rate: f32) {
-        if deck < DECKS {
-            self.controls.tempo_recovery[deck].store(false, Relaxed);
+        if deck >= DECKS {
+            return;
         }
-        self.controls.vinyl_follow[deck].store(false, Relaxed);
+        self.controls.tempo_recovery[deck].store(false, Relaxed);
+        // Publish release before clearing its manual-mode marker, never expose
+        // a released manual deck with an old zero/negative scratch rate.
+        if !active {
+            self.controls.scratching[deck].store(false, std::sync::atomic::Ordering::Release);
+        }
+        self.controls.vinyl_follow[deck].store(false, std::sync::atomic::Ordering::Release);
         set(
             &self.controls.scratch_rate[deck],
             if rate.is_finite() {
@@ -2234,21 +2541,22 @@ impl Engine {
                 0.
             },
         );
-        self.controls.scratching[deck].store(active, Relaxed);
+        self.controls.scratching[deck].store(active, std::sync::atomic::Ordering::Release);
     }
     pub fn vinyl_target(&self, deck: usize, seconds: f64) {
-        if deck < DECKS {
-            self.controls.tempo_recovery[deck].store(false, Relaxed);
-        }
-        if !seconds.is_finite() {
+        if deck >= DECKS || !seconds.is_finite() {
             return;
         }
-        self.controls.vinyl_target[deck].store(
-            (seconds.max(0.) * self.sample_rate as f64).to_bits(),
-            Relaxed,
-        );
-        self.controls.vinyl_follow[deck].store(true, Relaxed);
-        self.controls.scratching[deck].store(true, Relaxed);
+        self.controls.tempo_recovery[deck].store(false, Relaxed);
+        let target = (seconds.max(0.) * self.sample_rate as f64).to_bits();
+        if !self.controls.vinyl_follow[deck].load(Relaxed)
+            || !self.controls.scratching[deck].load(Relaxed)
+        {
+            self.controls.vinyl_anchor[deck].store(target, Relaxed);
+        }
+        self.controls.vinyl_target[deck].store(target, Relaxed);
+        self.controls.vinyl_follow[deck].store(true, std::sync::atomic::Ordering::Release);
+        self.controls.scratching[deck].store(true, std::sync::atomic::Ordering::Release);
     }
     pub fn schedule_section(
         &mut self,

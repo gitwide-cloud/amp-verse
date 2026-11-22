@@ -158,6 +158,22 @@ impl Processor {
             processing: false,
         })
     }
+    /// Clear pre-touch audio while reusing all callback-owned buffers.
+    pub fn reset_vinyl_delay(&mut self) {
+        self.at = 0;
+        self.primed = 0;
+        self.wet = 0.;
+        self.processing = false;
+        self.input.fill(0.);
+        self.output.fill(0.);
+        self.dry.fill([0.; 2]);
+        self.dry_at = 0;
+    }
+    /// Prime the shared delay with fresh forward audio; pitch DSP warms normally.
+    pub fn prime_vinyl_release(&mut self, frame: [f32; 2]) {
+        self.dry[self.dry_at] = frame;
+        self.dry_at = (self.dry_at + 1) % self.dry.len();
+    }
     pub fn frame(
         &mut self,
         frame: [f32; 2],
