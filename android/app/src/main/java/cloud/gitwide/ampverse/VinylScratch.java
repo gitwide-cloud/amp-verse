@@ -52,7 +52,7 @@ final class VinylScratch {
     void gain(int deck,float value){Session s=slots[deck].session;if(s!=null)s.gain=Math.max(0,Math.min(1,value));}
     boolean ready(int deck){Slot slot=slots[deck];return !closed&&routeRegistered&&slot.window!=null&&slot.key.equals(key(deck))&&slot.window.covers(decks[deck].getCurrentPosition(),0);}
     void prepare(int deck){
-        if(closed||busy(deck)||!VinylDecoder.available())return;ExoPlayer player=decks[deck];MediaItem item=player.getCurrentMediaItem();
+        if(closed||!routeRegistered||busy(deck)||!VinylDecoder.available())return;ExoPlayer player=decks[deck];MediaItem item=player.getCurrentMediaItem();
         if(item==null||item.localConfiguration==null)return;String key=key(deck),scheme=item.localConfiguration.uri.getScheme();
         if(!"file".equals(scheme)&&!"content".equals(scheme))return;
         long position=player.getCurrentPosition();Slot slot=slots[deck];if(android.os.SystemClock.elapsedRealtime()<slot.retryAfter)return;
@@ -76,7 +76,7 @@ final class VinylScratch {
     }
     boolean begin(int deck){
         if(closed||busy(deck))return false;
-        if(!routeRegistered){message.accept("Scratch route protection is unavailable. Current playback was not changed; reopen DJ and retry.");return false;}
+        if(!routeRegistered){message.accept("Scratch output is unavailable. Current playback was not changed; restart AMP Verse and retry.");return false;}
         if(!VinylDecoder.available()){message.accept("Real vinyl scratch requires AMP Verse Full with the local-audio decoder. Open or update Full DJ; no seek imitation was used.");return false;}
         MediaItem source=decks[deck].getCurrentMediaItem();
         if(source==null||source.localConfiguration==null||!("file".equals(source.localConfiguration.uri.getScheme())||"content".equals(source.localConfiguration.uri.getScheme()))){message.accept("Scratch needs a local or downloaded song. Current playback was not changed.");return false;}
