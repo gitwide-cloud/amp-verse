@@ -194,6 +194,49 @@ async fn emit(
     }
     Ok(())
 }
+#[derive(Clone)]
+struct SmartSession {
+    cycle: std::sync::Arc<std::sync::Mutex<amp_core::smart_cycle::SmartCycle>>,
+    library: String,
+}
+impl SmartSession {
+    fn new(cast: &Cast) -> Self {
+        Self {
+            cycle: Default::default(),
+            library: cast
+                .library_id
+                .clone()
+                .unwrap_or_else(|| cast.root.to_string_lossy().into_owned()),
+        }
+    }
+    fn pick(
+        &self,
+        cast: &Cast,
+        p: &SmartPlaylist,
+        current: Option<usize>,
+        target: Option<f64>,
+    ) -> Result<usize, String> {
+        self.cycle
+            .lock()
+            .unwrap()
+            .ranked(&self.library, p, &cast.tracks, current, target, None)
+            .first()
+            .copied()
+            .ok_or_else(|| "No playable eligible songs remain in Smart Playlist".into())
+    }
+    fn played(&self, cast: &Cast, p: &SmartPlaylist, index: usize) {
+        self.cycle
+            .lock()
+            .unwrap()
+            .played(&self.library, &p.id, &cast.tracks[index]);
+    }
+    fn failed(&self, cast: &Cast, p: &SmartPlaylist, index: usize) {
+        self.cycle
+            .lock()
+            .unwrap()
+            .failed(&self.library, &p.id, &cast.tracks[index]);
+    }
+}
 fn pick(
     cast: &Cast,
     profile: Option<&SmartPlaylist>,
@@ -205,11 +248,6 @@ fn pick(
 ) -> Result<usize, String> {
     if let Some(p) = profile {
         show::choose(p, &cast.tracks, current, recent, target, 0)
-            .or_else(|| {
-                current.filter(|i| {
-                    p.fallback == show::Fallback::RelaxRecent && show::eligible(p, &cast.tracks[*i])
-                })
-            })
             .ok_or_else(|| "No eligible songs remain in Smart Playlist".into())
     } else {
         let index = *indices
@@ -231,6 +269,7 @@ async fn prepare_next(
     recent: Vec<String>,
     target: Option<f64>,
     bpm: Option<f64>,
+    cycle: Option<SmartSession>,
 ) -> Result<Decoded, String> {
     let mut index = first;
     let mut failed = std::collections::HashSet::new();
@@ -251,6 +290,9 @@ async fn prepare_next(
             )),
         }
         failed.insert(index);
+        if let (Some(cycle), Some(rules)) = (&cycle, &profile) {
+            cycle.failed(&cast, rules, index);
+        }
         if let Some(rules) = &mut profile {
             rules.excluded.push(show::song_id(&cast.tracks[index]));
         }
@@ -269,15 +311,20 @@ async fn prepare_next(
         if profile.is_none() {
             cursor = 0;
         }
-        match pick(
-            &cast,
-            profile.as_ref(),
-            &candidates,
-            &mut cursor,
-            current,
-            &recent,
-            target,
-        ) {
+        let next = if let (Some(cycle), Some(rules)) = (&cycle, &profile) {
+            cycle.pick(&cast, rules, current, target)
+        } else {
+            pick(
+                &cast,
+                profile.as_ref(),
+                &candidates,
+                &mut cursor,
+                current,
+                &recent,
+                target,
+            )
+        };
+        match next {
             Ok(next) if !failed.contains(&next) => index = next,
             _ => break,
         }
@@ -436,18 +483,15 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
     let mut profile: Option<SmartPlaylist> = selection
         .as_ref()
         .and_then(|v| serde_json::from_value(v["rules"].clone()).ok());
+    let cycle = SmartSession::new(&cast);
     let mut cursor = 0;
     let mut recent = Vec::new();
     let mut target = profile.as_ref().and_then(|p| p.target_energy);
-    let first = pick(
-        &cast,
-        profile.as_ref(),
-        &indices,
-        &mut cursor,
-        None,
-        &recent,
-        target,
-    )?;
+    let first = if let Some(p) = &profile {
+        cycle.pick(&cast, p, None, target)?
+    } else {
+        pick(&cast, None, &indices, &mut cursor, None, &recent, target)?
+    };
     let mut current = if finite {
         let (decoded, actual) = prepare_finite(cast.clone(), occurrence, owner)
             .await?
@@ -464,6 +508,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             recent.clone(),
             target,
             None,
+            Some(cycle.clone()),
         )
         .await?
     };
@@ -624,6 +669,14 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             mix_revision = requested.revision;
             cast.station.lock().await.mix_revision = mix_revision;
         }
+        if let Some(p) = &profile {
+            if consumed == 0 {
+                let first_frames = current.frames.min(1024);
+                emit(&mut current, first_frames, &mut input, &mut clock).await?;
+                consumed = first_frames;
+            }
+            cycle.played(&cast, p, current.index);
+        }
         recent.push(show::song_id(&cast.tracks[current.index]));
         if recent.len() > 100 {
             recent.remove(0);
@@ -631,15 +684,20 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
         if let Some(plan) = &progression {
             target = Some(plan.next());
         }
-        let next_index = match pick(
-            &cast,
-            profile.as_ref(),
-            &indices,
-            &mut cursor,
-            Some(current.index),
-            &recent,
-            target,
-        ) {
+        let candidate = if let Some(p) = &profile {
+            cycle.pick(&cast, p, Some(current.index), target)
+        } else {
+            pick(
+                &cast,
+                None,
+                &indices,
+                &mut cursor,
+                Some(current.index),
+                &recent,
+                target,
+            )
+        };
+        let next_index = match candidate {
             Ok(index) => index,
             Err(error) => {
                 let remaining = current.frames.saturating_sub(consumed);
@@ -663,6 +721,7 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             recent.clone(),
             target,
             bpm,
+            Some(cycle.clone()),
         )));
         let fade_seconds = fade_seconds();
         let fade = (fade_seconds * RATE as f64) as u64;
@@ -768,6 +827,69 @@ mod reliability_tests {
     use super::*;
     use tower::ServiceExt;
     #[tokio::test]
+    #[ignore = "requires FFmpeg; generated Smart station cycle, no physical audio device"]
+    async fn smart_cycle_station_uses_entire_playable_pool_before_repeat() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("bad.wav"), b"broken").unwrap();
+        for i in 0..6 {
+            assert!(
+                amp_core::command("ffmpeg")
+                    .args(["-v", "fatal", "-f", "lavfi", "-i"])
+                    .arg(format!("sine=frequency={}:duration=0.6", 400 + i * 70))
+                    .arg(root.path().join(format!("t{i}.wav")))
+                    .status()
+                    .unwrap()
+                    .success()
+            );
+        }
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        let mut profile = show::Settings::default().playlists.remove(0);
+        profile.recent_repeat = 1;
+        let ids: Vec<_> = (0..cast.tracks.len()).collect();
+        *cast.selection.lock().unwrap() =
+            Some(serde_json::json!({"kind":"smart","rules":profile,"tracks":ids}));
+        let response = router(cast.clone())
+            .oneshot(
+                axum::http::Request::post("/api/start")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NO_CONTENT);
+        let mut heard = Vec::new();
+        let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
+        while heard.len() < 7 {
+            {
+                let station = cast.station.lock().await;
+                assert!(station.running, "{:?}", station.error);
+                if let Some(index) = station.current_index {
+                    assert_ne!(cast.tracks[index].path, std::path::PathBuf::from("bad.wav"));
+                    if heard.last() != Some(&index) {
+                        heard.push(index);
+                    }
+                }
+            }
+            assert!(
+                tokio::time::Instant::now() < deadline,
+                "Not enough audible handoffs: {heard:?}"
+            );
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+        cast.shutdown().await;
+        let unique: std::collections::HashSet<_> = heard[..6].iter().collect();
+        assert_eq!(
+            unique.len(),
+            6,
+            "repeat before the playable pool completed: {heard:?}"
+        );
+        assert_ne!(heard[5], heard[6]);
+    }
+    #[tokio::test]
     #[ignore = "requires FFmpeg; real encoded short-session test, no receiver hardware"]
     async fn repeated_handoffs_survive_bad_files_and_shutdown_cleanly() {
         let root = tempfile::tempdir().unwrap();
@@ -872,6 +994,7 @@ mod reliability_tests {
             vec![],
             None,
             None,
+            None,
         )
         .await
         .unwrap();
@@ -881,7 +1004,7 @@ mod reliability_tests {
             amp_core::preparation::load(&root.path().join("good.wav")).unwrap(),
             before
         );
-        let failure = prepare_next(cast, bad, None, vec![bad], None, vec![], None, None)
+        let failure = prepare_next(cast, bad, None, vec![bad], None, vec![], None, None, None)
             .await
             .err()
             .unwrap();

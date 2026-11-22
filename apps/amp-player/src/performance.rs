@@ -95,6 +95,8 @@ pub struct Run {
     completed_handoffs: u32,
     pub future_candidates: VecDeque<usize>,
     failed_songs: Vec<String>,
+    smart_cycle: amp_core::smart_cycle::SmartCycle,
+    smart_audible: Option<(usize, usize, u64)>,
     pub progression: Option<show::Progression>,
     planned_progression: Option<show::EnergyPlan>,
     planned_force: bool,
@@ -133,6 +135,8 @@ impl Default for Run {
             completed_handoffs: 0,
             future_candidates: VecDeque::new(),
             failed_songs: Vec::new(),
+            smart_cycle: Default::default(),
+            smart_audible: None,
             progression: None,
             planned_progression: None,
             planned_force: false,
@@ -156,6 +160,8 @@ impl Run {
         self.playlist = Some(name);
         self.requests.clear();
         self.failed_songs.clear();
+        self.smart_cycle = Default::default();
+        self.smart_audible = None;
         self.progression = None;
         self.planned_progression = None;
         self.regular = Some(RegularRun {
@@ -779,10 +785,48 @@ impl Player {
             }
         }
     }
+    fn commit_smart_audible(&mut self) {
+        let Some(profile) = self.run.profile.as_ref() else {
+            return;
+        };
+        if self.playback_owner != crate::playback_owner::Owner::Dj {
+            return;
+        }
+        let deck = self.active_deck();
+        if self.run.preloaded.is_some_and(|(d, _)| d == deck) {
+            return;
+        }
+        if !self.audio.as_ref().is_some_and(|a| {
+            a.load_current(deck)
+                && a.loaded(deck)
+                && a.controls.ready[deck].load(Relaxed)
+                && a.playing(deck)
+        }) {
+            return;
+        }
+        if self.loaded_origin[deck].as_deref() != Some(self.root.as_path()) {
+            return;
+        }
+        if let Some(index) = self.loaded[deck] {
+            let generation =
+                self.audio.as_ref().unwrap().controls.deck_generation[deck].load(Relaxed);
+            let event = (deck, index, generation);
+            if self.run.smart_audible == Some(event) {
+                return;
+            }
+            if let Some(track) = self.library.as_ref().and_then(|l| l.tracks.get(index)) {
+                self.run
+                    .smart_cycle
+                    .played(&self.root.to_string_lossy(), &profile.id, track);
+                self.run.smart_audible = Some(event);
+            }
+        }
+    }
     fn preload_smart(&mut self) -> Result<(), String> {
         self.preload_variant(0)
     }
     fn preload_variant(&mut self, alternate: usize) -> Result<(), String> {
+        self.commit_smart_audible();
         if self.cancel_changed_regular_queue() {
             return Err(self.status.clone());
         }
@@ -836,7 +880,6 @@ impl Player {
             .clone();
         p.excluded.extend(self.run.failed_songs.iter().cloned());
         let current = self.loaded[self.active_deck()];
-        let recent: Vec<_> = self.run.recent.iter().cloned().collect();
         let tracks = &self.library.as_ref().ok_or("Library unavailable")?.tracks;
         let target = self
             .run
@@ -844,16 +887,16 @@ impl Player {
             .as_ref()
             .map(|p| p.next())
             .or(self.run.target);
+        let cycle_candidates = self.run.smart_cycle.ranked(
+            &self.root.to_string_lossy(),
+            &p,
+            tracks,
+            current,
+            target,
+            None,
+        );
         while let Some(index) = self.run.future_candidates.pop_front() {
-            if current != Some(index)
-                && let Some(track) = tracks.get(index)
-                && show::eligible(&p, track)
-                && !recent
-                    .iter()
-                    .rev()
-                    .take(p.recent_repeat)
-                    .any(|id| *id == show::song_id(track))
-            {
+            if cycle_candidates.contains(&index) {
                 return self.call_track(index, None, Deck::Auto, Execution::LoadOnly);
             }
         }
@@ -880,8 +923,14 @@ impl Player {
                     .extensions
                     .insert("runtime_rank_next_key_lock".into(), json!(available));
             }
-            let ranked =
-                show::ranked_with_snapshot(&p, tracks, current, &recent, target, snapshot.as_ref());
+            let ranked = self.run.smart_cycle.ranked(
+                &self.root.to_string_lossy(),
+                &p,
+                tracks,
+                current,
+                target,
+                snapshot.as_ref(),
+            );
             let mut index=*ranked.get(alternate.min(ranked.len().saturating_sub(1))).ok_or("Auto Mix stopped: no playable next song matches this playlist's source and repeat rules")?;
             let wants_mashup = self.run.force_mashup
                 || self.run.transitions.pick(self.run.completed_handoffs)
@@ -1757,6 +1806,8 @@ impl Player {
                     return Err("This saved Smart Playlist has no matching songs. Choose its Music Source in Library, then Save Playlist.".into());
                 }
                 self.run.failed_songs.clear();
+                self.run.smart_cycle = Default::default();
+                self.run.smart_audible = None;
                 self.run.choice = p.id.clone();
                 self.run.planned_progression = p.energy_progression.clone();
                 self.run.planned_force = false;
@@ -2136,6 +2187,7 @@ impl Player {
             return;
         }
         self.commit_regular_audible_start();
+        self.commit_smart_audible();
         if self.run.auto
             && self.run.has_regular_playlist()
             && self.run.preloaded.is_none()
@@ -2834,6 +2886,128 @@ mod tests {
                 },
             }),
             ..Default::default()
+        }
+    }
+    #[test]
+    #[ignore = "muted generated native audio; requires a paced null sink"]
+    fn smart_cycle_only_consumes_audible_loads_not_cancelled_preloads() {
+        fn ready(player: &mut Player, deck: usize) {
+            let end = Instant::now() + Duration::from_secs(8);
+            loop {
+                player.performance_tick();
+                if player
+                    .audio
+                    .as_ref()
+                    .is_some_and(|a| a.load_current(deck) && a.controls.ready[deck].load(Relaxed))
+                {
+                    break;
+                }
+                assert!(Instant::now() < end);
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let fixture = root.path().join("fixture.wav");
+        assert!(
+            amp_core::command("ffmpeg")
+                .args([
+                    "-v",
+                    "fatal",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=440:duration=8"
+                ])
+                .arg(&fixture)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for i in 0..3 {
+            let folder = root.path().join(format!("source-{i}"));
+            std::fs::create_dir(&folder).unwrap();
+            std::fs::copy(&fixture, folder.join("song.wav")).unwrap();
+        }
+        let mut player = normal_test_player(root.path());
+        player.channel_gain = [0.; 6];
+        player.run.profile = Some(show::Settings::default().playlists.remove(0));
+        player.run.profile.as_mut().unwrap().recent_repeat = 1;
+        player.run.playlist = Some("demo".into());
+        player.run.transitions.enabled = false;
+        player.preload_smart().unwrap();
+        let (deck, first) = player.run.preloaded.unwrap();
+        ready(&mut player, deck);
+        player.commit_smart_audible();
+        let profile = player.run.profile.clone().unwrap();
+        assert_eq!(
+            player
+                .run
+                .smart_cycle
+                .ranked(
+                    &root.path().to_string_lossy(),
+                    &profile,
+                    &player.library.as_ref().unwrap().tracks,
+                    None,
+                    None,
+                    None
+                )
+                .len(),
+            3,
+            "prefetch is not playback"
+        );
+        player.run.preloaded = None;
+        player.audio.as_mut().unwrap().stop(deck);
+        let mut heard = std::collections::HashSet::new();
+        let mut active = deck;
+        for _ in 0..3 {
+            let current = player.loaded[player.active_deck()];
+            let index = player.run.smart_cycle.ranked(
+                &root.path().to_string_lossy(),
+                &profile,
+                &player.library.as_ref().unwrap().tracks,
+                current,
+                None,
+                None,
+            )[0];
+            assert!(heard.insert(index));
+            player
+                .call_track(index, None, Deck::PHYSICAL[active], Execution::PlayNow)
+                .unwrap();
+            ready(&mut player, active);
+            player.commit_smart_audible();
+            active = 1 - active;
+        }
+        assert_eq!(heard.len(), 3);
+        assert!(heard.contains(&first));
+        let last = player.loaded[player.active_deck()].unwrap();
+        player.preload_smart().unwrap();
+        let (_, next) = player.run.preloaded.unwrap();
+        assert_ne!(next, last);
+        player.run.preloaded = None;
+        for _ in 0..5 {
+            player.commit_smart_audible();
+        }
+        player
+            .call_track(next, None, Deck::PHYSICAL[active], Execution::PlayNow)
+            .unwrap();
+        ready(&mut player, active);
+        player.commit_smart_audible();
+        let remaining = player.run.smart_cycle.ranked(
+            &root.path().to_string_lossy(),
+            &profile,
+            &player.library.as_ref().unwrap().tracks,
+            Some(next),
+            None,
+            None,
+        );
+        assert!(
+            remaining.contains(&last),
+            "old boundary playback must not be consumed a second time by UI ticks"
+        );
+        if let Some(audio) = &mut player.audio {
+            for d in 0..6 {
+                audio.stop(d);
+            }
         }
     }
     #[test]

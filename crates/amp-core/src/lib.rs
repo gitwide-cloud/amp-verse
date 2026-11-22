@@ -20,6 +20,7 @@ pub mod knowledge;
 pub mod playlist_sync_contract;
 pub mod podcast_feed;
 pub mod show;
+pub mod smart_cycle;
 pub mod smart;
 pub mod smart_filters;
 // Compatibility names keep existing integrations on the same implementation.
