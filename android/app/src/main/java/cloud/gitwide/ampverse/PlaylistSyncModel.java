@@ -31,6 +31,13 @@ final class PlaylistSyncModel {
         // Missing entries are retained: this protocol has no deletion tombstones.
         state.put("smart_revision",snapshot.opt("smart_revision")).put("snapshot_token",snapshot.optString("snapshot_token"));
     }
+    static String deliveryStatus(JSONObject state)throws JSONException {
+        int queued=0,blocked=0;JSONObject entries=state.getJSONObject("documents");Iterator<String> ids=entries.keys();
+        while(ids.hasNext()){JSONObject entry=entries.getJSONObject(ids.next());if(entry.has("blocked"))blocked++;else if(entry.has("desired")||entry.has("pending"))queued++;}
+        if(blocked>0)return blocked+" saved phone draft(s) need review; they have NOT been delivered. "+queued+" edit(s) still queued.";
+        if(queued>0)return queued+" saved phone edit(s) queued; waiting for server acknowledgment.";
+        return "Server saved playlists verified. Other devices receive updates when connected; phone-only drafts are not uploaded.";
+    }
     static JSONObject visible(JSONObject entry)throws JSONException {return copy(entry.has("desired")?entry.getJSONObject("desired"):entry.getJSONObject("baseline"));}
     private static JSONObject mergeDraft(JSONObject base,JSONObject current,JSONObject proposed)throws JSONException {
         JSONObject merged=copy(current);Set<String> keys=new HashSet<>();Iterator<String> a=base.keys(),b=proposed.keys();while(a.hasNext())keys.add(a.next());while(b.hasNext())keys.add(b.next());

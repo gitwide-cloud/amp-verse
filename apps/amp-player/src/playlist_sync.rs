@@ -149,15 +149,44 @@ fn read(path: &Path) -> Result<Option<Value>, String> {
         })
         .transpose()
 }
+fn canonical_within(root: &Path, target: &Path) -> bool {
+    let mut target = target.components();
+    root.components().all(|expected| {
+        target.next().is_some_and(|actual| {
+            #[cfg(windows)]
+            {
+                expected
+                    .as_os_str()
+                    .as_encoded_bytes()
+                    .eq_ignore_ascii_case(actual.as_os_str().as_encoded_bytes())
+            }
+            #[cfg(not(windows))]
+            {
+                expected == actual
+            }
+        })
+    })
+}
 fn checked(root: &Path, target: &Path) -> Result<(), String> {
-    if !target.starts_with(root) {
+    let relative = target
+        .strip_prefix(root)
+        .map_err(|_| "Playlist path leaves paired library")?;
+    if relative.components().any(|c| {
+        !matches!(
+            c,
+            std::path::Component::Normal(_) | std::path::Component::CurDir
+        )
+    }) {
         return Err("Playlist path leaves paired library".into());
     }
+    // Persisted UNC/drive spellings are not canonical filesystem identities. Resolve
+    // BOTH sides; compare whole components, never a lossy string-prefix boundary.
+    let canonical_root = root.canonicalize().map_err(err)?;
     let ancestor = target
         .ancestors()
         .find(|p| p.exists())
         .ok_or("Missing library path")?;
-    if !ancestor.canonicalize().map_err(err)?.starts_with(root) {
+    if !canonical_within(&canonical_root, &ancestor.canonicalize().map_err(err)?) {
         return Err("Linked playlist path leaves library".into());
     }
     Ok(())
@@ -866,6 +895,62 @@ mod tests {
         }
     }
     #[test]
+    fn checked_canonicalizes_saved_root_and_keeps_escape_boundaries() {
+        let (directory, binding) = fixture();
+        let alias = binding.root.join(".");
+        checked(&alias, &alias.join("ampdj/playlists/new.json")).unwrap();
+        assert!(checked(&binding.root, &binding.root.join("../outside.json")).is_err());
+        assert!(!canonical_within(
+            &binding.root,
+            &directory.path().join("music-other")
+        ));
+        #[cfg(unix)]
+        {
+            let outside = directory.path().join("outside");
+            std::fs::create_dir(&outside).unwrap();
+            std::os::unix::fs::symlink(&outside, binding.root.join("escape")).unwrap();
+            assert!(checked(&binding.root, &binding.root.join("escape/new.json")).is_err());
+            let alias = directory.path().join("library-alias");
+            std::os::unix::fs::symlink(&binding.root, &alias).unwrap();
+            checked(&alias, &alias.join("ampdj/playlists/new.json")).unwrap();
+        }
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_unc_case_and_real_mixed_case_roots_keep_component_boundaries() {
+        let unc = Path::new(r"\\?\UNC\LAGnas\Public\plex\music");
+        assert!(canonical_within(
+            unc,
+            Path::new(r"\\?\UNC\lagnas\public\plex\MUSIC\ampdj")
+        ));
+        assert!(!canonical_within(
+            unc,
+            Path::new(r"\\?\UNC\lagnas\public\plex\music-other\ampdj")
+        ));
+        assert!(!canonical_within(
+            unc,
+            Path::new(r"\\?\UNC\lagnas\private\plex\music\ampdj")
+        ));
+        let (_directory, binding) = fixture();
+        let alternate = PathBuf::from(binding.root.to_string_lossy().to_ascii_uppercase());
+        checked(&alternate, &alternate.join("ampdj/playlists/new.json")).unwrap();
+        let outside = binding.root.parent().unwrap().join("outside-junction");
+        std::fs::create_dir(&outside).unwrap();
+        let junction = binding.root.join("escape-junction");
+        let created = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(&junction)
+            .arg(&outside)
+            .output()
+            .unwrap();
+        assert!(
+            created.status.success(),
+            "Windows junction fixture must be created"
+        );
+        assert!(checked(&binding.root, &junction.join("new.json")).is_err());
+        std::fs::remove_dir(&junction).unwrap();
+    }
+    #[test]
     fn blocked_storage_worker_never_blocks_ui_or_probes_a_missing_root_on_completion() {
         let (_dir, mut binding) = fixture();
         binding.root = std::env::temp_dir().join(format!(
@@ -1217,6 +1302,89 @@ mod tests {
             let _ = self.stop.take().unwrap().send(());
             self.thread.take().unwrap().join().unwrap();
         }
+    }
+    #[test]
+    fn phone_operations_reach_real_server_then_independent_desktop_documents() {
+        let server = Server::start();
+        let transport = Transport::new(&server.binding).unwrap();
+        let mut normal = normal(&server.binding, "phone-gospel", "Phone Gospel");
+        let reference = normal.document["tracks"][0].clone();
+        normal.document["tracks"]
+            .as_array_mut()
+            .unwrap()
+            .push(reference);
+        let mut create = operation(&server.binding, &normal, Value::Null, Action::Create);
+        create.device_id = "android-phone-fixture".into();
+        assert_eq!(transport.post(&create).unwrap()["status"], "applied");
+        let snapshot = transport.get().unwrap();
+        let mut rules =
+            serde_json::to_value(&amp_core::show::Settings::default().playlists[0]).unwrap();
+        rules["id"] = json!("phone-filtered");
+        rules["name"] = json!("Phone Gospel Smart");
+        rules["genres"] = json!(["Gospel"]);
+        rules["filters"] = json!([{"type":"Number","field":"Bpm","min":90.,"max":130.}]);
+        let smart = Document {
+            document_id: "smart_phone-filtered".into(),
+            kind: Kind::Smart,
+            document_version: 2,
+            revision: Value::Null,
+            document: rules,
+        };
+        let mut create = operation(
+            &server.binding,
+            &smart,
+            snapshot.smart_revision,
+            Action::Create,
+        );
+        create.device_id = "android-phone-fixture".into();
+        assert_eq!(transport.post(&create).unwrap()["status"], "applied");
+        let root = server._dir.path().join("independent-desktop");
+        std::fs::create_dir(&root).unwrap();
+        std::fs::create_dir(root.join("ampdj")).unwrap();
+        std::fs::copy(
+            server.binding.root.join("ampdj/library.json"),
+            root.join("ampdj/library.json"),
+        )
+        .unwrap();
+        let mut desktop = server.binding.clone();
+        desktop.root = root.canonicalize().unwrap();
+        desktop.ui_root = root;
+        cycle(&desktop, &server._dir.path().join("desktop-private")).unwrap();
+        let observed = local(&desktop).unwrap();
+        assert_eq!(
+            observed["normal_phone-gospel"].document["tracks"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            observed["normal_phone-gospel"].document["name"],
+            "Phone Gospel"
+        );
+        assert_eq!(
+            observed["smart_phone-filtered"].document["filters"],
+            smart.document["filters"]
+        );
+        assert_eq!(
+            observed["smart_phone-filtered"].document["genres"],
+            json!(["Gospel"])
+        );
+        let saved = view(&desktop).unwrap();
+        assert!(
+            saved
+                .normal
+                .iter()
+                .any(|(_, p)| p.name == "Phone Gospel" && p.tracks.len() == 2)
+        );
+        assert!(
+            saved
+                .settings
+                .unwrap()
+                .playlists
+                .iter()
+                .any(|p| p.name == "Phone Gospel Smart" && !p.filters.is_empty())
+        );
     }
     #[test]
     fn open_lan_real_backend_syncs_without_code_and_still_pins_authority() {
