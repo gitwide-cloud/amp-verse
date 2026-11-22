@@ -721,9 +721,17 @@ async fn playlists(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respons
                 && safe_id(id)
             {
                 let p = cast.root.join("ampdj/playlists").join(format!("{id}.json"));
-                if let Ok(p) = amp_core::Playlist::load(&p, &cast.root) {
-                    list["revision"] = serde_json::to_value(p.sync).map_err(|e| e.to_string())?;
-                }
+                let (playlist, mut raw) = sharing::normal_playlist_data(&cast, &p)?;
+                amp_core::coordination::adopt_legacy(&mut raw)?;
+                list["revision"] = raw.get("_amp_sync").cloned().unwrap_or(Value::Null);
+                list["track_paths"] = json!(
+                    playlist
+                        .tracks
+                        .iter()
+                        .map(|p| player_control::portable_path(p))
+                        .collect::<Vec<_>>()
+                );
+                list["companion_available"] = json!(playlist.companion_available);
             }
         }
         let settings = raw_smart_settings(&cast)?;
@@ -743,18 +751,18 @@ struct PlaylistEdit {
     name: String,
     #[serde(default)]
     tracks: Vec<usize>,
-    rules: Option<amp_core::show::SmartPlaylist>,
+    rules: Option<Value>,
     revision: Option<Value>,
 }
 async fn save_playlist(
     State(cast): State<Arc<Cast>>,
     headers: HeaderMap,
-    Json(mut e): Json<PlaylistEdit>,
+    Json(e): Json<PlaylistEdit>,
 ) -> Response {
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    if let Some(paths) = e.track_paths.take() {
+    if let Some(paths) = &e.track_paths {
         if e.library_id.as_deref() != cast.library_id.as_deref() || cast.library_id.is_none() {
             return err(
                 StatusCode::CONFLICT,
@@ -764,17 +772,6 @@ async fn save_playlist(
         if paths.len() > 20000 {
             return err(StatusCode::BAD_REQUEST, "Playlist has too many songs.");
         }
-        let Some(indices) = paths
-            .iter()
-            .map(|path| player_control::track_index(&cast, path))
-            .collect::<Option<Vec<_>>>()
-        else {
-            return err(
-                StatusCode::CONFLICT,
-                "A selected song left this library. Refresh before saving.",
-            );
-        };
-        e.tracks = indices;
     }
     if e.name.trim().is_empty() || e.name.len() > 200 || e.tracks.len() > 20000 {
         return err(StatusCode::BAD_REQUEST, "Invalid playlist");
@@ -785,14 +782,17 @@ async fn save_playlist(
             if e.revision.as_ref() != Some(&current) {
                 return Err("Smart playlists changed; reload settings revision".into());
             }
-            rules.name = e.name;
+            if !rules.is_object() {return Err("Invalid Smart rules".into());}
+            rules["name"] = json!(e.name);
             let id = e.id.unwrap_or_else(amp_core::coordination::token);
             let id = id.strip_prefix("smart_").unwrap_or(&id);
             if !safe_id(id) {
                 return Err("Invalid playlist ID".into());
             }
-            rules.id = id.into();
-            let rule_value = serde_json::to_value(&rules).map_err(|e| e.to_string())?;
+            rules["id"] = json!(id);
+            // Validate a typed copy, but preserve the caller's full raw nested rules.
+            let _:amp_core::show::SmartPlaylist=serde_json::from_value(rules.clone()).map_err(|e|e.to_string())?;
+            let rule_value = rules;
             let entries = current["playlists"]
                 .as_array_mut()
                 .ok_or("Invalid Smart playlist container")?;
@@ -846,32 +846,30 @@ async fn save_playlist(
             {
                 return Err("Playlist leaves library".into());
             }
-            let existing = amp_core::Playlist::load(&path, &cast.root).ok();
-            let current = existing
-                .as_ref()
-                .and_then(|p| p.sync.as_ref())
-                .map(|r| serde_json::to_value(r).unwrap());
-            if current != e.revision {
-                return Err("Playlist changed; reload before saving".into());
-            }
-            let list = amp_core::Playlist {
-                version: 1,
-                name: e.name,
-                tracks: e
-                    .tracks
-                    .iter()
-                    .map(|i| {
-                        cast.tracks
-                            .get(*i)
-                            .map(|t| t.path.clone())
-                            .ok_or("Track unavailable")
-                    })
-                    .collect::<Result<Vec<_>, _>>()?,
-                sync: existing.and_then(|p| p.sync),
-                companion_available: false,
+            let existing = if path.exists() || amp_core::catalog_db::read(&path)?.is_some() {
+                let (playlist,mut raw)=sharing::normal_playlist_data(&cast,&path)?;
+                amp_core::coordination::adopt_legacy(&mut raw)?;
+                Some((playlist,raw))
+            } else {None};
+            let current=existing.as_ref().and_then(|(_,v)|v.get("_amp_sync")).cloned();
+            if current!=e.revision {return Err("Playlist changed; reload before saving".into());}
+            let library=cast.library_id.as_deref().ok_or("Library identity unavailable")?;
+            let paths = match e.track_paths {
+                Some(paths)=>paths,
+                None=>e.tracks.iter().map(|i|cast.tracks.get(*i).map(|t|player_control::portable_path(&t.path)).ok_or("Track unavailable")).collect::<Result<Vec<_>,_>>()?,
             };
-            list.save_in_library(&path, &cast.root)
-                .map_err(|e| e.to_string())?;
+            let old:std::collections::HashSet<_>=existing.as_ref().map(|(p,_)|p.tracks.iter().map(|p|player_control::portable_path(p)).collect()).unwrap_or_default();
+            let mut portable=Vec::with_capacity(paths.len());
+            for path in paths {
+                let relative=path.replace('\\',"/");
+                let reference=amp_core::playlist_sync_contract::TrackRef{library_id:library.into(),track_key:format!("song_{:x}",Sha256::digest(relative.as_bytes())),relative_path:relative.clone()};
+                reference.validate(library)?;
+                if player_control::track_index(&cast,&relative).is_none()&&!old.contains(&relative){return Err("A new song is not in this library. Existing unavailable references may be retained, moved or removed.".into());}
+                portable.push(relative);
+            }
+            let mut value=existing.map(|(_,v)|v).unwrap_or_else(||json!({"version":1,"companion_available":false}));
+            value["name"]=json!(e.name);value["tracks"]=json!(portable);
+            amp_core::coordination::save_document(&path,&value,library)?;
             Ok(json!({"id":id}))
         }
     })
@@ -1220,6 +1218,46 @@ mod api_tests {
         let after = raw_smart_settings(&_cast).unwrap();
         assert_eq!(saved, after);
     }
+    #[tokio::test]
+    async fn browser_smart_rename_retains_nested_opaque_rules_and_all_genres() {
+        let (root, cast, app) = fixture();
+        let file = root.path().join("ampdj/smart-playlists.json");
+        let mut settings = serde_json::to_value(amp_core::show::Settings::default()).unwrap();
+        settings["version"] = json!(2);
+        settings["playlists"][0]["genres"] = json!(["R&B", "club music shit", "club"]);
+        settings["playlists"][0]["filters"] =
+            json!([{"type":"Flag","field":"Analyzed","value":true,"future_filter":{"retain":1}}]);
+        settings["playlists"][0]["playlist_sources"] =
+            json!([{"name":"Saved source","songs":[],"future_source":{"retain":2}}]);
+        settings["playlists"][0]["energy_progression"] = json!({"target":7.,"transitions":4,"hold":true,"arc":"Linear","future_progression":{"retain":3}});
+        amp_core::coordination::atomic_write(&file, &settings).unwrap();
+        let snapshot =
+            value(read(&app, "/api/studio/playlists").await).await["smart_revision"].clone();
+        let mut rules = snapshot["playlists"][0].clone();
+        rules["id"] = json!("not-the-target");
+        let response = write(
+            &app,
+            "/api/studio/playlists",
+            json!({"id":"smart_demo","name":"Renamed","rules":rules,"revision":snapshot}),
+        )
+        .await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let saved = raw_smart_settings(&cast).unwrap();
+        let actual = &saved["playlists"][0];
+        assert_eq!(actual["id"], "demo");
+        assert_eq!(actual["name"], "Renamed");
+        for field in [
+            "genres",
+            "filters",
+            "playlist_sources",
+            "energy_progression",
+        ] {
+            assert_eq!(
+                actual[field], settings["playlists"][0][field],
+                "{field} must survive a rename"
+            );
+        }
+    }
     async fn ticket(app: &Router) -> String {
         let response = app
             .clone()
@@ -1388,6 +1426,45 @@ mod api_tests {
         let summary = value(read(&app, "/api/studio/tracks?limit=1").await).await;
         assert_eq!(summary["tracks"][0]["bpm"], 123.);
         assert_eq!(summary["tracks"][0]["cue_in"], 1.25);
+    }
+    #[tokio::test]
+    async fn browser_normal_edit_preserves_unavailable_paths_companion_and_extensions() {
+        let (root, cast, app) = fixture();
+        let file = root.path().join("ampdj/playlists/retained.json");
+        let library = cast.library_id.as_deref().unwrap();
+        amp_core::coordination::save_document(&file,&json!({"version":1,"name":"Retained","tracks":["track-0.mp3","unavailable/song.mp3","track-0.mp3"],"companion_available":true,"future_setting":{"keep":[1,2]}}),library).unwrap();
+        let data = value(read(&app, "/api/studio/playlists").await).await;
+        let saved = data["playlists"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["id"] == "normal_retained")
+            .unwrap();
+        assert_eq!(
+            saved["track_paths"],
+            json!(["track-0.mp3", "unavailable/song.mp3", "track-0.mp3"])
+        );
+        assert_eq!(saved["companion_available"], true);
+        let request = json!({"id":"normal_retained","name":"Renamed","library_id":library,"track_paths":["unavailable/song.mp3","track-0.mp3","track-0.mp3"],"revision":saved["revision"]});
+        assert_eq!(
+            write(&app, "/api/studio/playlists", request.clone())
+                .await
+                .status(),
+            StatusCode::OK
+        );
+        let (_, raw) = sharing::normal_playlist_data(&cast, &file).unwrap();
+        assert_eq!(raw["name"], "Renamed");
+        assert_eq!(raw["tracks"], request["track_paths"]);
+        assert_eq!(raw["companion_available"], true);
+        assert_eq!(raw["future_setting"], json!({"keep":[1,2]}));
+        assert_eq!(
+            write(&app, "/api/studio/playlists", request).await.status(),
+            StatusCode::CONFLICT
+        );
+        for unsafe_path in ["../outside.mp3", "/absolute.mp3", "new-missing.mp3"] {
+            assert_eq!(write(&app,"/api/studio/playlists",json!({"id":"normal_retained","name":"Rejected","library_id":library,"track_paths":[unsafe_path],"revision":raw["_amp_sync"]})).await.status(),StatusCode::CONFLICT);
+        }
+        assert_eq!(sharing::normal_playlist_data(&cast, &file).unwrap().1, raw);
     }
     #[tokio::test]
     async fn playlist_conflicts_and_traversal_preserve_existing_data() {

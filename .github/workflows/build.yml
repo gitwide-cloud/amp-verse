@@ -68,7 +68,7 @@ jobs:
         with:
           node-version: '20'
       - name: Verify Studio browser session flow
-        run: node --test apps/amp-cast/web/studio-session.test.cjs
+        run: node --test apps/amp-cast/web/studio-session.test.cjs apps/amp-cast/web/studio-playlists.test.cjs
       - run: cargo fmt --all --check
       - name: Verify canonical desktop update and rollback
         if: runner.os == 'Windows'

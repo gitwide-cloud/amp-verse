@@ -25,7 +25,10 @@ async fn enable(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     cast.sharing.store(true, Relaxed);
     StatusCode::NO_CONTENT.into_response()
 }
-fn normal_playlist(cast: &Cast, path: &std::path::Path) -> Result<amp_core::Playlist, String> {
+pub(crate) fn normal_playlist_data(
+    cast: &Cast,
+    path: &std::path::Path,
+) -> Result<(amp_core::Playlist, Value), String> {
     use std::io::Read;
     const MAX: usize = 4 * 1024 * 1024;
     let bytes = if let Some(bytes) = amp_core::catalog_db::read(path)? {
@@ -42,8 +45,10 @@ fn normal_playlist(cast: &Cast, path: &std::path::Path) -> Result<amp_core::Play
     if bytes.len() > MAX {
         return Err("Playlist metadata exceeds supported size".into());
     }
-    let mut playlist: amp_core::Playlist =
+    let value: Value =
         serde_json::from_slice(&bytes).map_err(|_| "Playlist metadata is invalid")?;
+    let mut playlist: amp_core::Playlist =
+        serde_json::from_value(value.clone()).map_err(|_| "Playlist metadata is invalid")?;
     if playlist.version != 1 || playlist.tracks.len() > 20000 {
         return Err("Playlist metadata is unsupported".into());
     }
@@ -65,7 +70,10 @@ fn normal_playlist(cast: &Cast, path: &std::path::Path) -> Result<amp_core::Play
     }
     // Availability is deliberately not validated here. Missing audio must not
     // hide the rest of a saved playlist or rewrite its durable references.
-    Ok(playlist)
+    Ok((playlist, value))
+}
+fn normal_playlist(cast: &Cast, path: &std::path::Path) -> Result<amp_core::Playlist, String> {
+    normal_playlist_data(cast, path).map(|(playlist, _)| playlist)
 }
 pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
     let mut result = Vec::new();
