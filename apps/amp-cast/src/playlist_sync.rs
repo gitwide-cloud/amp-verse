@@ -272,7 +272,7 @@ fn collect(c: &Cast) -> Result<Value, String> {
         }
     }
     let token = budget.finish();
-    let response = json!({"protocol":1,"server_id":c.server_id,"library_id":c.library_id,"snapshot_token":token,"documents":documents,"smart_revision":smart_revision,"deletes_supported":false,"automatic_client_sync":false});
+    let response = json!({"protocol":1,"server_id":c.server_id,"library_id":c.library_id,"snapshot_token":token,"documents":documents,"smart_revision":smart_revision,"deletes_supported":false,"automatic_client_sync":false,"max_smart_document_version":3});
     let mut hash = Sha256::new();
     let mut writer = BudgetWriter {
         remaining: MAX_SNAPSHOT,

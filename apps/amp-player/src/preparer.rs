@@ -1077,6 +1077,15 @@ self.status=match queued{Ok(path)=>format!("{e}. Draft kept locally at {}. Recon
         ui.horizontal(|ui|{ui.label("BPM");let mut bpm=self.draft.bpm.unwrap_or(0.);if ui.add(egui::DragValue::new(&mut bpm).speed(0.1).range(0. ..=300.)).changed(){self.draft.bpm=if bpm>0.{Some(bpm)}else{None};self.draft.manual_override=true;}ui.label("Grid offset (s)");let mut offset=self.draft.beat_offset.unwrap_or(0.);if ui.add(egui::DragValue::new(&mut offset).speed(0.01).range(0. ..=21600.)).changed(){self.draft.beat_offset=Some(offset);self.draft.manual_override=true;}});
         ui.horizontal(|ui|{ui.label("Key");let mut key=self.draft.key.clone().unwrap_or_default();if ui.add(egui::TextEdit::singleline(&mut key).desired_width(140.)).changed(){self.draft.key=if key.is_empty(){None}else{Some(key)};self.draft.manual_override=true;}ui.label("Harmonic code");let mut code=self.draft.harmonic_key.clone().unwrap_or_default();if ui.add(egui::TextEdit::singleline(&mut code).desired_width(70.)).changed(){self.draft.harmonic_key=if code.is_empty(){None}else{Some(code)};self.draft.manual_override=true;}});
         ui.horizontal(|ui| {
+            ui.label("Content advisory");
+            let mut advisory = amp_core::content_advisory::classification(&self.draft);
+            let before = advisory;
+            egui::ComboBox::from_id_salt("content-advisory").selected_text(advisory.label()).show_ui(ui, |ui| {
+                for value in [amp_core::content_advisory::Classification::Unknown, amp_core::content_advisory::Classification::Clean, amp_core::content_advisory::Classification::Explicit] {
+                    ui.selectable_value(&mut advisory, value, value.label());
+                }
+            });
+            if advisory != before { amp_core::content_advisory::set_manual(&mut self.draft, advisory); }
             ui.label("Rating");
             let mut rating = self.draft.extensions.get("rating").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             if ui.add(egui::Slider::new(&mut rating, 0..=5)).changed() { self.draft.extensions.insert("rating".into(), serde_json::json!(rating)); }

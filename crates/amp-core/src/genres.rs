@@ -65,6 +65,7 @@ pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparatio
     // Derived tags never replace a user-saved genre. Refresh them on each background
     // scan so edits made in another tag editor become visible without reanalysis.
     preparation.extensions.remove("embedded_genres");
+    preparation.extensions.remove("embedded_tags");
     let Ok(probe) = lofty::probe::Probe::open(path) else {
         return;
     };
