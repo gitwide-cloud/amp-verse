@@ -15,7 +15,7 @@ Clean rules require Smart container/sync document version 3 and export version 4
 Legacy rules still load. Old Rust clients reject the unknown field/new version;
 the server rejects version downgrade. New desktop sync checks server capability
 before sending version 3 and retains the local draft on incompatible servers.
-Android continues preserving opaque rule JSON; no Android filter editor is added.
+Android preserves opaque rule JSON and accepts version-3 acknowledgments; a rename/roundtrip regression covers this compatibility change. No Android filter editor is added.
 Deploy tested matching server/desktop builds before enabling synchronized Clean
 rules. Do not independently enable a new rule on an old-server deployment.
 

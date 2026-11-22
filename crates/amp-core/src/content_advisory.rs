@@ -110,6 +110,16 @@ mod rule_tests {
         let saved = show::Settings::load(root.path()).unwrap();
         assert_eq!(saved.version, 3);
         let rules = &saved.playlists[0];
+        let bytes = show::SmartPlaylistExport::encode(rules, root.path()).unwrap();
+        let mut package: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(package["version"], 4);
+        let imported = show::SmartPlaylistExport::decode(&bytes, root.path()).unwrap();
+        assert_eq!(imported.filters, rules.filters);
+        package["version"] = serde_json::json!(3);
+        assert!(
+            show::SmartPlaylistExport::decode(&serde_json::to_vec(&package).unwrap(), root.path())
+                .is_err()
+        );
         for classification in [
             Classification::Clean,
             Classification::Explicit,
@@ -178,7 +188,12 @@ mod import_tests {
         std::fs::write(&path, &bytes).unwrap();
         let mut prep = Preparation::default();
         crate::genres::read_embedded(&path, &mut prep);
-        assert_eq!(classification(&prep), Classification::Clean);
+        assert_eq!(
+            classification(&prep),
+            Classification::Clean,
+            "{:?}",
+            prep.extensions
+        );
         set_manual(&mut prep, Classification::Explicit);
         crate::genres::read_embedded(&path, &mut prep);
         assert_eq!(classification(&prep), Classification::Explicit);

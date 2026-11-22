@@ -642,6 +642,7 @@ impl Editor {
             ui.add_space(8.);ui.add(egui::Label::new(&self.status).wrap());
             if !self.preview_status.is_empty() { ui.add(egui::Label::new(&self.preview_status).wrap()); }
         });
+        settings.version = settings.version.max(settings.required_version());
         ui.ctx().data_mut(|data| {
             data.insert_temp(egui::Id::unique("smart-editor-viewport"), area.inner_rect)
         });
@@ -1083,6 +1084,7 @@ fn merge_rules(
             conflicts.join("; ")
         ));
     }
+    merged.version = merged.version.max(merged.required_version());
     merged.validate()?;
     Ok(merged)
 }
@@ -1425,6 +1427,25 @@ mod tests {
         assert_eq!(count, lib.tracks.len());
         assert_eq!(folder_total(&lib.tree), count);
         println!("Music root selection includes {count} songs recursively");
+    }
+    #[test]
+    fn clean_filter_editor_merge_upgrades_schema_before_save() {
+        let root = tempfile::tempdir().unwrap();
+        let baseline = test_settings();
+        baseline.save(root.path()).unwrap();
+        let current = Settings::load(root.path()).unwrap();
+        let mut draft = current.clone();
+        draft.playlists[0]
+            .filters
+            .push(amp_core::smart_filters::Filter::new(
+                amp_core::smart_filters::Field::Clean,
+            ));
+        let merged = merge_rules(&current, &draft, &current, false).unwrap();
+        assert_eq!(merged.version, 3);
+        merged.save(root.path()).unwrap();
+        let saved = Settings::load(root.path()).unwrap();
+        assert!(saved.playlists[0].requires_advisory());
+        assert_eq!(saved.version, 3);
     }
     #[test]
     fn top_save_button_publishes_the_draft_even_with_a_lower_save_button() {

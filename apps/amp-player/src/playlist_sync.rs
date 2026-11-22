@@ -882,6 +882,17 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_server_never_advertises_clean_rule_support() {
+        let legacy = json!({"protocol":1,"server_id":"s","library_id":"l","documents":[],"smart_revision":null});
+        let snapshot: Snapshot = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(snapshot.max_smart_document_version, 2);
+        let mut modern = legacy;
+        modern["max_smart_document_version"] = json!(3);
+        let snapshot: Snapshot = serde_json::from_value(modern).unwrap();
+        assert_eq!(snapshot.max_smart_document_version, 3);
+    }
+
     fn fixture() -> (tempfile::TempDir, Binding) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("music");
