@@ -204,11 +204,19 @@ jobs:
           mkdir -p dist/licenses/signalsmith
           cp -r apps/amp-player/vendor/signalsmith/* dist/licenses/signalsmith/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
-          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":3},indent=2)+"\n")'
+          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":4},indent=2)+"\n")'
           python -c 'import shutil; shutil.copytree("docs", "dist/docs", ignore=shutil.ignore_patterns("tested-preview-install.md"))'
           cp -r licenses dist/
           mkdir -p dist/licenses/mp3-lab
           cp third-party/mp3-lab/LICENSE third-party/mp3-lab/PROVENANCE.md dist/licenses/mp3-lab/
+      - name: Package and verify memory-only live stems
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then stem_target="windows-x64"; else stem_target="linux-x64"; fi
+          python tools/setup_live_stems.py --worker target/release/amp-stem-worker${{ matrix.suffix }} --output dist/addons/stems-live --target "$stem_target"
+          python tools/test_live_stems.py --unit
+          # CI verifies correctness/storage; actual device two-deck timing is measured separately.
+          python tools/test_live_stems.py --module dist/addons/stems-live --requests 3 --max-pair-seconds 30
       - name: Package official AMP Lab YouTube tools
         shell: bash
         run: |

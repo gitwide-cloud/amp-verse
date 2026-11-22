@@ -202,7 +202,12 @@ impl Player {
                 .clone()
                 .unwrap_or_else(|| self.root.clone());
             if let Some(audio) = &mut self.audio {
-                match audio.load(deck, &root, &track, true) {
+                let result = if owner == Owner::Player {
+                    audio.load_original(deck, &root, &track, true)
+                } else {
+                    audio.load(deck, &root, &track, true)
+                };
+                match result {
                     Ok(()) => {
                         self.claim_playback(owner, deck, false);
                         self.cancel_deck_automation(deck);

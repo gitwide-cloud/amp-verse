@@ -37,6 +37,8 @@ mod live_mix;
 mod mashup;
 mod media_lookup;
 mod mix_schedule;
+mod onnx_stem_stream;
+mod onnx_stem_worker;
 mod output_admission;
 mod receiver_process;
 mod startup_index;
@@ -916,6 +918,11 @@ impl Player {
                 self.recover_failed_song(deck, &error);
             }
         }
+        if let Some(audio) = &self.audio {
+            for (deck, message) in audio.take_stem_warnings() {
+                self.status = format!("{}: {message}", crate::deck_rack::NAMES[deck]);
+            }
+        }
         self.player_sequence_tick();
         if self.playback_owner == playback_owner::Owner::Player
             && self.auto
@@ -980,10 +987,12 @@ impl Player {
                 player_sequence::normal_track(&mut track);
             }
             let result = self.ensure_audio().and_then(|_| {
-                self.audio
-                    .as_mut()
-                    .unwrap()
-                    .load(deck, &self.root, &track, play)
+                let audio = self.audio.as_mut().unwrap();
+                if owner == playback_owner::Owner::Player {
+                    audio.load_original(deck, &self.root, &track, play)
+                } else {
+                    audio.load(deck, &self.root, &track, play)
+                }
             });
             if result.is_ok() {
                 self.loaded_origin[deck] = Some(self.root.clone());
@@ -2516,6 +2525,38 @@ impl Player {
         path: PathBuf,
         cue: Option<f64>,
     ) -> Result<(), String> {
+        self.safe_load_path_mode(deck, path, cue, false)
+    }
+    fn safe_load_original_path(
+        &mut self,
+        deck: usize,
+        path: PathBuf,
+        cue: Option<f64>,
+    ) -> Result<(), String> {
+        self.safe_load_path_mode(deck, path, cue, true)
+    }
+    fn safe_load_path_mode(
+        &mut self,
+        deck: usize,
+        path: PathBuf,
+        cue: Option<f64>,
+        original: bool,
+    ) -> Result<(), String> {
+        let result = self.try_safe_load_path(deck, path, cue, original);
+        if result.is_err()
+            && let Some(audio) = &self.audio
+        {
+            audio.restore_stem_mode_request(deck);
+        }
+        result
+    }
+    fn try_safe_load_path(
+        &mut self,
+        deck: usize,
+        path: PathBuf,
+        cue: Option<f64>,
+        original: bool,
+    ) -> Result<(), String> {
         if deck >= deck_rack::NAMES.len() {
             return Err("Choose a deck from A1–A3 or B1–B3".into());
         }
@@ -2528,6 +2569,9 @@ impl Player {
                 .is_some_and(|(reserved, _)| reserved == deck))
         {
             self.pending_load[deck] = Some((path, cue));
+            if let Some(audio) = &self.audio {
+                audio.restore_stem_mode_request(deck);
+            }
             self.status = format!(
                 "Deck {} replacement staged. Stop it, then Apply staged track.",
                 deck_rack::NAMES[deck]
@@ -2563,10 +2607,12 @@ impl Player {
             preparation,
         };
         self.ensure_audio()?;
-        self.audio
-            .as_mut()
-            .unwrap()
-            .load(deck, &root, &track, false)?;
+        let audio = self.audio.as_mut().unwrap();
+        if original {
+            audio.load_original(deck, &root, &track, false)?;
+        } else {
+            audio.load(deck, &root, &track, false)?;
+        }
         self.cancel_deck_automation(deck);
         if deck == 0 {
             self.auto = false;
@@ -3241,6 +3287,8 @@ impl eframe::App for Player {
             self.audio.as_ref().map_or(0., |a| a.source_position(0)),
         );
         self.checkpoint(true);
+        self.audio.take();
+        let _ = onnx_stem_worker::shutdown();
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let _output_scope = output_admission::scope(self.output_admission.clone());
@@ -3432,9 +3480,12 @@ impl eframe::App for Player {
                 self.auto = false;
                 self.player_sequence.resume_auto = false;
                 let root = podcasts::downloads().unwrap_or_default();
-                let result = self
-                    .ensure_audio()
-                    .and_then(|()| self.audio.as_mut().unwrap().load(0, &root, &track, true));
+                let result = self.ensure_audio().and_then(|()| {
+                    self.audio
+                        .as_mut()
+                        .unwrap()
+                        .load_original(0, &root, &track, true)
+                });
                 match result {
                     Ok(()) => {
                         self.loaded[0] = None;
@@ -3458,7 +3509,7 @@ impl eframe::App for Player {
                     audio.stop(0);
                 }
                 let position = self.podcasts.resume_position();
-                match self.safe_load_path(0, path, Some(position)) {
+                match self.safe_load_original_path(0, path, Some(position)) {
                     Ok(()) => {
                         if let Some(audio) = &self.audio
                             && let Err(error) = audio.play(0)

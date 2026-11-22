@@ -147,7 +147,7 @@ impl Player {
         self.audio
             .as_mut()
             .unwrap()
-            .load(0, &root, &runtime, true)?;
+            .load_original(0, &root, &runtime, true)?;
         self.loaded[0] = self.loaded[active];
         self.loaded_snapshot[0] = Some(track);
         self.loaded_origin[0] = Some(root);

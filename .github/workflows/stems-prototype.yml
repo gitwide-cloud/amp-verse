@@ -1,23 +1,65 @@
-name: Bounded stem prototype
+name: Native live stems prototype
 on:
   push:
     branches: [feature/on-demand-stems-20261122]
-    paths: ['crates/amp-stems/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/stems-prototype.yml']
+    paths:
+      - 'crates/amp-stems/**'
+      - 'crates/amp-stem-worker/**'
+      - 'tools/setup_live_stems.py'
+      - 'tools/test_live_stems.py'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - '.github/workflows/stems-prototype.yml'
   workflow_dispatch:
 permissions:
   contents: read
+concurrency:
+  group: native-live-stems-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  session:
+  native:
     strategy:
+      fail-fast: false
       matrix:
-        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: linux-x64
+            suffix: ''
+          - os: windows-latest
+            target: windows-x64
+            suffix: '.exe'
     runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    env:
+      CARGO_BUILD_JOBS: '1'
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
-      - run: cargo fmt -p amp-stems --check
-      - run: cargo test -p amp-stems --locked
-      - run: cargo clippy -p amp-stems --all-targets --locked -- -D warnings
-      - run: cargo run -p amp-stems --example session_bench --release --locked
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: Swatinem/rust-cache@v2
+      - name: Format native worker and bounded core
+        run: cargo fmt -p amp-stems -p amp-stem-worker --check
+      - name: Test native worker and bounded core
+        run: cargo test -p amp-stems -p amp-stem-worker --locked
+      - name: Clippy native worker and bounded core
+        run: cargo clippy -p amp-stems -p amp-stem-worker --all-targets --locked -- -D warnings
+      - name: Offline packager security fixtures (not model inference)
+        run: python tools/test_live_stems.py --unit
+      - name: Build release native worker only
+        run: cargo build -p amp-stem-worker --release --locked
+      - name: Build pinned CPU module (no Python runtime in module)
+        run: python tools/setup_live_stems.py --worker target/release/amp-stem-worker${{ matrix.suffix }} --output artifacts/amp-live-stems-${{ matrix.target }} --target ${{ matrix.target }}
+      - name: Real SCNet in-memory acceptance, throughput and abort checks
+        run: python tools/test_live_stems.py --module artifacts/amp-live-stems-${{ matrix.target }} --requests 4 > artifacts/native-acceptance-${{ matrix.target }}.json
+      - name: Upload module and honest acceptance report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: amp-live-stems-${{ matrix.target }}
+          path: artifacts/
+          if-no-files-found: warn
+          retention-days: 7

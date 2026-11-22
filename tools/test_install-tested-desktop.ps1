@@ -35,6 +35,15 @@ try {
     [IO.File]::WriteAllBytes($bad,$pe)
     Must-Reject { Assert-PE $bad }
     if (!(Is-Within (Join-Path $root 'child') $root) -or (Is-Within ($root+'-neighbor') $root)) { throw 'Containment guard accepted a path prefix collision' }
+    $stemNames = @('amp-stem-worker.exe','onnxruntime.dll','scnet.int8.onnx','NOTICES.md','module.json','LICENSES\SCNet-MIT.txt','LICENSES\ONNXRuntime-LICENSE.txt','LICENSES\ONNXRuntime-ThirdPartyNotices.txt','LICENSES\AMP-Verse-LICENSE.txt')
+    $module = @($stemNames | ForEach-Object { [pscustomobject]@{ Source=$valid; Relative=('addons\stems-live\'+$_); Hash=$hash } })
+    if (@(Get-StemLiveFiles $module).Count -ne 9) { throw 'Complete verified native module was not selected' }
+    if (@(Get-StemLiveFiles @([pscustomobject]@{ Relative='addons\owner-addon\keep.dll' })).Count) { throw 'Unrelated add-on was selected' }
+    Must-Reject { Get-StemLiveFiles @($module | Select-Object -Skip 1) }
+    Must-Reject { Get-StemLiveFiles @($module + $module[0]) }
+    Must-Reject { Get-StemLiveFiles @($module + [pscustomobject]@{ Relative='addons\stems-live\unreviewed.dll' }) }
+    Must-Reject { Get-StemLiveFiles @($module + [pscustomobject]@{ Relative='addons\stems-live\Scripts\python.exe' }) }
+    Must-Reject { Get-StemLiveFiles @($module + [pscustomobject]@{ Relative='addons\stems-live\LICENSES\other.txt' }) }
     Write-Output 'Passed: x64 PE, exact checksum/copy, traversal, duplicate, alternate stream, wrong machine and path containment checks. No installation ran.'
 } finally {
     foreach ($name in @('valid.exe','copy.exe','invalid.exe')) {

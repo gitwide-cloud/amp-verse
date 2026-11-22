@@ -28,6 +28,16 @@ fn stereo_frame(frame: DeckFrame, separated: bool, gain: [f32; 3], drums_only: b
         [frame[0], frame[1]]
     }
 }
+fn runtime_stem_knobs(
+    preparation: &amp_core::Preparation,
+    original: bool,
+) -> Result<[f32; 3], String> {
+    if original {
+        Ok([0.; 3])
+    } else {
+        amp_core::stem_mix::knobs(preparation)
+    }
+}
 fn atom(v: f32) -> AtomicU32 {
     AtomicU32::new(v.to_bits())
 }
@@ -81,6 +91,7 @@ pub struct Controls {
     pub stem_level: [[AtomicU32; 3]; 6],
     pub stem_knobs: [[AtomicU32; 3]; 6],
     pub stems_loaded: [AtomicBool; 6],
+    pub on_demand_stems: [AtomicBool; 6],
     pub eq_kill: [[AtomicBool; 3]; 6],
     pub sweep: [AtomicU32; 6],
     pub cue: [AtomicBool; 6],
@@ -103,6 +114,7 @@ pub struct Controls {
     pub error: Mutex<Option<String>>,
     pub monitor_error: Mutex<Option<String>>,
     pub decode_errors: Mutex<Vec<(usize, u64, String)>>,
+    pub stem_warnings: Mutex<Vec<(usize, u64, String)>>,
 }
 impl Controls {
     pub(crate) fn pause_for_receiver(&self) {
@@ -192,6 +204,7 @@ impl Default for Controls {
             stem_level: std::array::from_fn(|_| std::array::from_fn(|_| atom(1.))),
             stem_knobs: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             stems_loaded: std::array::from_fn(|_| AtomicBool::new(false)),
+            on_demand_stems: std::array::from_fn(|_| AtomicBool::new(false)),
             eq_kill: std::array::from_fn(|_| std::array::from_fn(|_| AtomicBool::new(false))),
             sweep: std::array::from_fn(|_| atom(0.)),
             cue: std::array::from_fn(|_| AtomicBool::new(false)),
@@ -214,6 +227,7 @@ impl Default for Controls {
             error: Mutex::new(None),
             monitor_error: Mutex::new(None),
             decode_errors: Mutex::new(Vec::new()),
+            stem_warnings: Mutex::new(Vec::new()),
         }
     }
 }
@@ -228,6 +242,7 @@ struct Source {
     position: f64,
     primed: bool,
     separated: bool,
+    stem_degraded: Arc<AtomicBool>,
     stem_knobs: [f32; 3],
 }
 impl Source {
@@ -640,7 +655,8 @@ impl Mixer {
                     self.levels[d] = None;
                     self.controls.scratching[d].store(false, Relaxed);
                     self.controls.play[d].store(play, Relaxed);
-                    self.controls.stems_loaded[d].store(s.separated, Relaxed);
+                    self.controls.stems_loaded[d]
+                        .store(s.separated && !s.stem_degraded.load(Relaxed), Relaxed);
                     self.controls.key_lock_available[d].store(s.key_lock.is_some(), Relaxed);
                     let gains = amp_core::stem_mix::gains(s.stem_knobs);
                     for (i, gain) in gains.iter().enumerate() {
@@ -1265,7 +1281,15 @@ impl Mixer {
                     v.stem_mix[stem] +=
                         (get(&c.stem_level[d][stem]).clamp(0., 1.) - v.stem_mix[stem]) * 0.004;
                 }
+                let degraded = source.stem_degraded.load(Relaxed);
+                if degraded {
+                    c.stems_loaded[d].store(false, Relaxed);
+                }
                 let stem_gain: [f32; 3] = std::array::from_fn(|stem| {
+                    if degraded {
+                        return 1.;
+                    }
+
                     (if get(&c.stem_level[d][stem]) == 0. {
                         0.
                     } else {
@@ -1540,6 +1564,7 @@ mod vinyl_tests {
             position: 0.,
             primed: true,
             separated: false,
+            stem_degraded: Arc::new(AtomicBool::new(false)),
             stem_knobs: [0.; 3],
         }
     }
@@ -1682,6 +1707,7 @@ mod vinyl_tests {
             position: 0.,
             primed: true,
             separated: false,
+            stem_degraded: Arc::new(AtomicBool::new(false)),
             stem_knobs: [0.; 3],
         };
         tx.send(Command::Load(0, source, true, 1)).unwrap();
@@ -1783,6 +1809,11 @@ mod vinyl_tests {
     }
 }
 
+#[derive(Default)]
+struct DecodeOptions {
+    section: Option<(Option<crate::mix_schedule::Grid>, f32)>,
+    original: bool,
+}
 pub struct Engine {
     _stream: cpal::Stream,
     monitor_stream: Option<cpal::Stream>,
@@ -1794,6 +1825,7 @@ pub struct Engine {
     section_cancel: [Option<Arc<AtomicBool>>; 6],
     observed_epoch: [u64; 6],
     requested_generation: [u64; 6],
+    loaded_on_demand: [bool; 6],
     sample_buffers: [Option<Arc<[Frame]>>; 9],
     sample_retired: Vec<(usize, u64, Arc<[Frame]>)>,
     sample_generation: u64,
@@ -1862,6 +1894,7 @@ impl Engine {
             section_cancel: Default::default(),
             observed_epoch: [0; 6],
             requested_generation: [0; 6],
+            loaded_on_demand: [false; 6],
             sample_buffers: Default::default(),
             sample_retired: Vec::new(),
             sample_generation: 0,
@@ -1986,6 +2019,7 @@ impl Engine {
     pub fn stop_broadcast_tap(&self) {
         let _ = self.send(Command::Broadcast(None));
     }
+    /// DJ loads require explicit per-deck live intent. Original mode never consults legacy caches.
     pub fn load(
         &mut self,
         deck: usize,
@@ -1993,16 +2027,58 @@ impl Engine {
         track: &amp_core::Track,
         play: bool,
     ) -> Result<(), String> {
-        if track
-            .preparation
-            .extensions
-            .contains_key("podcast_stream_url")
-        {
-            return self.load_decoded(deck, root, track, play, None, None);
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
         }
-        let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
-        self.load_with_stems(deck, root, track, play, crate::stems::ready(&path))
+        if !self.controls.on_demand_stems[deck].load(Relaxed)
+            || track
+                .preparation
+                .extensions
+                .contains_key("podcast_stream_url")
+        {
+            return self.load_original(deck, root, track, play);
+        }
+        let result = self.load_decoded(deck, root, track, play, None, DecodeOptions::default());
+        if result.is_err() {
+            self.restore_stem_mode_request(deck);
+        }
+        result
     }
+    /// Playback-only override: saved stem edits stay intact in the song and on disk.
+    pub fn load_original(
+        &mut self,
+        deck: usize,
+        root: &Path,
+        track: &amp_core::Track,
+        play: bool,
+    ) -> Result<(), String> {
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        let result = self.load_decoded(
+            deck,
+            root,
+            track,
+            play,
+            None,
+            DecodeOptions {
+                original: true,
+                ..Default::default()
+            },
+        );
+        if result.is_ok() {
+            self.controls.on_demand_stems[deck].store(false, Relaxed);
+        } else {
+            self.restore_stem_mode_request(deck);
+        }
+        result
+    }
+    pub fn restore_stem_mode_request(&self, deck: usize) {
+        if deck < DECKS {
+            self.controls.on_demand_stems[deck].store(self.loaded_on_demand[deck], Relaxed);
+        }
+    }
+    #[cfg(test)]
     fn load_with_stems(
         &mut self,
         deck: usize,
@@ -2011,7 +2087,7 @@ impl Engine {
         play: bool,
         stems: Option<[std::path::PathBuf; 3]>,
     ) -> Result<(), String> {
-        self.load_decoded(deck, root, track, play, stems, None)
+        self.load_decoded(deck, root, track, play, stems, DecodeOptions::default())
     }
     fn load_decoded(
         &mut self,
@@ -2020,11 +2096,35 @@ impl Engine {
         track: &amp_core::Track,
         play: bool,
         stems: Option<[std::path::PathBuf; 3]>,
-        section: Option<(Option<crate::mix_schedule::Grid>, f32)>,
+        options: DecodeOptions,
     ) -> Result<(), String> {
+        let DecodeOptions { section, original } = options;
         track.preparation.validate()?;
-        let stem_knobs = amp_core::stem_mix::knobs(&track.preparation)?;
-        if amp_core::stem_mix::changed(stem_knobs) && stems.is_none() {
+        let stem_knobs = runtime_stem_knobs(&track.preparation, original)?;
+        let onnx = !original
+            && self.controls.on_demand_stems[deck].load(Relaxed)
+            && track
+                .preparation
+                .extensions
+                .get("podcast_stream_url")
+                .is_none();
+        if onnx && !crate::onnx_stem_worker::configured() {
+            return Err("On-demand stem worker/model is not configured".into());
+        }
+        if onnx
+            && (self.sample_rate > 48000
+                || self
+                    .controls
+                    .on_demand_stems
+                    .iter()
+                    .filter(|v| v.load(Relaxed))
+                    .count()
+                    > 2)
+        {
+            return Err("This beta supports two local stem decks at44.1/48kHz output".into());
+        }
+        let stems = if onnx { None } else { stems };
+        if amp_core::stem_mix::changed(stem_knobs) && stems.is_none() && !onnx {
             return Err(
                 "This song has a saved stem mix. Prepare its stems in Library before playback."
                     .into(),
@@ -2060,7 +2160,9 @@ impl Engine {
                 Relaxed,
             );
         }
-        let separated = stems.is_some();
+        let separated = stems.is_some() || onnx;
+        let stem_degraded = Arc::new(AtomicBool::new(false));
+        let worker_degraded = stem_degraded.clone();
         if section.is_none()
             && let Some(cancel) = self.cancel[deck].take()
         {
@@ -2071,7 +2173,8 @@ impl Engine {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
-        let (mut producer, consumer) = RingBuffer::<DeckFrame>::new(self.sample_rate as usize * 4);
+        let (mut producer, consumer) =
+            RingBuffer::<DeckFrame>::new(self.sample_rate as usize * if onnx { 16 } else { 4 });
         let rate = self.sample_rate;
         let prep = track.preparation.clone();
         let duration = Arc::new(AtomicU64::new(
@@ -2113,6 +2216,21 @@ impl Engine {
                     duration_worker.store(
                         ((seconds - prep.cue_in).max(0.) * rate as f64) as u64,
                         Relaxed,
+                    );
+                }
+                if onnx {
+                    return crate::onnx_stem_stream::decode(
+                        &path,
+                        &prep,
+                        rate,
+                        &mut producer,
+                        crate::onnx_stem_stream::Context {
+                            stop: stopped.clone(),
+                            controls: errors.clone(),
+                            deck,
+                            degraded_flag: worker_degraded,
+                            generation,
+                        },
                     );
                 }
                 let mut command = amp_core::command("ffmpeg");
@@ -2298,6 +2416,7 @@ impl Engine {
             position: 0.,
             primed: false,
             separated,
+            stem_degraded,
             stem_knobs,
         };
         if let Some((grid, seconds)) = section {
@@ -2321,6 +2440,7 @@ impl Engine {
         self.cancel[deck] = Some(cancel);
         self.send(Command::Load(deck, source, play, generation))?;
         self.requested_generation[deck] = generation;
+        self.loaded_on_demand[deck] = onnx;
         self.controls.play[deck].store(play, Relaxed);
         Ok(())
     }
@@ -2607,13 +2727,28 @@ impl Engine {
             return Err("Load a deck and choose a fade between 0.05 and 30 seconds".into());
         }
         let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
-        let stems = crate::stems::ready(&path);
-        if self.controls.stems_loaded[deck].load(Relaxed) != stems.is_some() {
+        let live = self.loaded_on_demand[deck];
+        let stems = if live || !self.controls.stems_loaded[deck].load(Relaxed) {
+            None
+        } else {
+            crate::stems::ready(&path)
+        };
+        if !live && self.controls.stems_loaded[deck].load(Relaxed) != stems.is_some() {
             return Err(
                 "Stem sources changed; reload this track before selecting a section".into(),
             );
         }
-        self.load_decoded(deck, root, track, false, stems, Some((grid, seconds)))
+        self.load_decoded(
+            deck,
+            root,
+            track,
+            false,
+            stems,
+            DecodeOptions {
+                section: Some((grid, seconds)),
+                original: !live && !self.controls.stems_loaded[deck].load(Relaxed),
+            },
+        )
     }
     pub fn cancel_section(&mut self, deck: usize) {
         // A committed section's decoder is now the current voice; retain it until load/stop.
@@ -2823,6 +2958,19 @@ impl Engine {
                     .drain(..)
                     .filter(|(deck, generation, _)| self.requested_generation[*deck] == *generation)
                     .map(|(deck, _, error)| (deck, error))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub fn take_stem_warnings(&self) -> Vec<(usize, String)> {
+        self.controls
+            .stem_warnings
+            .lock()
+            .map(|mut messages| {
+                messages
+                    .drain(..)
+                    .filter(|(d, g, _)| self.requested_generation[*d] == *g)
+                    .map(|(d, _, m)| (d, m))
                     .collect()
             })
             .unwrap_or_default()
@@ -3075,6 +3223,7 @@ mod tests {
             position: 0.,
             primed: false,
             separated: false,
+            stem_degraded: Arc::new(AtomicBool::new(false)),
             stem_knobs: [0.; 3],
         }
     }
@@ -3099,6 +3248,7 @@ mod tests {
             position: 0.,
             primed: false,
             separated: true,
+            stem_degraded: Arc::new(AtomicBool::new(false)),
             stem_knobs: [0.; 3],
         }
     }
@@ -3743,6 +3893,7 @@ mod tests {
             position: 0.,
             primed: true,
             separated: false,
+            stem_degraded: Arc::new(AtomicBool::new(false)),
             stem_knobs: [0.; 3],
         };
         for expected in 0..12 {
@@ -3985,6 +4136,37 @@ mod tests {
             0
         );
         assert!(engine.take_error().is_none());
+    }
+    #[test]
+    fn original_runtime_mix_ignores_saved_gains_without_mutating_metadata() {
+        let mut prep = amp_core::Preparation::default();
+        prep.extensions
+            .insert("default_stem_mix".into(), serde_json::json!([1., -1., 0.]));
+        let before = serde_json::to_value(&prep).unwrap();
+        assert_eq!(runtime_stem_knobs(&prep, true).unwrap(), [0.; 3]);
+        assert_eq!(runtime_stem_knobs(&prep, false).unwrap(), [1., -1., 0.]);
+        assert_eq!(serde_json::to_value(&prep).unwrap(), before);
+    }
+    #[test]
+    fn degraded_live_source_plays_original_even_with_saved_vocal_removal() {
+        let controls = Arc::new(Controls::default());
+        set(&controls.master, 1.);
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut original = source(0.2, 4000);
+        original.separated = true;
+        original.stem_knobs = [-1., 0., 0.];
+        original.stem_degraded.store(true, Relaxed);
+        tx.send(Command::Load(0, original, true, 1)).unwrap();
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        let mut frame = [0.; 2];
+        mixer.render(1500, |_, value| frame = value);
+        assert!((frame[0] / std::f32::consts::FRAC_1_SQRT_2 - 0.2).abs() < 0.001);
+        assert!(!controls.stems_loaded[0].load(Relaxed));
+        assert_eq!(
+            get(&controls.stem_knobs[0][0]),
+            -1.,
+            "saved/runtime edit is not destructively reset on fallback"
+        );
     }
     #[test]
     fn song_stem_defaults_apply_at_load_and_reset_for_the_next_song() {
@@ -4377,6 +4559,7 @@ mod tests {
                 position: 0.,
                 primed: false,
                 separated: false,
+                stem_degraded: Arc::new(AtomicBool::new(false)),
                 stem_knobs: [0.; 3],
             },
             false,

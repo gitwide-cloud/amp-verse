@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/amp-stems", "crates/amp-dj-policy", "crates/amp-core", "apps/amp-player", "apps/amp-cast", "apps/amp-engine"]
+members = ["crates/amp-stems", "crates/amp-stem-worker", "crates/amp-dj-policy", "crates/amp-core", "apps/amp-player", "apps/amp-cast", "apps/amp-engine"]
 resolver = "2"
 
 [workspace.package]
