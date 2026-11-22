@@ -455,7 +455,7 @@ mod tests {
             .set_read_timeout(Some(Duration::from_secs(3)))
             .unwrap();
         let mut request = b"GET /listen.mp3 HTTP/1.1\r\nX-Too-Large: ".to_vec();
-        request.extend_from_slice(&vec![b'x'; 16 * 1024]);
+        request.resize(request.len() + 16 * 1024, b'x');
         request.extend_from_slice(b"\r\n\r\n");
         // A peer may close as soon as its bounded header reader rejects input.
         let _ = socket.write_all(&request);
