@@ -319,7 +319,36 @@ fn supervise<F: Fn() -> Command>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use std::net::{TcpListener, TcpStream};
+    fn complete_get(socket: &mut TcpStream, stop: &AtomicBool) -> bool {
+        const MAX_HEADERS: usize = 16 * 1024;
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut request = Vec::new();
+        let mut chunk = [0u8; 1024];
+        while !canceled(stop) && Instant::now() < deadline {
+            match socket.read(&mut chunk) {
+                Ok(0) => return false,
+                Ok(count) => {
+                    if request.len() + count > MAX_HEADERS {
+                        return false;
+                    }
+                    request.extend_from_slice(&chunk[..count]);
+                    if request.windows(4).any(|part| part == b"\r\n\r\n") {
+                        return request.starts_with(b"GET ");
+                    }
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::WouldBlock
+                            | std::io::ErrorKind::TimedOut
+                            | std::io::ErrorKind::Interrupted
+                    ) => {}
+                Err(_) => return false,
+            }
+        }
+        false
+    }
     fn fixture(bytes: Vec<u8>, idle: bool) -> (String, Arc<AtomicBool>, JoinHandle<()>) {
         let listener = TcpListener::bind("127.0.0.1:0").unwrap();
         let url = format!("http://{}/listen.mp3", listener.local_addr().unwrap());
@@ -336,9 +365,22 @@ mod tests {
                         socket
                             .set_read_timeout(Some(Duration::from_millis(100)))
                             .unwrap();
-                        let mut request = [0; 2048];
-                        let _ = socket.read(&mut request);
-                        let _=socket.write_all(b"HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nConnection: close\r\n\r\n");
+                        // A single TCP read need not contain all request headers.
+                        // Closing with unread request bytes can reset Windows TCP.
+                        if !complete_get(&mut socket, &done) {
+                            continue;
+                        }
+                        let header = if idle {
+                            "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nConnection: close\r\n\r\n".to_owned()
+                        } else {
+                            format!(
+                                "HTTP/1.1 200 OK\r\nContent-Type: audio/mpeg\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                                bytes.len()
+                            )
+                        };
+                        if socket.write_all(header.as_bytes()).is_err() {
+                            continue;
+                        }
                         if idle {
                             while !canceled(&done) {
                                 thread::sleep(Duration::from_millis(10));
@@ -359,6 +401,78 @@ mod tests {
             }
         });
         (url, stop, worker)
+    }
+    #[test]
+    fn http_fixture_waits_for_complete_fragmented_get_and_frames_finite_body() {
+        let payload = b"exact finite body".to_vec();
+        let (url, stop, server) = fixture(payload.clone(), false);
+        let address = url::Url::parse(&url).unwrap();
+        let mut socket =
+            TcpStream::connect((address.host_str().unwrap(), address.port().unwrap())).unwrap();
+        socket.set_nodelay(true).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_millis(150)))
+            .unwrap();
+        socket
+            .write_all(b"GET /listen.mp3 HTTP/1.1\r\nHost:")
+            .unwrap();
+        let mut probe = [0u8; 1];
+        let early = socket.read(&mut probe).unwrap_err();
+        assert!(
+            matches!(
+                early.kind(),
+                std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+            ),
+            "Fixture replied or aborted before complete GET: {early}"
+        );
+        socket.write_all(b" localhost\r\n\r\n").unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        let mut response = Vec::new();
+        socket.read_to_end(&mut response).unwrap();
+        let boundary = response
+            .windows(4)
+            .position(|part| part == b"\r\n\r\n")
+            .unwrap()
+            + 4;
+        assert!(
+            std::str::from_utf8(&response[..boundary])
+                .unwrap()
+                .contains(&format!("Content-Length: {}\r\n", payload.len()))
+        );
+        assert_eq!(&response[boundary..], payload);
+        stop.store(true, Ordering::Release);
+        server.join().unwrap();
+    }
+    #[test]
+    fn http_fixture_rejects_oversized_headers_without_a_success_response() {
+        let (url, stop, server) = fixture(b"body".to_vec(), false);
+        let address = url::Url::parse(&url).unwrap();
+        let mut socket =
+            TcpStream::connect((address.host_str().unwrap(), address.port().unwrap())).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(3)))
+            .unwrap();
+        let mut request = b"GET /listen.mp3 HTTP/1.1\r\nX-Too-Large: ".to_vec();
+        request.extend_from_slice(&vec![b'x'; 16 * 1024]);
+        request.extend_from_slice(b"\r\n\r\n");
+        // A peer may close as soon as its bounded header reader rejects input.
+        let _ = socket.write_all(&request);
+        let mut probe = [0u8; 1];
+        match socket.read(&mut probe) {
+            Ok(0) => {}
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::ConnectionReset
+                        | std::io::ErrorKind::ConnectionAborted
+                        | std::io::ErrorKind::BrokenPipe
+                ) => {}
+            other => panic!("Oversized request was not rejected cleanly: {other:?}"),
+        }
+        stop.store(true, Ordering::Release);
+        server.join().unwrap();
     }
     fn child_command(mode: &'static str) -> Command {
         let mut c = Command::new(std::env::current_exe().unwrap());
