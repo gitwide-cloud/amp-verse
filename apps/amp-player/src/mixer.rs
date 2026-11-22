@@ -1141,6 +1141,7 @@ impl Mixer {
                     continue;
                 };
                 if pending.expected != c.deck_generation[d].load(Relaxed)
+                    || scratch_active[d]
                     || c.scratching[d].load(Relaxed)
                     || c.looping[d].load(Relaxed)
                 {
@@ -1743,6 +1744,42 @@ mod vinyl_tests {
         assert_eq!(c.position[0].load(Relaxed), again + 1);
         assert_eq!(m.voices[0].resume_fill, 0);
         c.scratching[0].store(false, Relaxed);
+    }
+    #[test]
+    fn manual_vinyl_drops_active_section_old_voice_without_muting_other_deck() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(48000, rx, c.clone());
+        tx.send(Command::Load(0, locked_source(100000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(1, locked_source(100000), true, 1))
+            .unwrap();
+        m.render(16000, |_, _| {});
+        m.sections[0] = Some(SectionChange {
+            source: None,
+            origin: 0.,
+            previous_origin: 0.,
+            grid: None,
+            at: None,
+            expected: 1,
+            total: 48000,
+            elapsed: 0,
+            old: Some(locked_source(100000)),
+        });
+        c.section_state[0].store(2, Relaxed);
+        let anchor = c.position[0].load(Relaxed);
+        let other = c.position[1].load(Relaxed);
+        touch(&c, 0, anchor);
+        let mut peak = 0f32;
+        m.render(1000, |i, f| {
+            if i > 512 {
+                peak = peak.max(f[0].abs());
+            }
+        });
+        assert!(m.sections[0].is_none());
+        assert_eq!(c.section_state[0].load(Relaxed), 0);
+        assert!(peak < 0.00001);
+        assert_eq!(c.position[1].load(Relaxed), other + 1000);
     }
 }
 
