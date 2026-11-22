@@ -37,3 +37,14 @@ References checked2026-11-22:
 Block encountered: automatic approval review rejected an attempted model-worker adapter write with only blocked-by-policy, before execution. The adapter file is absent; no alternative write/execution route was used. Research, the independent Rust session core and its tests proceeded. No real model/audio benchmark or install is claimed.
 
 Commands: cargo test -p amp-stems --locked; cargo run -p amp-stems --example session_bench --release --locked. The example reports control-plane/validation overhead only.
+
+
+## Owner clarification: per-song DATA maps,20–100MB for20000songs
+
+The per-track store is a small timing/activity/mixing map, not exported stem audio. The prototype map module has a4096-byte serialized record ceiling and100000000-byte catalog accounting budget. The fixed record stores original-source and model SHA256 identifiers, duration and at most334 nonoverlapping intervals with four confidence bytes each. It is explicitly ActivityMap, not a complete frequency mask and cannot by itself remove vocals while preserving instruments.
+
+Exact serialized accounting:20000 maximum-sized4088-byte records plus48bytes of planned index/framing per record and20bytes catalog header =82720020bytes, about82.7decimalMB. A100-interval record is1280bytes;20000 plus planned index/framing is26.56MB. These are format-size tests, not extraction of the owner's20000songs. No catalog writer is implemented, so physical database pages/journals/filesystem overhead still must be bounded and tested before promising an actual100MB deployment.
+
+For actual vocal/drum isolation, detailed time-frequency information must be computed from original audio by a shared model and consumed transiently in RAM. A sparse timing map is not a substitute for a separation algorithm. Dense per-song frequency masks are outside this small metadata budget. The model/runtime is a separate fixed installation cost; the experimental pinned ONNX graph is316446953bytes. Do not claim the shared model also fits20–100MB.
+
+An ONNX-only read-only adapter variant was subsequently accepted and tested privately after the earlier command rejection. Actual CUDA inference on real six-second samples worked with no audio-file output, using one shared graph. The old player PCM-stream integration was explicitly restored to baseline following the owner's clarification. Unwired experimental sources remain in the development workspace for reference, not installed or shipped. Legacy batch preparation stays withdrawn. Model licensing, low-latency playback mask rendering and actual map extraction remain unfinished.

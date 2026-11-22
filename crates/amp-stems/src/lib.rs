@@ -1,5 +1,6 @@
 //! Experimental on-demand stem scheduling. No filesystem, network or model downloads.
 //! Not wired into playback. Budget covers owned PCM, not model/driver workspace.
+pub mod map;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 pub const DECKS: usize = 6;
