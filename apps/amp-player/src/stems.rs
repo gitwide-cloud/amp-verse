@@ -222,6 +222,9 @@ fn prepare(
     cancel: &AtomicBool,
     process: &Process,
 ) -> Result<(), String> {
+    if cancel.load(Relaxed) {
+        return Err("Stem preparation canceled".into());
+    }
     preparation_permitted()?;
     fs::create_dir_all(cache).map_err(|e| e.to_string())?;
     if !crate::preparation_speed::wait(Some(cancel)) {
