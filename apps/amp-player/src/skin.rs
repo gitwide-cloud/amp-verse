@@ -838,6 +838,14 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
         egui::vec2(160., 26.),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
+            let label_first = label == "Auto Mix";
+            if label_first
+                && ui
+                    .add(egui::Label::new(label).sense(egui::Sense::click()))
+                    .clicked()
+            {
+                *value = !*value;
+            }
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(44., 24.), egui::Sense::click());
             #[cfg(test)]
@@ -866,9 +874,10 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
                 9.,
                 C::WHITE,
             );
-            if ui
-                .add(egui::Label::new(label).sense(egui::Sense::click()))
-                .clicked()
+            if !label_first
+                && ui
+                    .add(egui::Label::new(label).sense(egui::Sense::click()))
+                    .clicked()
             {
                 *value = !*value;
             }
