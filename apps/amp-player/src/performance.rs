@@ -1811,6 +1811,13 @@ impl Player {
                 self.run.target = energy.or(p.target_energy);
                 self.run.preloaded = None;
                 self.run.pending = None;
+                if execution == Execution::LoadOnly {
+                    self.status = if self.run.auto {
+                        format!("{} selected for Auto Mix. Upcoming songs use this source; current decks keep their songs.", p.name)
+                    } else {
+                        format!("{} selected for Auto Mix. Turn Auto Mix ON to load and play its songs.", p.name)
+                    };
+                }
                 if execution != Execution::LoadOnly {
                     self.run.failure = None;
                     self.run.crossfade = true;
@@ -4069,6 +4076,7 @@ mod tests {
         );
         assert!(!player.run.auto);
         assert!(player.audio.is_none());
+        assert_eq!(player.status, "Intended playlist selected for Auto Mix. Turn Auto Mix ON to load and play its songs.");
     }
     #[test]
     fn loading_empty_smart_source_preserves_the_current_session() {

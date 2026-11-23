@@ -578,7 +578,10 @@ impl Player {
                                     )
                                     .truncate(),
                                 );
-                                load_smart = ui.button("Load for Auto DJ").clicked();
+                                load_smart = ui
+                                    .button("Use for Auto Mix")
+                                    .on_hover_text("Select this source for Auto Mix. Turn Auto Mix ON to load and play songs; current decks keep their songs.")
+                                    .clicked();
                                 edit_smart = ui.button("Edit sources / rules in Library").clicked();
                                 refresh |= ui
                                     .button("Refresh")
