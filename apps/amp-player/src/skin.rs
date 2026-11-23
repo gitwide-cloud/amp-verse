@@ -88,7 +88,11 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
         } else {
             10
         })
-        .inner_margin(14)
+        .inner_margin(if ui.ctx().viewport_rect().width() < 1100. {
+            8
+        } else {
+            14
+        })
         .stroke(Stroke::new(1., p.border))
         .show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), body)
@@ -179,7 +183,11 @@ pub fn rack_panel<R>(
     let p = theme.palette();
     let background = ui.painter().add(egui::Shape::Noop);
     let response = egui::Frame::new()
-        .inner_margin(12)
+        .inner_margin(if ui.ctx().viewport_rect().width() < 1100. {
+            6
+        } else {
+            12
+        })
         .corner_radius(if theme.material() { 16 } else { 12 })
         .stroke(Stroke::new(
             if selected.is_some() { 1.7 } else { 1. },

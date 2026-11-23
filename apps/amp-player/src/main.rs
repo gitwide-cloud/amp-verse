@@ -1706,7 +1706,7 @@ impl Player {
                         rect,
                         self.loaded_origin[0].as_deref().unwrap_or(&self.root),
                         self.loaded_track(0),
-                        &self.title(0),
+                        self.title(0),
                     );
                 }
                 skin::display(ui, |ui| {

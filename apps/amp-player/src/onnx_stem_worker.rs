@@ -1018,6 +1018,13 @@ while True:
  h=json.loads(line); n=h['frames']*2; raw=sys.stdin.buffer.read(n*4)
  if len(raw)!=n*4: raise RuntimeError('fake truncated input')
  count+=1
+ if mode.endswith('parallel') and count==1:
+  os.makedirs(mode,exist_ok=True)
+  with open(os.path.join(mode,str(os.getpid())),'w') as marker: marker.write('ready')
+  deadline=time.monotonic()+10
+  while len(os.listdir(mode))<3:
+   if time.monotonic()>deadline: raise RuntimeError('parallel fake workers did not overlap')
+   time.sleep(0.01)
  if mode.endswith('hang'):
   child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])
   with open(mode,'w') as marker: marker.write(str(child.pid))
@@ -1067,17 +1074,22 @@ while True:
     fn three_slots_run_concurrently_and_one_cancel_does_not_kill_healthy_slots() {
         let broker = Arc::new(Broker::start_with(3, 6, None).unwrap());
         let barrier = Arc::new(std::sync::Barrier::new(4));
+        // Hold each fake process at its first request until all three are alive.
+        // Fast replies alone do not establish overlapping process occupancy.
+        let parallel_directory = tempfile::tempdir().unwrap();
+        let parallel = parallel_directory.path().join("parallel");
         let mut handles = Vec::new();
         for _ in 0..3 {
             let b = broker.clone();
             let gate = barrier.clone();
+            let parallel = parallel.clone();
             handles.push(thread::spawn(move || {
                 gate.wait();
                 b.submit(
                     vec![0.; 4],
                     token(),
-                    config("slow".into()),
-                    Duration::from_secs(3),
+                    config(parallel),
+                    Duration::from_secs(15),
                 )
                 .unwrap()
             }));

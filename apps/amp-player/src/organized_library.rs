@@ -114,7 +114,7 @@ impl Player {
                 });
             });
             ui.separator();
-            ui.vertical(|ui| {ui.set_width(ui.available_width()-8.);
+            ui.vertical(|ui| {ui.set_width((ui.available_width()-8.).max(0.));
                 match self.library_page {
                     0 => self.organized_music(ui,height),
                     1 => self.organized_smart(ui,height),
@@ -1120,7 +1120,7 @@ impl Player {
                     });
             });
             ui.vertical(|ui| {
-                ui.set_width(ui.available_width() - 4.);
+                ui.set_width((ui.available_width() - 4.).max(0.));
                 skin::panel(ui, false, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.heading("Tracks");
@@ -1490,7 +1490,11 @@ mod tests {
     }
     #[test]
     fn playlist_card_layouts_handle_narrow_and_wide_windows() {
-        for size in [egui::vec2(900., 760.), egui::vec2(1568., 930.)] {
+        for size in [
+            egui::vec2(320., 640.),
+            egui::vec2(900., 760.),
+            egui::vec2(1568., 930.),
+        ] {
             let (_dir, mut player) = card_fixture();
             let ctx = egui::Context::default();
             theme::apply(&ctx, theme::Theme::ModernDark);

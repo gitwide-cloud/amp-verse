@@ -21,7 +21,7 @@ impl Player {
         });
     }
     pub(super) fn card_tool_windows(&mut self, ctx: &egui::Context) {
-        for deck in 0..6 {
+        for (deck, name) in NAMES.iter().enumerate() {
             let mut open = ctx
                 .data(|d| d.get_temp::<bool>(tool_key(deck)))
                 .unwrap_or(false);
@@ -31,7 +31,7 @@ impl Player {
             let mut tab = ctx
                 .data(|d| d.get_temp::<u8>(tool_key(deck).with("tab")))
                 .unwrap_or(0);
-            egui::Window::new(format!("{} · Deck controls", NAMES[deck]))
+            egui::Window::new(format!("{name} · Deck controls"))
                 .id(tool_key(deck).with("window"))
                 .open(&mut open)
                 .default_width(380.)
@@ -182,16 +182,18 @@ impl Player {
             let cue = skin::deck_button(ui, "CUE", accent(d), button, false)
                 .on_hover_text("Return to the prepared cue IN and pause");
             #[cfg(test)]
-            ui.ctx().data_mut(|data| {
+            {
                 let transform = ui
                     .ctx()
                     .layer_transform_to_global(ui.layer_id())
                     .unwrap_or_default();
-                data.insert_temp(
-                    egui::Id::unique(("deck-cue-bounds", d)),
-                    transform * cue.rect,
-                );
-            });
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(
+                        egui::Id::unique(("deck-cue-bounds", d)),
+                        transform * cue.rect,
+                    );
+                });
+            }
             if cue.clicked() {
                 self.recue_deck(d);
             }

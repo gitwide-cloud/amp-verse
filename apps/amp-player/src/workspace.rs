@@ -165,10 +165,17 @@ impl Player {
             .map(|audio| {
                 (0..48)
                     .map(|i| {
-                        f32::from_bits(
-                            audio.controls.scope[0][i * 2]
-                                .load(std::sync::atomic::Ordering::Relaxed),
-                        )
+                        audio
+                            .controls
+                            .scope
+                            .iter()
+                            .map(|deck| {
+                                f32::from_bits(
+                                    deck[i * 2].load(std::sync::atomic::Ordering::Relaxed),
+                                )
+                            })
+                            .sum::<f32>()
+                            .clamp(0., 1.)
                     })
                     .collect()
             })
