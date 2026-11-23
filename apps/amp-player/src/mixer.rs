@@ -5163,7 +5163,7 @@ mod prepared_playback_tests {
                 duration: Arc::new(AtomicU64::new(frames.len() as u64)),
                 done: Arc::new(AtomicBool::new(true)),
                 failed: Arc::new(AtomicBool::new(false)),
-                history: VecDeque::new(),
+                history: VecDeque::with_capacity(44100 * 8),
                 history_start: 0,
                 position: 0.,
                 primed: false,
