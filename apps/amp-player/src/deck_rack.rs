@@ -372,6 +372,8 @@ impl Player {
             })
         .max(if compact { 278. } else { 300. })
         .min(if self.rack.expanded { 430. } else { 380. });
+        #[cfg(test)]
+        ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique("dj-requested-rack-height"),height));
         let rack_width = ui.available_width();
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
@@ -1603,7 +1605,8 @@ mod tests {
             );
             assert!(
                 library <= size.y - 140.,
-                "The music browser was pushed out at {size:?}: {library}"
+                "The music browser was pushed out at {size:?}: {library}; requested rack height {:?}",
+                ctx.data(|data|data.get_temp::<f32>(egui::Id::unique("dj-requested-rack-height")))
             );
             for deck in [0usize, 1] {
                 let rect = |name| {
