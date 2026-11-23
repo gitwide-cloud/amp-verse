@@ -1154,12 +1154,12 @@ impl Mixer {
                     }
                 }
             }
-            for d in 0..6 {
+            for (d, scratch) in scratch_active.iter().enumerate() {
                 let Some(pending) = &mut self.sections[d] else {
                     continue;
                 };
                 if pending.expected != c.deck_generation[d].load(Relaxed)
-                    || scratch_active[d]
+                    || *scratch
                     || c.scratching[d].load(Relaxed)
                     || c.looping[d].load(Relaxed)
                 {

@@ -160,8 +160,8 @@ pub(crate) fn decode_at(
         }
         for frame in bytes[..n].chunks_exact(frame_bytes) {
             let mut value = [0.; 6];
-            for (ch, sample) in frame.chunks_exact(4).enumerate() {
-                value[ch] = f32::from_le_bytes(sample.try_into().unwrap());
+            for (ch, sample) in frame.as_chunks::<4>().0.iter().enumerate() {
+                value[ch] = f32::from_le_bytes(*sample);
             }
             if value.iter().any(|v| !v.is_finite()) {
                 return Err("Invalid prepared PCM".into());

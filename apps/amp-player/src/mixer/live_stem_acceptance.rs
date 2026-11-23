@@ -448,13 +448,10 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
             energy[deck] > 1e-8 && changed[deck] > 1e-8 && peaks[deck] > 1e-9,
             "deck {deck} must contribute real changed audio"
         );
-        for stem in 0..3 {
-            assert_eq!(
-                get(&controls.stem_level[deck][stem]),
-                SIX_LEVELS[deck][stem]
-            );
+        for (stem, level) in SIX_LEVELS[deck].iter().enumerate() {
+            assert_eq!(get(&controls.stem_level[deck][stem]), *level);
             assert!(
-                (mixer.voices[deck].stem_mix[stem] - SIX_LEVELS[deck][stem]).abs() < 1e-4,
+                (mixer.voices[deck].stem_mix[stem] - *level).abs() < 1e-4,
                 "actual mixer must apply deck {deck} stem {stem}"
             );
         }
@@ -626,14 +623,14 @@ fn six_separated_frame_controls_route_filters_and_cancel_without_model() {
         (output[0] - dry).abs() > 1e-4,
         "six filters must change the actual master output"
     );
-    for deck in 0..6 {
+    for (deck, levels) in SIX_LEVELS.iter().enumerate() {
         assert_eq!(controls.position[deck].load(Relaxed), 4000);
         assert_eq!(controls.underruns[deck].load(Relaxed), 0);
         for (other, playing) in controls.play.iter().take(6).enumerate() {
             playing.store(other == deck, Relaxed);
         }
         mixer.render(100, |_, frame| output = frame);
-        let filtered = contribution(deck, SIX_LEVELS[deck]);
+        let filtered = contribution(deck, *levels);
         assert!(
             (output[0] - filtered).abs() < 1e-4,
             "deck {deck} actual filter/output routing"
