@@ -342,13 +342,32 @@ impl RequestQueue {
         if stopping.load(Ordering::Acquire) {
             return None;
         }
-        let index = pending
+        // Paused submissions can become urgent after Play. Compare all live
+        // snapshots against one clock reading without extending any deadline.
+        let now = Instant::now();
+        let (index, _, live_remaining) = pending
             .requests
             .iter()
             .enumerate()
-            .min_by_key(|(_, r)| r.deadline)
-            .map(|(i, _)| i)?;
-        Some(pending.requests.remove(index))
+            .map(|(index, request)| {
+                let live = request.live_budget.as_ref().map(|remaining| remaining());
+                if live.is_some_and(|remaining| remaining.is_zero()) {
+                    request.state.store(CANCELLED, Ordering::Release);
+                }
+                let fixed = request.deadline.saturating_duration_since(now);
+                let remaining = live.map_or(fixed, |remaining| fixed.min(remaining));
+                let effective = now.checked_add(remaining).unwrap_or(request.deadline);
+                (index, effective, live)
+            })
+            // min_by_key retains the first request for equal deadlines (FIFO).
+            .min_by_key(|(_, effective, _)| *effective)?;
+        let request = pending.requests.remove(index);
+        if trace_enabled() {
+            trace(json!({"event":"queue_select", "id":request.id,
+                "request_margin_ms":margin_ms(request.deadline, now),
+                "live_budget_ms":live_remaining.map(|remaining| remaining.as_secs_f64()*1000.)}));
+        }
+        Some(request)
     }
     fn drain(&self) {
         if let Ok(mut pending) = self.pending.lock() {
@@ -1456,6 +1475,53 @@ while True:
         let picked = queue.take(&AtomicBool::new(false)).unwrap();
         assert!(Arc::ptr_eq(&picked.cancel, &early));
         queue.finish(&picked);
+    }
+    #[test]
+    fn queued_paused_request_becomes_urgent_when_playback_starts() {
+        let queue = RequestQueue::new(6);
+        let cfg = config("good".into());
+        let remaining = Arc::new(AtomicU64::new(20));
+        let read = remaining.clone();
+        let mut urgent = request(cfg.clone(), token());
+        urgent.deadline = Instant::now() + Duration::from_secs(20);
+        urgent.live_budget = Some(Arc::new(move || {
+            Duration::from_secs(read.load(Ordering::Acquire))
+        }));
+        let urgent_id = urgent.id.clone();
+        let mut prefetch = request(cfg, token());
+        prefetch.deadline = Instant::now() + Duration::from_secs(5);
+        queue.push(urgent).unwrap();
+        queue.push(prefetch).unwrap();
+        // Both entered while paused. Play makes the first window urgent after enqueue.
+        remaining.store(1, Ordering::Release);
+        let picked = queue.take(&AtomicBool::new(false)).unwrap();
+        assert_eq!(
+            picked.id, urgent_id,
+            "live one-second budget must outrank static five-second prefetch"
+        );
+        queue.finish(&picked);
+    }
+    #[test]
+    fn effective_deadline_ties_keep_fifo_and_never_extend_fixed_deadline() {
+        let queue = RequestQueue::new(6);
+        let cfg = config("good".into());
+        let mut first = request(cfg.clone(), token());
+        let mut second = request(cfg.clone(), token());
+        let deadline = Instant::now() + Duration::from_secs(3);
+        first.deadline = deadline;
+        second.deadline = deadline;
+        first.live_budget = Some(Arc::new(|| Duration::from_secs(20)));
+        second.live_budget = Some(Arc::new(|| Duration::from_secs(20)));
+        let first_id = first.id.clone();
+        queue.push(first).unwrap();
+        queue.push(second).unwrap();
+        let picked = queue.take(&AtomicBool::new(false)).unwrap();
+        assert_eq!(picked.id, first_id);
+        assert_eq!(picked.deadline, deadline);
+        queue.finish(&picked);
+        let next = queue.take(&AtomicBool::new(false)).unwrap();
+        assert_eq!(next.deadline, deadline);
+        queue.finish(&next);
     }
     #[test]
     fn cuda_autodiscovery_requires_qualified_pinned_fixed_layout() {

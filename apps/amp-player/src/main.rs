@@ -2515,10 +2515,11 @@ impl Player {
             ui.label(kind);
             ui.weak("|");
             let width = (ui.available_width() - 190.).clamp(80., 360.);
-            ui.add_sized(
-                [width, 24.],
-                egui::Label::new(egui::RichText::new(name).strong()).truncate(),
-            )
+            ui.scope(|ui| {
+                ui.set_max_width(width);
+                ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate())
+            })
+            .inner
             .on_hover_text(name);
         }
         ui.separator();

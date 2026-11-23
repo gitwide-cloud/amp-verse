@@ -6,7 +6,26 @@ function node(tag,text,cls){const n=document.createElement(tag);if(text!==undefi
 function message(text,error=false){$('message').textContent=text;$('message').classList.toggle('error',error);}
 function run(fn){return async e=>{try{await fn(e);}catch(err){message(err.message||String(err),true);}};}
 function signInRequired(){state.signedIn=false;$('connection').textContent='Server online · Sign in required';$('access-panel').open=true;$('password').focus();}
-async function api(path,body,password){let r;try{r=await fetch('/api/'+path,{method:body===undefined?'GET':'POST',credentials:'same-origin',cache:'no-store',headers:{...(password===undefined?{}:{'x-amp-password':password}),'content-type':'application/json'},...(body===undefined?{}:{body:JSON.stringify(body)})});}catch{throw Error('Cannot reach AMP Verse. Check this server is running and your network is connected.');}if(!r.ok){const text=await r.text();let detail=text;try{const data=JSON.parse(text);detail=data.error||data.message||'';}catch{}if(r.status===401){signInRequired();throw Error(path==='studio/session'?'Sign-in failed. Use this AMP Verse server’s saved access code.':'Sign in to this AMP Verse server. Your session expired, you signed out, or its access code changed.');}if(r.status===503)throw Error(detail||'This server could not complete the operation. Retry once; if it continues, check the server music folder and logs.');throw Error(detail||`Server request failed (${r.status}).`);}return r.status===204?{}:r.json();}
+// Only this idempotent read may retry an explicit catalog-lock contention response.
+function catalogAbort(){const error=Error('Request cancelled.');error.name='AbortError';return error;}
+function catalogDelay(milliseconds,signal){return new Promise((resolve,reject)=>{if(signal.aborted)return reject(catalogAbort());const finish=()=>{signal.removeEventListener('abort',abort);resolve();},timer=setTimeout(finish,milliseconds),abort=()=>{clearTimeout(timer);signal.removeEventListener('abort',abort);reject(catalogAbort());};signal.addEventListener('abort',abort,{once:true});});}
+async function api(path,body,password,options={}){
+ const method=body===undefined?'GET':'POST',retryable=method==='GET'&&path==='studio/playlists';
+ const controller=retryable?new AbortController():null,signal=controller?.signal||options.signal;
+ const deadline=Date.now()+12000;let timeout=false,lastDetail='';
+ const abort=()=>controller?.abort();if(options.signal?.aborted)abort();else options.signal?.addEventListener('abort',abort,{once:true});
+ const timer=controller?setTimeout(()=>{timeout=true;controller.abort();},12000):null;
+ try{for(let attempt=0;;attempt++){
+  let r;try{if(signal?.aborted)throw catalogAbort();r=await fetch('/api/'+path,{method,credentials:'same-origin',cache:'no-store',headers:{...(password===undefined?{}:{'x-amp-password':password}),'content-type':'application/json'},...(signal?{signal}:{}),...(body===undefined?{}:{body:JSON.stringify(body)})});}
+  catch(error){if(timeout)throw Error(lastDetail||'This server is busy. Wait a moment and retry.');if(signal?.aborted||error?.name==='AbortError')throw error;throw Error('Cannot reach AMP Verse. Check this server is running and your network is connected.');}
+  if(r.ok)return r.status===204?{}:await r.json();
+  const text=await r.text();let detail=text,data={};try{data=JSON.parse(text);detail=data.error||data.message||'';}catch{}lastDetail=detail;
+  if(r.status===401){signInRequired();throw Error(path==='studio/session'?'Sign-in failed. Use this AMP Verse server’s saved access code.':'Sign in to this AMP Verse server. Your session expired, you signed out, or its access code changed.');}
+  if(retryable&&r.status===503&&data.code==='catalog_busy'&&attempt<2){const seconds=Number(r.headers?.get?.('Retry-After')),delay=Number.isFinite(seconds)&&seconds>0?Math.min(seconds*1000,1000):250;if(Date.now()+delay<deadline){await catalogDelay(delay,signal);continue;}}
+  if(r.status===503)throw Error(detail||'This server could not complete the operation. Retry once; if it continues, check the server music folder and logs.');
+  throw Error(detail||`Server request failed (${r.status}).`);
+ }}catch(error){if(timeout)throw Error(lastDetail||'This server is busy. Wait a moment and retry.');if(signal?.aborted)throw catalogAbort();throw error;}finally{if(timer!==null)clearTimeout(timer);options.signal?.removeEventListener('abort',abort);}
+}
 async function audioURL(track){const url='/api/player/audio?library_id='+encodeURIComponent(libraryIdentity())+'&path='+encodeURIComponent(track.path);const r=await fetch(url,{method:'HEAD',credentials:'same-origin',cache:'no-store'});if(r.status===401){signInRequired();throw Error('Sign in to play this server’s music.');}if(r.status===422)throw Error('This audio file is empty. Choose another track, then repair or re-import it in Library.');if(!r.ok)throw Error('This audio file is unavailable. Check the source in Library or choose another track.');return url;}
 const name=t=>t.title||t.name||'Untitled song';
 const seconds=n=>n!==null&&n!==undefined&&Number.isFinite(+n)?Math.floor(n/60)+':'+String(Math.floor(n%60)).padStart(2,'0'):'—';

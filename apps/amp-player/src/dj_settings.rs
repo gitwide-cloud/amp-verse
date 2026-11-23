@@ -125,6 +125,10 @@ mod tests {
                 && !text.contains("Waveforms")
                 && !text.contains("Load")
         );
+        assert!(
+            gear.left() < 500.,
+            "Short playlist names must keep settings beside the information, without a fixed wide column"
+        );
         let owner = player.playback_owner;
         for pressed in [true, false] {
             status_frame(

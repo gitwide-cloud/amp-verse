@@ -345,15 +345,28 @@ fn source_digest(path: &Path) -> String {
 #[test]
 #[ignore = "Requires explicit qualified CUDA GPU and AMP_STEM_TEST_SOURCE >=180sec; six real model decks at116% for90sec plus8sec survivors; no audio device/stem files"]
 fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
+    qualify_native_live_stem_decks(6);
+}
+
+#[test]
+#[ignore = "Requires explicit qualified CUDA GPU and AMP_STEM_TEST_SOURCE >=180sec; four real model decks at116% for90sec plus8sec survivors; no audio device/stem files"]
+fn four_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
+    qualify_native_live_stem_decks(4);
+}
+
+// TEST-ONLY shared qualification: identical timing and assertions for both profiles.
+fn qualify_native_live_stem_decks(count: usize) {
+    assert!(matches!(count, 4 | 6));
+    let decks: Vec<usize> = (0..count).collect();
     assert_eq!(
         std::env::var("AMP_STEM_TEST_QUALIFIED_GPU").as_deref(),
         Ok("1"),
-        "six-deck throughput qualification requires explicit GPU opt-in"
+        "multi-deck throughput qualification requires explicit GPU opt-in"
     );
     assert_eq!(
         std::env::var("AMP_ONNX_PROVIDER").as_deref(),
         Ok("cuda"),
-        "CPU six-deck throughput is not qualified"
+        "CPU multi-deck throughput is not qualified"
     );
     let path = std::path::PathBuf::from(
         std::env::var_os("AMP_STEM_TEST_SOURCE").expect("Set read-only source >=180sec"),
@@ -368,7 +381,7 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
     assert!(crate::onnx_stem_worker::configured());
     let controls = Arc::new(Controls::default());
     set(&controls.master, 0.5);
-    for deck in 0..6 {
+    for deck in 0..count {
         set(&controls.gain[deck], 0.35);
         set(&controls.rate[deck], 1.16);
         controls.on_demand_stems[deck].store(true, Relaxed);
@@ -379,20 +392,20 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
         stops: Vec::new(),
         tasks: Vec::new(),
     };
-    for deck in 0..6 {
+    for deck in 0..count {
         let source = stream_source(&path, deck, controls.clone(), &mut tasks, 180);
         tx.send(Command::Load(deck, source, false, 1)).unwrap();
     }
     mixer.process_commands();
     let prime_deadline = Instant::now() + Duration::from_secs(120);
-    while (0..6)
+    while (0..count)
         .any(|deck| mixer.voices[deck].source.as_ref().unwrap().ring.slots() < RATE as usize * 8)
     {
         assert!(
             Instant::now() < prime_deadline,
-            "six native decks failed to prime"
+            "{count} native decks failed to prime"
         );
-        for (deck, voice) in mixer.voices.iter().take(6).enumerate() {
+        for (deck, voice) in mixer.voices.iter().take(count).enumerate() {
             let source = voice.source.as_ref().unwrap();
             assert!(
                 !source.failed.load(Relaxed),
@@ -408,15 +421,15 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
     }
     let initial_pool = assert_pool_limits();
     tx.send(Command::Fader(0.5)).unwrap();
-    for (deck, levels) in SIX_LEVELS.into_iter().enumerate() {
+    for (deck, levels) in SIX_LEVELS.iter().copied().take(count).enumerate() {
         tx.send(Command::StemLevels(deck, levels)).unwrap();
         tx.send(Command::Play(deck)).unwrap();
     }
     let start = Instant::now();
     let mut rendered = 0usize;
-    let mut energy = [0f64; 6];
-    let mut changed = [0f64; 6];
-    let mut peaks = [0f32; 6];
+    let mut energy = vec![0f64; count];
+    let mut changed = vec![0f64; count];
+    let mut peaks = vec![0f32; count];
     let mut mix_energy = 0f64;
     while rendered < RATE as usize * 90 {
         mixer.render(BLOCK, |_, frame| {
@@ -427,8 +440,8 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
                 .sum::<f64>();
         });
         rendered += BLOCK;
-        assert_decks_live(&mixer, &controls, &[0, 1, 2, 3, 4, 5]);
-        for deck in 0..6 {
+        assert_decks_live(&mixer, &controls, &decks);
+        for deck in 0..count {
             let (filtered, difference) = samples_with_levels(&mixer, deck, SIX_LEVELS[deck]);
             energy[deck] += filtered;
             changed[deck] += difference;
@@ -439,7 +452,7 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
             std::thread::sleep(delay);
         }
     }
-    for deck in 0..6 {
+    for deck in 0..count {
         assert!(
             controls.position[deck].load(Relaxed) >= (f64::from(RATE) * 90. * 1.16) as u64 - 2,
             "deck {deck} clock must advance >=104.4 source seconds at116%"
@@ -457,7 +470,7 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
         }
     }
     assert!(mix_energy > 1e-6);
-    for (deck, voice) in mixer.voices.iter().take(6).enumerate() {
+    for (deck, voice) in mixer.voices.iter().take(count).enumerate() {
         assert!(
             !voice.source.as_ref().unwrap().done.load(Relaxed),
             "deck {deck} must not reach decoder EOF before independent cancellation"
@@ -467,10 +480,18 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
     let cancelled = 2usize;
     tasks.stops[cancelled].store(true, Relaxed);
     tx.send(Command::Stop(cancelled)).unwrap();
-    let others = [0usize, 1, 3, 4, 5];
-    let positions = others.map(|deck| controls.position[deck].load(Relaxed));
+    let others: Vec<_> = decks
+        .iter()
+        .copied()
+        .filter(|&deck| deck != cancelled)
+        .collect();
+    assert_eq!(others.len(), count - 1);
+    let positions: Vec<_> = others
+        .iter()
+        .map(|&deck| controls.position[deck].load(Relaxed))
+        .collect();
     let mut after_energy = 0f64;
-    let mut after_changed = [0f64; 6];
+    let mut after_changed = vec![0f64; count];
     while rendered < RATE as usize * 98 {
         mixer.render(BLOCK, |_, frame| {
             assert!(frame.iter().all(|value| value.is_finite()));
@@ -508,13 +529,13 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
         "no dry fallback warnings permitted"
     );
     tasks.cancel_all();
-    for deck in 0..6 {
+    for deck in 0..count {
         tx.send(Command::Stop(deck)).unwrap();
     }
     mixer.process_commands();
     assert!(
         tasks.wait_finished(),
-        "all six decoders must acknowledge cancellation"
+        "all {count} decoders must acknowledge cancellation"
     );
     assert!(crate::onnx_stem_worker::shutdown());
     assert_eq!(
@@ -540,8 +561,10 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
         files_after, files_before,
         "no saved stem audio or other output files"
     );
+    let filters = &SIX_LEVELS[..count];
+    let survivors = others.len();
     eprintln!(
-        "Qualified CUDA six live decks:90sec at116% together+8sec five-only; filters={SIX_LEVELS:?}; energies={energy:?}; changes={changed:?}; peaks={peaks:?}; after_cancel_changes={after_changed:?}; pools={initial_pool:?}/{busy_pool:?}/{final_pool:?}; cap claims are enforced quotas, not measured RSS; underruns0; fallback0; source unchanged; saved stem audio files0"
+        "Qualified CUDA {count} live decks:90sec at116% together+8sec {survivors}-only; filters={filters:?}; energies={energy:?}; changes={changed:?}; peaks={peaks:?}; after_cancel_changes={after_changed:?}; pools={initial_pool:?}/{busy_pool:?}/{final_pool:?}; cap claims are enforced quotas, not measured RSS; underruns0; fallback0; source unchanged; saved stem audio files0"
     );
 }
 

@@ -677,9 +677,77 @@ async fn export_audio(
         None => StatusCode::NOT_FOUND.into_response(),
     }
 }
+struct PlaylistReadFailure {
+    stage: &'static str,
+    kind: &'static str,
+    message: String,
+    detail: String,
+}
+impl PlaylistReadFailure {
+    fn new(stage: &'static str, kind: &'static str, message: &str, detail: impl ToString) -> Self {
+        Self {
+            stage,
+            kind,
+            message: message.into(),
+            detail: detail.to_string(),
+        }
+    }
+    fn parse(stage: &'static str, error: serde_json::Error) -> Self {
+        // Schema errors can quote metadata values. Keep the location/category, not those values.
+        Self::new(
+            stage,
+            "parse",
+            "Cannot read Smart playlist settings",
+            format!(
+                "JSON {:?} at line {} column {}",
+                error.classify(),
+                error.line(),
+                error.column()
+            ),
+        )
+    }
+    fn catalog(stage: &'static str, detail: String) -> Self {
+        let kind = if detail == "Shared record busy; retry after reloading" {
+            "busy"
+        } else {
+            "storage"
+        };
+        Self::new(stage, kind, &detail, &detail)
+    }
+    fn response(self) -> Response {
+        let code = if self.kind == "busy" {
+            "catalog_busy"
+        } else {
+            "playlist_read_failed"
+        };
+        // Local diagnostics only: no request headers, metadata documents, or raw paths in JSON.
+        let detail: String = self
+            .detail
+            .chars()
+            .take(512)
+            .map(|c| if c.is_control() { ' ' } else { c })
+            .collect();
+        eprintln!(
+            "AMP Studio playlist read failed: stage={} kind={} detail={detail}",
+            self.stage, self.kind
+        );
+        let mut response = (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"error":"Cannot read playlists", "code":code, "stage":self.stage, "kind":self.kind}))).into_response();
+        if self.kind == "busy" {
+            response
+                .headers_mut()
+                .insert("retry-after", axum::http::HeaderValue::from_static("1"));
+        }
+        response
+    }
+}
 fn raw_smart_settings(cast: &Cast) -> Result<Value, String> {
+    read_smart_settings(cast).map_err(|error| error.message)
+}
+fn read_smart_settings(cast: &Cast) -> Result<Value, PlaylistReadFailure> {
     let path = cast.root.join("ampdj/smart-playlists.json");
-    let bytes = if let Some(bytes) = amp_core::catalog_db::read(&path)? {
+    let bytes = if let Some(bytes) = amp_core::catalog_db::read(&path)
+        .map_err(|error| PlaylistReadFailure::catalog("smart_settings_catalog_read", error))?
+    {
         Some(bytes)
     } else {
         match std::fs::read(&path) {
@@ -688,32 +756,63 @@ fn raw_smart_settings(cast: &Cast) -> Result<Value, String> {
                 match std::fs::read(cast.root.join(".ampverse/show.json")) {
                     Ok(bytes) => Some(bytes),
                     Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
-                    Err(_) => return Err("Cannot read legacy Smart playlist settings".into()),
+                    Err(error) => {
+                        return Err(PlaylistReadFailure::new(
+                            "legacy_smart_settings_read",
+                            "storage",
+                            "Cannot read legacy Smart playlist settings",
+                            error,
+                        ));
+                    }
                 }
             }
-            Err(_) => return Err("Cannot read Smart playlist settings".into()),
+            Err(error) => {
+                return Err(PlaylistReadFailure::new(
+                    "smart_settings_read",
+                    "storage",
+                    "Cannot read Smart playlist settings",
+                    error,
+                ));
+            }
         }
     };
     let mut value = match bytes {
         Some(bytes) => {
             if bytes.len() > 4 * 1024 * 1024 {
-                return Err("Smart settings exceed supported size".into());
+                return Err(PlaylistReadFailure::new(
+                    "smart_settings_size",
+                    "metadata",
+                    "Smart settings exceed supported size",
+                    "Size limit exceeded",
+                ));
             }
-            serde_json::from_slice(&bytes).map_err(|_| "Cannot read Smart playlist settings")?
+            serde_json::from_slice(&bytes)
+                .map_err(|error| PlaylistReadFailure::parse("smart_settings_parse", error))?
         }
-        None => {
-            serde_json::to_value(amp_core::show::Settings::default()).map_err(|e| e.to_string())?
-        }
+        None => serde_json::to_value(amp_core::show::Settings::default()).map_err(|error| {
+            PlaylistReadFailure::new(
+                "smart_settings_defaults",
+                "metadata",
+                "Cannot read Smart playlist settings",
+                error,
+            )
+        })?,
     };
-    amp_core::coordination::adopt_legacy(&mut value)?;
+    amp_core::coordination::adopt_legacy(&mut value).map_err(|error| {
+        PlaylistReadFailure::new("smart_settings_revision", "metadata", &error, &error)
+    })?;
     Ok(value)
 }
 async fn playlists(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     if !cast.authorized(&headers) {
         return StatusCode::UNAUTHORIZED.into_response();
     }
-    let result = tokio::task::spawn_blocking(move || -> Result<Value, String> {
-        let mut lists = sharing::lists(&cast)?;
+    let result = tokio::task::spawn_blocking(move || -> Result<Value, PlaylistReadFailure> {
+        let settings = read_smart_settings(&cast)?;
+        let _: amp_core::show::Settings = serde_json::from_value(settings.clone())
+            .map_err(|error| PlaylistReadFailure::parse("smart_settings_schema", error))?;
+        let mut lists = sharing::lists(&cast)
+            .map_err(|error| PlaylistReadFailure::catalog("playlist_listing", error))?;
         for list in &mut lists {
             if let Some(id) = list["id"]
                 .as_str()
@@ -721,8 +820,11 @@ async fn playlists(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respons
                 && safe_id(id)
             {
                 let p = cast.root.join("ampdj/playlists").join(format!("{id}.json"));
-                let (playlist, mut raw) = sharing::normal_playlist_data(&cast, &p)?;
-                amp_core::coordination::adopt_legacy(&mut raw)?;
+                let (playlist, mut raw) = sharing::normal_playlist_data(&cast, &p)
+                    .map_err(|error| PlaylistReadFailure::catalog("normal_playlist_read", error))?;
+                amp_core::coordination::adopt_legacy(&mut raw).map_err(|error| {
+                    PlaylistReadFailure::new("normal_playlist_revision", "metadata", &error, &error)
+                })?;
                 list["revision"] = raw.get("_amp_sync").cloned().unwrap_or(Value::Null);
                 list["track_paths"] = json!(
                     playlist
@@ -734,13 +836,19 @@ async fn playlists(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Respons
                 list["companion_available"] = json!(playlist.companion_available);
             }
         }
-        let settings = raw_smart_settings(&cast)?;
         Ok(json!({"playlists":lists,"smart_revision":settings}))
     })
     .await;
     match result {
         Ok(Ok(v)) => Json(v).into_response(),
-        _ => err(StatusCode::SERVICE_UNAVAILABLE, "Cannot read playlists"),
+        Ok(Err(error)) => error.response(),
+        Err(error) => PlaylistReadFailure::new(
+            "playlist_read_task",
+            "internal",
+            "Cannot read playlists",
+            error,
+        )
+        .response(),
     }
 }
 #[derive(Deserialize)]
@@ -915,6 +1023,88 @@ mod api_tests {
     use super::*;
     use axum::http::Request;
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn unrelated_busy_errors_do_not_advertise_catalog_retry() {
+        let response = PlaylistReadFailure::catalog(
+            "playlist_listing",
+            "Some unrelated storage is busy".into(),
+        )
+        .response();
+        assert!(!response.headers().contains_key("retry-after"));
+        let error = value(response).await;
+        assert_eq!(error["code"], "playlist_read_failed");
+    }
+    #[tokio::test]
+    async fn catalog_lock_busy_read_is_retryable_and_release_restores_saved_playlists() {
+        let (root, _cast, app) = fixture();
+        let created = write(
+            &app,
+            "/api/studio/playlists",
+            json!({"name":"Saved normal", "tracks":[0]}),
+        )
+        .await;
+        assert_eq!(created.status(), StatusCode::OK);
+        amp_core::catalog_db::ensure(root.path()).unwrap();
+        let before = value(read(&app, "/api/studio/playlists").await).await;
+        assert!(before["playlists"].as_array().unwrap().len() >= 2);
+        let catalog = amp_core::catalog_db::path(root.path());
+        let bytes = std::fs::read(&catalog).unwrap();
+        let lock =
+            amp_core::coordination::Lock::acquire(&root.path().join("ampdj/catalog-publication"))
+                .unwrap();
+        let response = read(&app, "/api/studio/playlists").await;
+        assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(response.headers()["retry-after"], "1");
+        let error = value(response).await;
+        assert_eq!(error["error"], "Cannot read playlists");
+        assert_eq!(error["code"], "catalog_busy");
+        assert_eq!(error["kind"], "busy");
+        assert_eq!(error["stage"], "smart_settings_catalog_read");
+        assert!(!error.to_string().contains(root.path().to_str().unwrap()));
+        drop(lock);
+        let response = read(&app, "/api/studio/playlists").await;
+        assert_eq!(response.status(), StatusCode::OK);
+        let after = value(response).await;
+        assert_eq!(after, before);
+        assert_eq!(
+            std::fs::read(catalog).unwrap(),
+            bytes,
+            "GET cannot rewrite the catalog"
+        );
+    }
+    #[tokio::test]
+    async fn playlist_parse_schema_and_storage_failures_never_advertise_retry() {
+        for (contents, stage) in [
+            ("{ invalid", "smart_settings_parse"),
+            (
+                r#"{"version":2,"playlists":"invalid"}"#,
+                "smart_settings_schema",
+            ),
+        ] {
+            let (root, _cast, app) = fixture();
+            let file = root.path().join("ampdj/smart-playlists.json");
+            std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+            std::fs::write(&file, contents).unwrap();
+            let response = read(&app, "/api/studio/playlists").await;
+            assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+            assert!(!response.headers().contains_key("retry-after"));
+            let error = value(response).await;
+            assert_eq!(error["error"], "Cannot read playlists");
+            assert_eq!(error["code"], "playlist_read_failed");
+            assert_eq!(error["kind"], "parse");
+            assert_eq!(error["stage"], stage);
+            assert!(!error.to_string().contains(contents));
+            assert_eq!(std::fs::read_to_string(file).unwrap(), contents);
+        }
+        let (root, _cast, app) = fixture();
+        std::fs::create_dir_all(root.path().join("ampdj/smart-playlists.json")).unwrap();
+        let response = read(&app, "/api/studio/playlists").await;
+        assert!(!response.headers().contains_key("retry-after"));
+        let error = value(response).await;
+        assert_eq!(error["code"], "playlist_read_failed");
+        assert_eq!(error["kind"], "storage");
+        assert_eq!(error["stage"], "smart_settings_read");
+    }
     #[tokio::test]
     async fn empty_audio_is_a_source_error_instead_of_successful_silence() {
         let (_root, cast, app) = fixture();
