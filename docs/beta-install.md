@@ -1,7 +1,9 @@
-# AMP Verse Beta 3
+# AMP Verse Beta channel
 
 This is the Beta release channel. The desktop numeric base version remains
-1.0.22; Android is 0.3.2-beta.3, version code 39. Server builds report Beta 3.
+1.0.22; the beta number, package version and source revision are recorded in
+`build.json`. Android versions and version codes are recorded in the signed
+`android-packages.json` catalog. Check those records for the particular build.
 
 Use `install-tested-desktop.ps1` and the verified matching build manifest to
 update the single existing AMP Verse installation in place. Follow
@@ -20,8 +22,8 @@ Audio Preview Mix, clip previews and podcast previews are playback features and
 retain their names. Beta artifacts are manually reviewed updates; stable
 automatic-update trust rules remain in effect.
 
-Beta 3 is a release candidate until the final combined source passes CI and its
-signed packages are published on GitHub. Use the reviewed GitHub update path;
+Use beta packages only after their matching source passes CI and their signed
+packages are published on GitHub. Use the reviewed GitHub update path;
 USB installation is not the release workflow. Unsigned CI APKs are signing
 inputs, not installable published updates. Phone-to-server live broadcasting
 remains unimplemented.
