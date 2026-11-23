@@ -187,6 +187,7 @@ impl Player {
             if ui.button("DJ settings").clicked() {
                 self.open_dj_settings(ui.ctx());
             }
+            ui.menu_button("Deck view / tools", |ui| self.card_view_tools(ui));
         });
         ui.separator();
         for side in 0..2 {
@@ -370,7 +371,7 @@ impl Player {
                 library_height + 52.
             })
         .max(if compact { 290. } else { 320. })
-        .min(if self.rack.expanded { 450. } else { 410. });
+        .min(if self.rack.expanded { 430. } else { 380. });
         let rack_width = ui.available_width();
         #[cfg(test)]
         ui.ctx().data_mut(|data| {

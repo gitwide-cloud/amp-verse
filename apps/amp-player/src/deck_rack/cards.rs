@@ -163,7 +163,9 @@ impl Player {
             .data_mut(|d| d.insert_temp(egui::Id::unique("native-dj-card-layout"), true));
         ui.spacing_mut().item_spacing.x = gap;
         ui.horizontal_top(|ui| {
-            ui.add_space(((available - total) / 2.).max(0.));
+            if available > total {
+                ui.add_space((available - total) / 2.);
+            }
             if self.rack.six {
                 self.card_auxiliary(ui, banks[0], height, 0);
                 window_layout::splitter(
@@ -201,6 +203,8 @@ impl Player {
         if self.rack.six {
             self.rack.strip_ratios = banks.map(|w| w / total);
         }
+    }
+    pub(super) fn card_view_tools(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.rack.six, false, "A / B main");
             ui.selectable_value(&mut self.rack.six, true, "6 decks");
@@ -225,7 +229,7 @@ impl Player {
     }
     fn card_auxiliary(&mut self, ui: &mut egui::Ui, width: f32, height: f32, side: usize) {
         ui.allocate_ui_with_layout(egui::vec2(width,height),egui::Layout::top_down(egui::Align::Min),|ui|{
-            egui::ScrollArea::vertical().id_salt("auxiliary-deck-cards").max_height(height).auto_shrink([false,false]).show(ui,|ui|{
+            egui::ScrollArea::vertical().id_salt(("auxiliary-deck-cards",side)).max_height(height).auto_shrink([false,false]).show(ui,|ui|{
             ui.spacing_mut().item_spacing.y=8.;let live=self.rack.live;let mut decks:Vec<_>=(0..6).filter(|d|d%2==side&&!live.contains(d)).collect();decks.sort_by_key(|d|(d%2,d/2));
             for d in decks {ui.push_id(("strip",d),|ui|{
                 let frame=panel(ui,None).show(ui,|ui|{
