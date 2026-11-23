@@ -125,6 +125,45 @@ fn receipt_matches(
         && value["proof_run"].as_str().is_some_and(|s| !s.is_empty()))
     .then_some(maximum)
 }
+fn parse_host_identity(value: &str) -> Option<String> {
+    let value = value.trim();
+    (!value.is_empty() && value.len() <= 255 && !value.chars().any(char::is_control))
+        .then(|| value.to_owned())
+}
+#[cfg(any(target_os = "linux", test))]
+fn bounded_hostname(mut input: impl std::io::Read) -> Result<String, String> {
+    use std::io::Read;
+    let mut value = String::new();
+    input
+        .by_ref()
+        .take(257)
+        .read_to_string(&mut value)
+        .map_err(|e| e.to_string())?;
+    if value.len() > 256 {
+        return Err("Host identity oversized".into());
+    }
+    parse_host_identity(&value).ok_or_else(|| "Host identity unavailable".into())
+}
+fn host_identity() -> Result<String, String> {
+    for key in ["COMPUTERNAME", "HOSTNAME"] {
+        if let Some(host) = std::env::var(key)
+            .ok()
+            .and_then(|value| parse_host_identity(&value))
+        {
+            return Ok(host);
+        }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        bounded_hostname(
+            std::fs::File::open("/proc/sys/kernel/hostname").map_err(|e| e.to_string())?,
+        )
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        Err("Host identity unavailable".into())
+    }
+}
 fn verify_local_receipt() -> Result<usize, String> {
     use sha2::{Digest, Sha256};
     use std::{
@@ -144,9 +183,7 @@ fn verify_local_receipt() -> Result<usize, String> {
     let receipt: serde_json::Value =
         serde_json::from_slice(&std::fs::read(path).map_err(|e| e.to_string())?)
             .map_err(|e| e.to_string())?;
-    let host = std::env::var("COMPUTERNAME")
-        .or_else(|_| std::env::var("HOSTNAME"))
-        .map_err(|_| "Host identity unavailable")?;
+    let host = host_identity()?;
     let mut child = amp_core::command("nvidia-smi")
         .args(["--id=0", "--query-gpu=uuid", "--format=csv,noheader"])
         .stdin(Stdio::null())
@@ -527,6 +564,20 @@ mod tests {
         save(&manifest);
         std::fs::write(root.join("onnxruntime.dll"), b"swapped-runtime!").unwrap();
         assert!(verify_runtime_manifest(&path, deadline).is_err());
+    }
+    #[test]
+    fn bounded_kernel_hostname_supports_linux_without_exported_environment() {
+        assert_eq!(
+            bounded_hostname(std::io::Cursor::new(b"sager-host\n")).unwrap(),
+            "sager-host"
+        );
+        assert_eq!(
+            parse_host_identity("  windows-host  "),
+            Some("windows-host".into())
+        );
+        assert!(bounded_hostname(std::io::Cursor::new(vec![b'x'; 258])).is_err());
+        assert!(bounded_hostname(std::io::Cursor::new(b"bad\ninside")).is_err());
+        assert!(parse_host_identity(" ").is_none());
     }
     #[test]
     fn maximum_persists_and_invalid_write_preserves_previous() {
