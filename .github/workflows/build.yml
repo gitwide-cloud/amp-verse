@@ -1,7 +1,7 @@
 name: Build and verify AMP Verse
 on:
   push:
-    branches: [main]
+    branches: [main, 'fix/sag99-live-stem-timeout']
     # Beta assets are fully verified by workflow_dispatch and signed locally.
     # Do not invoke the stable signing/publishing route for prerelease tags.
     tags: ['v*', '!v*-*']
