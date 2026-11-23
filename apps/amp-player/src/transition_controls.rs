@@ -37,6 +37,7 @@ fn simplify(settings: &mut Settings) {
     settings.style = Style::Variety;
 }
 
+#[cfg(test)]
 pub fn show(
     ui: &mut egui::Ui,
     settings: &mut Settings,
@@ -57,34 +58,121 @@ pub fn show(
         open = true;
         simplify(settings);
     }
-    egui::Window::new("Auto DJ transitions").id(egui::Id::unique("transitions-window")).open(&mut open).default_width(620.).default_height(560.).max_height((ui.ctx().viewport_rect().height()-60.).max(200.)).resizable(true).vscroll(true).show(ui.ctx(),|ui|{
-        ui.label("Turn on the transitions you like. Auto DJ rotates through enabled types; clean blends fill the other mixes.");
-        switch(ui,&mut settings.enabled,"Use effects","Master switch for occasional effects. Timing and your crossfade duration stay unchanged.");
-        switch(ui,&mut settings.tempo_recovery,"Recover native tempo","After Auto DJ handoffs, gently return to original speed with Key Lock. Pitch or jog touch cancels recovery.");
-        ui.separator();let previous=*settings;
-        for (index,label,help) in [
-            (0,"Scratch","One bar of incoming drum scratches, beat-locked before the blend; needs prepared drums."),(1,"Stutter","A brief rhythmic repeat."),
-            (2,"Tape brake","Slow the outgoing deck briefly."),(3,"Filter sweep","Sweep tone during the blend."),
-            (4,"Build/drop & bass swap","With compatible cued buildups, blend sixteen beats into the incoming drop; otherwise trade bass normally."),(5,"Beatmatch tempo","Match prepared tempos within the supported range."),
-        ] {switch(ui,&mut settings.techniques[index],label,help);}
-        switch(ui,&mut settings.loop_build,"Loop buildup","Shorten a beat loop before the handoff; requires BPM and enough mix time.");
-        switch(ui,&mut settings.stem_swap,"Stem handoff","Requires prepared stems on both decks.");
-        switch(ui,&mut settings.mashup,"Vocal / backing","Incoming vocals over outgoing backing, then the full incoming song at its prepared landing.");
-        if *settings!=previous {settings.style=Style::Variety;}
-        ui.separator();
-        ui.horizontal_wrapped(|ui|{ui.label("Use an effect every");ui.add(egui::DragValue::new(&mut settings.every).range(2..=12));ui.label("mixes");});
-        ui.weak("Unsupported combinations use a clean blend. Turning every type off is safe.");
-        egui::CollapsingHeader::new("Timing and mix options").show(ui,|ui|{
-            ui.label("When to start a transition");
-            ui.horizontal_wrapped(|ui|{for (timing,label) in [(Timing::Immediate,"Now"),(Timing::Beat,"Next beat"),(Timing::Bar,"Next bar"),(Timing::Phrase8,"2 bars"),(Timing::Phrase16,"4 bars"),(Timing::Phrase32,"8 bars")] {ui.selectable_value(&mut settings.timing,timing,label);}});
-            ui.weak("Bar counts assume four beats. Missing grids use a timed blend.");
-            ui.horizontal_wrapped(|ui|{ui.label("Mashup hold");for beats in [8,16,32] {ui.selectable_value(&mut settings.mashup_beats,beats,format!("{beats} beats"));}});
-            ui.add(egui::Slider::new(wave_span,4. ..=60.).text("Waveform seconds"));
-            mashup=ui.add_enabled(can_mashup,egui::Button::new("Try mashup on next pair")).clicked();
+    egui::Window::new("Auto DJ transitions")
+        .id(egui::Id::unique("transitions-window"))
+        .open(&mut open)
+        .default_width(620.)
+        .default_height(560.)
+        .max_height((ui.ctx().viewport_rect().height() - 60.).max(200.))
+        .resizable(true)
+        .vscroll(true)
+        .show(ui.ctx(), |ui| {
+            mashup = inline(ui, settings, wave_span, can_mashup);
         });
-    });
     ui.ctx().data_mut(|d| {
         d.insert_temp(id, open);
+    });
+    mashup
+}
+pub fn inline(
+    ui: &mut egui::Ui,
+    settings: &mut Settings,
+    wave_span: &mut f64,
+    can_mashup: bool,
+) -> bool {
+    simplify(settings);
+    let mut mashup = false;
+
+    ui.label("Turn on the transitions you like. Auto DJ rotates through enabled types; clean blends fill the other mixes.");
+    switch(
+        ui,
+        &mut settings.enabled,
+        "Use effects",
+        "Master switch for occasional effects. Timing and your crossfade duration stay unchanged.",
+    );
+    switch(
+        ui,
+        &mut settings.tempo_recovery,
+        "Recover native tempo",
+        "After Auto DJ handoffs, gently return to original speed with Key Lock. Pitch or jog touch cancels recovery.",
+    );
+    ui.separator();
+    let previous = *settings;
+    for (index, label, help) in [
+        (
+            0,
+            "Scratch",
+            "One bar of incoming drum scratches, beat-locked before the blend; needs prepared drums.",
+        ),
+        (1, "Stutter", "A brief rhythmic repeat."),
+        (2, "Tape brake", "Slow the outgoing deck briefly."),
+        (3, "Filter sweep", "Sweep tone during the blend."),
+        (
+            4,
+            "Build/drop & bass swap",
+            "With compatible cued buildups, blend sixteen beats into the incoming drop; otherwise trade bass normally.",
+        ),
+        (
+            5,
+            "Beatmatch tempo",
+            "Match prepared tempos within the supported range.",
+        ),
+    ] {
+        switch(ui, &mut settings.techniques[index], label, help);
+    }
+    switch(
+        ui,
+        &mut settings.loop_build,
+        "Loop buildup",
+        "Shorten a beat loop before the handoff; requires BPM and enough mix time.",
+    );
+    switch(
+        ui,
+        &mut settings.stem_swap,
+        "Stem handoff",
+        "Requires prepared stems on both decks.",
+    );
+    switch(
+        ui,
+        &mut settings.mashup,
+        "Vocal / backing",
+        "Incoming vocals over outgoing backing, then the full incoming song at its prepared landing.",
+    );
+    if *settings != previous {
+        settings.style = Style::Variety;
+    }
+    ui.separator();
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Use an effect every");
+        ui.add(egui::DragValue::new(&mut settings.every).range(2..=12));
+        ui.label("mixes");
+    });
+    ui.weak("Unsupported combinations use a clean blend. Turning every type off is safe.");
+    egui::CollapsingHeader::new("Timing and mix options").show(ui, |ui| {
+        ui.label("When to start a transition");
+        ui.horizontal_wrapped(|ui| {
+            for (timing, label) in [
+                (Timing::Immediate, "Now"),
+                (Timing::Beat, "Next beat"),
+                (Timing::Bar, "Next bar"),
+                (Timing::Phrase8, "2 bars"),
+                (Timing::Phrase16, "4 bars"),
+                (Timing::Phrase32, "8 bars"),
+            ] {
+                ui.selectable_value(&mut settings.timing, timing, label);
+            }
+        });
+        ui.weak("Bar counts assume four beats. Missing grids use a timed blend.");
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Mashup hold");
+            for beats in [8, 16, 32] {
+                ui.selectable_value(&mut settings.mashup_beats, beats, format!("{beats} beats"));
+            }
+        });
+        ui.add(egui::Slider::new(wave_span, 4. ..=60.).text("Waveform seconds"));
+        mashup = ui
+            .add_enabled(can_mashup, egui::Button::new("Try mashup on next pair"))
+            .clicked();
     });
     mashup
 }

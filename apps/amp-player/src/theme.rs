@@ -115,14 +115,14 @@ impl Theme {
                 muted: C::from_rgb(84, 96, 111),
             },
             Self::ModernDark => Palette {
-                background: C::from_rgb(13, 16, 22),
-                surface: C::from_rgb(24, 29, 38),
-                elevated: C::from_rgb(34, 41, 53),
-                border: C::from_rgb(70, 81, 99),
-                text: C::from_rgb(231, 236, 243),
-                accent: C::from_rgb(255, 197, 54),
-                signal: C::from_rgb(130, 212, 155),
-                muted: C::from_rgb(155, 168, 187),
+                background: C::from_rgb(6, 13, 18),
+                surface: C::from_rgb(14, 23, 29),
+                elevated: C::from_rgb(30, 38, 44),
+                border: C::from_rgb(60, 75, 84),
+                text: C::from_rgb(245, 247, 249),
+                accent: C::from_rgb(255, 211, 0),
+                signal: C::from_rgb(63, 224, 101),
+                muted: C::from_rgb(170, 185, 198),
             },
         }
     }
@@ -247,13 +247,57 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
         style.spacing.item_spacing = egui::vec2(6., 5.);
         style
             .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.));
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(16.));
         style
             .text_styles
             .insert(egui::TextStyle::Button, egui::FontId::proportional(14.));
         style
             .text_styles
             .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.));
+    }
+    if theme == Theme::ModernDark {
+        // Let egui use the black selection stroke for text on the gold fill.
+        // A global white override also recolors selected labels and loses contrast.
+        style.visuals.override_text_color = None;
+        style.visuals.widgets.noninteractive.fg_stroke.color = p.text;
+        style.visuals.widgets.inactive.fg_stroke.color = p.text;
+        style.visuals.widgets.hovered.fg_stroke.color = p.text;
+        // egui also uses the active foreground for ordinary strong labels.
+        style.visuals.widgets.active.bg_fill = p.elevated;
+        style.visuals.widgets.active.fg_stroke.color = p.text;
+        let display_family = if ctx
+            .data(|data| data.get_temp::<bool>(egui::Id::unique("amp-brand-fonts")))
+            .unwrap_or(false)
+        {
+            egui::FontFamily::Name("AMP Display".into())
+        } else {
+            egui::FontFamily::Proportional
+        };
+        style.visuals.extreme_bg_color = p.background;
+        style.visuals.faint_bg_color = p.surface;
+        style.visuals.text_edit_bg_color = Some(p.background);
+        style.visuals.window_corner_radius = egui::CornerRadius::same(14);
+        style.visuals.menu_corner_radius = egui::CornerRadius::same(12);
+        style.visuals.widgets.noninteractive.bg_fill = p.surface;
+        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1., p.border);
+        style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(12);
+        style.visuals.widgets.inactive.weak_bg_fill = p.elevated;
+        style.visuals.slider_trailing_fill = true;
+        style.visuals.selection.bg_fill = p.accent;
+        style.visuals.selection.stroke = egui::Stroke::new(1., p.background);
+        style.spacing.button_padding = egui::vec2(14., 9.);
+        style.spacing.item_spacing = egui::vec2(9., 8.);
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            egui::FontId::new(27., display_family.clone()),
+        );
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(16.));
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::new(17., display_family),
+        );
     }
     ctx.set_global_style(style);
     for id in [
@@ -310,6 +354,47 @@ pub fn selector(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn card_headings_and_selected_controls_keep_readable_contrast() {
+        fn luminance(color: C) -> f32 {
+            let linear = |v: u8| {
+                let v = f32::from(v) / 255.;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r()) + 0.7152 * linear(color.g()) + 0.0722 * linear(color.b())
+        }
+        let contrast = |a: C, b: C| {
+            let a = luminance(a);
+            let b = luminance(b);
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        };
+        let ctx = egui::Context::default();
+        apply(&ctx, Theme::ModernDark);
+        let style = ctx.global_style();
+        let visuals = &style.visuals;
+        assert!(
+            contrast(
+                visuals.strong_text_color(),
+                Theme::ModernDark.palette().surface
+            ) >= 7.,
+            "Normal strong card text must remain readable"
+        );
+        assert!(
+            contrast(
+                visuals.widgets.active.text_color(),
+                visuals.widgets.active.bg_fill
+            ) >= 7.,
+            "Pressed controls need readable labels"
+        );
+        assert!(
+            contrast(visuals.selection.stroke.color, visuals.selection.bg_fill) >= 7.,
+            "Selected gold controls need dark text"
+        );
+    }
     #[test]
     fn preferences_replace_and_round_trip_all_themes() {
         let dir = tempfile::tempdir().unwrap();

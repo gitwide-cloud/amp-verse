@@ -1,4 +1,6 @@
 plugins { id 'com.android.application' }
+// Extra native ABI is confined to debug UI-test APKs, never the shipped release.
+def uiEmulatorX86 = System.getenv('AMP_UI_TEST_X86') == '1'
 android {
     namespace 'cloud.gitwide.ampverse'
     compileSdk 35
@@ -7,8 +9,8 @@ android {
         applicationId 'cloud.gitwide.ampverse'
         minSdk 28
         targetSdk 35
-        versionCode 39
-        versionName '0.3.2-beta.3'
+        versionCode 42
+        versionName '0.3.2-beta.6'
         ndk { abiFilters 'arm64-v8a' }
         testInstrumentationRunner 'androidx.test.runner.AndroidJUnitRunner'
     }
@@ -36,7 +38,10 @@ android {
             }
         }
     }
-    buildTypes { release { if (System.getenv('AMP_ANDROID_KEYSTORE')) signingConfig signingConfigs.published } }
+    buildTypes {
+        debug { if (uiEmulatorX86) { ndk { abiFilters 'arm64-v8a', 'x86_64' } } }
+        release { if (System.getenv('AMP_ANDROID_KEYSTORE')) signingConfig signingConfigs.published }
+    }
 }
 dependencies {
     testImplementation 'junit:junit:4.13.2'
@@ -63,6 +68,8 @@ dependencies {
     inputs.file('../../tools/build_android_dj.py')
     inputs.file('../../Cargo.toml')
     inputs.file('../../Cargo.lock')
+    inputs.property('uiEmulatorX86', uiEmulatorX86)
     outputs.file('build/generated/djLogicJni/arm64-v8a/libamp_dj_policy.so')
+    if (uiEmulatorX86) outputs.file('build/generated/djLogicJni/x86_64/libamp_dj_policy.so')
  }
  tasks.named('preBuild').configure { dependsOn 'buildSharedDjLogic' }

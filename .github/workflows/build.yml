@@ -181,10 +181,12 @@ jobs:
           fixture_music="$(mktemp -d)"
           ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 "$fixture_music/Tone.wav"
           target/release/amp-prepare "$fixture_music"
+          mkdir -p target/release/addons
+          cp plugins/amp-podcasts/amp-podcasts.ampplugin target/release/addons/amp-podcasts.ampplugin
           python3 -c "import sys; sys.path.insert(0,'tools'); from fixture_catalog import read,write; d=read(sys.argv[1],'tracks/Tone.wav.json'); d['cue_in']=0.2; d['manual_override']=True; write(sys.argv[1],'tracks/Tone.wav.json',d)" "$fixture_music"
           target/release/amp-prepare "$fixture_music" --force
           for theme in classic modern-light modern-dark; do
-            for view in player compact mini combined library playlists analysis devices preparation rules dj dj-window dj-library sampler lab addons cast; do
+            for view in player compact mini combined library playlists analysis devices preparation rules dj dj-window dj-library sampler lab addons cast v1-player v1-library v1-playlists v1-dj v1-lab v1-cast v1-podcasts; do
               timeout 35s xvfb-run -a env LIBGL_ALWAYS_SOFTWARE=1 AMP_THEME="$theme" AMP_VERSE_CONFIG_DIR=test-output/theme-config AMP_SCREENSHOT_VIEW="$view" AMP_SCREENSHOT="test-output/$theme-$view.png" target/release/amp-player "$fixture_music"
               test -s "test-output/$theme-$view.png"
             done
@@ -200,6 +202,8 @@ jobs:
           name: amp-player-ui
           path: test-output/*.png
       - name: Package binaries and documentation
+        env:
+          AMP_DESKTOP_PACKAGE_VERSION: ${{ steps.package_version.outputs.version }}
         shell: bash
         run: |
           mkdir -p dist
@@ -208,7 +212,9 @@ jobs:
           mkdir -p dist/licenses/signalsmith
           cp -r apps/amp-player/vendor/signalsmith/* dist/licenses/signalsmith/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
-          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":6},indent=2)+"\n")'
+          mkdir -p dist/licenses/Barlow
+          cp apps/amp-player/assets/fonts/OFL.txt dist/licenses/Barlow/OFL.txt
+          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":int(os.environ["AMP_DESKTOP_PACKAGE_VERSION"].split("-beta.")[1].split(".")[0]),"package_version":os.environ["AMP_DESKTOP_PACKAGE_VERSION"]},indent=2)+"\n")'
           python -c 'import shutil; shutil.copytree("docs", "dist/docs", ignore=shutil.ignore_patterns("tested-preview-install.md"))'
           cp -r licenses dist/
           mkdir -p dist/licenses/mp3-lab

@@ -55,6 +55,16 @@ impl Panel {
             .changed();
         changed
     }
+    pub fn filter_knob(&mut self, ui: &mut egui::Ui, deck: usize, accent: egui::Color32) -> bool {
+        dial(
+            ui,
+            "Filter (left low-pass; right high-pass)",
+            &mut self.sweep[deck],
+            -1. ..=1.,
+            accent,
+        )
+        .changed()
+    }
     pub fn set_filter(&mut self, deck: usize, value: f32) {
         self.sweep[deck] = value;
     }

@@ -32,7 +32,7 @@ final class RemotePanel extends LinearLayout {
     private final okhttp3.OkHttpClient socketClient=new okhttp3.OkHttpClient.Builder().pingInterval(10,TimeUnit.SECONDS).build();
     private okhttp3.WebSocket socket;
     RemotePanel(Activity a,Appearance c){super(a);activity=a;colors=c;setOrientation(VERTICAL);setPadding(12,12,12,12);
-        addView(label("Control desktop AMP Verse",22));
+        setBackground(Chrome.panel(colors,false));addView(label("Remote · your desktop",22));addView(label("Control its Player and DJ decks. Audio stays on the selected computer.",14));
         discoverButton=button("Discover devices",this::discover);discoverButton.setContentDescription("Discover AMP Verse devices");addView(discoverButton);
         discoveryStatus=label("Find Player, DJ and Cast hosts on your Wi-Fi.",14);addView(discoveryStatus);
         nearbyDevices=new LinearLayout(a);nearbyDevices.setOrientation(VERTICAL);addView(nearbyDevices);
@@ -40,7 +40,7 @@ final class RemotePanel extends LinearLayout {
         address=field("http://192.168.1.50:8790",false);address.setText(a.getSharedPreferences("settings",0).getString("remote-server",""));address.setContentDescription("Desktop server address");password=field("Optional control password",true);password.setContentDescription("Desktop control password");
         if(address.getText().toString().equals(rememberedBase))password.setText(rememberedSecret);
         addView(button("Connect / Refresh",this::connect));
-        addView(button("Disconnect remote",this::disconnect));connectionOptions=UiSections.fold(this,colors,"Connection settings",connectionStart);status=label("Choose the desktop control server. Cast radio has its own screen.",14);addView(status);now=label("Not connected",18);addView(now);
+        addView(button("Disconnect remote",this::disconnect));connectionOptions=UiSections.fold(this,colors,"Connection settings",connectionStart);status=label("Choose a nearby computer or open Connection settings. Listen & Cast plays station audio on this phone.",14);addView(status);now=label("Not connected",18);addView(now);
         controls=new LinearLayout(a);controls.setOrientation(VERTICAL);addView(controls);controls.setVisibility(GONE);
         row(controls,button("A",()->{deck="a";status.setText("Selected deck A");}),button("B",()->{deck="b";status.setText("Selected deck B");}));
         controls.addView(button("Choose desktop deck · A1–A3 / B1–B3",()->{String[] names={"Live A","Live B","A1","A2","A3","B1","B2","B3"},values={"a","b","a1","a2","a3","b1","b2","b3"};new AlertDialog.Builder(activity).setTitle("Desktop deck").setItems(names,(d,n)->{deck=values[n];status.setText("Selected "+names[n]+" · cue, seek and track loading target this deck");}).setNegativeButton("Close",null).show();}));

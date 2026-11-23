@@ -53,3 +53,11 @@ The optional model is Systran/faster-whisper-base, pinned revision ebe41f70d5b6d
 ## Android Full / Lab URL downloader
 
 Full and the Lab companion include youtubedl-android 0.18.1 (GNU GPL version 3), https://github.com/yausername/youtubedl-android/tree/0.18.1 . Those combined Android binaries are distributed under GPL-3.0; original AMP source notices and other component licenses remain in force. Lite, DJ, Cast, Podcasts and Remote do not link this dependency. The matching release includes the GPL text, exact AMP source/tag, upstream downloader source and build scripts, and the existing FFmpegKit corresponding-source bundle. See android/features/lab/assets/licenses/youtubedl-android/SOURCE.txt.
+
+## Barlow fonts
+
+The native desktop card interface embeds Barlow Regular and SemiBold
+by Jeremy Tribby. The fonts are distributed under the SIL Open Font License 1.1.
+Source: https://github.com/google/fonts/tree/main/ofl/barlow
+The complete license is included at `licenses/Barlow/OFL.txt` in desktop
+packages and `apps/amp-player/assets/fonts/OFL.txt` in the source tree.

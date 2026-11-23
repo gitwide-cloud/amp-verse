@@ -64,37 +64,79 @@ impl Arrangement {
                 self.youtube.opened(loaded);
             }
             let previous = self.tab;
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut self.tab, 0, "Waveform editor");
-                ui.selectable_value(&mut self.tab, 1, "Mix timeline");
-            });
-            if previous == 1 && self.tab != 1 {
-                self.timeline.stop();
-            }
-            if previous == 0 && self.tab != 0 {
-                self.editor.stop();
-            }
-            if !self.demo_loaded
-                && std::env::var("AMP_SCREENSHOT_VIEW").is_ok_and(|s| s == "lab")
-                && let Some(track) = library.and_then(|l| l.tracks.first())
-                && let Ok(path) = amp_core::resolve(root, &track.path)
-            {
-                self.editor.load_path(path);
-                self.demo_loaded = true;
-            }
-            self.youtube.show(ui);
-            egui::ScrollArea::vertical()
-                .id_salt("lab-workspace")
-                .max_height(ui.available_height())
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if self.tab == 0 {
-                        self.recorder.show(ui);
-                        self.editor.show(ui, root, library);
+            let wide = ui.available_width() > 900.;
+            ui.horizontal_top(|ui| {
+                if wide {
+                    crate::skin::panel(ui, false, |ui| {
+                        ui.set_width(180.);
+                        ui.set_min_height((ui.available_height() - 30.).max(200.));
+                        for (index, label, icon) in [
+                            (0, "Waveform Editor", crate::icons::Icon::Analyze),
+                            (1, "Mix Timeline", crate::icons::Icon::Layers),
+                        ] {
+                            if crate::icons::button(
+                                ui,
+                                icon,
+                                label,
+                                self.tab == index,
+                                egui::vec2(ui.available_width(), 48.),
+                            )
+                            .clicked()
+                            {
+                                self.tab = index;
+                            }
+                        }
+                        ui.separator();
+                        ui.weak("Create clips and edit audio. Your source files stay in place.");
+                    });
+                }
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    ui.heading(if self.tab == 0 {
+                        "Waveform Editor"
                     } else {
-                        self.content(ui, root, library);
+                        "Mix Timeline"
+                    });
+                    ui.weak(if self.tab == 0 {
+                        "Edit waveforms, add markers and create cue points."
+                    } else {
+                        "Arrange clips and preview your mix."
+                    });
+                    if !wide {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.selectable_value(&mut self.tab, 0, "Waveform Editor");
+                            ui.selectable_value(&mut self.tab, 1, "Mix Timeline");
+                        });
                     }
+                    if previous == 1 && self.tab != 1 {
+                        self.timeline.stop();
+                    }
+                    if previous == 0 && self.tab != 0 {
+                        self.editor.stop();
+                    }
+                    if !self.demo_loaded
+                        && std::env::var("AMP_SCREENSHOT_VIEW").is_ok_and(|s| s == "lab")
+                        && let Some(track) = library.and_then(|l| l.tracks.first())
+                        && let Ok(path) = amp_core::resolve(root, &track.path)
+                    {
+                        self.editor.load_path(path);
+                        self.demo_loaded = true;
+                    }
+                    self.youtube.show(ui);
+                    egui::ScrollArea::vertical()
+                        .id_salt("lab-workspace")
+                        .max_height(ui.available_height())
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if self.tab == 0 {
+                                self.recorder.show(ui);
+                                self.editor.show(ui, root, library);
+                            } else {
+                                self.content(ui, root, library);
+                            }
+                        });
                 });
+            });
             action
         })
     }

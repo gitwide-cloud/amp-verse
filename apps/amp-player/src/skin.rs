@@ -1,11 +1,33 @@
 use eframe::egui::{self, Color32 as C, FontId, Rect, RichText, Stroke, Vec2};
-pub const GOLD: C = C::from_rgb(255, 194, 26);
+pub const GOLD: C = C::from_rgb(255, 211, 0);
 pub const GREEN: C = C::from_rgb(130, 245, 61);
-pub const ORANGE: C = C::from_rgb(255, 170, 28);
+pub const ORANGE: C = GOLD;
 pub const CYAN: C = C::from_rgb(36, 208, 235);
 pub const BLACK: C = C::from_rgb(7, 8, 12);
 
 pub fn configure(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "amp-body".into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Barlow-Regular.ttf")).into(),
+    );
+    fonts.font_data.insert(
+        "amp-display".into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Barlow-SemiBold.ttf")).into(),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "amp-body".into());
+    let mut display_fallback = fonts.families[&egui::FontFamily::Proportional].clone();
+    display_fallback.insert(0, "amp-display".into());
+    fonts.families.insert(
+        egui::FontFamily::Name("AMP Display".into()),
+        display_fallback,
+    );
+    ctx.set_fonts(fonts);
+    ctx.data_mut(|data| data.insert_temp(egui::Id::unique("amp-brand-fonts"), true));
     crate::theme::apply(ctx, crate::theme::load());
 }
 pub fn accent(ui: &egui::Ui) -> C {
@@ -74,14 +96,17 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
     } else {
         (p.elevated, p.surface)
     };
-    if theme == crate::theme::Theme::Classic || (purple && theme == crate::theme::Theme::ModernDark)
-    {
+    if theme == crate::theme::Theme::Classic {
         ui.painter().set(
             bg,
             gradient(
                 ui.painter(),
                 rect,
-                if purple { p.elevated } else { top },
+                if purple || theme == crate::theme::Theme::ModernDark {
+                    p.elevated
+                } else {
+                    top
+                },
                 bottom,
             ),
         );
@@ -151,7 +176,7 @@ pub fn rack_panel<R>(
     let background = ui.painter().add(egui::Shape::Noop);
     let response = egui::Frame::new()
         .inner_margin(6)
-        .corner_radius(if theme.material() { 16 } else { 6 })
+        .corner_radius(if theme.material() { 16 } else { 12 })
         .stroke(Stroke::new(
             if selected.is_some() { 1.7 } else { 1. },
             selected.unwrap_or(p.border),
@@ -179,7 +204,7 @@ pub fn rack_panel<R>(
     } else {
         ui.painter().set(
             background,
-            egui::Shape::rect_filled(rect, if theme.material() { 16. } else { 6. }, p.surface),
+            egui::Shape::rect_filled(rect, if theme.material() { 16. } else { 12. }, p.surface),
         );
     }
     response
@@ -246,12 +271,23 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     ui.painter().text(
         rect.min + Vec2::new(38., 21.),
         egui::Align2::LEFT_CENTER,
-        if title == "AMP VERSE" {
+        if matches!(
+            title,
+            "PLAYER"
+                | "AMP Library"
+                | "AMP DJ"
+                | "AMP Lab"
+                | "AMP Cast"
+                | "AMP Podcasts"
+                | "Plugin Manager"
+        ) {
+            "AMP VERSE"
+        } else if title == "AMP VERSE" {
             "AMP Player"
         } else {
             title
         },
-        FontId::proportional(21.),
+        FontId::proportional(28.),
         p.text,
     );
     let menu_rect = Rect::from_min_max(rect.min, egui::pos2(rect.left() + 220., rect.bottom()));
@@ -285,31 +321,29 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
             );
         }
     } else if center_right - center_left > 140. {
-        let mid = (center_left + center_right) / 2.;
-        let label = "AMP Verse";
-        let text_width = label.len() as f32 * 9.;
-        if theme == crate::theme::Theme::Classic {
-            for y in [14., 19., 24.] {
-                for (a, b) in [
-                    (center_left, mid - text_width / 2. - 12.),
-                    (mid + text_width / 2. + 12., center_right),
-                ] {
-                    if b > a {
-                        ui.painter().line_segment(
-                            [egui::pos2(a, rect.top() + y), egui::pos2(b, rect.top() + y)],
-                            Stroke::new(2., p.accent),
-                        );
-                    }
-                }
+        let bars = ui
+            .ctx()
+            .data(|data| data.get_temp::<Vec<f32>>(egui::Id::unique("workspace-master-scope")))
+            .unwrap_or_default();
+        let width = (center_right - center_left).min(480.);
+        let left = (center_left + center_right - width) / 2.;
+        for index in 0..48 {
+            let level = bars.get(index).copied().unwrap_or(0.).clamp(0., 1.);
+            let segments = (level.sqrt() * 7.).round() as usize;
+            for segment in 0..=segments {
+                ui.painter().rect_filled(
+                    Rect::from_min_size(
+                        egui::pos2(
+                            left + index as f32 * width / 48.,
+                            rect.bottom() - 7. - segment as f32 * 3.5,
+                        ),
+                        Vec2::new((width / 48. - 2.).max(1.), 2.5),
+                    ),
+                    0.5,
+                    p.accent,
+                );
             }
         }
-        ui.painter().text(
-            egui::pos2(mid, rect.center().y),
-            egui::Align2::CENTER_CENTER,
-            label,
-            FontId::proportional(20.),
-            p.text,
-        );
     }
     let response = ui.interact(
         menu_rect,
@@ -804,6 +838,14 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
         egui::vec2(160., 26.),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
+            let label_first = label == "Auto Mix";
+            if label_first
+                && ui
+                    .add(egui::Label::new(label).sense(egui::Sense::click()))
+                    .clicked()
+            {
+                *value = !*value;
+            }
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(44., 24.), egui::Sense::click());
             #[cfg(test)]
@@ -832,9 +874,10 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
                 9.,
                 C::WHITE,
             );
-            if ui
-                .add(egui::Label::new(label).sense(egui::Sense::click()))
-                .clicked()
+            if !label_first
+                && ui
+                    .add(egui::Label::new(label).sense(egui::Sense::click()))
+                    .clicked()
             {
                 *value = !*value;
             }
