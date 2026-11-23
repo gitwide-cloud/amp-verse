@@ -271,7 +271,7 @@ impl Player {
                     self.lab_open = pane == 3;
                 }
             }
-            ui.weak(format!("{} Beta 8", env!("CARGO_PKG_VERSION")));
+            ui.weak(format!("{} Beta 9", env!("CARGO_PKG_VERSION")));
             let settings_menu = ui.menu_button("   ", |ui| {
                 ui.label("Appearance");
                 theme::selector(ui);

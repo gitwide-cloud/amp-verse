@@ -180,6 +180,7 @@ impl Browser {
         self.capture(root, library, settings, queue);
         self.select_smart(id);
     }
+    #[cfg(test)]
     pub(super) fn selected_smart(&self) -> Option<&str> {
         (self.source == Source::Smart && !self.smart.is_empty()).then_some(self.smart.as_str())
     }

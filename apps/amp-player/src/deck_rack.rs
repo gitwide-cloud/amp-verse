@@ -153,42 +153,7 @@ impl Player {
         ui.ctx()
             .data_mut(|data| data.insert_temp(egui::Id::unique("six-deck-header-scope"), scope));
         self.header(ui, "AMP DJ", true);
-        ui.horizontal_wrapped(|ui| {
-            self.performance_controls(ui);
-            if !self.run.auto {
-                self.card_manual_playlist_controls(ui);
-            }
-            if ui.button("Waveforms").clicked() {
-                self.open_dj_settings(ui.ctx());
-            }
-
-            if self.auto_dj_controls || self.run.auto {
-                if ui.button("Tempo / Sync").clicked() {
-                    self.open_dj_settings(ui.ctx());
-                }
-                let previous = self.run.transitions;
-                if transition_controls::show(
-                    ui,
-                    &mut self.run.transitions,
-                    &mut self.wave_span,
-                    self.run.pending.is_none() && !self.audio.as_ref().is_some_and(|a| a.fading()),
-                ) {
-                    self.run.force_mashup = true;
-                    if let Err(error) = self.execute_control(control::Action::AutoFade) {
-                        self.run.force_mashup = false;
-                        self.status = error;
-                    }
-                }
-                if previous != self.run.transitions {
-                    let _ = transition_styles::save(self.run.transitions);
-                }
-                self.run.scratch_assist = self.run.transitions.enabled;
-            }
-            if ui.button("DJ settings").clicked() {
-                self.open_dj_settings(ui.ctx());
-            }
-            ui.menu_button("Deck view / tools", |ui| self.card_view_tools(ui));
-        });
+        ui.horizontal_wrapped(|ui| self.performance_controls(ui));
         ui.separator();
         for side in 0..2 {
             let d = self.rack.live[side];

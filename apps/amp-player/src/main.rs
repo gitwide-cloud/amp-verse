@@ -2474,126 +2474,64 @@ impl Player {
             Err(error) => self.status = format!("Could not open Smart Playlist: {error}"),
         }
     }
+    fn loaded_auto_playlist_info(&self) -> Option<(&str, &str)> {
+        if let Some(profile) = &self.run.profile {
+            Some(("Smart", profile.name.as_str()))
+        } else if self.run.has_regular_playlist() {
+            self.run.playlist.as_deref().map(|name| ("Regular", name))
+        } else {
+            None
+        }
+    }
     fn performance_controls(&mut self, ui: &mut egui::Ui) {
+        let loaded = self.loaded_auto_playlist_info().is_some();
         let mut enabled = self.run.auto;
         let old = enabled;
-        skin::switch(
-            ui,
-            &mut enabled,
-            if old {
-                "Auto Mix · ON"
-            } else {
-                "Auto Mix · OFF"
-            },
-        );
+        skin::switch(ui, &mut enabled, "Auto Mix");
         if enabled != old {
             self.run.failure = None;
-            let result =
-                if !enabled || self.run.profile.is_some() || self.run.has_regular_playlist() {
-                    self.execute_control(control::Action::AutoDj { enabled })
-                } else {
-                    let choice = self
-                        .dj_browser
-                        .selected_smart()
-                        .map(str::to_owned)
-                        .unwrap_or_else(|| self.run.choice.clone());
-                    if choice.is_empty() {
-                        Err("Choose a music source in DJ settings, then turn Auto Mix on.".into())
-                    } else {
-                        self.execute_control(control::Action::LoadSmartPlaylist {
-                            playlist: choice,
-                            execution: control::Execution::PlayNow,
-                            style: None,
-                            energy: None,
-                        })
-                    }
-                };
+            let result = if enabled && !loaded {
+                Err("Load a playlist for Auto Mix from the DJ Library first.".into())
+            } else {
+                self.execute_control(control::Action::AutoDj { enabled })
+            };
             if let Err(error) = result {
                 self.status = error.clone();
                 self.run.failure = Some(error);
             }
-            enabled = self.run.auto;
-            self.auto_dj_controls = enabled;
+            self.auto_dj_controls = self.run.auto;
         }
         #[cfg(test)]
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(egui::Id::unique("auto-dj-menu-visible"), enabled));
-        if let Some(error) = &self.run.failure {
-            ui.colored_label(egui::Color32::from_rgb(255, 180, 70), error);
-        }
-        if !enabled {
-            return;
-        }
-        let original_style = ui.style().clone();
-        ui.style_mut().text_styles.insert(
-            egui::TextStyle::Button,
-            egui::FontId::proportional(if self.rack.six { 14. } else { 16. }),
-        );
-        ui.style_mut().text_styles.insert(
-            egui::TextStyle::Body,
-            egui::FontId::proportional(if self.rack.six { 14. } else { 16. }),
-        );
-        ui.spacing_mut().button_padding = if self.rack.six {
-            egui::vec2(8., 6.)
-        } else {
-            egui::vec2(12., 10.)
-        };
-
-        let selected = self.run.choice.clone();
-        let mut context_edit = None;
-        ui.horizontal_wrapped(|ui| {
-            let name = self
-                .run
-                .settings
-                .playlists
-                .iter()
-                .find(|p| p.id == selected)
-                .map_or("Choose Smart Playlist", |p| p.name.as_str());
-            let selector = ui.button(name);
-            if selector.clicked() {
-                self.open_dj_settings(ui.ctx());
-            }
-            if !selected.is_empty()
-                && let Some(action) = show_editor::playlist_menu(&selector)
-            {
-                context_edit = Some((selected.clone(), action));
-            }
-            if ui.button("Load").clicked()
-                && let Err(e) = self.execute_control(control::Action::LoadSmartPlaylist {
-                    playlist: selected.clone(),
-                    execution: if self.run.auto {
-                        control::Execution::LoadOnly
-                    } else {
-                        control::Execution::PlayNow
-                    },
-                    style: None,
-                    energy: None,
-                })
-            {
-                self.status = e;
-            }
-            if ui.button("Mix Next").clicked()
-                && let Err(e) = self.execute_control(control::Action::MixNext { immediate: true })
-            {
-                self.status = e;
-            }
-            if ui.button(self.run.transitions.pace.label()).clicked() {
-                self.open_dj_settings(ui.ctx());
-            }
-            if ui
-                .button(format!("{:?} · settings", self.run.style))
-                .clicked()
-            {
-                self.open_dj_settings(ui.ctx());
-            }
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::unique("auto-dj-menu-visible"), loaded);
         });
-        ui.set_style(original_style);
-        if self.run.choice != selected {
-            self.dj_browser.select_smart(&selected);
+        if let Some((kind, name)) = self.loaded_auto_playlist_info() {
+            ui.separator();
+            ui.label("Playlist");
+            ui.weak("|");
+            ui.label(kind);
+            ui.weak("|");
+            let width = (ui.available_width() - 190.).clamp(80., 360.);
+            ui.add_sized(
+                [width, 24.],
+                egui::Label::new(egui::RichText::new(name).strong()).truncate(),
+            )
+            .on_hover_text(name);
         }
-        self.run.choice = selected;
-        if let Some((id, action)) = context_edit {
-            self.smart_playlist_action(ui, &id, action);
+        ui.separator();
+        let settings = icons::button(
+            ui,
+            icons::Icon::Settings,
+            "DJ Settings",
+            false,
+            egui::vec2(158., 36.),
+        );
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::unique("dj-status-settings-button"), settings.rect);
+        });
+        if settings.clicked() {
+            self.open_dj_settings(ui.ctx());
         }
     }
     fn performance_mix_options(&mut self, ui: &mut egui::Ui) {

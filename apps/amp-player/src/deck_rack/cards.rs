@@ -14,45 +14,6 @@ fn tool_key(deck: usize) -> egui::Id {
     egui::Id::unique(("card-deck-tools-open", deck))
 }
 impl Player {
-    pub(super) fn card_manual_playlist_controls(&mut self, ui: &mut egui::Ui) {
-        let selected = self.run.choice.clone();
-        let name = self
-            .run
-            .settings
-            .playlists
-            .iter()
-            .find(|p| p.id == selected)
-            .map(|p| p.name.clone());
-        let has_music = self
-            .library
-            .as_ref()
-            .is_some_and(|library| !library.tracks.is_empty());
-        let ready = has_music && name.is_some();
-        let label = name.as_deref().unwrap_or("Choose Smart Playlist");
-        if ui
-            .add_sized([170., 36.], egui::Button::new(label).truncate())
-            .on_hover_text("Choose a saved Smart Playlist")
-            .clicked()
-        {
-            self.open_dj_settings(ui.ctx());
-        }
-        if ui
-            .add_enabled(ready, egui::Button::new("Load"))
-            .on_disabled_hover_text("Choose a playlist and add music in Library first")
-            .clicked()
-            && let Err(error) = self.execute_control(control::Action::LoadSmartPlaylist {
-                playlist: selected,
-                execution: control::Execution::LoadOnly,
-                style: None,
-                energy: None,
-            })
-        {
-            self.status = error;
-        }
-        if !has_music {
-            ui.weak("Add music in Library");
-        }
-    }
     pub(super) fn card_open_tools(&self, ctx: &egui::Context, deck: usize, tab: u8) {
         ctx.data_mut(|d| {
             d.insert_temp(tool_key(deck), true);
@@ -209,7 +170,7 @@ impl Player {
             }
         }
     }
-    pub(super) fn card_view_tools(&mut self, ui: &mut egui::Ui) {
+    pub(crate) fn card_view_tools(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.rack.six, false, "A / B main");
             ui.selectable_value(&mut self.rack.six, true, "6 decks");

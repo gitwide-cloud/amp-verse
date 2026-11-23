@@ -22,7 +22,7 @@ def desktop_version(root):
     with (root / "Cargo.toml").open("rb") as source:
         version = tomllib.load(source)["workspace"]["package"]["version"]
     build = os.environ.get("GITHUB_SHA", "local")[:8]
-    return safe(f"{version}-beta.8.git{safe(build)}")
+    return safe(f"{version}-beta.9.git{safe(build)}")
 
 
 def package_android(source, destination, build):
