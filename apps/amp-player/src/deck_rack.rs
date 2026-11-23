@@ -370,14 +370,14 @@ impl Player {
             } else {
                 library_height + 52.
             })
-        .max(if compact { 290. } else { 320. })
+        .max(if compact { 278. } else { 300. })
         .min(if self.rack.expanded { 430. } else { 380. });
         let rack_width = ui.available_width();
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
             data.insert_temp(
                 egui::Id::unique("native-dj-card-layout"),
-                rack_width >= 1100.,
+                rack_width >= if self.rack.six { 1100. } else { 950. },
             )
         });
         let mixer = if compact { 126. } else { 146. };
@@ -401,7 +401,7 @@ impl Player {
             .ctx()
             .data_mut(|d| *d.get_temp_mut_or_insert_with(saved_id, || self.rack.strip_ratios));
         let rendered = if self.rack.six { strips } else { [0.; 2] };
-        if rack_width >= 1100. {
+        if rack_width >= if self.rack.six { 1100. } else { 950. } {
             self.card_rack(ui, height);
         } else {
             ui.horizontal_top(|ui| {
@@ -440,7 +440,7 @@ impl Player {
         }
         self.card_tool_windows(ui.ctx());
         // Only deliberate drags change the stored ratios; ordinary window resizing must not clamp them permanently.
-        if rack_width < 950. {
+        if rack_width < if self.rack.six { 1100. } else { 950. } {
             for (side, width) in strips.into_iter().enumerate() {
                 let old = (rack_width * self.rack.strip_ratios[side]).clamp(minimum, maximum);
                 if (old - width).abs() > 0.01 {
