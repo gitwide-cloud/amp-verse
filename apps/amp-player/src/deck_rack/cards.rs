@@ -30,10 +30,7 @@ impl Player {
         let ready = has_music && name.is_some();
         let label = name.as_deref().unwrap_or("Choose Smart Playlist");
         if ui
-            .add_sized(
-                [170., 36.],
-                egui::Button::new(format!("{label} ▾")).truncate(),
-            )
+            .add_sized([170., 36.], egui::Button::new(label).truncate())
             .on_hover_text("Choose a saved Smart Playlist")
             .clicked()
         {

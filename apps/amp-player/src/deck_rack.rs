@@ -480,7 +480,7 @@ impl Player {
             ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Master"));
             let pair = self.pair();
             ui.label(format!(
-                "{} · LIVE {} / {} · Crossfade {} ↔ {}",
+                "{} · LIVE {} / {} · Crossfade {} / {}",
                 if self.rack.six {
                     "3+3 decks"
                 } else {

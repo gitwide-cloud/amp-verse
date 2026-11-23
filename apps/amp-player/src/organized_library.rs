@@ -667,7 +667,7 @@ impl Player {
                     ui.add_space(8.);
                     ui.horizontal_wrapped(|ui| {
                         if ui
-                            .add_enabled(!self.queue.is_empty(), cards::primary("▶ Play"))
+                            .add_enabled(!self.queue.is_empty(), cards::primary("Play"))
                             .clicked()
                         {
                             self.play_playlist_queue();
@@ -737,7 +737,7 @@ impl Player {
                 {
                     self.expand_smart_list();
                 }
-                ui.menu_button("More ▾", |ui| {
+                ui.menu_button("More", |ui| {
                     self.playlist_queue_options(ui);
                 });
             });

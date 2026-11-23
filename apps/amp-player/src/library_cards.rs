@@ -358,13 +358,25 @@ pub(super) fn track_row(
             known(&key),
             known(&length),
             if track.preparation.analysis.is_some() {
-                "✓"
+                ""
             } else {
                 "—"
             },
         ],
         if selected { p.accent } else { p.text },
     );
+    if rect.width() >= 590. && track.preparation.analysis.is_some() {
+        let center = egui::pos2(rect.right() - 50., rect.center().y);
+        let stroke = egui::Stroke::new(2.5, p.signal);
+        ui.painter().line_segment(
+            [center + egui::vec2(-7., 0.), center + egui::vec2(-2., 5.)],
+            stroke,
+        );
+        ui.painter().line_segment(
+            [center + egui::vec2(-2., 5.), center + egui::vec2(8., -6.)],
+            stroke,
+        );
+    }
     response.widget_info(|| {
         egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), &track.title)
     });
