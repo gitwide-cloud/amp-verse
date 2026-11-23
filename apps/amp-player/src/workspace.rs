@@ -272,6 +272,9 @@ impl Player {
                 icons::Icon::Settings,
                 skin::foreground(ui),
             );
+            settings_menu.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, "Settings and appearance")
+            });
             settings_menu
                 .response
                 .on_hover_text("Settings and appearance");
