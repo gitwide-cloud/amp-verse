@@ -1,3 +1,5 @@
+> Historical prepared-stem documentation: this disk-writing separator is withdrawn. Use [Live stems](LIVE-STEMS.md) for the current RAM-only engine. Do not use the old preparation/install commands below.
+
 # Live DJ stem controls
 
 The center mixer fills the deck section. In short windows, channel controls scroll independently while the crossfader and stem controls remain below them. Below the crossfader, each deck always shows three knobs: Vocals, Instruments and Beat (drums). Center keeps the original level; turn left to reduce/remove that part, or right to reduce the other parts and isolate it. Double-click or Home resets a knob. Reset restores the original three-part mix. A uses amber and B uses cyan.

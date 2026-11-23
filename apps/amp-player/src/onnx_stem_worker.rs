@@ -17,6 +17,7 @@ use std::{
 
 pub(crate) const MAX_FRAMES: usize = 485_100;
 const HEADER_LIMIT: usize = 1024;
+#[cfg(test)]
 const QUEUE_CAPACITY: usize = 2;
 const TICK: Duration = Duration::from_millis(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
