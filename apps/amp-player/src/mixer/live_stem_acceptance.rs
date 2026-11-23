@@ -392,8 +392,8 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
             Instant::now() < prime_deadline,
             "six native decks failed to prime"
         );
-        for deck in 0..6 {
-            let source = mixer.voices[deck].source.as_ref().unwrap();
+        for (deck, voice) in mixer.voices.iter().take(6).enumerate() {
+            let source = voice.source.as_ref().unwrap();
             assert!(
                 !source.failed.load(Relaxed),
                 "deck {deck} priming decoder failure"
@@ -460,14 +460,9 @@ fn six_native_live_stem_decks_play_distinct_filters_and_cancel_independently() {
         }
     }
     assert!(mix_energy > 1e-6);
-    for deck in 0..6 {
+    for (deck, voice) in mixer.voices.iter().take(6).enumerate() {
         assert!(
-            !mixer.voices[deck]
-                .source
-                .as_ref()
-                .unwrap()
-                .done
-                .load(Relaxed),
+            !voice.source.as_ref().unwrap().done.load(Relaxed),
             "deck {deck} must not reach decoder EOF before independent cancellation"
         );
     }
@@ -634,8 +629,8 @@ fn six_separated_frame_controls_route_filters_and_cancel_without_model() {
     for deck in 0..6 {
         assert_eq!(controls.position[deck].load(Relaxed), 4000);
         assert_eq!(controls.underruns[deck].load(Relaxed), 0);
-        for other in 0..6 {
-            controls.play[other].store(other == deck, Relaxed);
+        for (other, playing) in controls.play.iter().take(6).enumerate() {
+            playing.store(other == deck, Relaxed);
         }
         mixer.render(100, |_, frame| output = frame);
         let filtered = contribution(deck, SIX_LEVELS[deck]);
@@ -649,8 +644,8 @@ fn six_separated_frame_controls_route_filters_and_cancel_without_model() {
         );
         assert!(get(&controls.peak[deck]) > 1e-6);
     }
-    for deck in 0..6 {
-        controls.play[deck].store(true, Relaxed);
+    for playing in controls.play.iter().take(6) {
+        playing.store(true, Relaxed);
     }
     let before: [u64; 6] = std::array::from_fn(|deck| controls.position[deck].load(Relaxed));
     tx.send(Command::Stop(2)).unwrap();
