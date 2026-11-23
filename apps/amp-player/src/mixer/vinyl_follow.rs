@@ -82,8 +82,8 @@ mod tests {
                 follows[0].reset(positions[0]);
             }
         }
-        for d in 1..6 {
-            assert!((positions[d] - (10000. + (d as f64 - 2.) * 160.)).abs() < 0.002);
+        for (d, position) in positions.iter().enumerate().skip(1) {
+            assert!((*position - (10000. + (d as f64 - 2.) * 160.)).abs() < 0.002);
         }
         let held = positions[3];
         for _ in 0..4800 {
@@ -114,8 +114,10 @@ mod codec_acceptance {
         assert!(decoded.status.success());
         let pcm: Vec<f32> = decoded
             .stdout
-            .chunks_exact(4)
-            .map(|b| f32::from_le_bytes(b.try_into().unwrap()))
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
             .collect();
         assert!(pcm.len() >= 48000 * 4);
         assert!(pcm.iter().all(|x| x.is_finite()));
@@ -125,7 +127,7 @@ mod codec_acceptance {
         let mut mixer = Mixer::new(48000, rx, c.clone());
         for d in 0..6 {
             let (mut producer, consumer) = RingBuffer::new(pcm.len() / 2 + 1);
-            for pair in pcm.chunks_exact(2) {
+            for pair in pcm.as_chunks::<2>().0 {
                 producer.push([pair[0], pair[1], 0., 0., 0., 0.]).unwrap();
             }
             let source = Source {
