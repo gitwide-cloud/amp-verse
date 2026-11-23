@@ -30,6 +30,11 @@ impl Default for Workspace {
 }
 impl Player {
     pub(super) fn workspace_player(&mut self, ui: &mut egui::Ui) {
+        // A crowded navigation row must not enlarge the Player beyond its viewport.
+        ui.set_max_width(
+            ui.available_width()
+                .min((ui.clip_rect().right() - ui.cursor().left()).max(1.)),
+        );
         self.player_ui(ui);
         if self.podcasts.is_active() {
             let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
@@ -83,7 +88,7 @@ impl Player {
                 );
             } else {
                 self.waveforms[0].height = Some(if ui.available_height() < 220. {
-                    80.
+                    56.
                 } else {
                     110.
                 });
@@ -99,9 +104,10 @@ impl Player {
         });
         ui.add_space(12.);
         let mut play = None;
+        let queue_card_height = ui.available_height();
         skin::panel(ui, false, |ui| {
             ui.set_min_width(ui.available_width());
-            ui.set_min_height(ui.available_height().max(80.));
+            ui.set_height((queue_card_height - 16.).max(40.));
             ui.horizontal(|ui| {
                 ui.heading("Play queue");
                 ui.weak(format!("{} songs", self.queue.len()));
@@ -109,10 +115,11 @@ impl Player {
                     self.workspace.pane = 1;
                 }
             });
-            let queue_height = ui.available_height().max(40.);
+            let queue_height = ui.available_height().max(0.);
             egui::ScrollArea::vertical()
                 .id_salt("v1-player-queue")
                 .max_height(queue_height)
+                .min_scrolled_height(0.)
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if self.queue.is_empty() {
@@ -408,6 +415,7 @@ mod tests {
                     size.x,
                 );
             }
+            output.textures_delta.clear();
             cards.sort_by(|a, b| a.top().total_cmp(&b.top()));
             cards.dedup();
             assert_eq!(
@@ -443,7 +451,6 @@ mod tests {
             }
             assert_eq!(player.playback_owner, playback_owner::Owner::Dj);
             assert!(player.queue.is_empty() && player.audio.is_none());
-            output.textures_delta.clear();
         }
     }
     #[test]
