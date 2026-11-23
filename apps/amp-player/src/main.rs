@@ -1251,6 +1251,7 @@ impl Player {
             for deck in 0..6 {
                 audio.stop(deck);
             }
+            audio.discard_library_stem_modes();
         }
         self.auto = false;
         self.loaded = [None; 6];

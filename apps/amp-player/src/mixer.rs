@@ -1832,6 +1832,17 @@ pub struct Engine {
     sample_retired: Vec<(usize, u64, Arc<[Frame]>)>,
     sample_generation: u64,
 }
+fn reset_library_stem_modes(loaded: &mut [bool; 6], controls: &Controls) {
+    loaded.fill(false);
+    for (intent, prepared) in controls
+        .on_demand_stems
+        .iter()
+        .zip(&controls.prepared_stems)
+    {
+        intent.store(false, Relaxed);
+        prepared.store(false, Relaxed);
+    }
+}
 fn check_live_stem_admission(
     loaded: &[bool; 6],
     controls: &Controls,
@@ -2567,6 +2578,11 @@ impl Engine {
         self.commands
             .try_send(Command::Admitted(epoch, Box::new(command)))
             .map_err(|_| "Audio command queue is busy".into())
+    }
+    /// Only for a library switch that discards all loaded song snapshots.
+    /// Ordinary Stop deliberately retains the requested mode for resume/reload.
+    pub fn discard_library_stem_modes(&mut self) {
+        reset_library_stem_modes(&mut self.loaded_on_demand, &self.controls);
     }
     pub fn stop(&mut self, deck: usize) {
         self.cancel_section(deck);
@@ -5078,6 +5094,26 @@ mod live_stem_acceptance;
 #[cfg(test)]
 mod live_admission_tests {
     use super::*;
+    #[test]
+    fn discarding_library_clears_ghost_modes_without_changing_channel_settings() {
+        let controls = Controls::default();
+        let mut loaded = [true; 6];
+        for (live, prepared) in controls
+            .on_demand_stems
+            .iter()
+            .zip(&controls.prepared_stems)
+        {
+            live.store(true, Relaxed);
+            prepared.store(true, Relaxed);
+        }
+        set(&controls.gain[0], 0.7);
+        reset_library_stem_modes(&mut loaded, &controls);
+        assert_eq!(loaded, [false; 6]);
+        assert!(controls.on_demand_stems.iter().all(|v| !v.load(Relaxed)));
+        assert!(controls.prepared_stems.iter().all(|v| !v.load(Relaxed)));
+        assert!((get(&controls.gain[0]) - 0.7).abs() < 1e-6);
+    }
+
     #[test]
     fn mixer_rejects_extra_intent_before_load_and_keeps_existing_decks() {
         let controls = Controls::default();
