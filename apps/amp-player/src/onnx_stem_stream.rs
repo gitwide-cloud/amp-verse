@@ -14,6 +14,7 @@ const RATE: usize = 44100;
 const WINDOW: usize = RATE * 11;
 const OVERLAP: usize = RATE / 2;
 type Parts = [Vec<f32>; 3];
+pub(crate) const MAX_LIVE_DECKS: usize = 6;
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
 struct Admission;
 impl Admission {
@@ -21,7 +22,7 @@ impl Admission {
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while !stop.load(Relaxed) && std::time::Instant::now() < deadline {
             let n = ACTIVE.load(Relaxed);
-            if n < 2 && ACTIVE.compare_exchange(n, n + 1, Relaxed, Relaxed).is_ok() {
+            if n < MAX_LIVE_DECKS && ACTIVE.compare_exchange(n, n + 1, Relaxed, Relaxed).is_ok() {
                 return Some(Self);
             }
             std::thread::sleep(Duration::from_millis(10));

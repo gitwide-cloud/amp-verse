@@ -37,9 +37,23 @@ fn malformed_header_exits_without_model_or_runtime() {
     assert!(String::from_utf8_lossy(&out.stderr).contains("header"));
 }
 #[test]
-fn noncpu_request_fails_before_opening_runtime() {
+fn cuda_without_vendor_directory_fails_before_opening_runtime() {
     let out = worker().args(["--provider", "cuda"]).output().unwrap();
     assert!(!out.status.success());
     assert!(out.stdout.is_empty());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("CPU only"));
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("--cuda-dll-dir"));
+    assert!(!error.contains("Pinned local SCNet model missing"));
+    assert!(!error.contains("ORT_DYLIB_PATH"));
+}
+
+#[test]
+fn unsupported_provider_is_rejected_before_runtime_or_model_access() {
+    let out = worker().args(["--provider", "dml"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(out.stdout.is_empty());
+    let error = String::from_utf8_lossy(&out.stderr);
+    assert!(error.contains("supports cpu or cuda"));
+    assert!(!error.contains("ORT_DYLIB_PATH"));
+    assert!(!error.contains("Pinned local SCNet model missing"));
 }

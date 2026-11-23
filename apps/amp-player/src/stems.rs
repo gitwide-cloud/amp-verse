@@ -800,16 +800,21 @@ impl Panel {
                 a.load_current(deck) && a.controls.stems_loaded[deck].load(Relaxed)
             });
             if on_demand_configured {
-                ui.label("Live stems · memory only");
-                ui.weak("Current separation uses CPU processing with a 3 GiB process RAM cap. Initial model startup can take several seconds. No stem audio is saved.");
+                let mode_label = ui.label("Live stems · memory only");
+                if let Some((slots, per_worker_mib, live, _peak)) =
+                    crate::onnx_stem_worker::pool_status()
+                {
+                    mode_label.on_hover_text(format!(
+                        "Processing workers: {live}/{slots}\nWorker RAM budget: {} MiB total\nNo stem audio files are saved.",
+                        slots as u64 * u64::from(per_worker_mib)
+                    ));
+                }
+                ui.weak("All six decks can use independent stem filters. The shared engine keeps stem audio in memory; no stem audio files are saved. Initial preparation can take several seconds.");
                 if let Some(audio) = audio {
                     let enabled = audio.controls.on_demand_stems[deck].load(Relaxed);
-                    let enabled_decks = audio.controls.on_demand_stems.iter()
-                        .filter(|mode| mode.load(Relaxed)).count();
                     let has_source = source.is_some_and(|path| path.is_file());
-                    let within_limit = enabled || enabled_decks < 2;
                     if ui.add_enabled(
-                        can_reload && has_source && within_limit,
+                        can_reload && has_source,
                         egui::Button::new(if enabled {
                             "Use original audio"
                         } else {
@@ -823,8 +828,6 @@ impl Panel {
                         ui.weak("Pause this deck before changing its audio mode.");
                     } else if !has_source {
                         ui.weak("Load an available local song into this deck first.");
-                    } else if !within_limit {
-                        ui.weak("Two decks already have on-demand mode enabled. Switch one paused deck back to original audio first.");
                     }
                 } else {
                     ui.weak("Start the audio engine and load a local song to choose this deck's mode.");

@@ -1,6 +1,9 @@
 use amp_stem_worker::{Result, Spectral, load_model, read_request, write_parts};
 use ort::{
-    execution_providers::CPUExecutionProvider,
+    execution_providers::{
+        ArenaExtendStrategy, CPUExecutionProvider, CUDAExecutionProvider,
+        cuda::{self, CuDNNConvAlgorithmSearch},
+    },
     session::{Session, builder::GraphOptimizationLevel},
     tensor::TensorElementType,
     value::Tensor,
@@ -12,16 +15,20 @@ struct Config {
     model: PathBuf,
     requests: usize,
     memory_mib: usize,
+    provider: String,
+    cuda_dll_dir: Option<PathBuf>,
 }
 impl Config {
     fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let args: Vec<_> = args.into_iter().collect();
         if args.len() > 14 || !args.len().is_multiple_of(2) {
-            return Err("Use --model path [--provider cpu] [--device-id0] [--requests0..256] [--memory-mib512..6144]".into());
+            return Err("Use --model path [--provider cpu|cuda] [--device-id0] [--requests0..256] [--memory-mib512..6144]".into());
         }
         let mut model = None;
         let mut requests = 0;
         let mut memory_mib = 3072;
+        let mut provider = "cpu".to_owned();
+        let mut cuda_dll_dir = None;
         let mut seen = std::collections::HashSet::new();
         for pair in args.as_chunks::<2>().0 {
             let flag = pair[0].to_str().ok_or("Invalid option")?;
@@ -36,10 +43,13 @@ impl Config {
             };
             match flag {
                 "--model" => model = Some(PathBuf::from(&pair[1])),
-                "--provider" if pair[1] == "cpu" => (),
-                "--provider" => return Err("Native worker currently supports CPU only".into()),
+                "--provider" if pair[1] == "cpu" || pair[1] == "cuda" => {
+                    provider = pair[1].to_string_lossy().into_owned()
+                }
+                "--provider" => return Err("Native worker supports cpu or cuda".into()),
+                "--cuda-dll-dir" => cuda_dll_dir = Some(PathBuf::from(&pair[1])),
                 "--device-id" if integer()? == 0 => (),
-                "--device-id" => return Err("CPU device-id must be0".into()),
+                "--device-id" => return Err("Stem device-id must be0".into()),
                 "--requests" => {
                     requests = integer()?;
                     if requests > 256 {
@@ -55,7 +65,18 @@ impl Config {
                 _ => return Err(format!("Unknown option: {flag}")),
             }
         }
+        if cuda_dll_dir
+            .as_ref()
+            .is_some_and(|p: &PathBuf| !p.is_absolute() || !p.is_dir())
+        {
+            return Err("CUDA DLL directory must be an installed absolute directory".into());
+        }
+        if provider == "cuda" && cuda_dll_dir.is_none() {
+            return Err("CUDA provider needs --cuda-dll-dir for installed vendor libraries".into());
+        }
         Ok(Self {
+            provider,
+            cuda_dll_dir,
             model: model.ok_or("--model is required")?,
             requests,
             memory_mib,
@@ -93,12 +114,62 @@ fn run(config: Config) -> Result<()> {
         .with_name("AMP native stems")
         .commit()
         .map_err(err)?;
-    let mut session = Session::builder()
-        .map_err(err)?
-        .with_execution_providers([CPUExecutionProvider::default()
+    let gpu = config.provider == "cuda";
+    let gpu_arena_limit = 4usize * 1024 * 1024 * 1024;
+    let provider = if gpu {
+        "CUDAExecutionProvider"
+    } else {
+        "CPUExecutionProvider"
+    };
+    if let Some(directory) = config.cuda_dll_dir.as_ref().filter(|_| gpu) {
+        cuda::preload_dylibs(Some(directory), Some(directory)).map_err(err)?;
+    }
+    // ort's CUDA preload list omits cuDNN's CNN component, used by this pinned graph.
+    // SAFETY: only the fixed installed vendor filename is loaded; keep its handle alive
+    // for the session. No model- or manifest-supplied executable path is accepted.
+    #[cfg(windows)]
+    let _cuda_cnn = if gpu {
+        Some(
+            unsafe {
+                libloading::Library::new(
+                    config
+                        .cuda_dll_dir
+                        .as_ref()
+                        .unwrap()
+                        .join("cudnn_cnn64_9.dll"),
+                )
+            }
+            .map_err(err)?,
+        )
+    } else {
+        None
+    };
+    let ep = if gpu {
+        CUDAExecutionProvider::default()
+            .with_device_id(0)
+            .with_memory_limit(gpu_arena_limit)
+            .with_arena_extend_strategy(ArenaExtendStrategy::SameAsRequested)
+            .with_conv_algorithm_search(CuDNNConvAlgorithmSearch::Heuristic)
+            .with_conv_max_workspace(true)
+            .with_tf32(false)
+            .build()
+            .error_on_failure()
+    } else {
+        CPUExecutionProvider::default()
             .with_arena_allocator(false)
-            .build()])
+            .build()
+            .error_on_failure()
+    };
+    let mut builder = Session::builder()
         .map_err(err)?
+        .with_execution_providers([ep])
+        .map_err(err)?;
+    if gpu {
+        builder = builder
+            .with_config_entry("session.disable_cpu_ep_fallback", "1")
+            .map_err(err)?;
+    }
+    let mut session = builder
         .with_optimization_level(GraphOptimizationLevel::Level3)
         .map_err(err)?
         .with_intra_threads(2)
@@ -148,7 +219,9 @@ fn run(config: Config) -> Result<()> {
         let seconds = started.elapsed().as_secs_f64();
         let header = json!({"version":1,"request_id":request.header.request_id,"frames":request.header.frames,
             "sample_rate":44100,"channels":2,"parts":["vocals","drums","bass","other"],
-            "model_kind":"scnet","provider":"CPUExecutionProvider","configured_providers":["CPUExecutionProvider"],
+            "model_kind":"scnet","provider":provider,"configured_providers":[provider],
+            "cpu_fallback_disabled":gpu,"gpu_arena_limit_bytes":if gpu{gpu_arena_limit}else{0},
+            "gpu_total_memory_hard_limit":false,"tf32":false,
             "peak_worker_rss_bytes":limits::peak_rss()?,"hard_model_memory_limit_enforced":true,
             "memory_limit_mib":config.memory_mib,"memory_limit_kind":limits::KIND,
             "load_seconds":if index==0{load_seconds}else{0.},"inference_seconds":seconds,
@@ -171,7 +244,7 @@ fn run(config: Config) -> Result<()> {
 fn main() {
     if std::env::args_os().nth(1).is_some_and(|v| v == "--help") {
         eprintln!(
-            "amp-stem-worker --model PINNED_SCNET.onnx [--provider cpu] [--device-id0] [--requests0] [--memory-mib3072]\nNative ONNX Runtime via ORT_DYLIB_PATH; no downloads or audio files. Model/runtime notices: crates/amp-stem-worker/NOTICES.md"
+            "amp-stem-worker --model PINNED_SCNET.onnx [--provider cpu|cuda] [--device-id0] [--requests0] [--memory-mib3072]\nCUDA needs --cuda-dll-dir ABSOLUTE_VENDOR_DIR. Native ONNX Runtime via ORT_DYLIB_PATH; no downloads or audio files. Model/runtime notices: crates/amp-stem-worker/NOTICES.md"
         );
         return;
     }
@@ -284,6 +357,29 @@ mod tests {
     use super::*;
     fn parse(args: &[&str]) -> Result<Config> {
         Config::parse(args.iter().map(OsString::from))
+    }
+    #[test]
+    fn cuda_requires_explicit_installed_vendor_directory_and_device_zero() {
+        let dir = std::env::temp_dir();
+        let text = dir.to_str().unwrap();
+        let cfg = parse(&["--model", "a", "--provider", "cuda", "--cuda-dll-dir", text]).unwrap();
+        assert_eq!(cfg.provider, "cuda");
+        assert_eq!(cfg.cuda_dll_dir, Some(dir.clone()));
+        assert!(parse(&["--model", "a", "--provider", "cuda"]).is_err());
+        assert!(parse(&["--model", "a", "--provider", "dml"]).is_err());
+        assert!(
+            parse(&[
+                "--model",
+                "a",
+                "--provider",
+                "cuda",
+                "--cuda-dll-dir",
+                text,
+                "--device-id",
+                "1"
+            ])
+            .is_err()
+        );
     }
     #[test]
     fn cpu_only_cli_and_memory_bounds() {

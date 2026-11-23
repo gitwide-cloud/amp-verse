@@ -152,6 +152,7 @@ name = "amp-stem-worker"
 version = "0.1.0"
 dependencies = [
  "libc",
+ "libloading 0.8.9",
  "ort",
  "realfft",
  "serde",

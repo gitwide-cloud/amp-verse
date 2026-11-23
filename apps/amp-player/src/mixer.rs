@@ -2110,17 +2110,8 @@ impl Engine {
         if onnx && !crate::onnx_stem_worker::configured() {
             return Err("On-demand stem worker/model is not configured".into());
         }
-        if onnx
-            && (self.sample_rate > 48000
-                || self
-                    .controls
-                    .on_demand_stems
-                    .iter()
-                    .filter(|v| v.load(Relaxed))
-                    .count()
-                    > 2)
-        {
-            return Err("This beta supports two local stem decks at44.1/48kHz output".into());
+        if onnx && self.sample_rate > 48000 {
+            return Err("Live stems currently support output rates up to48kHz".into());
         }
         let stems = if onnx { None } else { stems };
         if amp_core::stem_mix::changed(stem_knobs) && stems.is_none() && !onnx {

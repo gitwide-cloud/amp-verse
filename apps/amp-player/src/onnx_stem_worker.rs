@@ -1,13 +1,14 @@
-//! One supervised, persistent ONNX process. PCM stays in bounded pipes/RAM, never audio files.
+//! A bounded pool of supervised, persistent ONNX processes. PCM stays in bounded pipes/RAM, never audio files.
 //! Caller owns the source generation: cancel its token on seek/load/Stop and reject old generations.
 use serde_json::{Value, json};
 use std::{
+    collections::HashSet,
     io::{BufReader, Read, Write},
     path::PathBuf,
     process::{Command, Stdio},
     sync::{
-        Arc, Mutex, OnceLock,
-        atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering},
+        Arc, Condvar, Mutex, OnceLock,
+        atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering},
         mpsc,
     },
     thread,
@@ -39,7 +40,54 @@ struct Config {
     model: PathBuf,
     provider: String,
     cuda_dll_dir: Option<PathBuf>,
+    runtime: Option<PathBuf>,
     script: &'static str,
+}
+const CUDA_VENDOR_DLLS: [&str; 12] = [
+    "cublasLt64_12.dll",
+    "cublas64_12.dll",
+    "cufft64_11.dll",
+    "cudart64_12.dll",
+    "cudnn_engines_runtime_compiled64_9.dll",
+    "cudnn_engines_precompiled64_9.dll",
+    "cudnn_heuristic64_9.dll",
+    "cudnn_ops64_9.dll",
+    "cudnn_cnn64_9.dll",
+    "cudnn_adv64_9.dll",
+    "cudnn_graph64_9.dll",
+    "cudnn64_9.dll",
+];
+fn verified_cuda_module(directory: &std::path::Path) -> bool {
+    let manifest = directory.join("module.json");
+    let Ok(metadata) = std::fs::symlink_metadata(&manifest) else {
+        return false;
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() || metadata.len() > 16384 {
+        return false;
+    }
+    let Ok(bytes) = std::fs::read(&manifest) else {
+        return false;
+    };
+    let Ok(value) = serde_json::from_slice::<Value>(&bytes) else {
+        return false;
+    };
+    value["id"] == "stems-cuda"
+        && value["version"] == 1
+        && value["provider"] == "cuda"
+        && value["onnxruntime_version"] == "1.22.0"
+        && value["qualified"] == true
+        && value["model_sha256"]
+            == "98228931494151762a1c4ab1ec7899a894b1f81fd4a509921a9d2f9bacc50845"
+        && [
+            "onnxruntime.dll",
+            "onnxruntime_providers_shared.dll",
+            "onnxruntime_providers_cuda.dll",
+        ]
+        .iter()
+        .all(|name| directory.join(name).is_file())
+        && CUDA_VENDOR_DLLS
+            .iter()
+            .all(|name| directory.join("vendor").join(name).is_file())
 }
 impl Config {
     fn environment() -> Result<Self, String> {
@@ -73,25 +121,71 @@ impl Config {
             .ok_or("The live stem engine is not installed")?;
         let model = std::env::var_os("AMP_ONNX_MODEL")
             .map(PathBuf::from)
-            .or_else(|| module.map(|p| p.join("scnet.int8.onnx")))
+            .or_else(|| module.as_ref().map(|p| p.join("scnet.int8.onnx")))
             .filter(|p| p.is_absolute() && p.is_file())
             .ok_or("The live stem model is not installed")?;
-        let provider = std::env::var("AMP_ONNX_PROVIDER")
-            .unwrap_or_else(|_| if native { "cpu".into() } else { "cuda".into() });
+        let gpu_module = module
+            .as_ref()
+            .and_then(|p| p.parent())
+            .map(|p| p.join("stems-cuda"));
+        let verified_gpu = gpu_module.as_ref().filter(|p| verified_cuda_module(p));
+        let provider = std::env::var("AMP_ONNX_PROVIDER").unwrap_or_else(|_| {
+            if native {
+                if verified_gpu.is_some() {
+                    "cuda".into()
+                } else {
+                    "cpu".into()
+                }
+            } else {
+                "cuda".into()
+            }
+        });
         let memory_mib = if native { 3072 } else { 6144 };
-        if native && provider != "cpu" {
-            return Err("The compact native stem engine currently uses CPU processing".into());
+        if !matches!(provider.as_str(), "cuda" | "cpu" | "dml") || (native && provider == "dml") {
+            return Err(
+                "AMP_ONNX_PROVIDER must be cpu or cuda for native stems (legacy also supports dml)"
+                    .into(),
+            );
         }
-        if !matches!(provider.as_str(), "cuda" | "cpu" | "dml") {
-            return Err("AMP_ONNX_PROVIDER must be cuda, cpu or dml".into());
-        }
-        let cuda_dll_dir = std::env::var_os("AMP_ONNX_CUDA_DLL_DIR").map(PathBuf::from);
+        let cuda_dll_dir = std::env::var_os("AMP_ONNX_CUDA_DLL_DIR")
+            .map(PathBuf::from)
+            .or_else(|| {
+                if provider == "cuda" {
+                    verified_gpu.map(|p| p.join("vendor"))
+                } else {
+                    None
+                }
+            });
         if cuda_dll_dir
             .as_ref()
             .is_some_and(|p| !p.is_absolute() || !p.is_dir())
         {
             return Err("AMP_ONNX_CUDA_DLL_DIR must be an installed local directory".into());
         }
+        let runtime = if native && provider == "cuda" {
+            let path = std::env::var_os("AMP_ONNX_RUNTIME")
+                .map(PathBuf::from)
+                .or_else(|| verified_gpu.map(|p| p.join("onnxruntime.dll")))
+                .or_else(|| std::env::var_os("ORT_DYLIB_PATH").map(PathBuf::from))
+                .filter(|p| p.is_absolute() && p.is_file());
+            if path.is_none() || cuda_dll_dir.is_none() {
+                return Err("CUDA stem add-on is incomplete; install its runtime/vendor libraries or explicitly select CPU processing".into());
+            }
+            path
+        } else if native {
+            python
+                .parent()
+                .map(|p| {
+                    p.join(if cfg!(windows) {
+                        "onnxruntime.dll"
+                    } else {
+                        "libonnxruntime.so"
+                    })
+                })
+                .filter(|p| p.is_file())
+        } else {
+            None
+        };
         Ok(Self {
             python,
             native,
@@ -99,6 +193,7 @@ impl Config {
             model,
             provider,
             cuda_dll_dir,
+            runtime,
             script: include_str!("../../../tools/stem_onnx_window.py"),
         })
     }
@@ -119,47 +214,175 @@ struct Request {
     deadline: Instant,
     reply: mpsc::SyncSender<Reply>,
 }
+#[derive(Default)]
+struct PoolMetrics {
+    live: AtomicUsize,
+    peak: AtomicUsize,
+}
+#[derive(Default)]
+struct Pending {
+    requests: Vec<Request>,
+    outstanding: HashSet<usize>,
+}
+struct RequestQueue {
+    pending: Mutex<Pending>,
+    ready: Condvar,
+    capacity: usize,
+}
+impl RequestQueue {
+    fn new(capacity: usize) -> Self {
+        Self {
+            pending: Mutex::new(Pending::default()),
+            ready: Condvar::new(),
+            capacity,
+        }
+    }
+    fn push(&self, request: Request) -> Result<(), String> {
+        let mut pending = self.pending.lock().map_err(|_| "Stem queue unavailable")?;
+        Self::discard_stale(&mut pending);
+        if pending.requests.len() >= self.capacity {
+            return Err("Stem request queue is full; retry when a deck window completes".into());
+        }
+        let source = Arc::as_ptr(&request.cancel) as usize;
+        if !pending.outstanding.insert(source) {
+            return Err("A stem request for this source is already outstanding".into());
+        }
+        pending.requests.push(request);
+        self.ready.notify_one();
+        Ok(())
+    }
+    fn discard_stale(pending: &mut Pending) {
+        let now = Instant::now();
+        let mut index = 0;
+        while index < pending.requests.len() {
+            let work = &pending.requests[index];
+            if work.state.load(Ordering::Acquire) == CANCELLED
+                || work.cancel.load(Ordering::Acquire)
+                || now >= work.deadline
+            {
+                let work = pending.requests.remove(index);
+                work.state.store(CANCELLED, Ordering::Release);
+                pending
+                    .outstanding
+                    .remove(&(Arc::as_ptr(&work.cancel) as usize));
+                let _ = work.reply.try_send(Err(
+                    "Stem window cancelled or expired before inference".into(),
+                ));
+            } else {
+                index += 1;
+            }
+        }
+    }
+    fn finish(&self, work: &Request) {
+        if let Ok(mut pending) = self.pending.lock() {
+            pending
+                .outstanding
+                .remove(&(Arc::as_ptr(&work.cancel) as usize));
+        }
+    }
+    fn take(&self, stopping: &AtomicBool) -> Option<Request> {
+        let mut pending = self.pending.lock().ok()?;
+        Self::discard_stale(&mut pending);
+        while pending.requests.is_empty() && !stopping.load(Ordering::Acquire) {
+            pending = self.ready.wait_timeout(pending, TICK).ok()?.0;
+            // Return periodically so idle slots can reap their model process.
+            if pending.requests.is_empty() {
+                return None;
+            }
+        }
+        if stopping.load(Ordering::Acquire) {
+            return None;
+        }
+        let index = pending
+            .requests
+            .iter()
+            .enumerate()
+            .min_by_key(|(_, r)| r.deadline)
+            .map(|(i, _)| i)?;
+        Some(pending.requests.remove(index))
+    }
+    fn drain(&self) {
+        if let Ok(mut pending) = self.pending.lock() {
+            for work in pending.requests.drain(..) {
+                let _ = work.reply.send(Err("Stem supervisor shutting down".into()));
+            }
+            pending.outstanding.clear();
+        }
+    }
+}
 struct Broker {
-    tx: mpsc::SyncSender<Request>,
+    queue: Arc<RequestQueue>,
     stopping: Arc<AtomicBool>,
-    finished: Arc<AtomicBool>,
+    finished: Arc<AtomicUsize>,
+    width: usize,
+    memory_mib: Option<u32>,
+    metrics: Arc<PoolMetrics>,
 }
 impl Broker {
+    #[cfg(test)]
     fn start() -> Result<Self, String> {
-        let (tx, rx) = mpsc::sync_channel::<Request>(QUEUE_CAPACITY);
+        Self::start_with(1, QUEUE_CAPACITY, None)
+    }
+    fn start_pool(config: &Config) -> Result<Self, String> {
+        let (width, memory) = pool_plan(config);
+        Self::start_with(width, 6, Some(memory))
+    }
+    fn start_with(width: usize, capacity: usize, memory_mib: Option<u32>) -> Result<Self, String> {
+        let queue = Arc::new(RequestQueue::new(capacity));
         let stopping = Arc::new(AtomicBool::new(false));
-        let stop = stopping.clone();
-        let finished = Arc::new(AtomicBool::new(false));
-        let acknowledged = finished.clone();
-        thread::Builder::new()
-            .name("amp-onnx-broker".into())
-            .spawn(move || {
-                if broker_loop(rx, stop) {
-                    acknowledged.store(true, Ordering::Release);
-                }
-            })
-            .map_err(|e| format!("Cannot start stem supervisor: {e}"))?;
+        let finished = Arc::new(AtomicUsize::new(0));
+        let metrics = Arc::new(PoolMetrics::default());
+        for slot in 0..width {
+            let q = queue.clone();
+            let stop = stopping.clone();
+            let done = finished.clone();
+            let stats = metrics.clone();
+            if let Err(error) = thread::Builder::new()
+                .name(format!("amp-onnx-slot-{slot}"))
+                .spawn(move || {
+                    if broker_loop(q, stop, stats) {
+                        done.fetch_add(1, Ordering::AcqRel);
+                    }
+                })
+            {
+                stopping.store(true, Ordering::Release);
+                queue.ready.notify_all();
+                return Err(format!("Cannot start stem supervisor: {error}"));
+            }
+        }
         Ok(Self {
-            tx,
+            queue,
             stopping,
             finished,
+            width,
+            memory_mib,
+            metrics,
         })
     }
     fn shutdown(&self) -> bool {
         self.stopping.store(true, Ordering::Release);
+        self.queue.ready.notify_all();
         let deadline = Instant::now() + Duration::from_secs(3);
-        while !self.finished.load(Ordering::Acquire) && Instant::now() < deadline {
+        while self.finished.load(Ordering::Acquire) < self.width && Instant::now() < deadline {
             thread::sleep(TICK);
         }
-        self.finished.load(Ordering::Acquire)
+        self.finished.load(Ordering::Acquire) == self.width
     }
     fn submit(
         &self,
         pcm: Vec<f32>,
         cancel: Arc<AtomicBool>,
-        config: Config,
+        mut config: Config,
         budget: Duration,
     ) -> Reply {
+        if let Some(memory) = self.memory_mib {
+            if self.width > 1 && (!config.native || config.provider != "cpu") {
+                return Err(
+                    "Stem pool provider changed; restart AMP before changing providers".into(),
+                );
+            }
+            config.memory_mib = memory;
+        }
         validate_input(&pcm)?;
         if cancel.load(Ordering::Acquire) {
             return Err("Stem window cancelled".into());
@@ -178,12 +401,7 @@ impl Broker {
             deadline,
             reply,
         };
-        self.tx.try_send(request).map_err(|e| match e {
-            mpsc::TrySendError::Full(_) => {
-                "Stem request queue is full; retry when a deck window completes".to_owned()
-            }
-            mpsc::TrySendError::Disconnected(_) => "Stem supervisor stopped".to_owned(),
-        })?;
+        self.queue.push(request)?;
         loop {
             if Instant::now() >= deadline
                 && state
@@ -223,6 +441,31 @@ impl Broker {
     }
 }
 
+impl Drop for Broker {
+    fn drop(&mut self) {
+        self.stopping.store(true, Ordering::Release);
+        self.queue.ready.notify_all();
+    }
+}
+fn pool_plan(config: &Config) -> (usize, u32) {
+    let width = if config.native && config.provider == "cpu" {
+        (thread::available_parallelism().map_or(1, usize::from) / 2).clamp(1, 3)
+    } else {
+        1
+    };
+    (width, config.memory_mib.min(6144 / width as u32))
+}
+/// Logical slots, per-process hard cap, unreaped processes, peak unreaped processes.
+/// A quarantined child remains counted until confirmed reaped; this is not RSS.
+pub(crate) fn pool_status() -> Option<(usize, u32, usize, usize)> {
+    let broker = BROKER.get()?.as_ref().ok()?;
+    Some((
+        broker.width,
+        broker.memory_mib.unwrap_or(0),
+        broker.metrics.live.load(Ordering::Acquire),
+        broker.metrics.peak.load(Ordering::Acquire),
+    ))
+}
 /// Configuration check only: no Python launch, model probing or ordinary-playback warm-up.
 pub(crate) fn configured() -> bool {
     Config::environment().is_ok()
@@ -230,13 +473,13 @@ pub(crate) fn configured() -> bool {
 
 /// Blocking BACKGROUND API. Never call from the render/audio/UI thread.
 /// Interleaved stereo44.1k f32; vocals, instruments=(bass+other), drums. No disk cache.
-/// At most one inference + two queued input windows; overload rejects immediately.
+/// At most three native CPU inferences plus six queued windows; overload rejects immediately.
 /// Budget includes queue time; expiry never cancels the caller's deck/source token.
 pub(crate) fn separate(pcm: Vec<f32>, cancel: Arc<AtomicBool>, budget: Duration) -> Reply {
     validate_input(&pcm)?;
     let config = Config::environment()?;
     BROKER
-        .get_or_init(Broker::start)
+        .get_or_init(|| Broker::start_pool(&config))
         .as_ref()
         .map_err(Clone::clone)?
         .submit(pcm, cancel, config, budget)
@@ -272,6 +515,7 @@ struct Worker {
     poisoned: bool,
     warmed: bool,
     stderr: Arc<Mutex<Vec<u8>>>,
+    metrics: Option<Arc<PoolMetrics>>,
 }
 fn wrapped(command: Command) -> process_wrap::std::CommandWrap {
     let mut command = process_wrap::std::CommandWrap::from(command);
@@ -308,20 +552,20 @@ impl Worker {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
-        if config.native {
-            let runtime = config.python.parent().map(|p| {
-                p.join(if cfg!(windows) {
-                    "onnxruntime.dll"
-                } else {
-                    "libonnxruntime.so"
-                })
-            });
-            if let Some(runtime) = runtime.filter(|p| p.is_file()) {
-                command.env("ORT_DYLIB_PATH", runtime);
-            }
+        if let Some(runtime) = &config.runtime {
+            command.env("ORT_DYLIB_PATH", runtime);
         }
         if let Some(path) = &config.cuda_dll_dir {
             command.arg("--cuda-dll-dir").arg(path);
+            if config.provider == "cuda" {
+                let mut paths = vec![path.clone()];
+                if let Some(existing) = std::env::var_os("PATH") {
+                    paths.extend(std::env::split_paths(&existing));
+                }
+                let path_env = std::env::join_paths(paths)
+                    .map_err(|e| format!("Invalid CUDA library search path: {e}"))?;
+                command.env("PATH", path_env);
+            }
         }
         let mut child = wrapped(command)
             .spawn()
@@ -332,8 +576,12 @@ impl Worker {
             child.stderr().take(),
         );
         let (Some(mut input), Some(output), Some(mut errors)) = pipes else {
-            let _ = child.start_kill();
-            return Err("ONNX worker pipes unavailable".into());
+            return Self::startup_failure(
+                child,
+                config,
+                Arc::new(Mutex::new(Vec::new())),
+                "ONNX worker pipes unavailable".into(),
+            );
         };
         let stderr = Arc::new(Mutex::new(Vec::new()));
         let tail = stderr.clone();
@@ -355,17 +603,29 @@ impl Worker {
                 }
             })
         {
-            let _ = child.start_kill();
-            return Err(format!("Cannot supervise ONNX diagnostics: {error}"));
+            return Self::startup_failure(
+                child,
+                config,
+                stderr,
+                format!("Cannot supervise ONNX diagnostics: {error}"),
+            );
         }
         let (tx, rx) = mpsc::sync_channel::<WireRequest>(1);
         let provider = config.expected_provider().to_owned();
+        let memory_limit = config.memory_mib;
         if let Err(error) = thread::Builder::new()
             .name("amp-onnx-pipes".into())
             .spawn(move || {
                 let mut output = BufReader::new(output);
                 while let Ok(work) = rx.recv() {
-                    let result = exchange(&mut input, &mut output, &work.id, &work.pcm, &provider);
+                    let result = exchange_with_limit(
+                        &mut input,
+                        &mut output,
+                        &work.id,
+                        &work.pcm,
+                        &provider,
+                        memory_limit,
+                    );
                     let failed = result.is_err();
                     let _ = work.reply.send(result);
                     if failed {
@@ -374,8 +634,12 @@ impl Worker {
                 }
             })
         {
-            let _ = child.start_kill();
-            return Err(format!("Cannot supervise ONNX pipes: {error}"));
+            return Self::startup_failure(
+                child,
+                config,
+                stderr,
+                format!("Cannot supervise ONNX pipes: {error}"),
+            );
         }
         Ok(Self {
             child,
@@ -384,7 +648,36 @@ impl Worker {
             poisoned: false,
             warmed: false,
             stderr,
+            metrics: None,
         })
+    }
+    /// A partially launched child still owns this slot until exit is acknowledged.
+    fn startup_failure(
+        child: Box<dyn process_wrap::std::ChildWrapper>,
+        config: Config,
+        stderr: Arc<Mutex<Vec<u8>>>,
+        message: String,
+    ) -> Result<Self, String> {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        if let Ok(mut errors) = stderr.lock() {
+            errors.extend_from_slice(message.as_bytes());
+            let excess = errors.len().saturating_sub(4096);
+            errors.drain(..excess);
+        }
+        let mut failed = Self {
+            child,
+            tx,
+            config,
+            poisoned: true,
+            warmed: false,
+            stderr,
+            metrics: None,
+        };
+        if failed.terminate() {
+            Err(message)
+        } else {
+            Ok(failed)
+        }
     }
     /// Bounded cancellation acknowledgement; retain/quarantine an un-reaped process.
     fn terminate(&mut self) -> bool {
@@ -393,7 +686,12 @@ impl Worker {
         let deadline = Instant::now() + REAP_TIMEOUT;
         loop {
             match self.child.try_wait() {
-                Ok(Some(_)) => return true,
+                Ok(Some(_)) => {
+                    if let Some(metrics) = self.metrics.take() {
+                        metrics.live.fetch_sub(1, Ordering::AcqRel);
+                    }
+                    return true;
+                }
                 _ if Instant::now() < deadline => thread::sleep(TICK),
                 _ => return false,
             }
@@ -425,28 +723,24 @@ fn stop_worker(worker: &mut Option<Worker>) -> bool {
         false
     }
 }
-fn broker_loop(rx: mpsc::Receiver<Request>, stopping: Arc<AtomicBool>) -> bool {
+fn broker_loop(
+    queue: Arc<RequestQueue>,
+    stopping: Arc<AtomicBool>,
+    metrics: Arc<PoolMetrics>,
+) -> bool {
     let mut worker: Option<Worker> = None;
     let mut last_use = Instant::now();
     loop {
         if stopping.load(Ordering::Acquire) {
             let reaped = stop_worker(&mut worker);
-            while let Ok(work) = rx.try_recv() {
-                let _ = work.reply.send(Err("Stem supervisor shutting down".into()));
-            }
+            queue.drain();
             return reaped;
         }
-        let work = match rx.recv_timeout(TICK) {
-            Ok(work) => work,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                if last_use.elapsed() >= IDLE_TIMEOUT {
-                    let _ = stop_worker(&mut worker);
-                }
-                continue;
+        let Some(work) = queue.take(&stopping) else {
+            if last_use.elapsed() >= IDLE_TIMEOUT {
+                let _ = stop_worker(&mut worker);
             }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                return stop_worker(&mut worker);
-            }
+            continue;
         };
         if work
             .state
@@ -458,15 +752,26 @@ fn broker_loop(rx: mpsc::Receiver<Request>, stopping: Arc<AtomicBool>) -> bool {
             let _ = work
                 .reply
                 .send(Err("Stem window cancelled before inference".into()));
+            queue.finish(&work);
             continue;
         }
-        let result = process_window(&mut worker, &work, &stopping);
+        let result = process_window_tracked(&mut worker, &work, &stopping, Some(&metrics));
         work.state.store(DONE, Ordering::Release);
+        queue.finish(&work);
         let _ = work.reply.send(result);
         last_use = Instant::now();
     }
 }
+#[cfg(test)]
 fn process_window(worker: &mut Option<Worker>, work: &Request, stopping: &AtomicBool) -> Reply {
+    process_window_tracked(worker, work, stopping, None)
+}
+fn process_window_tracked(
+    worker: &mut Option<Worker>,
+    work: &Request,
+    stopping: &AtomicBool,
+    metrics: Option<&Arc<PoolMetrics>>,
+) -> Reply {
     if work.cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire) {
         return Err("Stem window cancelled before inference".into());
     }
@@ -483,7 +788,25 @@ fn process_window(worker: &mut Option<Worker>, work: &Request, stopping: &Atomic
         return Err("Previous ONNX worker has not stopped; retry later".into());
     }
     if worker.is_none() {
-        *worker = Some(Worker::spawn(work.config.clone())?);
+        let mut spawned = Worker::spawn(work.config.clone())?;
+        if let Some(metrics) = metrics {
+            let live = metrics.live.fetch_add(1, Ordering::AcqRel) + 1;
+            metrics.peak.fetch_max(live, Ordering::AcqRel);
+            spawned.metrics = Some(metrics.clone());
+        }
+        *worker = Some(spawned);
+    }
+    if worker.as_ref().is_some_and(|worker| worker.poisoned) {
+        let detail = worker.as_ref().map(Worker::diagnostic).unwrap_or_default();
+        let reaped = stop_worker(worker);
+        return Err(format!(
+            "ONNX startup failed; {}. {detail}",
+            if reaped {
+                "process stopped"
+            } else {
+                "slot quarantined until process exit"
+            }
+        ));
     }
     let active = worker.as_mut().ok_or("ONNX worker unavailable")?;
     let deadline = work.deadline.min(
@@ -545,12 +868,23 @@ fn process_window(worker: &mut Option<Worker>, work: &Request, stopping: &Atomic
         }
     }
 }
+#[cfg(test)]
 fn exchange(
     input: &mut impl Write,
     output: &mut impl Read,
     id: &str,
     pcm: &[f32],
     provider: &str,
+) -> Reply {
+    exchange_with_limit(input, output, id, pcm, provider, 6144)
+}
+fn exchange_with_limit(
+    input: &mut impl Write,
+    output: &mut impl Read,
+    id: &str,
+    pcm: &[f32],
+    provider: &str,
+    memory_limit: u32,
 ) -> Reply {
     let frames = pcm.len() / 2;
     let mut header = serde_json::to_vec(
@@ -599,7 +933,7 @@ fn exchange(
         || h["hard_model_memory_limit_enforced"] != true
         || h["memory_limit_mib"]
             .as_u64()
-            .is_none_or(|v| v == 0 || v > 6144)
+            .is_none_or(|v| v == 0 || v > u64::from(memory_limit))
         || h["persistent_audio_bytes"] != 0
     {
         return Err("Response identity, shape, provider or memory contract mismatch".into());
@@ -674,6 +1008,7 @@ while True:
             model: mode,
             provider: "cpu".into(),
             cuda_dll_dir: None,
+            runtime: None,
             script: FAKE,
         }
     }
@@ -692,6 +1027,300 @@ while True:
             out.extend(sample.to_le_bytes());
         }
         Cursor::new(out)
+    }
+    #[test]
+    fn three_slots_run_concurrently_and_one_cancel_does_not_kill_healthy_slots() {
+        let broker = Arc::new(Broker::start_with(3, 6, None).unwrap());
+        let barrier = Arc::new(std::sync::Barrier::new(4));
+        let mut handles = Vec::new();
+        for _ in 0..3 {
+            let b = broker.clone();
+            let gate = barrier.clone();
+            handles.push(thread::spawn(move || {
+                gate.wait();
+                b.submit(
+                    vec![0.; 4],
+                    token(),
+                    config("slow".into()),
+                    Duration::from_secs(3),
+                )
+                .unwrap()
+            }));
+        }
+        barrier.wait();
+        for h in handles {
+            assert_eq!(
+                h.join().unwrap()[0],
+                vec![1.; 4],
+                "each concurrent request needs a distinct persistent process"
+            );
+        }
+        assert_eq!(broker.metrics.peak.load(Ordering::Acquire), 3);
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("hang");
+        let b = broker.clone();
+        let cancel = token();
+        let flag = cancel.clone();
+        let hanging = thread::spawn(move || {
+            b.submit(
+                vec![0.; 4],
+                flag,
+                config(marker.clone()),
+                Duration::from_secs(5),
+            )
+        });
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !directory.path().join("hang").exists() {
+            assert!(Instant::now() < deadline);
+            thread::sleep(TICK);
+        }
+        assert!(
+            broker
+                .submit(
+                    vec![0.; 4],
+                    token(),
+                    config("slow".into()),
+                    Duration::from_secs(2)
+                )
+                .is_ok()
+        );
+        cancel.store(true, Ordering::Release);
+        assert!(hanging.join().unwrap().is_err());
+        assert!(
+            broker
+                .submit(
+                    vec![0.; 4],
+                    token(),
+                    config("slow".into()),
+                    Duration::from_secs(2)
+                )
+                .is_ok()
+        );
+        let begin = Instant::now();
+        assert!(broker.shutdown());
+        assert!(begin.elapsed() < Duration::from_secs(3));
+        assert_eq!(broker.metrics.live.load(Ordering::Acquire), 0);
+        assert!(broker.metrics.peak.load(Ordering::Acquire) <= 3);
+    }
+    #[derive(Debug)]
+    struct QuarantinedChild {
+        exited: Arc<AtomicBool>,
+    }
+    impl process_wrap::std::ChildWrapper for QuarantinedChild {
+        fn inner(&self) -> &dyn process_wrap::std::ChildWrapper {
+            self
+        }
+        fn inner_mut(&mut self) -> &mut dyn process_wrap::std::ChildWrapper {
+            self
+        }
+        fn into_inner(self: Box<Self>) -> Box<dyn process_wrap::std::ChildWrapper> {
+            self
+        }
+        fn start_kill(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+        fn try_wait(&mut self) -> std::io::Result<Option<std::process::ExitStatus>> {
+            if !self.exited.load(Ordering::Acquire) {
+                return Ok(None);
+            }
+            #[cfg(unix)]
+            use std::os::unix::process::ExitStatusExt;
+            #[cfg(windows)]
+            use std::os::windows::process::ExitStatusExt;
+            Ok(Some(std::process::ExitStatus::from_raw(0)))
+        }
+    }
+    #[test]
+    fn quarantined_slot_keeps_its_reservation_and_cannot_respawn_before_reap() {
+        let exited = token();
+        let metrics = Arc::new(PoolMetrics::default());
+        metrics.live.store(1, Ordering::Release);
+        metrics.peak.store(1, Ordering::Release);
+        let (tx, _rx) = mpsc::sync_channel(1);
+        let mut worker = Some(Worker {
+            child: Box::new(QuarantinedChild {
+                exited: exited.clone(),
+            }),
+            tx,
+            config: config("good".into()),
+            poisoned: true,
+            warmed: true,
+            stderr: Arc::new(Mutex::new(Vec::new())),
+            metrics: Some(metrics.clone()),
+        });
+        let error = process_window_tracked(
+            &mut worker,
+            &request(config("good".into()), token()),
+            &AtomicBool::new(false),
+            Some(&metrics),
+        )
+        .unwrap_err();
+        assert!(error.contains("has not stopped"));
+        assert!(worker.is_some());
+        assert_eq!(metrics.live.load(Ordering::Acquire), 1);
+        assert_eq!(metrics.peak.load(Ordering::Acquire), 1);
+        exited.store(true, Ordering::Release);
+        assert!(stop_worker(&mut worker));
+        assert!(worker.is_none());
+        assert_eq!(metrics.live.load(Ordering::Acquire), 0);
+    }
+    #[test]
+    fn response_cannot_claim_a_memory_cap_larger_than_its_pool_allocation() {
+        let header = header(1);
+        let mut bytes = wire(&header, &[0.; 8]);
+        let error = exchange_with_limit(
+            &mut Vec::new(),
+            &mut bytes,
+            "test",
+            &[0.; 2],
+            "CPUExecutionProvider",
+            2048,
+        )
+        .unwrap_err();
+        assert!(error.contains("memory contract"));
+    }
+    #[test]
+    fn stale_pending_windows_are_reclaimed_before_capacity_and_duplicate_checks() {
+        let queue = RequestQueue::new(6);
+        let cfg = config("good".into());
+        let mut states = Vec::new();
+        let mut retry_source = None;
+        for _ in 0..6 {
+            let work = request(cfg.clone(), token());
+            states.push(work.state.clone());
+            queue.push(work).unwrap();
+        }
+        {
+            let mut pending = queue.pending.lock().unwrap();
+            for (i, work) in pending.requests.iter_mut().enumerate() {
+                if i < 3 {
+                    work.cancel.store(true, Ordering::Release);
+                } else {
+                    work.deadline = Instant::now() - TICK;
+                    retry_source = Some(work.cancel.clone());
+                }
+            }
+        }
+        queue
+            .push(request(cfg.clone(), retry_source.clone().unwrap()))
+            .unwrap();
+        assert!(
+            states
+                .iter()
+                .all(|state| state.load(Ordering::Acquire) == CANCELLED)
+        );
+        assert_eq!(queue.pending.lock().unwrap().requests.len(), 1);
+        assert_eq!(queue.pending.lock().unwrap().outstanding.len(), 1);
+        let active = queue.take(&AtomicBool::new(false)).unwrap();
+        assert!(
+            queue
+                .push(request(cfg, retry_source.unwrap()))
+                .unwrap_err()
+                .contains("already outstanding"),
+            "running source reservation must not be reclaimed"
+        );
+        queue.finish(&active);
+    }
+    #[test]
+    fn partial_startup_failure_retains_unreaped_child_in_a_poisoned_slot() {
+        let exited = token();
+        let failed = Worker::startup_failure(
+            Box::new(QuarantinedChild {
+                exited: exited.clone(),
+            }),
+            config("good".into()),
+            Arc::new(Mutex::new(Vec::new())),
+            "forced pipe supervision failure".into(),
+        )
+        .unwrap();
+        assert!(failed.poisoned);
+        assert!(failed.diagnostic().contains("forced pipe"));
+        let mut worker = Some(failed);
+        let error = process_window(
+            &mut worker,
+            &request(config("good".into()), token()),
+            &AtomicBool::new(false),
+        )
+        .unwrap_err();
+        assert!(error.contains("has not stopped"));
+        assert!(
+            worker.is_some(),
+            "failed child must retain its slot rather than allow a replacement"
+        );
+        exited.store(true, Ordering::Release);
+        assert!(stop_worker(&mut worker));
+        assert!(worker.is_none());
+        assert!(
+            matches!(Worker::startup_failure(Box::new(QuarantinedChild{exited}),config("good".into()),Arc::new(Mutex::new(Vec::new())),"already stopped".into()),Err(error) if error.contains("already stopped"))
+        );
+    }
+    #[test]
+    fn pending_edf_is_stable_and_duplicate_sources_are_rejected() {
+        let queue = RequestQueue::new(6);
+        let cfg = config("good".into());
+        let a = token();
+        let mut later = request(cfg.clone(), a.clone());
+        later.deadline = Instant::now() + Duration::from_secs(5);
+        let mut earlier = request(cfg.clone(), token());
+        earlier.deadline = Instant::now() + Duration::from_secs(1);
+        let early = earlier.cancel.clone();
+        queue.push(later).unwrap();
+        queue.push(earlier).unwrap();
+        assert!(
+            queue
+                .push(request(cfg, a))
+                .unwrap_err()
+                .contains("already outstanding")
+        );
+        let picked = queue.take(&AtomicBool::new(false)).unwrap();
+        assert!(Arc::ptr_eq(&picked.cancel, &early));
+        queue.finish(&picked);
+    }
+    #[test]
+    fn cuda_autodiscovery_requires_qualified_pinned_fixed_layout() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root.path();
+        std::fs::create_dir(dir.join("vendor")).unwrap();
+        for file in CUDA_VENDOR_DLLS {
+            std::fs::write(dir.join("vendor").join(file), []).unwrap();
+        }
+        for file in [
+            "onnxruntime.dll",
+            "onnxruntime_providers_shared.dll",
+            "onnxruntime_providers_cuda.dll",
+        ] {
+            std::fs::write(dir.join(file), []).unwrap();
+        }
+        let mut manifest = json!({"id":"stems-cuda","version":1,"provider":"cuda","onnxruntime_version":"1.22.0","qualified":false,"model_sha256":"98228931494151762a1c4ab1ec7899a894b1f81fd4a509921a9d2f9bacc50845"});
+        let save = |value: &Value| {
+            std::fs::write(dir.join("module.json"), serde_json::to_vec(value).unwrap()).unwrap()
+        };
+        save(&manifest);
+        assert!(!verified_cuda_module(dir));
+        manifest["qualified"] = json!(true);
+        save(&manifest);
+        assert!(verified_cuda_module(dir));
+        manifest["model_sha256"] = json!("unverified");
+        save(&manifest);
+        assert!(!verified_cuda_module(dir));
+        manifest["model_sha256"] =
+            json!("98228931494151762a1c4ab1ec7899a894b1f81fd4a509921a9d2f9bacc50845");
+        save(&manifest);
+        std::fs::remove_file(dir.join("onnxruntime_providers_cuda.dll")).unwrap();
+        assert!(!verified_cuda_module(dir));
+    }
+    #[test]
+    fn native_pool_reservations_never_exceed_six_gib_and_legacy_stays_single() {
+        let mut cfg = config("good".into());
+        assert_eq!(pool_plan(&cfg), (1, 6144));
+        cfg.native = true;
+        cfg.memory_mib = 3072;
+        let (width, memory) = pool_plan(&cfg);
+        assert!((1..=3).contains(&width));
+        assert!(memory <= 3072);
+        assert!(width as u32 * memory <= 6144);
+        cfg.provider = "cuda".into();
+        assert_eq!(pool_plan(&cfg), (1, 3072));
     }
     #[test]
     fn fake_persistent_worker_reuses_model_slot_and_combines_exact_parts() {
@@ -791,17 +1420,32 @@ while True:
         .unwrap();
         assert_eq!(output, [vec![1., 2.], vec![12., 14.], vec![3., 4.]]);
     }
+    fn unstarted(capacity: usize) -> Broker {
+        Broker {
+            queue: Arc::new(RequestQueue::new(capacity)),
+            stopping: token(),
+            finished: Arc::new(AtomicUsize::new(0)),
+            width: 1,
+            memory_mib: None,
+            metrics: Arc::new(PoolMetrics::default()),
+        }
+    }
+    fn wait_pending(broker: &Broker) -> Arc<AtomicU8> {
+        let deadline = Instant::now() + Duration::from_secs(3);
+        loop {
+            if let Some(request) = broker.queue.pending.lock().unwrap().requests.first() {
+                return request.state.clone();
+            }
+            assert!(Instant::now() < deadline);
+            thread::sleep(TICK);
+        }
+    }
     #[test]
     fn queue_is_bounded_and_cancelled_pending_inputs_never_start() {
-        let (tx, rx) = mpsc::sync_channel(QUEUE_CAPACITY);
-        let broker = Broker {
-            tx,
-            stopping: token(),
-            finished: token(),
-        };
+        let broker = unstarted(QUEUE_CAPACITY);
         let cfg = config("good".into());
         for _ in 0..QUEUE_CAPACITY {
-            assert!(broker.tx.try_send(request(cfg.clone(), token())).is_ok());
+            assert!(broker.queue.push(request(cfg.clone(), token())).is_ok());
         }
         assert!(
             broker
@@ -809,25 +1453,20 @@ while True:
                 .unwrap_err()
                 .contains("queue is full")
         );
-        drop(rx);
-        let (tx, rx) = mpsc::sync_channel(1);
-        let broker = Broker {
-            tx,
-            stopping: token(),
-            finished: token(),
-        };
+        let broker = Arc::new(unstarted(1));
+        let copy = broker.clone();
         let cancel = token();
         let flag = cancel.clone();
         let handle =
-            thread::spawn(move || broker.submit(vec![0.; 2], flag, cfg, Duration::from_secs(5)));
-        let queued = rx.recv_timeout(Duration::from_secs(3)).unwrap();
-        assert_eq!(queued.state.load(Ordering::Acquire), PENDING);
+            thread::spawn(move || copy.submit(vec![0.; 2], flag, cfg, Duration::from_secs(5)));
+        let state = wait_pending(&broker);
+        assert_eq!(state.load(Ordering::Acquire), PENDING);
         cancel.store(true, Ordering::Release);
         assert!(handle.join().unwrap().is_err());
         assert_eq!(
-            queued.state.load(Ordering::Acquire),
+            state.load(Ordering::Acquire),
             CANCELLED,
-            "queued cancellation must prevent a later inference"
+            "queued cancellation must prevent later inference"
         );
     }
     fn request(config: Config, cancel: Arc<AtomicBool>) -> Request {
@@ -968,24 +1607,20 @@ while True:
     }
     #[test]
     fn queued_deadline_does_not_cancel_deck_or_allow_late_inference() {
-        let (tx, rx) = mpsc::sync_channel(1);
-        let broker = Broker {
-            tx,
-            stopping: token(),
-            finished: token(),
-        };
+        let broker = Arc::new(unstarted(1));
+        let copy = broker.clone();
         let cancel = token();
         let flag = cancel.clone();
         let cfg = config("good".into());
         let handle =
-            thread::spawn(move || broker.submit(vec![0.; 2], flag, cfg, Duration::from_millis(80)));
-        let queued = rx.recv_timeout(Duration::from_secs(3)).unwrap();
+            thread::spawn(move || copy.submit(vec![0.; 2], flag, cfg, Duration::from_millis(80)));
+        let state = wait_pending(&broker);
         assert!(handle.join().unwrap().unwrap_err().contains("timed out"));
         assert!(
             !cancel.load(Ordering::Acquire),
             "queue expiry must preserve original-audio fallback"
         );
-        assert_eq!(queued.state.load(Ordering::Acquire), CANCELLED);
+        assert_eq!(state.load(Ordering::Acquire), CANCELLED);
     }
     #[test]
     fn active_deadline_reaps_worker_without_cancelling_deck_fallback() {
