@@ -824,8 +824,9 @@ impl Panel {
                 let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().enumerate().filter(|(d,v)| v.load(Relaxed) && !a.controls.prepared_stems[*d].load(Relaxed)).count());
                 let previous = crate::stem_capability::maximum();
                 let mut maximum = previous;
-                egui::ComboBox::from_id_salt("live-stem-maximum").selected_text(format!("Maximum {maximum} live decks")).show_ui(ui, |ui| {
-                    for count in [2,4,6] { ui.selectable_value(&mut maximum,count,format!("{count} decks")); }
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Maximum live decks:");
+                    for count in [2,4,6] { ui.selectable_value(&mut maximum,count,count.to_string()); }
                 });
                 if maximum != previous && let Err(error) = crate::stem_capability::save_maximum(maximum,enabled_count) { self.status[deck] = error; }
                 if crate::stem_capability::maximum() > policy.hardware_limit { ui.weak("Your chosen maximum is limited by this engine's hardware qualification."); }
