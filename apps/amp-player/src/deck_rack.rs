@@ -370,13 +370,13 @@ impl Player {
                 library_height + 52.
             })
         .max(if compact { 290. } else { 320. })
-        .min(if self.rack.expanded { 550. } else { 490. });
+        .min(if self.rack.expanded { 450. } else { 410. });
         let rack_width = ui.available_width();
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
             data.insert_temp(
                 egui::Id::unique("native-dj-card-layout"),
-                rack_width >= 950.,
+                rack_width >= 1100.,
             )
         });
         let mixer = if compact { 126. } else { 146. };
@@ -400,7 +400,7 @@ impl Player {
             .ctx()
             .data_mut(|d| *d.get_temp_mut_or_insert_with(saved_id, || self.rack.strip_ratios));
         let rendered = if self.rack.six { strips } else { [0.; 2] };
-        if rack_width >= 950. {
+        if rack_width >= 1100. {
             self.card_rack(ui, height);
         } else {
             ui.horizontal_top(|ui| {

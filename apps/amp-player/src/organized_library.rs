@@ -1818,7 +1818,8 @@ mod tests {
         std::fs::create_dir_all(&directory).unwrap();
         let (_dir, mut player) = card_fixture();
         let dj = std::env::var("AMP_LIBRARY_CARD_PREVIEW_DJ").as_deref() == Ok("1");
-        if dj {
+        let player_view = std::env::var("AMP_LIBRARY_CARD_PREVIEW_PLAYER").as_deref() == Ok("1");
+        if dj || player_view {
             player = Player::default();
             player.workspace.enabled = true;
             player.workspace.rendering = true;
@@ -1828,10 +1829,26 @@ mod tests {
         theme::apply(&ctx, theme::Theme::ModernDark);
         let full_workspace = std::env::var("AMP_CARD_WORKSPACE").as_deref() == Ok("1");
         if full_workspace {
-            player.workspace.pane = if dj { 2 } else { 1 };
+            player.workspace.pane = if player_view {
+                0
+            } else if dj {
+                2
+            } else {
+                1
+            };
             player.workspace.rendering = false;
         }
-        let size = egui::vec2(1280., 900.);
+        let dimension = |key: &str, fallback: f32| {
+            std::env::var(key)
+                .ok()
+                .and_then(|v| v.parse::<f32>().ok())
+                .filter(|v| v.is_finite() && (320. ..=4096.).contains(v))
+                .unwrap_or(fallback)
+        };
+        let size = egui::vec2(
+            dimension("AMP_CARD_PREVIEW_WIDTH", 1280.),
+            dimension("AMP_CARD_PREVIEW_HEIGHT", 900.),
+        );
         let mut output = ctx.run_ui(
             egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
@@ -1840,6 +1857,8 @@ mod tests {
             |ui| {
                 if full_workspace {
                     player.workspace_ui(ui);
+                } else if player_view {
+                    player.workspace_player(ui);
                 } else if dj {
                     player.deck_workspace_ui(ui);
                 } else {

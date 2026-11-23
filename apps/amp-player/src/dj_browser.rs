@@ -217,6 +217,8 @@ fn playlist_indices(
 }
 impl Player {
     pub(super) fn dj_library_ui(&mut self, ui: &mut egui::Ui) {
+        ui.spacing_mut().interact_size.y = 26.;
+        ui.spacing_mut().item_spacing.y = 3.;
         if self.dj_browser.snapshot.is_none()
             && let Some(library) = &self.library
         {
@@ -495,6 +497,36 @@ impl Player {
                         .desired_width(ui.available_width())
                         .hint_text("Search this source"),
                 );
+                ui.horizontal_wrapped(|ui| {
+                    let selected = self.dj_browser.selected_path.clone();
+                    for (deck, label) in [(0, "Load A"), (1, "Load B")] {
+                        if ui
+                            .add_enabled(selected.is_some(), egui::Button::new(label))
+                            .clicked()
+                            && let Some(path) = &selected
+                        {
+                            load = Some((deck, path.clone()));
+                        }
+                    }
+                    if ui
+                        .add_enabled(selected.is_some(), egui::Button::new("Add to Queue"))
+                        .clicked()
+                        && let Some(path) = &selected
+                    {
+                        queue_drop =
+                            Some(amp_core::music_sources::audio_path(&snapshot_root, path));
+                    }
+                    if ui
+                        .add_enabled(selected.is_some(), egui::Button::new("Track details"))
+                        .clicked()
+                        && let Some(path) = &selected
+                    {
+                        self.dj_browser.details = library_snapshot
+                            .as_ref()
+                            .and_then(|l| l.tracks.iter().find(|t| &t.path == path))
+                            .cloned();
+                    }
+                });
                 let Some(lib) = &library_snapshot else {
                     ui.weak(if self.scan.is_some() {
                         "Scanning your music folders. Tracks will appear when the scan finishes."
@@ -593,6 +625,25 @@ impl Player {
                 if !matching_smart {
                     ui.weak(format!("{} tracks", indices.len()));
                 }
+                let base_width = self
+                    .dj_browser
+                    .columns
+                    .columns
+                    .iter()
+                    .filter(|c| c.visible)
+                    .map(|c| c.width + ui.spacing().item_spacing.x)
+                    .sum::<f32>()
+                    + 120.;
+                let extra = (ui.available_width() - base_width - 12.).max(0.);
+                let grow = |key: &str| {
+                    if key == "title" {
+                        extra * 0.65
+                    } else if key == "artist" {
+                        extra * 0.35
+                    } else {
+                        0.
+                    }
+                };
                 egui::ScrollArea::horizontal()
                     .id_salt("dj-columns-horizontal")
                     .show(ui, |ui| {
@@ -616,7 +667,7 @@ impl Player {
                                 .filter(|c| c.visible)
                             {
                                 let (rect, _) = ui.allocate_exact_size(
-                                    egui::vec2(column.width, 24.),
+                                    egui::vec2(column.width + grow(&column.key), 24.),
                                     egui::Sense::hover(),
                                 );
                                 ui.painter_at(rect).text(
@@ -654,13 +705,13 @@ impl Player {
                         egui::ScrollArea::vertical()
                             .id_salt("dj-source-tracks")
                             .max_height((height - if self.rack.six { 110. } else { 155. }).max(34.))
-                            .show_rows(ui, 34., indices.len(), |ui, range| {
+                            .show_rows(ui, 31., indices.len(), |ui, range| {
                                 for row in range {
                                     let i = indices[row];
                                     let t = &lib.tracks[i];
                                     ui.horizontal(|ui| {
                                         ui.add_sized(
-                                            [28., 30.],
+                                            [28., 28.],
                                             egui::Label::new((row + 1).to_string()),
                                         );
                                         for column in self
@@ -691,25 +742,36 @@ impl Player {
                                             } else {
                                                 track_columns::cell(t, &column.key)
                                             };
-                                            let response = if column.key == "title" {
-                                                ui.add_sized(
-                                                    [column.width, 30.],
-                                                    egui::Button::selectable(
-                                                        self.dj_browser.selected_path.as_ref()
-                                                            == Some(&t.path),
-                                                        &value,
-                                                    )
-                                                    .truncate()
-                                                    .sense(egui::Sense::click_and_drag()),
-                                                )
-                                            } else {
-                                                ui.add_sized(
-                                                    [column.width, 30.],
-                                                    egui::Label::new(&value)
-                                                        .truncate()
-                                                        .sense(egui::Sense::click_and_drag()),
-                                                )
-                                            };
+                                            let cell_width = column.width + grow(&column.key);
+                                            let (rect, response) = ui.allocate_exact_size(
+                                                egui::vec2(cell_width, 28.),
+                                                egui::Sense::click_and_drag(),
+                                            );
+                                            let selected = self.dj_browser.selected_path.as_ref()
+                                                == Some(&t.path);
+                                            if selected
+                                                || response.hovered()
+                                                || row.is_multiple_of(2)
+                                            {
+                                                ui.painter().rect_filled(
+                                                    rect,
+                                                    3.,
+                                                    if selected {
+                                                        GOLD.gamma_multiply(0.16)
+                                                    } else {
+                                                        ui.visuals().faint_bg_color
+                                                    },
+                                                );
+                                            }
+                                            ui.painter()
+                                                .with_clip_rect(rect.intersect(ui.clip_rect()))
+                                                .text(
+                                                    rect.left_center() + egui::vec2(4., 0.),
+                                                    egui::Align2::LEFT_CENTER,
+                                                    &value,
+                                                    egui::FontId::proportional(14.),
+                                                    ui.visuals().text_color(),
+                                                );
                                             let response = response.on_hover_text(&value);
                                             #[cfg(test)]
                                             if row == 0 && column.key == "title" {
@@ -806,7 +868,7 @@ impl Player {
                     })
                     .sense(egui::Sense::hover()),
                 );
-                queue_drop = dragdrop::target(&target, GOLD);
+                queue_drop = dragdrop::target(&target, GOLD).or(queue_drop.take());
                 if indices.is_empty() && !matching_smart {
                     ui.weak("No tracks in this source. Prepare and edit playlists in AMP Library.");
                 }
