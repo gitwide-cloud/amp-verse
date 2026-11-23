@@ -13,14 +13,32 @@ import java.io.File;
 import static org.junit.Assert.*;
 
 public class CleanUiDeviceTest {
+    private void awaitIme(ActivityScenario<MainActivity> scenario,boolean visible) throws Exception {
+        if(android.os.Build.VERSION.SDK_INT<30)return;
+        java.util.concurrent.atomic.AtomicBoolean matched=new java.util.concurrent.atomic.AtomicBoolean();
+        for(int attempt=0;attempt<40;attempt++){
+            scenario.onActivity(a->{WindowInsets insets=a.getWindow().getDecorView().getRootWindowInsets();matched.set(insets!=null&&insets.isVisible(WindowInsets.Type.ime())==visible);});
+            if(matched.get())return;
+            Thread.sleep(50);
+        }
+        fail("IME did not become "+(visible?"visible":"hidden")+" within 2 seconds");
+    }
+    private void openLibrarySearch(ActivityScenario<MainActivity> scenario){
+        scenario.onActivity(a->{View input=description(a.getWindow().getDecorView(),"Search phone music");assertTrue(input instanceof EditText);input.requestFocus();((android.view.inputmethod.InputMethodManager)a.getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(input,android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);});
+    }
     @Test public void leavingLibrarySearchDismissesKeyboard() throws Exception {
         Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
         try(ActivityScenario<MainActivity> scenario=ActivityScenario.launch(new Intent(context,MainActivity.class).putExtra("module","AMP Library"))){
             Thread.sleep(400);
-            scenario.onActivity(a->{View input=description(a.getWindow().getDecorView(),"Search phone music");assertTrue(input instanceof EditText);input.requestFocus();((android.view.inputmethod.InputMethodManager)a.getSystemService(Context.INPUT_METHOD_SERVICE)).showSoftInput(input,android.view.inputmethod.InputMethodManager.SHOW_IMPLICIT);});
-            Thread.sleep(500);
-            scenario.onActivity(a->a.getWindow().getDecorView().findViewWithTag("nav-dj").performClick());Thread.sleep(500);
-            scenario.onActivity(a->{if(android.os.Build.VERSION.SDK_INT>=30)assertFalse(a.getWindow().getDecorView().getRootWindowInsets().isVisible(WindowInsets.Type.ime()));});
+            openLibrarySearch(scenario);awaitIme(scenario,true);
+            scenario.onActivity(a->a.getWindow().getDecorView().findViewWithTag("nav-dj").performClick());
+            awaitIme(scenario,false);
+            // Navigation cleanup must not prevent a later intentional field tap.
+            scenario.onActivity(a->a.getWindow().getDecorView().findViewWithTag("nav-library").performClick());
+            InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+            openLibrarySearch(scenario);awaitIme(scenario,true);
+            scenario.onActivity(a->a.getWindow().getDecorView().findViewWithTag("nav-dj").performClick());
+            awaitIme(scenario,false);
         }
     }
     private ScrollView scrolling(View view){if(view instanceof ScrollView)return (ScrollView)view;if(view instanceof ViewGroup)for(int i=0;i<((ViewGroup)view).getChildCount();i++){ScrollView found=scrolling(((ViewGroup)view).getChildAt(i));if(found!=null)return found;}return null;}

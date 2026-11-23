@@ -118,11 +118,23 @@ public final class MainActivity extends Activity {
     private void dismissKeyboard(){
         View focus=getCurrentFocus();
         android.view.inputmethod.InputMethodManager keyboard=(android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
-        if(focus!=null){focus.clearFocus();keyboard.hideSoftInputFromWindow(focus.getWindowToken(),0);}
+        if(focus!=null&&focus!=root){focus.clearFocus();keyboard.hideSoftInputFromWindow(focus.getWindowToken(),0);}
         if(root!=null){root.requestFocus();keyboard.hideSoftInputFromWindow(root.getWindowToken(),0);}
         if(android.os.Build.VERSION.SDK_INT>=30){android.view.WindowInsetsController controller=getWindow().getInsetsController();if(controller!=null)controller.hide(android.view.WindowInsets.Type.ime());}
     }
-    private void selectModule(String name) { dismissKeyboard();String feature=Modules.moduleId(name);if(feature!=null&&!Modules.embedded(feature)){Modules.open(this,feature);return;} if(name.equals("AMP Player"))PlaybackService.switchToPlayer();if(name.equals("AMP Lab")){startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;if(name.equals("AMP Cast")||name.equals("AMP Remote"))deviceMode=name;library=name.equals("AMP Library");draw();root.post(this::dismissKeyboard); }
+    private void settleNavigationKeyboard(){
+        final LinearLayout destination=root;
+        destination.post(()->{
+            if(root!=destination)return;
+            dismissKeyboard();
+            destination.postOnAnimation(()->{
+                // A deliberate tap on a new text field wins over this one-shot
+                // navigation cleanup. Do not hide keyboards during normal typing.
+                if(root==destination&&destination.isFocused())dismissKeyboard();
+            });
+        });
+    }
+    private void selectModule(String name) { dismissKeyboard();String feature=Modules.moduleId(name);if(feature!=null&&!Modules.embedded(feature)){Modules.open(this,feature);return;} if(name.equals("AMP Player"))PlaybackService.switchToPlayer();if(name.equals("AMP Lab")){startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;if(name.equals("AMP Cast")||name.equals("AMP Remote"))deviceMode=name;library=name.equals("AMP Library");draw();settleNavigationKeyboard(); }
     private void openSettings(){startActivity(new Intent(this,SettingsActivity.class));}
     private void saveScroll(){if(moduleScroll!=null)scrollPositions.put(renderedKey,moduleScroll.getScrollY());if(queueScroll!=null)scrollPositions.put("player-queue",queueScroll.getScrollY());}
     private void draw() {
@@ -135,7 +147,7 @@ public final class MainActivity extends Activity {
         appearance=new Appearance(this);bg=appearance.background;panel=appearance.surface;text=appearance.text;muted=appearance.muted;accent=appearance.accent;
         title=null;clock=null;durationLabel=null;details=null;artwork=null;artworkKey="";displayedArtwork=null;playerRows.clear();transportButtons.clear();seek=null;play=null;status=null;shuffleButton=null;repeatButton=null;
         getWindow().setStatusBarColor(bg);getWindow().setNavigationBarColor(bg);getWindow().getDecorView().setSystemUiVisibility(Color.red(bg)>200?View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR|View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR:0);
-        root=new LinearLayout(this);root.setFocusableInTouchMode(true);root.requestFocus();root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(bg);
+        root=new LinearLayout(this);root.setFocusableInTouchMode(true);root.setDescendantFocusability(android.view.ViewGroup.FOCUS_BEFORE_DESCENDANTS);root.requestFocus();root.setOrientation(LinearLayout.VERTICAL);root.setBackgroundColor(bg);
         root.setOnApplyWindowInsetsListener((view,insets)->{view.setPadding(dp(10)+insets.getSystemWindowInsetLeft(),insets.getSystemWindowInsetTop(),dp(10)+insets.getSystemWindowInsetRight(),insets.getSystemWindowInsetBottom());return insets;});setContentView(root);
         LinearLayout header=new LinearLayout(this);header.setGravity(android.view.Gravity.CENTER_VERTICAL);
         Button brand=button("ϟ AMPϟVERSE",this::showModules);brand.setSingleLine(true);brand.setEllipsize(android.text.TextUtils.TruncateAt.END);
