@@ -115,7 +115,14 @@ public final class MainActivity extends Activity {
         view.setTextColor(Chrome.ink(appearance,false));view.setBackgroundTintList(null);view.setBackground(Chrome.button(appearance,false));view.setOnClickListener(v->action.run());return view;
     }
     private void rowButton(LinearLayout row,String caption,Runnable action) { LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(0,-2,1);params.setMargins(dp(1),dp(2),dp(1),dp(2));row.addView(button(caption,action),params); }
-    private void selectModule(String name) { String feature=Modules.moduleId(name);if(feature!=null&&!Modules.embedded(feature)){Modules.open(this,feature);return;} View focus=getCurrentFocus();if(focus!=null)((android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE)).hideSoftInputFromWindow(focus.getWindowToken(),0);if(name.equals("AMP Player"))PlaybackService.switchToPlayer();if(name.equals("AMP Lab")){startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;if(name.equals("AMP Cast")||name.equals("AMP Remote"))deviceMode=name;library=name.equals("AMP Library");draw(); }
+    private void dismissKeyboard(){
+        View focus=getCurrentFocus();
+        android.view.inputmethod.InputMethodManager keyboard=(android.view.inputmethod.InputMethodManager)getSystemService(INPUT_METHOD_SERVICE);
+        if(focus!=null){focus.clearFocus();keyboard.hideSoftInputFromWindow(focus.getWindowToken(),0);}
+        if(root!=null){root.requestFocus();keyboard.hideSoftInputFromWindow(root.getWindowToken(),0);}
+        if(android.os.Build.VERSION.SDK_INT>=30){android.view.WindowInsetsController controller=getWindow().getInsetsController();if(controller!=null)controller.hide(android.view.WindowInsets.Type.ime());}
+    }
+    private void selectModule(String name) { dismissKeyboard();String feature=Modules.moduleId(name);if(feature!=null&&!Modules.embedded(feature)){Modules.open(this,feature);return;} if(name.equals("AMP Player"))PlaybackService.switchToPlayer();if(name.equals("AMP Lab")){startActivity(new Intent(this,cloud.gitwide.ampverse.lab.MainActivity.class));return;} module=name;if(name.equals("AMP Cast")||name.equals("AMP Remote"))deviceMode=name;library=name.equals("AMP Library");draw();root.post(this::dismissKeyboard); }
     private void openSettings(){startActivity(new Intent(this,SettingsActivity.class));}
     private void saveScroll(){if(moduleScroll!=null)scrollPositions.put(renderedKey,moduleScroll.getScrollY());if(queueScroll!=null)scrollPositions.put("player-queue",queueScroll.getScrollY());}
     private void draw() {

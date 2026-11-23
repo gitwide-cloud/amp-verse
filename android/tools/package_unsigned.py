@@ -23,7 +23,7 @@ def package(root, destination, sdk):
     shutil.copy2(signer, local_tools / "apksigner.jar")
     if (tools / "NOTICE.txt").is_file():
         shutil.copy2(tools / "NOTICE.txt", local_tools / "NOTICE.txt")
-    report = {"schema": 1, "kind": "unsigned-beta-requires-local-signing", "source_commit": os.environ.get("GITHUB_SHA", "local"), "build_tools": "35.0.0", "release_channel": "beta", "beta": 3, "packages": []}
+    report = {"schema": 1, "kind": "unsigned-beta-requires-local-signing", "source_commit": os.environ.get("GITHUB_SHA", "local"), "build_tools": "35.0.0", "release_channel": "beta", "packages": []}
     common_version = None
     for module in ("lite", "full", "dj", "lab", "cast", "podcasts", "remote"):
         folder = root / (f"app/build/outputs/apk/{module}/release" if module in ("lite", "full") else f"modules/{module}/build/outputs/apk/release")
@@ -56,6 +56,9 @@ def package(root, destination, sdk):
         (destination / (name + ".output-metadata.json")).write_text(json.dumps(metadata, indent=2) + "\n")
         (destination / (name + ".alignment.txt")).write_text("PASS: official build-tools 35 zipalign -c -P 16 4\n" + aligned.stdout + aligned.stderr)
         report["packages"].append({"edition": module, "name": name, "package_id": package_id, "version_code": int(version_code), "version": version, "sha256": hashlib.sha256(target.read_bytes()).hexdigest(), "size": target.stat().st_size, "alignment_verified": True, "signed": False})
+    report["version"], report["version_code"] = common_version
+    beta = re.search(r"-beta\.([1-9]\d*)$", common_version[0])
+    report["beta"] = int(beta.group(1)) if beta else None
     (destination / "unsigned-manifest.json").write_text(json.dumps(report, indent=2) + "\n")
     (destination / "SIGNING_REQUIRED.md").write_text("""# Unsigned beta — local signing required
 

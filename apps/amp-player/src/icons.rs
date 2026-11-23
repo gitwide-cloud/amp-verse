@@ -265,7 +265,12 @@ pub fn button(
                 rect.min + egui::vec2(43., rect.height() / 2.),
                 egui::Align2::LEFT_CENTER,
                 label,
-                egui::FontId::proportional(18.),
+                egui::FontId::new(
+                    18.,
+                    ui.style().text_styles[&egui::TextStyle::Button]
+                        .family
+                        .clone(),
+                ),
                 color,
             );
     }

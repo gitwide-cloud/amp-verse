@@ -65,7 +65,7 @@ jobs:
           result=$?
           mkdir -p test-output/android-card-ui
           adb logcat -d > test-output/android-card-ui/logcat.txt
-          adb pull /sdcard/Android/data/cloud.gitwide.ampverse/files test-output/android-card-ui/screenshots
+          adb pull /sdcard/Download/amp-verse-card-ui test-output/android-card-ui/screenshots
           screenshot_result=$?
           if [ "$result" -ne 0 ]; then exit "$result"; fi
           if [ "$screenshot_result" -ne 0 ]; then exit "$screenshot_result"; fi

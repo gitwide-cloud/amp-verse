@@ -139,7 +139,8 @@ impl Player {
         }
     }
     pub(super) fn card_rack(&mut self, ui: &mut egui::Ui, height: f32) {
-        let total = ui.available_width();
+        // Leave a visible outer gutter for fractional stroke/pixel rounding.
+        let total = (ui.available_width() - 8.).max(1.);
         #[cfg(test)]
         ui.ctx()
             .data_mut(|data| data.insert_temp(egui::Id::unique("native-dj-card-layout"), true));
@@ -460,6 +461,21 @@ impl Player {
                     #[cfg(not(test))]
                     let _ = knobs;
                     ui.separator();
+                    // Keep saved banks restored even when the compact card opens
+                    // their pads in a panel: keyboard sampler actions stay ready.
+                    if d.is_multiple_of(2) {
+                        if !self.sampler.started {
+                            self.sampler.started = true;
+                            if self.sampler.has_saved() && self.ensure_audio().is_ok() {
+                                self.sampler.restore();
+                            }
+                        }
+                    } else if !self.right_sampler.started {
+                        self.right_sampler.started = true;
+                        if self.right_sampler.has_saved() && self.ensure_right_samples().is_ok() {
+                            self.right_sampler.restore();
+                        }
+                    }
                     if width < 400. {
                         let cues = ui.scope(|ui| {
                             ui.horizontal(|ui| {
@@ -574,7 +590,7 @@ impl Player {
                                 skin::meter(
                                     ui,
                                     self.audio.as_ref().map_or(0., |a| a.peak(d)),
-                                    egui::vec2(20., (height - 160.).clamp(100., 280.)),
+                                    egui::vec2(20., (height - 190.).clamp(100., 280.)),
                                 );
                             });
                         }
@@ -675,42 +691,55 @@ impl Player {
                 panel(ui, None).show(ui, |ui| {
                     ui.set_width(width - 24.);
                     ui.set_min_height(height - 24.);
-                    ui.strong("Deck View");
-                    if ui.selectable_label(!self.rack.six, "A / B main").clicked() {
-                        self.rack.six = false;
-                    }
-                    if ui.selectable_label(self.rack.six, "6 decks").clicked() {
-                        self.rack.six = true;
-                    }
-                    ui.separator();
-                    let mut side = ui
-                        .ctx()
-                        .data(|data| data.get_temp::<usize>(egui::Id::unique("card-tools-side")))
-                        .unwrap_or(0);
-                    ui.horizontal(|ui| {
-                        ui.selectable_value(&mut side, 0, "A");
-                        ui.selectable_value(&mut side, 1, "B");
-                    });
-                    ui.ctx().data_mut(|data| {
-                        data.insert_temp(egui::Id::unique("card-tools-side"), side)
-                    });
-                    let deck = self.rack.live[side];
-                    for (label, tab) in [
-                        ("Effects", 0),
-                        ("Stems", 1),
-                        ("Controls", 0),
-                        ("Advanced", 3),
-                    ] {
-                        if ui
-                            .add_sized([width - 24., 34.], egui::Button::new(label))
-                            .clicked()
-                        {
-                            self.card_open_tools(ui.ctx(), deck, tab);
-                        }
-                    }
-                    ui.separator();
-                    ui.small(format!("{} selected", NAMES[deck]));
-                    ui.small("Deck view changes controls only; audio routing stays unchanged.");
+                    egui::ScrollArea::vertical()
+                        .id_salt("deck-card-tools")
+                        .max_height((height - 24.).max(80.))
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            ui.strong("Deck View");
+                            if ui.selectable_label(!self.rack.six, "A / B main").clicked() {
+                                self.rack.six = false;
+                            }
+                            if ui.selectable_label(self.rack.six, "6 decks").clicked() {
+                                self.rack.six = true;
+                            }
+                            ui.separator();
+                            let mut side = ui
+                                .ctx()
+                                .data(|data| {
+                                    data.get_temp::<usize>(egui::Id::unique("card-tools-side"))
+                                })
+                                .unwrap_or(0);
+                            ui.horizontal(|ui| {
+                                ui.selectable_value(&mut side, 0, "A");
+                                ui.selectable_value(&mut side, 1, "B");
+                            });
+                            ui.ctx().data_mut(|data| {
+                                data.insert_temp(egui::Id::unique("card-tools-side"), side)
+                            });
+                            let deck = self.rack.live[side];
+                            for (label, tab) in [
+                                ("Effects", 0),
+                                ("Stems", 1),
+                                ("Controls", 0),
+                                ("Advanced", 3),
+                            ] {
+                                if ui
+                                    .add_sized(
+                                        [ui.available_width(), 34.],
+                                        egui::Button::new(label),
+                                    )
+                                    .clicked()
+                                {
+                                    self.card_open_tools(ui.ctx(), deck, tab);
+                                }
+                            }
+                            ui.separator();
+                            ui.small(format!("{} selected", NAMES[deck]));
+                            ui.small(
+                                "Deck view changes controls only; audio routing stays unchanged.",
+                            );
+                        });
                 });
             },
         );

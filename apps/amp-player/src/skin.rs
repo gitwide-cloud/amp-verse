@@ -9,26 +9,22 @@ pub fn configure(ctx: &egui::Context) {
     let mut fonts = egui::FontDefinitions::default();
     fonts.font_data.insert(
         "amp-body".into(),
-        egui::FontData::from_static(include_bytes!(
-            "../assets/fonts/BarlowCondensed-Regular.ttf"
-        ))
-        .into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Barlow-Regular.ttf")).into(),
     );
     fonts.font_data.insert(
         "amp-display".into(),
-        egui::FontData::from_static(include_bytes!(
-            "../assets/fonts/BarlowCondensed-SemiBold.ttf"
-        ))
-        .into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Barlow-SemiBold.ttf")).into(),
     );
     fonts
         .families
         .entry(egui::FontFamily::Proportional)
         .or_default()
-        .insert(0, "amp-display".into());
+        .insert(0, "amp-body".into());
+    let mut display_fallback = fonts.families[&egui::FontFamily::Proportional].clone();
+    display_fallback.insert(0, "amp-display".into());
     fonts.families.insert(
         egui::FontFamily::Name("AMP Display".into()),
-        vec!["amp-display".into(), "amp-body".into()],
+        display_fallback,
     );
     ctx.set_fonts(fonts);
     ctx.data_mut(|data| data.insert_temp(egui::Id::unique("amp-brand-fonts"), true));

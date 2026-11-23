@@ -247,7 +247,7 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
         style.spacing.item_spacing = egui::vec2(6., 5.);
         style
             .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.));
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(16.));
         style
             .text_styles
             .insert(egui::TextStyle::Button, egui::FontId::proportional(14.));
@@ -284,7 +284,7 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
         );
         style
             .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.));
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(16.));
         style.text_styles.insert(
             egui::TextStyle::Button,
             egui::FontId::new(17., display_family),
