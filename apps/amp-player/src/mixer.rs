@@ -1,6 +1,7 @@
 //! DJ Engine: device rendering and stem preparation. Musical decisions live in DJ Logic.
 #[path = "stems.rs"]
 pub(crate) mod stems;
+mod vinyl_follow;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Consumer, PushError, RingBuffer};
 use std::{
@@ -299,6 +300,7 @@ struct Voice {
     pending_loop: Option<(u64, Vec<DeckFrame>)>,
     tail_frames: usize,
     manual_vinyl: bool,
+    vinyl_motion: vinyl_follow::Follow,
     resume_fill: usize,
     resume_origin: f64,
 }
@@ -1265,6 +1267,7 @@ impl Mixer {
                     source.position = f64::from_bits(c.vinyl_anchor[d].load(Relaxed))
                         .max(source.history_start as f64);
                     v.manual_vinyl = true;
+                    v.vinyl_motion.reset(source.position);
                     v.resume_fill = 0;
                     v.tail_frames = 0;
                     if let Some(processor) = &mut source.key_lock {
@@ -1341,7 +1344,7 @@ impl Mixer {
                         } else if c.vinyl_follow[d].load(Relaxed) && c.scratching[d].load(Relaxed) {
                             let target = (f64::from_bits(c.vinyl_target[d].load(Relaxed)))
                                 .max(source.history_start as f64);
-                            ((target - source.position) * 0.025).clamp(-4., 4.) as f32
+                            v.vinyl_motion.rate(target, source.position, self.rate)
                         } else {
                             rates[d]
                         };
