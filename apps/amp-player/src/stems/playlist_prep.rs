@@ -15,7 +15,12 @@ struct Task {
 impl Drop for Task {
     fn drop(&mut self) {
         self.cancel.store(true, Relaxed);
-        PREPARING.store(false, Relaxed);
+    }
+}
+struct ProcessingLease<'a>(&'a AtomicBool);
+impl Drop for ProcessingLease<'_> {
+    fn drop(&mut self) {
+        self.0.store(false, Relaxed);
     }
 }
 #[derive(Default)]
@@ -101,7 +106,7 @@ impl Panel {
             }
             state.stats_rx = None;
         }
-        if state.stats.is_none()
+        if !state.stats_attempted
             && state.stats_rx.is_none()
             && state.task.is_none()
             && let Some(root) = crate::prepared_stem_playback::root()
@@ -182,10 +187,16 @@ impl Panel {
                 let (tx, rx) = mpsc::channel();
                 let name = choice.snapshot.name.clone();
                 PREPARING.store(true, Relaxed);
-                std::thread::spawn(move || {
+                let started=std::thread::Builder::new().name("playlist-stem-preparation".into()).spawn(move || {
+                    let _processing=ProcessingLease(&PREPARING);
                     let result=crate::prepared_stem_cache::prepare_selected(&root,choice.snapshot,stopped,|p|{let _=ptx.try_send(p);}).map(|songs|format!("Prepared {} songs locally. Pause a deck and enable prepared stems to use them.",songs.len()));
                     let _ = tx.send(result);
                 });
+                if let Err(error) = started {
+                    PREPARING.store(false, Relaxed);
+                    state.status = format!("Could not start playlist preparation: {error}");
+                    return;
+                }
                 state.task = Some(Task {
                     cancel,
                     progress: prx,
@@ -248,6 +259,17 @@ impl Panel {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn completed_worker_releases_live_guard_without_any_ui_poll() {
+        let busy = std::sync::Arc::new(super::AtomicBool::new(true));
+        let worker_busy = busy.clone();
+        std::thread::spawn(move || {
+            let _lease = super::ProcessingLease(&worker_busy);
+        })
+        .join()
+        .unwrap();
+        assert!(!busy.load(super::Relaxed));
+    }
     #[test]
     fn optional_preparation_never_starts_over_live_decks() {
         assert!(!super::start_allowed(true, true, true));

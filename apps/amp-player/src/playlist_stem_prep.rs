@@ -21,6 +21,17 @@ impl Player {
         })
     }
     pub(super) fn offer_playlist_stems(&mut self, name: String, paths: Vec<PathBuf>) {
+        self.stem_panel.clear_playlist_offer();
+        let mut unique = std::collections::HashSet::new();
+        let paths: Vec<_> = paths
+            .into_iter()
+            .filter(|p| unique.insert(p.clone()))
+            .collect();
+        if paths.len() > 1000 {
+            self.status="This playlist exceeds the 1,000-song preparation limit. Choose a smaller playlist; no preparation has started.".into();
+            return;
+        }
+
         let mut sources = Vec::new();
         let mut seconds = 0f64;
         let mut unknown = 0;
@@ -63,6 +74,7 @@ impl Player {
             .offer_playlist(name, sources, (seconds * 96000.).ceil() as u64, unknown);
     }
     pub(super) fn offer_smart_playlist_stems(&mut self, id: &str) {
+        self.stem_panel.clear_playlist_offer();
         if self.show_editor.playlist_unsaved(id) {
             self.stem_panel.clear_playlist_offer();
             self.status =
