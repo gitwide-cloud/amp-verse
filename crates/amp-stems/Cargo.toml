@@ -1,0 +1,5 @@
+[package]
+name = "amp-stems"
+version.workspace = true
+edition.workspace = true
+license.workspace = true

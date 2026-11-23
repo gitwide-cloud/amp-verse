@@ -87,14 +87,17 @@ impl Player {
             || !audio.loaded(deck)
             || audio.controls.finished[deck].load(std::sync::atomic::Ordering::Relaxed)
         {
-            if let Some(track) = self.loaded_snapshot[deck].clone() {
+            if let Some(mut track) = self.loaded_snapshot[deck].clone() {
+                crate::manual_load::full_track(&mut track.preparation);
                 let root = self.loaded_origin[deck]
                     .clone()
                     .unwrap_or_else(|| self.root.clone());
-                self.audio
-                    .as_mut()
-                    .unwrap()
-                    .load(deck, &root, &track, true)?;
+                let audio = self.audio.as_mut().unwrap();
+                if owner == Owner::Player {
+                    audio.load_original(deck, &root, &track, true)?;
+                } else {
+                    audio.load(deck, &root, &track, true)?;
+                }
                 self.claim_playback(owner, deck, false);
                 self.resume_player_sequence();
                 return Ok(());
@@ -197,12 +200,18 @@ impl Player {
                     }
                 }
             }
-        } else if let Some(track) = self.loaded_snapshot[deck].clone() {
+        } else if let Some(mut track) = self.loaded_snapshot[deck].clone() {
+            crate::manual_load::full_track(&mut track.preparation);
             let root = self.loaded_origin[deck]
                 .clone()
                 .unwrap_or_else(|| self.root.clone());
             if let Some(audio) = &mut self.audio {
-                match audio.load(deck, &root, &track, true) {
+                let result = if owner == Owner::Player {
+                    audio.load_original(deck, &root, &track, true)
+                } else {
+                    audio.load(deck, &root, &track, true)
+                };
+                match result {
                     Ok(()) => {
                         self.claim_playback(owner, deck, false);
                         self.cancel_deck_automation(deck);

@@ -13,6 +13,7 @@ pub mod background;
 pub mod batch;
 pub(crate) use library_engine::catalog_shards;
 pub mod coordination;
+pub mod cue_policy;
 pub mod discovery;
 pub mod energy_profile;
 pub mod engine_api;

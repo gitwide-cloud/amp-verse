@@ -4,7 +4,7 @@ param(
     [string]$Rollback = (Join-Path $PSScriptRoot 'restore-tested-desktop.ps1')
 )
 $ErrorActionPreference='Stop'
-if (Get-Process -Name amp-player,amp-cast,amp-engine,amp-prepare,amp-update -ErrorAction SilentlyContinue) {
+if (Get-Process -Name amp-player,amp-cast,amp-engine,amp-prepare,amp-update,amp-stem-worker -ErrorAction SilentlyContinue) {
     throw 'Transaction fixture cannot run while AMP processes are open; no process was stopped and no fixture was created.'
 }
 function Check([bool]$Condition,[string]$Message) { if (!$Condition) { throw $Message } }
@@ -45,12 +45,26 @@ try {
         New-Item -ItemType Directory -Force -Path $folder | Out-Null
         [IO.File]::WriteAllText((Join-Path $folder 'saved.txt'),'keep settings')
     }
+    $moduleRelative='addons\stems-live'
+    $moduleFiles=@('amp-stem-worker.exe','onnxruntime.dll','scnet.int8.onnx','NOTICES.md','module.json','LICENSES\SCNet-MIT.txt','LICENSES\ONNXRuntime-LICENSE.txt','LICENSES\ONNXRuntime-ThirdPartyNotices.txt','LICENSES\AMP-Verse-LICENSE.txt')
+    foreach ($name in $moduleFiles) {
+        $target=Join-Path $desktop ($moduleRelative+'\'+$name)
+        New-Item -ItemType Directory -Force -Path (Split-Path $target -Parent) | Out-Null
+        if ([IO.Path]::GetExtension($target) -in @('.exe','.dll')) { Write-Fixture $target 1 }
+        else { [IO.File]::WriteAllText($target,'verified native module fixture') }
+    }
+    Write-Fixture (Join-Path $destination ($moduleRelative+'\amp-stem-worker.exe')) 0
+    $oldStemWorker=File-Hash (Join-Path $destination ($moduleRelative+'\amp-stem-worker.exe'))
+    $ownerAddon=Join-Path $destination 'addons\owner-addon\keep.txt'
+    New-Item -ItemType Directory -Force -Path (Split-Path $ownerAddon -Parent) | Out-Null
+    [IO.File]::WriteAllText($ownerAddon,'owner-created add-on is never replaced')
+    $ownerAddonHash=File-Hash $ownerAddon
     $oldPlayer=File-Hash (Join-Path $destination 'amp-player.exe')
     $oldEngine=File-Hash (Join-Path $destination 'addons\amp-engine.exe')
     $oldLauncher=File-Hash $launcher
     $oldSettings=File-Hash (Join-Path $settings 'saved.txt')
     $commit='a'*40; $run='12345'; $manifest=Join-Path $root 'delivery.json'
-    $desktopEntries=@(Get-ChildItem -LiteralPath $desktop -File | ForEach-Object { @{ path=$_.Name; sha256=(File-Hash $_.FullName) } })
+    $desktopEntries=@(Get-ChildItem -LiteralPath $desktop -File -Recurse | ForEach-Object { @{ path=$_.FullName.Substring($desktop.Length+1); sha256=(File-Hash $_.FullName) } })
     $engineEntries=@(Get-ChildItem -LiteralPath $engine -File | ForEach-Object { @{ path=$_.Name; sha256=(File-Hash $_.FullName) } })
     @{ version=1; source_commit=$commit; desktop_run_id=$run; engine_run_id=$run; desktop_files=$desktopEntries; engine_files=$engineEntries } |
         ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $manifest -Encoding UTF8
@@ -61,6 +75,8 @@ try {
     Check ((File-Hash (Join-Path $destination 'amp-player.exe')) -eq $oldPlayer) 'Bad manifest changed player'
     & $Installer @arguments | Out-Null
     Check ((File-Hash (Join-Path $destination 'amp-player.exe')) -eq (File-Hash (Join-Path $desktop 'amp-player.exe'))) 'Player was not updated'
+    foreach ($name in $moduleFiles) { Check ((File-Hash (Join-Path $destination ($moduleRelative+'\'+$name))) -eq (File-Hash (Join-Path $desktop ($moduleRelative+'\'+$name)))) "Native module file was not installed: $name" }
+    Check ((File-Hash $ownerAddon) -eq $ownerAddonHash) 'Unrelated add-on was changed'
     Check ((File-Hash $launcher) -eq $oldLauncher) 'Launcher was changed'
     Check ((File-Hash (Join-Path $settings 'saved.txt')) -eq $oldSettings) 'Active settings were changed'
     Check (!(Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA 'Programs') -Directory | Where-Object Name -ne 'AMP Verse')) 'Extra installation was created'
@@ -81,6 +97,9 @@ try {
     & $Rollback -BackupDirectory $backup -BackupManifestSha256 $backupHash | Out-Null
     Check ((File-Hash (Join-Path $destination 'amp-player.exe')) -eq $oldPlayer) 'Player rollback failed'
     Check ((File-Hash (Join-Path $destination 'addons\amp-engine.exe')) -eq $oldEngine) 'Engine rollback failed'
+    Check ((File-Hash (Join-Path $destination ($moduleRelative+'\amp-stem-worker.exe'))) -eq $oldStemWorker) 'Previous stem worker was not restored'
+    foreach ($name in $moduleFiles | Where-Object { $_ -ne 'amp-stem-worker.exe' }) { Check (!(Test-Path -LiteralPath (Join-Path $destination ($moduleRelative+'\'+$name)))) "Introduced module file was not removed: $name" }
+    Check ((File-Hash $ownerAddon) -eq $ownerAddonHash) 'Rollback changed unrelated add-on'
     Check ((File-Hash $launcher) -eq $oldLauncher) 'Rollback changed launcher'
     Check ((File-Hash (Join-Path $settings 'saved.txt')) -eq $oldSettings) 'Rollback changed settings'
     Check (!(Test-Path -LiteralPath (Join-Path $destination 'tested-desktop-receipt.json'))) 'Introduced receipt was not removed'

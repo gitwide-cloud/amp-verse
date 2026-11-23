@@ -17,6 +17,8 @@ fn chroma(samples: &[f32], sum: &mut [f64; 12]) {
     chroma_engine::Analyzer::new().accumulate(samples, sum);
 }
 
+pub use crate::cue_policy::{automatic_entry_limit, repair_legacy_entry};
+
 fn correlation(a: &[f64; 12], b: &[f64; 12]) -> f64 {
     let am = a.iter().sum::<f64>() / 12.;
     let bm = b.iter().sum::<f64>() / 12.;
@@ -155,11 +157,15 @@ fn result(
             *seconds = rhythm::snap(*seconds, bpm, offset).clamp(audio_start, duration);
         }
     }
-    let cue_in = energy_cues
-        .first()
-        .map_or(audio_start, |(seconds, _)| *seconds);
     let cue_out = ((last + 1) as f64 * BLOCK as f64 / RATE).min(duration);
+    let ease_in = energy_cues::ease_in(energy, first, last).min(cue_out);
+    let cue_in = energy_cues::default_entry(ease_in, cue_out, &energy_cues);
+    let outro = energy_cues::outro(energy, first, last).clamp(audio_start, cue_out);
     let mut p = existing.clone();
+    p.extensions.insert(
+        "auto_cue_policy".into(),
+        serde_json::json!("early-entry-v2"),
+    );
     if !alternatives.is_empty() {
         p.extensions
             .insert("tempo_alternatives".into(), serde_json::json!(alternatives));
@@ -222,12 +228,35 @@ fn result(
             ..Default::default()
         },
     ];
+    p.cues.push(Cue {
+        id: "auto-ease-in".into(),
+        label: "Ease in · sustained audio".into(),
+        seconds: ease_in,
+        kind: "intro".into(),
+        ..Default::default()
+    });
+    p.cues.push(Cue {
+        id: "auto-outro".into(),
+        label: "Outro candidate".into(),
+        seconds: outro,
+        kind: "outro".into(),
+        ..Default::default()
+    });
+    if let Some(seconds) = energy_cues::high_energy(energy, first, last) {
+        p.cues.push(Cue {
+            id: "auto-high-energy".into(),
+            label: "High-energy candidate · sustained level".into(),
+            seconds,
+            kind: "high-energy".into(),
+            ..Default::default()
+        });
+    }
     for (index, (seconds, label)) in energy_cues.iter().enumerate() {
         p.cues.push(Cue {
             id: format!("auto-energy-{}", index + 1),
             label: (*label).into(),
             seconds: *seconds,
-            kind: if *label == "High-energy drop" {
+            kind: if *label == "Energy rise · drop candidate" {
                 "drop"
             } else {
                 "energy-start"
@@ -255,8 +284,8 @@ fn result(
     }
     p.cues.push(Cue {
         id: "auto-mix-in".into(),
-        label: if energy_cues.is_empty() {
-            "Mix in · audio start fallback"
+        label: if (cue_in - ease_in).abs() < 0.001 {
+            "Mix in · ease in"
         } else {
             "Mix in · high energy"
         }
@@ -498,6 +527,89 @@ mod tests {
                 .unwrap()
                 > 19.
         );
+    }
+    #[test]
+    fn late_peak_does_not_replace_early_mix_in_and_landmarks_are_separate() {
+        let mut energy = vec![0.04; 15000];
+        energy[13200..14800].fill(0.8);
+        let p = result(&energy, &energy, &[0.; 12], 150., &Preparation::default()).unwrap();
+        assert!(p.cue_in < 1.);
+        assert!(p.cue_out.unwrap() > 148.);
+        assert_eq!(p.extensions["auto_cue_policy"], "early-entry-v2");
+        for (id, kind) in [
+            ("auto-ease-in", "intro"),
+            ("auto-high-energy", "high-energy"),
+            ("auto-outro", "outro"),
+            ("auto-mix-in", "mix-in"),
+        ] {
+            assert!(p.cues.iter().any(|cue| cue.id == id && cue.kind == kind));
+        }
+        assert!(
+            p.cues
+                .iter()
+                .any(|cue| cue.kind == "drop" && cue.seconds > 130.)
+        );
+        let mut manual = p.clone();
+        manual.manual_override = true;
+        manual.cue_in = 132.;
+        let kept = result(&energy, &energy, &[0.; 12], 150., &manual).unwrap();
+        assert_eq!(kept.cues, manual.cues);
+        assert_eq!(kept.manual_cues, manual.manual_cues);
+        assert_eq!(kept.cue_in, 132.);
+        assert!(
+            kept.extensions["analysis_recommendation"]["cue_in"]
+                .as_f64()
+                .unwrap()
+                < 1.
+        );
+    }
+    #[test]
+    fn legacy_entry_repair_is_pure_idempotent_and_preserves_manual_review_and_revision() {
+        let mut energy = vec![0.04; 15000];
+        energy[13200..14800].fill(0.8);
+        let mut legacy =
+            result(&energy, &energy, &[0.; 12], 150., &Preparation::default()).unwrap();
+        legacy.cue_in = 132.;
+        legacy
+            .cues
+            .iter_mut()
+            .find(|c| c.id == "auto-mix-in")
+            .unwrap()
+            .seconds = 132.;
+        legacy
+            .extensions
+            .insert("_amp_sync".into(), serde_json::json!({"revision":123}));
+        let original = legacy.clone();
+        assert!(repair_legacy_entry(&mut legacy));
+        assert_eq!(legacy.cue_in, 0.);
+        assert_eq!(
+            legacy.extensions["_amp_sync"],
+            original.extensions["_amp_sync"]
+        );
+        assert_eq!(legacy.analysis, original.analysis);
+        assert_eq!(legacy.source_sha256, original.source_sha256);
+        assert!(
+            legacy
+                .cues
+                .iter()
+                .any(|c| c.kind == "drop" && c.seconds > 130.)
+        );
+        assert!(!repair_legacy_entry(&mut legacy));
+        for mode in 0..3 {
+            let mut locked = original.clone();
+            match mode {
+                0 => locked.manual_override = true,
+                1 => locked.analysis.as_mut().unwrap().reviewed = true,
+                _ => locked.manual_cues.push(Cue {
+                    id: "mine".into(),
+                    seconds: 132.,
+                    ..Default::default()
+                }),
+            }
+            let before = serde_json::to_value(&locked).unwrap();
+            assert!(!repair_legacy_entry(&mut locked));
+            assert_eq!(serde_json::to_value(&locked).unwrap(), before);
+        }
     }
     #[test]
     fn click_tempo_and_manual_cues_survive() {

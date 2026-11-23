@@ -80,11 +80,11 @@ const ENTRIES: [Entry; 8] = [
     Entry {
         name: "AMP Stem Separator",
         kind: "Optional",
-        summary: "Prepare real vocal and instrumental audio for live deck controls.",
+        summary: "Separate active DJ tracks in memory, without saved stem audio.",
         features: &[
-            "Local Demucs separation; music is never uploaded",
+            "Local native separation; music is never uploaded",
             "Per-deck levels, mute and solo on a shared playback clock",
-            "Background preparation with cancel and reusable local cache",
+            "Up to two live decks with bounded RAM and cancellation",
             "Original audio and saved cues remain unchanged",
         ],
     },
@@ -278,10 +278,10 @@ impl Manager {
                         ui.hyperlink_to("GitHub releases","https://github.com/gitwide-cloud/amp-verse/releases");
                     },
                     6=>{
-                        ui.label(if crate::stems::runtime().is_some() { "Stem add-on installed" } else { "Stem add-on not installed" });
+                        ui.label(if crate::onnx_stem_worker::configured() { "Live stem engine installed" } else { "Live stem engine not installed" });
                         if skin::button(ui,"OPEN AMP DJ",GOLD).clicked() { action=Some(Module::Dj); }
-                        ui.weak("Load a song, open Stems on its deck, then Prepare stems. Playback stays unchanged until a prepared deck is loaded.");
-                        ui.hyperlink_to("Stem setup guide", "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md");
+                        ui.weak("Load a song in DJ, pause its deck, open Stems and choose Enable live stems. No stem audio is saved. Choose Use original audio to switch back.");
+                        ui.hyperlink_to("Live stem setup guide", "https://github.com/gitwide-cloud/amp-verse/blob/feature/on-demand-stems-20261122/docs/LIVE-STEMS.md");
                     },
                     _=>{
                         let installed=crate::engine::path();

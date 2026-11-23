@@ -1,5 +1,7 @@
 //! Optional background separation and device-local prepared audio cache.
 //! Never writes source audio, NAS preparation, or active deck snapshots.
+#[path = "stems/playlist_prep.rs"]
+mod playlist_prep;
 use eframe::egui;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -15,6 +17,9 @@ use std::{
     },
     time::{Duration, SystemTime},
 };
+pub(crate) fn playlist_preparing() -> bool {
+    playlist_prep::PREPARING.load(Relaxed)
+}
 fn cache_root() -> Option<PathBuf> {
     crate::theme::settings_path().and_then(|p| p.parent().map(|p| p.join("prepared-stems")))
 }
@@ -408,6 +413,7 @@ impl Drop for Job {
     }
 }
 pub struct Panel {
+    playlist_prep: playlist_prep::State,
     pub manual_change: Option<(usize, [f32; 3])>,
     job: Option<Job>,
     batch: Option<Job>,
@@ -424,6 +430,7 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            playlist_prep: Default::default(),
             job: None,
             manual_change: None,
             batch: None,
@@ -441,9 +448,14 @@ impl Default for Panel {
 }
 impl Panel {
     pub fn busy(&self) -> bool {
-        self.job.is_some() || self.batch.is_some()
+        self.job.is_some() || self.batch.is_some() || self.playlist_prep.busy()
     }
     pub fn prepare_song(&mut self, ui: &mut egui::Ui, source: &Path) -> bool {
+        if crate::onnx_stem_worker::configured() {
+            ui.label("On-demand stems are selected per DJ deck.");
+            ui.weak("Load this song into a paused DJ deck, then use its on-demand stem reload control. Separation stays in RAM; no stem audio is saved.");
+            return false;
+        }
         if let Some(job) = &self.job
             && let Ok(result) = job.rx.try_recv()
         {
@@ -519,6 +531,12 @@ impl Panel {
         prepared
     }
     pub fn library(&mut self, ui: &mut egui::Ui, root: &Path) {
+        if crate::onnx_stem_worker::configured() {
+            ui.heading("On-demand DJ stems");
+            ui.label("Choose on-demand separation on a loaded, paused DJ deck. There is no library-wide batch operation.");
+            ui.weak("The current local worker uses CPU processing with a 3 GiB process RAM cap. Initial model startup can take several seconds. Stem audio stays in RAM and is not saved.");
+            return;
+        }
         ui.label(STORAGE_DISABLED);
         if let Some(rx) = &self.batch_rx {
             while let Ok((done, total, title)) = rx.try_recv() {
@@ -733,7 +751,11 @@ impl Panel {
             );
         });
         if !active && !vertical {
-            ui.small("Stem processing disabled pending storage-safe replacement");
+            ui.small(if crate::onnx_stem_worker::configured() {
+                "Enable on-demand stems from this paused deck's stem reload control."
+            } else {
+                "Stem processing disabled pending storage-safe replacement"
+            });
         }
         (previous != self.level[deck]).then_some(self.level[deck])
     }
@@ -765,6 +787,8 @@ impl Panel {
             }
         }
         let previous_levels = self.level[deck];
+        let cached = source.is_some_and(crate::prepared_stem_playback::candidate);
+        let on_demand_configured = crate::onnx_stem_worker::configured() || cached;
         let mut reload = false;
         let response = ui.push_id(("deck-stems", deck), |ui| {
             ui.colored_label(
@@ -779,11 +803,60 @@ impl Panel {
                     "B · STEMS"
                 },
             );
-            let prepared = source.is_some_and(|p| ready(p).is_some());
+            let prepared = !on_demand_configured && source.is_some_and(|p| ready(p).is_some());
             let active = audio.is_some_and(|a| {
                 a.load_current(deck) && a.controls.stems_loaded[deck].load(Relaxed)
             });
-            if let Some(job) = &self.job {
+            if on_demand_configured {
+                let mode_label = ui.label(if cached {"Prepared stems · local compressed cache"} else {"Live stems · memory only"});
+                if let Some((slots, per_worker_mib, live, _peak)) =
+                    crate::onnx_stem_worker::pool_status()
+                {
+                    mode_label.on_hover_text(format!(
+                        "Processing workers: {live}/{slots}\nWorker RAM budget: {} MiB total\nNo stem audio files are saved.",
+                        slots as u64 * u64::from(per_worker_mib)
+                    ));
+                }
+                if cached {ui.weak("Prepared playback uses no live separation slot. Cached audio is fully verified before playback.");}
+                let policy = crate::stem_capability::current();
+                ui.label(format!("Live stem limit: {} decks · {}", policy.limit, policy.reason));
+                ui.weak("Normal six-deck playback stays available. Live stem audio remains in memory; initial processing can take several seconds.");
+                let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().enumerate().filter(|(d,v)| v.load(Relaxed) && !a.controls.prepared_stems[*d].load(Relaxed)).count());
+                let previous = crate::stem_capability::maximum();
+                let mut maximum = previous;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Maximum live decks:");
+                    for count in [2,4,6] { ui.selectable_value(&mut maximum,count,count.to_string()); }
+                });
+                if maximum != previous && let Err(error) = crate::stem_capability::save_maximum(maximum,enabled_count) { self.status[deck] = error; }
+                if crate::stem_capability::maximum() > policy.hardware_limit { ui.weak("Your chosen maximum is limited by this engine's hardware qualification."); }
+                if let Some(audio) = audio {
+                    let enabled = audio.controls.on_demand_stems[deck].load(Relaxed);
+                    let has_source = source.is_some_and(|path| path.is_file());
+                    let reserved = std::array::from_fn(|d| audio.controls.on_demand_stems[d].load(Relaxed) && !audio.controls.prepared_stems[d].load(Relaxed));
+                    let admitted = cached || (!playlist_preparing() && policy.allows(&reserved,deck));
+                    if !cached && playlist_preparing() {ui.weak("Cancel or finish playlist preparation before enabling live stems.");}
+                    if !enabled && !admitted { ui.weak(policy.error()); }
+                    if ui.add_enabled(
+                        can_reload && has_source && (enabled || admitted),
+                        egui::Button::new(if enabled {
+                            "Use original audio"
+                        } else {
+                            if cached {"Enable prepared stems"} else {"Enable live stems"}
+                        }),
+                    ).clicked() {
+                        audio.controls.on_demand_stems[deck].store(!enabled, Relaxed);
+                        reload = true;
+                    }
+                    if !can_reload {
+                        ui.weak("Pause this deck before changing its audio mode.");
+                    } else if !has_source {
+                        ui.weak("Load an available local song into this deck first.");
+                    }
+                } else {
+                    ui.weak("Start the audio engine and load a local song to choose this deck's mode.");
+                }
+            } else if let Some(job) = &self.job {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Separating locally…");
@@ -819,7 +892,7 @@ impl Panel {
                     });
                 }
             }
-            if runtime().is_none() {
+            if !on_demand_configured && runtime().is_none() {
                 ui.hyperlink_to(
                     "Stem processing withdrawn — storage incident",
                     "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md",

@@ -6,7 +6,7 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 function Assert-AppClosed {
-    if (Get-Process -Name amp-player,amp-cast,amp-engine,amp-prepare,amp-update -ErrorAction SilentlyContinue) {
+    if (Get-Process -Name amp-player,amp-cast,amp-engine,amp-prepare,amp-update,amp-stem-worker -ErrorAction SilentlyContinue) {
         throw 'Close AMP Verse, Cast and analysis/update processes first. No process was stopped.'
     }
 }

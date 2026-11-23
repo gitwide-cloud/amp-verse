@@ -58,8 +58,42 @@ function Verified-Files([string]$Root, $Entries) {
     return $result
 }
 
+# This fixed native module is the only desktop artifact add-on exception.
+# All supplied files were independently hashed by Verified-Files before selection.
+function Get-StemLiveFiles($Files) {
+    $required = @(
+        'addons\stems-live\amp-stem-worker.exe',
+        'addons\stems-live\onnxruntime.dll',
+        'addons\stems-live\scnet.int8.onnx',
+        'addons\stems-live\NOTICES.md',
+        'addons\stems-live\module.json',
+        'addons\stems-live\LICENSES\SCNet-MIT.txt',
+        'addons\stems-live\LICENSES\ONNXRuntime-LICENSE.txt',
+        'addons\stems-live\LICENSES\ONNXRuntime-ThirdPartyNotices.txt',
+        'addons\stems-live\LICENSES\AMP-Verse-LICENSE.txt'
+    )
+    $allowed = $required + @('addons\stems-live\onnxruntime_providers_shared.dll')
+    $selected = @()
+    $seen = @{}
+    foreach ($file in $Files) {
+        $relative = ([string]$file.Relative).Replace('/','\')
+        if ($relative -notmatch '^addons\\stems-live(?:\\|$)') { continue }
+        if ($relative -cnotin $allowed -or $seen.ContainsKey($relative)) {
+            throw "Unsupported or duplicate live-stem module file: $relative"
+        }
+        $seen[$relative] = $true
+        $selected += [pscustomobject]@{ Source=$file.Source; Relative=$relative; Hash=$file.Hash }
+    }
+    if ($selected.Count) {
+        foreach ($relative in $required) {
+            if (!$seen.ContainsKey($relative)) { throw "Incomplete live-stem module: missing $relative" }
+        }
+    }
+    return $selected
+}
+
 function Assert-AppClosed {
-    if (Get-Process -Name amp-player,amp-cast,amp-engine,amp-prepare,amp-update -ErrorAction SilentlyContinue) {
+    if (Get-Process -Name amp-player,amp-cast,amp-engine,amp-prepare,amp-update,amp-stem-worker -ErrorAction SilentlyContinue) {
         throw 'Close AMP Verse, Cast and analysis/update processes first. No process was stopped.'
     }
 }
@@ -124,6 +158,7 @@ foreach ($file in $desktopFiles) {
         $plan += [pscustomobject]@{ Source=$file.Source; Relative=$relative; Hash=$file.Hash }
     }
 }
+$plan += @(Get-StemLiveFiles $desktopFiles)
 $plan += [pscustomobject]@{ Source=$engine[0].Source; Relative='addons\amp-engine.exe'; Hash=$engine[0].Hash }
 foreach ($file in $engineFiles) {
     if ($file.Relative -match '^(licenses[\\/]|LICENSE$|THIRD_PARTY_NOTICES.md$)') {

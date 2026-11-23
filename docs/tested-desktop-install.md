@@ -6,7 +6,7 @@ keeps the active launcher, shortcuts and profile in place. It creates no preview
 installation, shortcut or profile. `install-tested-preview.ps1` is deprecated and
 retained only for compatibility with historical deliveries.
 
-The existing player, Cast, updater and analysis workers must be closed by the
+The existing player, Cast, updater, analysis and native stem workers must be closed by the
 user. The installer refuses running processes; it never kills playback and never
 launches the app. It also refuses a pending `amp-player.next.exe`, which the
 existing launcher would otherwise install over the new delivery.
@@ -29,8 +29,7 @@ Before changing installed files, the installer verifies the artifacts, stages
 selected application files and the matching engine, and verifies backup copies
 of every file it will overwrite. Existing FFmpeg tools/notices are required and
 left unchanged. Artifact launchers, shortcuts and profile files are excluded
-from the update plan. Existing add-ons are retained; only `addons/amp-engine.exe`
-is replaced with this delivery's matching engine. Documentation and packaged
+from the update plan. Existing add-ons are retained; addons/amp-engine.exe is replaced with this delivery's matching engine. A desktop manifest may additionally include the fixed addons/stems-live native module. Its worker, runtime, model, module manifest, notices and four named license texts must all be present together and individually verified by the delivery manifest. Only exact filenames accepted by Get-StemLiveFiles enter the plan; Python environments, arbitrary DLLs and other add-ons cannot enter through this exception. The optional exact onnxruntime_providers_shared.dll is accepted when supplied. Existing same-name module files receive the normal verified backup; rollback restores them and removes only newly introduced module files. Owner files elsewhere in add-ons are untouched. Documentation and packaged
 Lab dependencies may be refreshed. Shared music files/library metadata are not
 included in the update or settings backups.
 

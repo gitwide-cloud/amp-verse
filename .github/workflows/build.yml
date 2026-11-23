@@ -56,9 +56,10 @@ jobs:
           sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" install -y libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev libasound2-dev libasound2-plugins pulseaudio pulseaudio-utils ffmpeg xvfb
       - name: Windows audio test dependencies
         if: runner.os == 'Windows'
+        timeout-minutes: 10
         run: |
-          choco install ffmpeg --yes --no-progress
-          ffmpeg -version
+          python tools/setup_ci_ffmpeg.py --self-test
+          python tools/setup_ci_ffmpeg.py
       - name: Prepare verified official Lab URL-import dependencies
         env:
           GH_TOKEN: ${{ github.token }}
@@ -66,6 +67,7 @@ jobs:
           python tools/test_setup_lab_youtube.py
           python tools/setup_lab_youtube.py --dest test-output/lab-tools
       - run: python tools/test_engine_release_metadata.py
+      - run: python tools/test_stem_cuda_module.py
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
@@ -79,6 +81,8 @@ jobs:
           powershell -NoProfile -File tools/test_install-tested-desktop.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File tools/test_install-tested-desktop-transaction.ps1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          powershell -NoProfile -File tools/test-install-stem-cuda.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Verify Windows raw and canonical metadata paths
         if: runner.os == 'Windows'
@@ -204,11 +208,20 @@ jobs:
           mkdir -p dist/licenses/signalsmith
           cp -r apps/amp-player/vendor/signalsmith/* dist/licenses/signalsmith/
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
-          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":3},indent=2)+"\n")'
+          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":6},indent=2)+"\n")'
           python -c 'import shutil; shutil.copytree("docs", "dist/docs", ignore=shutil.ignore_patterns("tested-preview-install.md"))'
           cp -r licenses dist/
           mkdir -p dist/licenses/mp3-lab
           cp third-party/mp3-lab/LICENSE third-party/mp3-lab/PROVENANCE.md dist/licenses/mp3-lab/
+      - name: Package and verify memory-only live stems
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then stem_target="windows-x64"; else stem_target="linux-x64"; fi
+          python tools/setup_live_stems.py --worker target/release/amp-stem-worker${{ matrix.suffix }} --output dist/addons/stems-live --target "$stem_target"
+          python tools/test_live_stems.py --unit
+          # CI verifies correctness/storage; actual device two-deck timing is measured separately.
+          python tools/test_live_stems.py --module dist/addons/stems-live --requests 3 --max-pair-seconds 30
+          python tools/verify_live_stem_player.py --module dist/addons/stems-live
       - name: Package official AMP Lab YouTube tools
         shell: bash
         run: |

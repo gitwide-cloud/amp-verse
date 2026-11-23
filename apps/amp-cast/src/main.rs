@@ -134,7 +134,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!(
-        "AMP Cast {} Beta 3 listening on http://{}",
+        "AMP Cast {} Beta 6 listening on http://{}",
         env!("CARGO_PKG_VERSION"),
         listener.local_addr()?
     );
