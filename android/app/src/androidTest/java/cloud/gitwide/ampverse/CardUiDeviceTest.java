@@ -34,4 +34,13 @@ public final class CardUiDeviceTest {
             androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync();capture("card-dj-focused.png");
         }
     }
+    @Test public void devicesCardsKeepDiscoveryAndRemoteSeparateWithoutTakingPlayback(){
+        org.junit.Assume.assumeTrue(BuildConfig.EDITION.equals("full"));
+        try(ActivityScenario<MainActivity> screen=ActivityScenario.launch(MainActivity.class)){
+            awaitService(screen);
+            screen.onActivity(activity->{String owner=PlaybackService.owner();View root=activity.getWindow().getDecorView();tagged(root,"nav-devices").performClick();root=activity.getWindow().getDecorView();tagged(root,"nav-cast").performClick();root=activity.getWindow().getDecorView();for(String title:new String[]{"Station · listening & control","NOW PLAYING","Server","Output","Stations","Discover","Quick Actions","Nearby AMP servers","Offline · playlists & music","Saved Playlists · sync & manage"})assertNotNull(title,text(root,title));assertEquals(owner,PlaybackService.owner());text(root,"Remote · control your desktop").performClick();root=activity.getWindow().getDecorView();assertNotNull(text(root,"Remote · your desktop"));assertNotNull(tagged(root,"nav-devices"));assertEquals(owner,PlaybackService.owner());});
+            androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync();capture("card-devices-remote.png");
+        }
+    }
+
 }

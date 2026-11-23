@@ -9,7 +9,7 @@ import java.util.concurrent.*;
 
 /** Integrated Android station controls; local listening uses the existing playback service. */
 class CastPanel extends LinearLayout {
-    interface Listener {default boolean phoneAvailable(){return true;}default boolean playlistSyncAvailable(){return false;}default void playlistSync(CastClient selected){}void listen(String url,String name);void stopListening();default void playlist(java.util.List<androidx.media3.common.MediaItem> items){}}
+    interface Listener {default void remote(){}default boolean phoneAvailable(){return true;}default boolean playlistSyncAvailable(){return false;}default void playlistSync(CastClient selected){}void listen(String url,String name);void stopListening();default void playlist(java.util.List<androidx.media3.common.MediaItem> items){}}
     final Activity activity;
     private final Appearance colors;
     final Listener listener;
@@ -18,7 +18,9 @@ class CastPanel extends LinearLayout {
     private android.net.ConnectivityManager.NetworkCallback networkCallback;
     private final ExecutorService worker=Executors.newSingleThreadExecutor();
     final TextView status,now,queue;
-    private TextView capabilityNote,diagnostics;
+    private TextView capabilityNote,diagnostics,serverSummary,stationSummary;
+    private LinearLayout dashboardStations;
+    private Button selectedStation;
     private Button chromecast,hostBroadcast,serverPlay,serverStop,stationPlaylist;
     private volatile boolean verified;
     private boolean hostLaunchSupported,serverOutputSupported,playlistSupported,serverOutputRunning;
@@ -94,6 +96,7 @@ class CastPanel extends LinearLayout {
         search.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int a,int c,int d){}public void onTextChanged(CharSequence t,int a,int b,int c){renderQueue();}public void afterTextChanged(android.text.Editable t){}});
         addView(action("Help",()->new android.app.AlertDialog.Builder(activity).setTitle("Radio help").setMessage("Station access selects a host without changing playback. Local listening plays its stream here. Server speakers play it on the host audio output. Remote desktop broadcast changes the host source to its desktop Player/DJ master. Google Cast asks a Google speaker to fetch the host stream. Sending this phone’s own playback is not implemented. Internet radio and offline playlists are separate listening choices.").setPositiveButton("Done",null).show()));enabled(false);
         if(listener.playlistSyncAvailable())addView(action("Enable saved-playlist sync",()->{CastClient selected=client;if(selected==null||!verified){Toast.makeText(activity,"Connect to an authorized host first",Toast.LENGTH_LONG).show();return;}listener.playlistSync(selected);}));
+        buildDeviceCards();
         renderServers(hostSession.selection.merge(java.util.Collections.emptyList()));
         CastHostSelection.Host saved=hostSession.selection.selected();
         if(saved!=null){address.setText(saved.base);status.setText("Reconnecting to selected host…");now.setText("Your selected server");}
@@ -101,6 +104,37 @@ class CastPanel extends LinearLayout {
         handler.post(this::resumeConnection);
         handler.postDelayed(poll,3000);
     }
+    /** Cards expose the common listening path; existing administrative tools stay intact below. */
+    private void buildDeviceCards(){
+        java.util.List<android.view.View> original=new java.util.ArrayList<>();
+        for(int i=0;i<getChildCount();i++)original.add(getChildAt(i));
+        removeAllViews();setBackgroundColor(android.graphics.Color.TRANSPARENT);setPadding(0,dp(8),0,0);
+        LinearLayout program=card(true);program.addView(label("Station · listening & control",14));
+        stationSummary=label("No station selected",22);stationSummary.setTypeface(null,android.graphics.Typeface.BOLD);program.addView(stationSummary);
+        program.addView(label("Choose an AMP server below. Connecting never starts playback.",14));
+        LinearLayout playing=card(false);playing.addView(label("NOW PLAYING",13));playing.addView(now);playing.addView(status);
+        stationControls.removeView(listen);playing.addView(listen);listen.setText("Listen on this phone");listen.setTextColor(android.graphics.Color.BLACK);listen.setBackground(Chrome.button(colors,true));
+        playing.addView(action("Stop listening on this phone",listener::stopListening));
+        playing.addView(action("Output · this phone / Google Cast",()->new android.app.AlertDialog.Builder(activity).setTitle("Choose audio destination").setMessage("Phone listening and Google Cast receive the selected host stream. The phone's system audio settings select its speaker, headphones or Bluetooth output.").setItems(new String[]{"Phone audio settings","Google Cast host stream"},(dialog,index)->{if(index==0)activity.startActivity(new android.content.Intent(android.provider.Settings.ACTION_SOUND_SETTINGS));else chromecast.performClick();}).setNegativeButton("Close",null).show()));
+        LinearLayout server=card(false);server.addView(label("Server",18));serverSummary=label("Not connected",15);server.addView(serverSummary);server.addView(action("Connection settings",()->{connectionFields.setVisibility(VISIBLE);reveal(connectionFields);}));
+        LinearLayout output=card(false);output.addView(label("Output",18));output.addView(label("This phone · system audio route\nListening starts only when you tap Listen.",14));output.addView(action("Audio settings",()->activity.startActivity(new android.content.Intent(android.provider.Settings.ACTION_SOUND_SETTINGS))));
+        if(getResources().getConfiguration().screenWidthDp>=380&&getResources().getConfiguration().fontScale<=1.15f){
+            removeView(server);removeView(output);LinearLayout pair=new LinearLayout(activity);pair.setBaselineAligned(false);addView(pair);LinearLayout.LayoutParams left=new LinearLayout.LayoutParams(0,-2,1);left.setMargins(0,0,dp(6),dp(10));pair.addView(server,left);LinearLayout.LayoutParams right=new LinearLayout.LayoutParams(0,-2,1);right.setMargins(dp(6),0,0,dp(10));pair.addView(output,right);
+        }
+        // Large text and narrow windows keep both information cards readable.
+        addView(label("Stations",21));dashboardStations=new LinearLayout(activity);dashboardStations.setOrientation(VERTICAL);addView(dashboardStations);selectedStation=action("Selected host · listen",()->listen.performClick());dashboardStations.addView(selectedStation);dashboardStations.addView(action("Smart Radio · choose playlist",()->stationPlaylist.performClick()));
+        addView(label("Discover",21));LinearLayout discovery=card(false);discovery.addView(find);find.setText("Nearby AMP servers");discovery.addView(serverList);
+        for(int i=0;i<original.size();i++){android.view.View view=original.get(i);if(android.text.TextUtils.equals("Internet radio · tap a result to listen",view.getContentDescription())){discovery.addView(view);if(i+1<original.size())discovery.addView(original.get(i+1));break;}}
+        addView(label("Quick Actions",21));LinearLayout quick=card(false);quick.addView(action("Offline · playlists & music",this::offline));quick.addView(action("Saved Playlists · sync & manage",()->reveal(libraryView)));quick.addView(action("Remote · control your desktop",listener::remote));
+        int advancedStart=getChildCount();
+        LinearLayout advanced=new LinearLayout(activity);advanced.setOrientation(VERTICAL);addView(advanced);
+        for(android.view.View view:original)if(view.getParent()==null)advanced.addView(view);
+        UiSections.fold(this,colors,"More · library, station controls & diagnostics",advancedStart);
+        enabled(client!=null);
+        status.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE);
+    }
+    private LinearLayout card(boolean highlight){LinearLayout box=new LinearLayout(activity);box.setOrientation(VERTICAL);box.setPadding(dp(12),dp(10),dp(12),dp(10));box.setBackground(highlight?Chrome.highlighted(colors,colors.accent):Chrome.panel(colors,false));LinearLayout.LayoutParams params=new LinearLayout.LayoutParams(-1,-2);params.setMargins(0,0,0,dp(10));addView(box,params);return box;}
+    private void reveal(android.view.View view){android.view.View child=view;while(child!=this&&child.getParent() instanceof android.view.View){child.setVisibility(VISIBLE);child=(android.view.View)child.getParent();}view.post(()->view.requestRectangleOnScreen(new android.graphics.Rect(0,0,view.getWidth(),Math.max(dp(80),view.getHeight())),false));}
     int dp(int n){return (int)(n*getResources().getDisplayMetrics().density);}
     TextView label(String text,int size){TextView v=new TextView(activity);v.setText(text);v.setTextColor(colors.text);v.setTextSize(size);v.setPadding(0,dp(6),0,dp(6));return v;}
     private EditText field(String hint,boolean secret){EditText v=new EditText(activity);v.setHint(hint);v.setSingleLine(true);v.setTextColor(colors.text);v.setHintTextColor(colors.muted);v.setInputType(InputType.TYPE_CLASS_TEXT|(secret?InputType.TYPE_TEXT_VARIATION_PASSWORD:InputType.TYPE_TEXT_VARIATION_URI));connectionFields.addView(v);return v;}
@@ -118,9 +152,12 @@ class CastPanel extends LinearLayout {
     private void enabled(boolean connected){
         stationControls.setVisibility(VISIBLE);search.setVisibility(connected&&!sharingVisible?VISIBLE:GONE);queue.setVisibility(connected&&!sharingVisible?VISIBLE:GONE);
         boolean ready=connected&&verified&&!busy;
+        if(serverSummary!=null)serverSummary.setText(connected?(verified?"Connected · ":"Reconnecting · ")+stationName:"Not connected · choose a nearby server");
+        if(stationSummary!=null)stationSummary.setText(stationName+" · "+(!connected?"Not connected":!verified?"Checking connection":preparing?"Preparing":running?"ON AIR":"Stopped"));
         if(!connected)capabilityNote.setText("Connect to an AMP host to enable station, listening, speaker and desktop controls. Connecting does not start playback.");
         else if(!verified)capabilityNote.setText("Host status is unverified. Refresh or reconnect before using host controls. Stop phone playback remains available.");
         boolean control=ready&&(!passwordRequired||client.hasPassword())&&!authRejected;
+        if(selectedStation!=null){selectedStation.setText(stationName+" · "+(running?"ON AIR · Listen":"Host not on air"));selectedStation.setEnabled(ready&&running&&listener.phoneAvailable());}
         start.setEnabled(control&&playlistSupported&&!running&&!preparing);stop.setEnabled(control&&(running||preparing));listen.setEnabled(ready&&running&&listener.phoneAvailable());chromecast.setEnabled(ready&&running);
         hostBroadcast.setEnabled(control&&hostLaunchSupported);serverPlay.setEnabled(control&&serverOutputSupported&&running&&!serverOutputRunning);serverStop.setEnabled(control&&serverOutputSupported&&serverOutputRunning);stationPlaylist.setEnabled(control&&playlistSupported);
         setChildrenEnabled(sharedLists,control);
