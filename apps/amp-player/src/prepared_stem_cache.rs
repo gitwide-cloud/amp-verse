@@ -712,6 +712,9 @@ fn prepare_with(
         for p in &mut encoders {
             p.wait()?;
         }
+        // Stop/join disk watchdogs before publication: their directory enumeration
+        // handles can prevent renaming the staging directory on Windows.
+        drop(encoders);
         if encoded != frames {
             return Err("Source frame count changed between passes".into());
         }
@@ -756,11 +759,16 @@ fn prepare_with(
             bitrate: 256000,
             parts: parts.try_into().map_err(|_| "Part count")?,
         };
-        let mut file = fs::File::create(stage.path().join("manifest.json")).map_err(err)?;
+        let mut file = fs::File::create(stage.path().join("manifest.json"))
+            .map_err(|e| format!("Create prepared manifest: {e}"))?;
         file.write_all(&serde_json::to_vec(&manifest).map_err(err)?)
-            .map_err(err)?;
-        file.sync_all().map_err(err)?;
-        let _ = verify_entry(stage.path(), &hash, &cancel)?;
+            .map_err(|e| format!("Write prepared manifest: {e}"))?;
+        file.sync_all()
+            .map_err(|e| format!("Sync prepared manifest: {e}"))?;
+        // Windows publication must not retain an open staging-manifest handle.
+        drop(file);
+        let _ = verify_entry(stage.path(), &hash, &cancel)
+            .map_err(|e| format!("Verify staged prepared stems: {e}"))?;
         if digest(path, &cancel)? != hash {
             return Err("Original changed before publication".into());
         }
@@ -768,7 +776,8 @@ fn prepare_with(
         if usage(&root)? > CACHE_LIMIT {
             return Err("Cache quota exceeded before publication".into());
         }
-        fs::rename(stage.path(), &target).map_err(err)?;
+        fs::rename(stage.path(), &target)
+            .map_err(|e| format!("Publish prepared stem directory: {e}"))?;
         write_lookup(&root, path, &hash)?;
         results.push(Prepared {
             directory: target,
