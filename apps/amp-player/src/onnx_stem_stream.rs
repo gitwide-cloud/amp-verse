@@ -110,6 +110,7 @@ struct Output {
     input_frame: u64,
     output_frame: u64,
     rate: u32,
+    owner_observed: Arc<AtomicBool>,
 }
 impl Output {
     fn inference_budget(
@@ -119,7 +120,8 @@ impl Output {
         generation: u64,
         first: bool,
     ) -> Duration {
-        if first
+        if generation == 0
+            || first
             || !controls.play[deck].load(Relaxed)
             || controls.deck_generation[deck].load(Relaxed) != generation
         {
@@ -137,11 +139,28 @@ impl Output {
         generation: u64,
         first: bool,
     ) -> Duration {
-        if first {
+        // Sections use their own pending timeline and cancellation token; the
+        // main deck position/generation cannot describe their buffered audio.
+        if generation == 0 {
             return Duration::from_secs(20);
         }
-        if controls.deck_generation[deck].load(Relaxed) != generation {
-            return Duration::ZERO;
+        if controls.deck_generation[deck].load(std::sync::atomic::Ordering::Acquire) == generation {
+            self.owner_observed
+                .store(true, std::sync::atomic::Ordering::Release);
+        } else {
+            return if self
+                .owner_observed
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                Duration::ZERO
+            } else {
+                // Decoder startup may outrun Command::Load installation. The
+                // worker's absolute request deadline and source token still bind.
+                Duration::from_secs(20)
+            };
+        }
+        if first {
+            return Duration::from_secs(20);
         }
         if !controls.play[deck].load(Relaxed) {
             return Duration::from_secs(20);
@@ -168,6 +187,7 @@ impl Output {
             input_frame: self.input_frame,
             output_frame: self.output_frame,
             rate: self.rate,
+            owner_observed: self.owner_observed.clone(),
         };
         Arc::new(move || boundary.live_inference_budget(&controls, deck, generation, first))
     }
@@ -279,6 +299,7 @@ pub(crate) fn decode(
         input_frame: 0,
         output_frame: 0,
         rate,
+        owner_observed: Arc::new(AtomicBool::new(false)),
     };
     let _admission = Admission::acquire(&stop);
     let mut degraded = _admission.is_none();
@@ -404,6 +425,7 @@ mod tests {
             input_frame: 0,
             output_frame: 0,
             rate: 48000,
+            owner_observed: Arc::new(AtomicBool::new(false)),
         };
         out.emit(&parts, 10, &mut p, &stop).unwrap();
         out.emit(&parts, 10, &mut p, &stop).unwrap();
@@ -423,6 +445,7 @@ mod tests {
             input_frame: (RATE * 10) as u64,
             output_frame: 0,
             rate: 48000,
+            owner_observed: Arc::new(AtomicBool::new(false)),
         };
         let guard = out.live_budget_guard(controls.clone(), 0, 7, false);
         assert_eq!(guard(), Duration::from_secs(20));
@@ -451,9 +474,57 @@ mod tests {
             input_frame: 0,
             output_frame: 0,
             rate: 48000,
+            owner_observed: Arc::new(AtomicBool::new(false)),
         };
         let guard = out.live_budget_guard(controls, 0, 7, true);
         assert_eq!(guard(), Duration::from_secs(20));
+    }
+    #[test]
+    fn second_window_waits_for_owner_then_tracks_budget_and_rejects_replacement() {
+        let controls = Arc::new(crate::mixer::Controls::default());
+        let out = Output {
+            input_frame: (RATE * 10) as u64,
+            output_frame: 0,
+            rate: 48000,
+            owner_observed: Arc::new(AtomicBool::new(false)),
+        };
+        let startup = out.live_budget_guard(controls.clone(), 0, 7, true);
+        let second = out.live_budget_guard(controls.clone(), 0, 7, false);
+        assert_eq!(second(), Duration::from_secs(20));
+        controls.deck_generation[0].store(7, Relaxed);
+        // Startup observations must be shared with later captured boundaries.
+        assert_eq!(startup(), Duration::from_secs(20));
+        controls.play[0].store(true, Relaxed);
+        controls.position[0].store(48000 * 2, Relaxed);
+        assert_eq!(second(), Duration::from_secs_f64(7.75));
+        controls.deck_generation[0].store(8, Relaxed);
+        assert_eq!(second(), Duration::ZERO);
+        assert_eq!(startup(), Duration::ZERO);
+        // A newly captured later window inherits observed ownership even if
+        // its own guard never sampled the old installed generation.
+        let later = out.live_budget_guard(controls, 0, 7, false);
+        assert_eq!(later(), Duration::ZERO);
+    }
+    #[test]
+    fn section_budget_does_not_use_main_deck_clock_or_ownership() {
+        let controls = Arc::new(crate::mixer::Controls::default());
+        controls.play[0].store(true, Relaxed);
+        controls.position[0].store(48000 * 180, Relaxed);
+        let out = Output {
+            input_frame: (RATE * 10) as u64,
+            output_frame: 0,
+            rate: 48000,
+            owner_observed: Arc::new(AtomicBool::new(false)),
+        };
+        assert_eq!(
+            out.inference_budget(&controls, 0, 0, false),
+            Duration::from_secs(20)
+        );
+        controls.deck_generation[0].store(7, Relaxed);
+        let section = out.live_budget_guard(controls.clone(), 0, 0, false);
+        assert_eq!(section(), Duration::from_secs(20));
+        controls.deck_generation[0].store(8, Relaxed);
+        assert_eq!(section(), Duration::from_secs(20));
     }
     #[test]
     fn inference_deadline_follows_buffer_tempo_and_source_generation() {
@@ -465,6 +536,7 @@ mod tests {
             input_frame: (RATE * 10) as u64,
             output_frame: 0,
             rate: 48000,
+            owner_observed: Arc::new(AtomicBool::new(false)),
         };
         assert_eq!(
             out.inference_budget(&controls, 0, 7, false),
@@ -531,6 +603,8 @@ mod live_acceptance {
         let (mut producer, mut consumer) = rtrb::RingBuffer::new(32768);
         let stop = Arc::new(AtomicBool::new(false));
         let controls = Arc::new(crate::mixer::Controls::default());
+        // This standalone fixture has no Command::Load callback to install ownership.
+        controls.deck_generation[0].store(1, Relaxed);
         let degraded = Arc::new(AtomicBool::new(false));
         let context = Context {
             stop,
