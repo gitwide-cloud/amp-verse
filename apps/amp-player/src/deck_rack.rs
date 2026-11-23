@@ -871,7 +871,7 @@ impl Player {
                 });
                 #[cfg(test)] ui.ctx().data_mut(|data| { data.insert_temp(egui::Id::unique(("dj-cue-pads", d)).with("screen"), (cues.response.rect, ui.layer_id())); });
                 #[cfg(not(test))] let _ = cues;
-                if height<310. {
+                if height<400. {
                     if ui.button("Sampler / Cue Deck").clicked(){self.card_open_tools(ui.ctx(),d,2);}
                     if d.is_multiple_of(2) {
                         if !self.sampler.started {self.sampler.started=true;if self.sampler.has_saved()&&self.ensure_audio().is_ok(){self.sampler.restore();}}
