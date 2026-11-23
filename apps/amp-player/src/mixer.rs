@@ -5165,7 +5165,12 @@ mod prepared_playback_tests {
             } else {
                 [1., 0., 0.]
             };
-            assert_eq!(voice.stem_mix, desired);
+            for (actual, wanted) in voice.stem_mix.iter().zip(desired) {
+                assert!(
+                    (actual - wanted).abs() < 1e-4,
+                    "smoothed prepared filter did not reach requested level"
+                );
+            }
             assert_eq!(controls.underruns[deck].load(Relaxed), 0);
         }
         let before = controls.position[1].load(Relaxed);
