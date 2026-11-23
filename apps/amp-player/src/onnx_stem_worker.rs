@@ -44,7 +44,7 @@ struct Config {
     runtime: Option<PathBuf>,
     script: &'static str,
 }
-const CUDA_VENDOR_DLLS: [&str; 12] = [
+pub(crate) const CUDA_VENDOR_DLLS: [&str; 12] = [
     "cublasLt64_12.dll",
     "cublas64_12.dll",
     "cufft64_11.dll",
@@ -322,6 +322,7 @@ struct Broker {
     width: usize,
     memory_mib: Option<u32>,
     metrics: Arc<PoolMetrics>,
+    provider: Option<String>,
 }
 impl Broker {
     #[cfg(test)]
@@ -330,7 +331,9 @@ impl Broker {
     }
     fn start_pool(config: &Config) -> Result<Self, String> {
         let (width, memory) = pool_plan(config);
-        Self::start_with(width, 6, Some(memory))
+        let mut broker = Self::start_with(width, 6, Some(memory))?;
+        broker.provider = Some(config.provider.clone());
+        Ok(broker)
     }
     fn start_with(width: usize, capacity: usize, memory_mib: Option<u32>) -> Result<Self, String> {
         let queue = Arc::new(RequestQueue::new(capacity));
@@ -362,6 +365,7 @@ impl Broker {
             width,
             memory_mib,
             metrics,
+            provider: None,
         })
     }
     fn shutdown(&self) -> bool {
@@ -471,20 +475,33 @@ pub(crate) fn pool_status() -> Option<(usize, u32, usize, usize)> {
         broker.metrics.peak.load(Ordering::Acquire),
     ))
 }
-/// Configuration check only: no Python launch, model probing or ordinary-playback warm-up.
-/// Qualification is tied to the selected native CUDA runtime, not a CPU/core-count guess.
-pub(crate) fn qualified_cuda() -> bool {
-    let Ok(config) = Config::environment() else {
+/// Cheap provider gate for the UI; runtime hashing stays in receipt background work.
+pub(crate) fn selected_cuda() -> bool {
+    if std::env::var("AMP_ONNX_PROVIDER").is_ok_and(|p| p != "cuda") {
         return false;
-    };
-    config.native
-        && config.provider == "cuda"
-        && config
-            .runtime
-            .as_ref()
-            .and_then(|p| p.parent())
-            .is_some_and(verified_cuda_module)
+    }
+    if let Some(Ok(broker)) = BROKER.get() {
+        return broker.provider.as_deref() == Some("cuda");
+    }
+    true // Before pool launch, successful receipt verification supplies CUDA evidence.
 }
+pub(crate) fn qualification_files() -> Option<(PathBuf, PathBuf, PathBuf)> {
+    let config = Config::environment().ok()?;
+    if !config.native || config.provider != "cuda" {
+        return None;
+    }
+    let directory = config.runtime.as_ref()?.parent()?;
+    if !verified_cuda_module(directory)
+        || config.cuda_dll_dir.as_ref()?.canonicalize().ok()?
+            != directory.join("vendor").canonicalize().ok()?
+        || config.runtime.as_ref()?.canonicalize().ok()?
+            != directory.join("onnxruntime.dll").canonicalize().ok()?
+    {
+        return None;
+    }
+    Some((config.python, config.model, directory.join("module.json")))
+}
+/// Configuration check only: no Python launch, model probing or ordinary-playback warm-up.
 pub(crate) fn configured() -> bool {
     Config::environment().is_ok()
 }
@@ -1447,6 +1464,7 @@ while True:
             width: 1,
             memory_mib: None,
             metrics: Arc::new(PoolMetrics::default()),
+            provider: None,
         }
     }
     fn wait_pending(broker: &Broker) -> Arc<AtomicU8> {
