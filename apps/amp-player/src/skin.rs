@@ -1,7 +1,7 @@
 use eframe::egui::{self, Color32 as C, FontId, Rect, RichText, Stroke, Vec2};
 pub const GOLD: C = C::from_rgb(255, 211, 0);
 pub const GREEN: C = C::from_rgb(130, 245, 61);
-pub const ORANGE: C = C::from_rgb(255, 170, 28);
+pub const ORANGE: C = GOLD;
 pub const CYAN: C = C::from_rgb(36, 208, 235);
 pub const BLACK: C = C::from_rgb(7, 8, 12);
 
@@ -25,7 +25,7 @@ pub fn configure(ctx: &egui::Context) {
         .families
         .entry(egui::FontFamily::Proportional)
         .or_default()
-        .insert(0, "amp-body".into());
+        .insert(0, "amp-display".into());
     fonts.families.insert(
         egui::FontFamily::Name("AMP Display".into()),
         vec!["amp-display".into(), "amp-body".into()],
@@ -88,11 +88,7 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
         } else {
             10
         })
-        .inner_margin(if ui.ctx().viewport_rect().width() < 1100. {
-            8
-        } else {
-            14
-        })
+        .inner_margin(8)
         .stroke(Stroke::new(1., p.border))
         .show(ui, |ui| {
             ui.with_layout(egui::Layout::top_down(egui::Align::Min), body)
@@ -183,11 +179,7 @@ pub fn rack_panel<R>(
     let p = theme.palette();
     let background = ui.painter().add(egui::Shape::Noop);
     let response = egui::Frame::new()
-        .inner_margin(if ui.ctx().viewport_rect().width() < 1100. {
-            6
-        } else {
-            12
-        })
+        .inner_margin(6)
         .corner_radius(if theme.material() { 16 } else { 12 })
         .stroke(Stroke::new(
             if selected.is_some() { 1.7 } else { 1. },
@@ -299,7 +291,7 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
         } else {
             title
         },
-        FontId::proportional(21.),
+        FontId::proportional(28.),
         p.text,
     );
     let menu_rect = Rect::from_min_max(rect.min, egui::pos2(rect.left() + 220., rect.bottom()));

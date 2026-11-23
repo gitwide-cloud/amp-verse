@@ -14,6 +14,48 @@ fn tool_key(deck: usize) -> egui::Id {
     egui::Id::unique(("card-deck-tools-open", deck))
 }
 impl Player {
+    pub(super) fn card_manual_playlist_controls(&mut self, ui: &mut egui::Ui) {
+        let selected = self.run.choice.clone();
+        let name = self
+            .run
+            .settings
+            .playlists
+            .iter()
+            .find(|p| p.id == selected)
+            .map(|p| p.name.clone());
+        let has_music = self
+            .library
+            .as_ref()
+            .is_some_and(|library| !library.tracks.is_empty());
+        let ready = has_music && name.is_some();
+        let label = name.as_deref().unwrap_or("Choose Smart Playlist");
+        if ui
+            .add_sized(
+                [170., 36.],
+                egui::Button::new(format!("{label} ▾")).truncate(),
+            )
+            .on_hover_text("Choose a saved Smart Playlist")
+            .clicked()
+        {
+            self.open_dj_settings(ui.ctx());
+        }
+        if ui
+            .add_enabled(ready, egui::Button::new("Load"))
+            .on_disabled_hover_text("Choose a playlist and add music in Library first")
+            .clicked()
+            && let Err(error) = self.execute_control(control::Action::LoadSmartPlaylist {
+                playlist: selected,
+                execution: control::Execution::LoadOnly,
+                style: None,
+                energy: None,
+            })
+        {
+            self.status = error;
+        }
+        if !has_music {
+            ui.weak("Add music in Library");
+        }
+    }
     pub(super) fn card_open_tools(&self, ctx: &egui::Context, deck: usize, tab: u8) {
         ctx.data_mut(|d| {
             d.insert_temp(tool_key(deck), true);
@@ -102,17 +144,21 @@ impl Player {
         ui.ctx()
             .data_mut(|data| data.insert_temp(egui::Id::unique("native-dj-card-layout"), true));
         let gap = 8.;
-        let mut aux = if self.rack.six {
-            (total * self.rack.strip_ratios[0]).clamp(128., 280.)
-        } else {
-            0.
-        };
-        let mut tools = (total * self.rack.strip_ratios[1]).clamp(112., 260.);
-        let old = [aux, tools];
         let center = if total < 1250. { 94. } else { 106. };
         let gaps = if self.rack.six { 6. } else { 4. };
         let dividers = if self.rack.six { 20. } else { 10. };
-        let main = ((total - aux - tools - center - gap * gaps - dividers) / 2.).max(240.);
+        let sidebar_budget = (total - 520. - center - gap * gaps - dividers)
+            .max(if self.rack.six { 240. } else { 112. });
+        let mut aux = if self.rack.six {
+            (total * self.rack.strip_ratios[0])
+                .clamp(128., (sidebar_budget - 112.).clamp(128., 280.))
+        } else {
+            0.
+        };
+        let mut tools = (total * self.rack.strip_ratios[1])
+            .clamp(112., (sidebar_budget - aux).clamp(112., 260.));
+        let old = [aux, tools];
+        let main = ((total - aux - tools - center - gap * gaps - dividers) / 2.).max(260.);
         ui.spacing_mut().item_spacing.x = gap;
         ui.horizontal_top(|ui| {
             if self.rack.six {
@@ -121,7 +167,7 @@ impl Player {
                     ui,
                     "dj-deck-left-divider",
                     &mut aux,
-                    128. ..=280.,
+                    128. ..=(sidebar_budget - tools).clamp(128., 280.),
                     true,
                     1.,
                     height,
@@ -140,7 +186,7 @@ impl Player {
                 ui,
                 "dj-deck-right-divider",
                 &mut tools,
-                112. ..=260.,
+                112. ..=(sidebar_budget - aux).clamp(112., 260.),
                 true,
                 -1.,
                 height,
@@ -160,7 +206,7 @@ impl Player {
             ui.spacing_mut().item_spacing.y=8.;let live=self.rack.live;let mut decks:Vec<_>=(0..6).filter(|d|!live.contains(d)).collect();decks.sort_by_key(|d|(d%2,d/2));
             for d in decks {ui.push_id(("strip",d),|ui|{
                 let frame=panel(ui,None).show(ui,|ui|{
-                    ui.set_width((width-20.).max(100.));ui.spacing_mut().item_spacing.y=3.;ui.spacing_mut().interact_size.y=22.;ui.set_min_height(((height-24.)/4.-20.).max(62.));
+                    ui.set_width((width-24.).max(100.));ui.spacing_mut().item_spacing.y=3.;ui.spacing_mut().interact_size.y=22.;ui.set_min_height(((height-24.)/4.-20.).max(62.));
                     ui.horizontal(|ui|{if ui.selectable_label(false,egui::RichText::new(NAMES[d]).strong().color(accent(d))).on_hover_text("Show this deck on its main vinyl control; audio routing stays unchanged").clicked(){self.rack.live[d%2]=d;}
                         if transport_button(ui,d,self.playing[d],egui::vec2(22.,22.)).clicked(){self.toggle_deck(d);}
                         if ui.small_button("···").on_hover_text("Open this deck's controls").clicked(){self.card_open_tools(ui.ctx(),d,0);}
@@ -241,10 +287,10 @@ impl Player {
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 panel(ui, Some(accent(d))).show(ui, |ui| {
-                    ui.set_width(width - 20.);
-                    ui.set_min_height(height - 20.);
+                    ui.set_width(width - 24.);
+                    ui.set_min_height(height - 24.);
                     ui.spacing_mut().item_spacing.y = 3.;
-                    let compact_card = width < 450.;
+                    let compact_card = width < 540.;
                     let wheel = (height - if compact_card { 222. } else { 180. })
                         .clamp(130., 280.)
                         .min((width * 0.43).max(130.));
@@ -253,7 +299,7 @@ impl Player {
                         - wheel
                         - if compact_card { 0. } else { 34. }
                         - ui.spacing().item_spacing.x * if compact_card { 1. } else { 2. })
-                    .max(112.);
+                    .max(96.);
                     ui.horizontal_top(|ui| {
                         ui.allocate_ui_with_layout(
                             egui::vec2(info, wheel),
@@ -362,7 +408,7 @@ impl Player {
                         }
                     });
                     if compact_card {
-                        self.card_transport(ui, d, width - 20.);
+                        self.card_transport(ui, d, width - 24.);
                     }
                     ui.separator();
                     let knobs = ui.scope(|ui| {
@@ -414,60 +460,88 @@ impl Player {
                     #[cfg(not(test))]
                     let _ = knobs;
                     ui.separator();
-                    ui.columns(2, |columns| {
-                        let cues = columns[0].scope(|ui| {
+                    if width < 400. {
+                        let cues = ui.scope(|ui| {
                             ui.horizontal(|ui| {
                                 ui.small("HOT CUES");
                                 if ui.small_button("1–8").clicked() {
                                     self.card_open_tools(ui.ctx(), d, 3);
                                     self.dj_cues[d] = true;
                                 }
+                                if ui.small_button("Sampler / Cue").clicked() {
+                                    self.card_open_tools(ui.ctx(), d, 2);
+                                }
                             });
                             self.main_hot_cues_count(ui, d, accent(d), 4);
                         });
                         #[cfg(test)]
-                        columns[0].ctx().data_mut(|data| {
+                        ui.ctx().data_mut(|data| {
                             data.insert_temp(
                                 egui::Id::unique(("dj-cue-pads", d)).with("screen"),
-                                (cues.response.rect, columns[0].layer_id()),
+                                (cues.response.rect, ui.layer_id()),
                             )
                         });
                         #[cfg(not(test))]
                         let _ = cues;
-                        columns[1].horizontal(|ui| {
-                            ui.small("SAMPLER");
-                            if ui.small_button("Bank / Cue").clicked() {
-                                self.card_open_tools(ui.ctx(), d, 2);
+                    } else {
+                        ui.columns(2, |columns| {
+                            let cues = columns[0].scope(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.small("HOT CUES");
+                                    if ui.small_button("1–8").clicked() {
+                                        self.card_open_tools(ui.ctx(), d, 3);
+                                        self.dj_cues[d] = true;
+                                    }
+                                });
+                                self.main_hot_cues_count(ui, d, accent(d), 4);
+                            });
+                            #[cfg(test)]
+                            columns[0].ctx().data_mut(|data| {
+                                data.insert_temp(
+                                    egui::Id::unique(("dj-cue-pads", d)).with("screen"),
+                                    (cues.response.rect, columns[0].layer_id()),
+                                )
+                            });
+                            #[cfg(not(test))]
+                            let _ = cues;
+                            columns[1].horizontal(|ui| {
+                                ui.small("SAMPLER");
+                                if ui.small_button("Bank / Cue").clicked() {
+                                    self.card_open_tools(ui.ctx(), d, 2);
+                                }
+                            });
+                            let actions = if d.is_multiple_of(2) {
+                                if !self.sampler.started {
+                                    self.sampler.started = true;
+                                    if self.sampler.has_saved() && self.ensure_audio().is_ok() {
+                                        self.sampler.restore();
+                                    }
+                                }
+                                self.sampler.inline_pads(
+                                    &mut columns[1],
+                                    self.audio.as_ref(),
+                                    false,
+                                )
+                            } else {
+                                if !self.right_sampler.started {
+                                    self.right_sampler.started = true;
+                                    if self.right_sampler.has_saved()
+                                        && self.ensure_right_samples().is_ok()
+                                    {
+                                        self.right_sampler.restore();
+                                    }
+                                }
+                                self.right_sampler.inline_pads(
+                                    &mut columns[1],
+                                    self.right_sample_audio.as_ref(),
+                                    false,
+                                )
+                            };
+                            for action in actions {
+                                self.side_sample_action(d % 2, action);
                             }
                         });
-                        let actions = if d.is_multiple_of(2) {
-                            if !self.sampler.started {
-                                self.sampler.started = true;
-                                if self.sampler.has_saved() && self.ensure_audio().is_ok() {
-                                    self.sampler.restore();
-                                }
-                            }
-                            self.sampler
-                                .inline_pads(&mut columns[1], self.audio.as_ref(), false)
-                        } else {
-                            if !self.right_sampler.started {
-                                self.right_sampler.started = true;
-                                if self.right_sampler.has_saved()
-                                    && self.ensure_right_samples().is_ok()
-                                {
-                                    self.right_sampler.restore();
-                                }
-                            }
-                            self.right_sampler.inline_pads(
-                                &mut columns[1],
-                                self.right_sample_audio.as_ref(),
-                                false,
-                            )
-                        };
-                        for action in actions {
-                            self.side_sample_action(d % 2, action);
-                        }
-                    });
+                    }
                 });
             },
         );
@@ -491,8 +565,8 @@ impl Player {
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
                 panel(ui, None).show(ui, |ui| {
-                    ui.set_width(width - 20.);
-                    ui.set_min_height(height - 20.);
+                    ui.set_width(width - 24.);
+                    ui.set_min_height(height - 24.);
                     ui.columns(2, |columns| {
                         for (side, d) in pair.into_iter().enumerate() {
                             columns[side].vertical_centered(|ui| {
@@ -508,7 +582,7 @@ impl Player {
                     ui.vertical_centered(|ui| {
                         ui.small("Crossfade");
                         let fade = ui.add_sized(
-                            [width - 20., 32.],
+                            [width - 24., 32.],
                             egui::Button::new(
                                 egui::RichText::new("Auto")
                                     .strong()
@@ -526,7 +600,7 @@ impl Player {
                         if fade.clicked() {
                             self.auto_crossfade();
                         }
-                        ui.spacing_mut().slider_width = width - 22.;
+                        ui.spacing_mut().slider_width = width - 26.;
                         if ui
                             .add(egui::Slider::new(&mut self.fader, 0. ..=1.).show_value(false))
                             .changed()
@@ -550,7 +624,27 @@ impl Player {
                         if previous != self.fade_seconds {
                             let _ = crossfade_settings::save(self.fade_seconds);
                         }
-                        if ui.button("Headphones").clicked() {
+                        let headphones = ui.add_sized([width - 24., 34.], egui::Button::new(""));
+                        icons::draw(
+                            ui,
+                            egui::Rect::from_center_size(
+                                headphones.rect.center(),
+                                egui::vec2(22., 22.),
+                            ),
+                            icons::Icon::Headphones,
+                            skin::foreground(ui),
+                        );
+                        headphones.widget_info(|| {
+                            egui::WidgetInfo::labeled(
+                                egui::Role::Button,
+                                ui.is_enabled(),
+                                "Headphones",
+                            )
+                        });
+                        if headphones
+                            .on_hover_text("Headphones · choose private cue output")
+                            .clicked()
+                        {
                             ui.ctx().data_mut(|data| {
                                 data.insert_temp(egui::Id::unique("card-headphones-open"), true)
                             });
@@ -579,8 +673,8 @@ impl Player {
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 panel(ui, None).show(ui, |ui| {
-                    ui.set_width(width - 20.);
-                    ui.set_min_height(height - 20.);
+                    ui.set_width(width - 24.);
+                    ui.set_min_height(height - 24.);
                     ui.strong("Deck View");
                     if ui.selectable_label(!self.rack.six, "A / B main").clicked() {
                         self.rack.six = false;
@@ -608,7 +702,7 @@ impl Player {
                         ("Advanced", 3),
                     ] {
                         if ui
-                            .add_sized([width - 20., 34.], egui::Button::new(label))
+                            .add_sized([width - 24., 34.], egui::Button::new(label))
                             .clicked()
                         {
                             self.card_open_tools(ui.ctx(), deck, tab);

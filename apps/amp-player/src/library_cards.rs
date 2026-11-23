@@ -14,7 +14,10 @@ pub(super) fn panel<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R)
         .stroke(egui::Stroke::new(1., p.border))
         .corner_radius(12)
         .inner_margin(14)
-        .show(ui, body)
+        .show(ui, |ui| {
+            ui.with_layout(egui::Layout::top_down(egui::Align::Min), body)
+                .inner
+        })
         .inner
 }
 pub(super) fn primary(label: &str) -> egui::Button<'_> {
@@ -402,6 +405,23 @@ pub(super) fn duration<'a>(tracks: impl Iterator<Item = &'a amp_core::Track>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn panel_content_stays_vertical_inside_horizontal_parent() {
+        let ctx = egui::Context::default();
+        let mut rows = Vec::new();
+        let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+            ui.horizontal_top(|ui| {
+                panel(ui, |ui| {
+                    rows.push(ui.button("Library").rect);
+                    rows.push(ui.button("Playlists").rect);
+                });
+            });
+        });
+        output.textures_delta.clear();
+        assert_eq!(rows.len(), 2);
+        assert!((rows[0].left() - rows[1].left()).abs() < 0.01);
+        assert!(rows[1].top() >= rows[0].bottom());
+    }
     #[test]
     fn artwork_completion_is_collected_after_navigating_to_another_playlist() {
         let (tx, rx) = mpsc::channel();

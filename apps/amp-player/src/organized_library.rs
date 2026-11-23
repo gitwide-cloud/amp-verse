@@ -98,8 +98,10 @@ impl Player {
 
         let height = (ui.available_height() - 64.).max(260.);
         egui::ScrollArea::vertical().id_salt("library-workflow-body").max_height((ui.available_height()-62.).max(80.)).auto_shrink([false,false]).show(ui,|ui| {
+        let body_width = ui.available_width().max(0.);
+        let nav_width=(body_width*0.16).clamp(176.,224.);
+        let content_width=(body_width-nav_width-54.).max(0.);
         ui.horizontal_top(|ui| {
-            let nav_width=(ui.available_width()*0.16).clamp(176.,224.);
              cards::panel(ui, |ui| {ui.set_width(nav_width);ui.set_min_height((height-66.).max(220.));
                 egui::ScrollArea::vertical().id_salt("library-navigation").max_height((height-180.).max(160.)).show(ui,|ui|{
                 for (page,icon,title) in [(0,icons::Icon::Folder,"Library"),(1,icons::Icon::Layers,"Smart Playlists"),(2,icons::Icon::List,"Playlists"),(3,icons::Icon::Device,"Devices"),(4,icons::Icon::History,"History"),(5,icons::Icon::Folder,"Sources"),(6,icons::Icon::Analyze,"Analyze Music"),(11,icons::Icon::List,"Transcribe"),(7,icons::Icon::Analyze,"Equalizer"),(8,icons::Icon::Folder,"Organise library"),(9,icons::Icon::List,"Tags & artwork")] {
@@ -114,7 +116,9 @@ impl Player {
                 });
             });
             ui.separator();
-            ui.vertical(|ui| {ui.set_width((ui.available_width()-8.).max(0.));
+            ui.allocate_ui_with_layout(egui::vec2(content_width, height), egui::Layout::top_down(egui::Align::Min), |ui| {
+                ui.set_width(content_width);
+                ui.set_max_width(content_width);
                 match self.library_page {
                     0 => self.organized_music(ui,height),
                     1 => self.organized_smart(ui,height),
@@ -1101,8 +1105,10 @@ impl Player {
             );
         });
         ui.add_space(12.);
+        let music_width = ui.available_width().max(0.);
+        let folder_width = (music_width * 0.29).clamp(120., 290.);
+        let tracks_width = (music_width - folder_width - 48.).max(0.);
         ui.horizontal_top(|ui| {
-            let folder_width = (ui.available_width() * 0.29).clamp(180., 290.);
             skin::panel(ui, false, |ui| {
                 ui.set_width(folder_width);
                 ui.set_min_height(height - 80.);
@@ -1119,8 +1125,9 @@ impl Player {
                         }
                     });
             });
-            ui.vertical(|ui| {
-                ui.set_width((ui.available_width() - 4.).max(0.));
+            ui.allocate_ui_with_layout(egui::vec2(tracks_width,height),egui::Layout::top_down(egui::Align::Min),|ui| {
+                ui.set_width(tracks_width);
+                ui.set_max_width(tracks_width);
                 skin::panel(ui, false, |ui| {
                     ui.set_min_width(ui.available_width());
                     ui.heading("Tracks");
@@ -1498,13 +1505,14 @@ mod tests {
             let (_dir, mut player) = card_fixture();
             let ctx = egui::Context::default();
             theme::apply(&ctx, theme::Theme::ModernDark);
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
                 },
                 |ui| player.library_ui(ui),
             );
+            output.textures_delta.clear();
             assert_eq!(player.queue.len(), 8);
             assert!(player.audio.is_none());
         }
@@ -1526,6 +1534,11 @@ mod tests {
         let ctx = egui::Context::default();
         skin::configure(&ctx);
         theme::apply(&ctx, theme::Theme::ModernDark);
+        let full_workspace = std::env::var("AMP_CARD_WORKSPACE").as_deref() == Ok("1");
+        if full_workspace {
+            player.workspace.pane = if dj { 2 } else { 1 };
+            player.workspace.rendering = false;
+        }
         let size = egui::vec2(1280., 900.);
         let mut output = ctx.run_ui(
             egui::RawInput {
@@ -1533,7 +1546,9 @@ mod tests {
                 ..Default::default()
             },
             |ui| {
-                if dj {
+                if full_workspace {
+                    player.workspace_ui(ui);
+                } else if dj {
                     player.deck_workspace_ui(ui);
                 } else {
                     player.library_ui(ui);

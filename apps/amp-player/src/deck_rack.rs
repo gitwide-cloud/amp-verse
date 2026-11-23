@@ -155,6 +155,9 @@ impl Player {
         self.header(ui, "AMP DJ", true);
         ui.horizontal_wrapped(|ui| {
             self.performance_controls(ui);
+            if !self.run.auto {
+                self.card_manual_playlist_controls(ui);
+            }
             if ui.button("Waveforms").clicked() {
                 self.open_dj_settings(ui.ctx());
             }
@@ -188,7 +191,7 @@ impl Player {
         ui.separator();
         for side in 0..2 {
             let d = self.rack.live[side];
-            if ui.available_width() < 1100. {
+            if ui.available_width() < 950. {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(NAMES[d])
@@ -236,7 +239,7 @@ impl Player {
             }
             self.waveforms[d].overlay = false;
             self.waveforms[d].ignore_seek = false;
-            self.waveforms[d].tint = (ui.available_width() >= 1100.).then_some(accent(d));
+            self.waveforms[d].tint = (ui.available_width() >= 950.).then_some(accent(d));
             let t = self.loaded_snapshot[d]
                 .as_ref()
                 .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
@@ -251,7 +254,7 @@ impl Player {
                 self.wave_span,
                 d,
             );
-            if ui.available_width() >= 1100. {
+            if ui.available_width() >= 950. {
                 let label = egui::Rect::from_min_size(
                     egui::pos2(
                         ui.min_rect().left(),
@@ -373,7 +376,7 @@ impl Player {
         ui.ctx().data_mut(|data| {
             data.insert_temp(
                 egui::Id::unique("native-dj-card-layout"),
-                rack_width >= 1100.,
+                rack_width >= 950.,
             )
         });
         let mixer = if compact { 126. } else { 146. };
@@ -397,7 +400,7 @@ impl Player {
             .ctx()
             .data_mut(|d| *d.get_temp_mut_or_insert_with(saved_id, || self.rack.strip_ratios));
         let rendered = if self.rack.six { strips } else { [0.; 2] };
-        if rack_width >= 1100. {
+        if rack_width >= 950. {
             self.card_rack(ui, height);
         } else {
             ui.horizontal_top(|ui| {
@@ -436,7 +439,7 @@ impl Player {
         }
         self.card_tool_windows(ui.ctx());
         // Only deliberate drags change the stored ratios; ordinary window resizing must not clamp them permanently.
-        if rack_width < 1100. {
+        if rack_width < 950. {
             for (side, width) in strips.into_iter().enumerate() {
                 let old = (rack_width * self.rack.strip_ratios[side]).clamp(minimum, maximum);
                 if (old - width).abs() > 0.01 {
