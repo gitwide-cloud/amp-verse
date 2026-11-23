@@ -716,10 +716,9 @@ impl Player {
                                 cards::primary("Play"),
                             )
                             .clicked()
+                            && self.activate_playlist_preview()
                         {
-                            if self.activate_playlist_preview() {
-                                self.play_playlist_queue();
-                            }
+                            self.play_playlist_queue();
                         }
                         if ui
                             .add_enabled(
