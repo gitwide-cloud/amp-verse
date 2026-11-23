@@ -29,7 +29,7 @@ impl Default for Workspace {
     }
 }
 impl Player {
-    fn workspace_player(&mut self, ui: &mut egui::Ui) {
+    pub(super) fn workspace_player(&mut self, ui: &mut egui::Ui) {
         self.player_ui(ui);
         if self.podcasts.is_active() {
             let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
@@ -82,7 +82,11 @@ impl Player {
                     "Publisher audio stream. Download this episode for local offline playback.",
                 );
             } else {
-                self.waveforms[0].height = Some(110.);
+                self.waveforms[0].height = Some(if ui.available_height() < 220. {
+                    80.
+                } else {
+                    110.
+                });
                 self.waveforms[0].show(
                     ui,
                     self.loaded_origin[0].as_deref().unwrap_or(&self.root),
@@ -97,6 +101,7 @@ impl Player {
         let mut play = None;
         skin::panel(ui, false, |ui| {
             ui.set_min_width(ui.available_width());
+            ui.set_min_height(ui.available_height().max(80.));
             ui.horizontal(|ui| {
                 ui.heading("Play queue");
                 ui.weak(format!("{} songs", self.queue.len()));
@@ -104,14 +109,16 @@ impl Player {
                     self.workspace.pane = 1;
                 }
             });
+            let queue_height = ui.available_height().max(40.);
             egui::ScrollArea::vertical()
                 .id_salt("v1-player-queue")
-                .max_height(ui.available_height().max(40.))
+                .max_height(queue_height)
+                .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if self.queue.is_empty() {
                         ui.weak("Choose songs or a playlist in Library to build your queue.");
                         ui.vertical_centered(|ui| {
-                            ui.add_space(40.);
+                            ui.add_space(((queue_height - 220.) * 0.5).max(8.));
                             let (rect, _) =
                                 ui.allocate_exact_size(egui::vec2(60., 60.), egui::Sense::hover());
                             icons::draw(
@@ -252,7 +259,7 @@ impl Player {
                     self.lab_open = pane == 3;
                 }
             }
-            ui.weak(format!("{} Beta 7", env!("CARGO_PKG_VERSION")));
+            ui.weak(format!("{} Beta 8", env!("CARGO_PKG_VERSION")));
             let settings_menu = ui.menu_button("   ", |ui| {
                 ui.label("Appearance");
                 theme::selector(ui);
@@ -334,6 +341,111 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn player_cards_fill_width_queue_fills_height_and_eq_stays_in_transport() {
+        fn inspect(
+            shape: &egui::Shape,
+            surface: egui::Color32,
+            cards: &mut Vec<egui::Rect>,
+            labels: &mut Vec<(String, egui::Rect)>,
+            width: f32,
+        ) {
+            match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == surface
+                        && rect.rect.width() > width * 0.9
+                        && rect.rect.height() > 12. =>
+                {
+                    cards.push(rect.rect)
+                }
+                egui::Shape::Text(text) => labels.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(children) => {
+                    for child in children {
+                        inspect(child, surface, cards, labels, width);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for size in [
+            egui::vec2(760., 540.),
+            egui::vec2(1280., 900.),
+            egui::vec2(1568., 1003.),
+            egui::vec2(2560., 1536.),
+        ] {
+            let ctx = egui::Context::default();
+            skin::configure(&ctx);
+            theme::apply(&ctx, theme::Theme::ModernDark);
+            let mut player = Player {
+                workspace: Workspace {
+                    enabled: true,
+                    pane: 0,
+                    rendering: true,
+                },
+                playback_owner: playback_owner::Owner::Dj,
+                ..Default::default()
+            };
+            player.status =
+                "Saved library ready; checking for new tracks in background. ".repeat(8);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| player.workspace_player(ui),
+            );
+            let mut cards = Vec::new();
+            let mut labels = Vec::new();
+            for shape in &output.shapes {
+                inspect(
+                    &shape.shape,
+                    theme::Theme::ModernDark.palette().surface,
+                    &mut cards,
+                    &mut labels,
+                    size.x,
+                );
+            }
+            cards.sort_by(|a, b| a.top().total_cmp(&b.top()));
+            cards.dedup();
+            assert_eq!(
+                cards.len(),
+                4,
+                "Expected transport, toolbar, waveform and queue cards at {size:?}: {cards:?}"
+            );
+            for card in &cards {
+                assert!(
+                    card.width() >= size.x - 2. && card.right() <= size.x + 1.,
+                    "Card must fill available width without horizontal overflow at {size:?}: {card:?}"
+                );
+            }
+            assert!(
+                (cards[3].bottom() - size.y).abs() <= 2.,
+                "Queue should fill the remaining height at {size:?}: {:?}",
+                cards[3]
+            );
+            let low = labels
+                .iter()
+                .find(|(text, _)| text == "Low")
+                .expect("Player low EQ remains visible")
+                .1;
+            assert!(
+                cards[0].contains_rect(low),
+                "EQ must stay inside the transport card at {size:?}"
+            );
+            if size.x >= 1050. {
+                assert!(
+                    low.left() > size.x * 0.7,
+                    "Wide Player EQ must remain on the right at {size:?}: {low:?}"
+                );
+            }
+            assert_eq!(player.playback_owner, playback_owner::Owner::Dj);
+            assert!(player.queue.is_empty() && player.audio.is_none());
+            output.textures_delta.clear();
+        }
+    }
     #[test]
     fn changing_workspaces_keeps_playback_owner_and_native_window_size() {
         for size in [

@@ -1647,6 +1647,15 @@ impl Player {
         }
     }
     fn player_ui(&mut self, ui: &mut egui::Ui) {
+        if self.workspace.rendering {
+            self.workspace_player_transport(ui);
+            ui.add_space(8.);
+            skin::panel(ui, false, |ui| {
+                ui.set_min_width(ui.available_width());
+                self.player_toolbar(ui);
+            });
+            return;
+        }
         skin::panel(ui, true, |ui| {
             self.header(ui, "AMP VERSE", true);
             ui.horizontal_wrapped(|ui| {
@@ -1817,47 +1826,276 @@ impl Player {
                     );
                 }
             });
-            ui.horizontal(|ui| {
-                self.player_view_menu(ui);
-                if ui
-                    .button(if self.library_open && (self.layout.parent[1] == Some(0)) {
-                        "Collapse Library"
-                    } else {
-                        "Expand Library"
-                    })
-                    .clicked()
-                {
-                    if self.workspace.enabled {
-                        self.workspace.pane = 1;
-                    } else if self.library_open && self.layout.parent[1] == Some(0) {
-                        self.library_open = false;
-                        self.resize_player(ui.ctx(), false);
-                    } else {
-                        self.library_open = true;
-                        self.layout.parent[1] = Some(0);
-                        self.resize_player(ui.ctx(), true);
-                    }
-                }
-                ui.checkbox(&mut self.auto, "Play queue");
-                ui.toggle_value(&mut self.shuffle, "Shuffle");
-                ui.toggle_value(&mut self.repeat_one, "Repeat one");
-                if ui
-                    .button("EQ")
-                    .on_hover_text("Open expanded EQ in Library")
-                    .clicked()
-                {
-                    self.library_page = 7;
-                    if self.workspace.enabled {
-                        self.workspace.pane = 1;
-                    }
+            self.player_toolbar(ui);
+        });
+    }
+    fn player_toolbar(&mut self, ui: &mut egui::Ui) {
+        let workspace = self.workspace.rendering;
+        let controls = |ui: &mut egui::Ui| {
+            self.player_view_menu(ui);
+            if ui
+                .button(if self.library_open && (self.layout.parent[1] == Some(0)) {
+                    "Collapse Library"
+                } else {
+                    "Expand Library"
+                })
+                .clicked()
+            {
+                if self.workspace.enabled {
+                    self.workspace.pane = 1;
+                } else if self.library_open && self.layout.parent[1] == Some(0) {
+                    self.library_open = false;
+                    self.resize_player(ui.ctx(), false);
+                } else {
                     self.library_open = true;
                     self.layout.parent[1] = Some(0);
                     self.resize_player(ui.ctx(), true);
                 }
+            }
+            ui.checkbox(&mut self.auto, "Play queue");
+            ui.toggle_value(&mut self.shuffle, "Shuffle");
+            ui.toggle_value(&mut self.repeat_one, "Repeat one");
+            if ui
+                .button("EQ")
+                .on_hover_text("Open expanded EQ in Library")
+                .clicked()
+            {
+                self.library_page = 7;
+                if self.workspace.enabled {
+                    self.workspace.pane = 1;
+                }
+                self.library_open = true;
+                self.layout.parent[1] = Some(0);
+                self.resize_player(ui.ctx(), true);
+            }
 
+            if workspace {
+                ui.add(egui::Label::new(RichText::new(&self.status).weak()).truncate());
+            } else {
                 ui.weak(&self.status);
-            });
+            }
+        };
+        if workspace {
+            ui.horizontal_wrapped(controls);
+        } else {
+            ui.horizontal(controls);
+        }
+    }
+    fn workspace_player_transport(&mut self, ui: &mut egui::Ui) {
+        skin::panel(ui, true, |ui| {
+            ui.set_min_width(ui.available_width());
+            let wide = ui.available_width() >= 1050.;
+            let row_height = if wide { 72. } else { 62. };
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), row_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_height(row_height);
+                    self.workspace_player_buttons(ui);
+                    let art_size = if wide { 72. } else { 62. };
+                    let (rect, _) = ui
+                        .allocate_exact_size(egui::vec2(art_size, art_size), egui::Sense::hover());
+                    organized_library::artwork(
+                        ui,
+                        rect,
+                        self.loaded_origin[0].as_deref().unwrap_or(&self.root),
+                        self.loaded_track(0),
+                        self.title(0),
+                    );
+                    let fixed = if wide {
+                        140. + 180. + 180. + ui.spacing().item_spacing.x * 5. + 2.
+                    } else {
+                        0.
+                    };
+                    let width = (ui.available_width() - fixed).max(120.);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width, art_size),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_width(width);
+                            ui.set_max_width(width);
+                            self.workspace_player_track_display(ui);
+                        },
+                    );
+                    if wide {
+                        self.workspace_player_scope(ui, 140.);
+                        self.workspace_player_volume(ui);
+                        self.workspace_player_eq(ui);
+                    }
+                },
+            );
+            if !wide {
+                ui.add_space(8.);
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 60.),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_height(60.);
+                        let scope_width =
+                            (ui.available_width() - 360. - ui.spacing().item_spacing.x * 4. - 2.)
+                                .max(90.);
+                        self.workspace_player_scope(ui, scope_width);
+                        self.workspace_player_volume(ui);
+                        self.workspace_player_eq(ui);
+                    },
+                );
+            }
         });
+    }
+    fn workspace_player_buttons(&mut self, ui: &mut egui::Ui) {
+        for action in 0..4 {
+            let playing = self.playback_owner == playback_owner::Owner::Player && self.playing[0];
+            let (icon, label) = match action {
+                0 => (icons::Icon::Previous, "Previous"),
+                1 if playing => (icons::Icon::Pause, "Pause"),
+                1 => (icons::Icon::Play, "Play"),
+                2 => (icons::Icon::Stop, "Stop"),
+                _ => (icons::Icon::Next, "Next"),
+            };
+            if icons::button(ui, icon, "", action == 1, egui::vec2(58., 48.))
+                .on_hover_text(label)
+                .clicked()
+            {
+                match action {
+                    0 => {
+                        if let Some(index) = self.loaded[0] {
+                            self.play(0, index.saturating_sub(1));
+                        }
+                    }
+                    1 => {
+                        if self.podcasts.is_active() {
+                            self.toggle_player();
+                        } else if let Some(index) =
+                            self.selected.filter(|index| Some(*index) != self.loaded[0])
+                        {
+                            self.play(0, index);
+                        } else {
+                            self.toggle_player();
+                        }
+                    }
+                    2 => self.stop_player(),
+                    _ => self.next(),
+                }
+            }
+        }
+    }
+    fn workspace_player_track_display(&self, ui: &mut egui::Ui) {
+        let position = self
+            .audio
+            .as_ref()
+            .map_or(0., |audio| audio.source_position(0));
+        let duration = self.loaded_track(0).and_then(|track| {
+            track
+                .preparation
+                .analysis
+                .as_ref()
+                .map(|analysis| analysis.duration)
+                .or_else(|| {
+                    track
+                        .preparation
+                        .extensions
+                        .get("duration_seconds")
+                        .and_then(|value| value.as_f64())
+                        .filter(|duration| *duration > 0.)
+                })
+        });
+        ui.label(
+            RichText::new(format!(
+                "{:02}:{:02} / {}",
+                position as u64 / 60,
+                position as u64 % 60,
+                duration
+                    .map(|duration| format!(
+                        "{:02}:{:02}",
+                        duration as u64 / 60,
+                        duration as u64 % 60
+                    ))
+                    .unwrap_or_else(|| "--:--".into())
+            ))
+            .monospace()
+            .size(23.)
+            .color(skin::accent(ui)),
+        );
+        ui.add(egui::Label::new(RichText::new(self.title(0)).strong()).truncate());
+        let metadata = self
+            .loaded_track(0)
+            .map(|track| {
+                format!(
+                    "{} · {} BPM · {}",
+                    track
+                        .path
+                        .extension()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_uppercase(),
+                    track
+                        .preparation
+                        .bpm
+                        .map(|bpm| format!("{bpm:.1}"))
+                        .unwrap_or_else(|| "--".into()),
+                    track.preparation.harmonic_key.as_deref().unwrap_or("--")
+                )
+            })
+            .unwrap_or_else(|| "Local / network library".into());
+        ui.add(egui::Label::new(RichText::new(metadata).weak()).truncate());
+    }
+    fn workspace_player_scope(&self, ui: &mut egui::Ui, width: f32) {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 48.), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 2., egui::Color32::BLACK);
+        if let Some(audio) = &self.audio {
+            for index in 0..48 {
+                let value = f32::from_bits(
+                    audio.controls.scope[0][index * 2].load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .clamp(0., 1.);
+                let x = rect.left() + index as f32 * rect.width() / 48.;
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(x, rect.bottom() - 3.),
+                        egui::pos2(x, rect.bottom() - 3. - value * 42.),
+                    ],
+                    egui::Stroke::new(1.5, GOLD),
+                );
+            }
+        }
+        response.on_hover_text("Live measured output amplitude history");
+    }
+    fn workspace_player_volume(&mut self, ui: &mut egui::Ui) {
+        ui.allocate_ui_with_layout(
+            egui::vec2(180., 58.),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(180.);
+                ui.spacing_mut().slider_width = 100.;
+                ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Vol"));
+            },
+        );
+    }
+    fn workspace_player_eq(&mut self, ui: &mut egui::Ui) {
+        ui.allocate_ui_with_layout(
+            egui::vec2(180., 60.),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_width(180.);
+                ui.spacing_mut().item_spacing.y = 0.;
+                ui.spacing_mut().interact_size.y = 18.;
+                ui.spacing_mut().slider_width = 115.;
+                for (band, label) in ["Low", "Mid", "High"].iter().enumerate() {
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.eq[0][band], -12. ..=12.)
+                                .text(*label)
+                                .show_value(false),
+                        )
+                        .on_hover_text("Player EQ · -12 to +12 dB")
+                        .changed()
+                        && let Some(audio) = &self.audio
+                    {
+                        audio.set_eq(0, band, self.eq[0][band]);
+                    }
+                }
+            },
+        );
     }
     fn set_player_mode(&mut self, ctx: &egui::Context, mode: u8) {
         if mode != 0 {
