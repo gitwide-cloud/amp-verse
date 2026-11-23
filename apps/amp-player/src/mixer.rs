@@ -5186,16 +5186,75 @@ mod prepared_playback_tests {
         }
         tx.send(Command::Fader(0.5)).unwrap();
         mixer.process_commands();
-        for playing in &controls.play {
-            playing.store(true, Relaxed);
+        for (deck, _) in controls.play.iter().enumerate() {
+            tx.send(Command::Play(deck)).unwrap();
         }
         let mut energy = 0.;
         mixer.render(44100, |_, frame| {
             energy += frame[0] as f64 * frame[0] as f64;
         });
-        assert!(energy > 1.);
+        eprintln!(
+            "Prepared fixture master energy={energy}; positions={:?}; peaks={:?}",
+            std::array::from_fn::<_, 6, _>(|d| controls.position[d].load(Relaxed)),
+            std::array::from_fn::<_, 6, _>(|d| get(&controls.peak[d]))
+        );
+        // Reference the decoded fixture, actual channel gains and crossfader law,
+        // rather than assuming an arbitrary loudness for compressed source audio.
+        let pair = controls.pair_indices();
+        let buses = amp_core::show::crossfade_weights(0.5);
+        let reference_energy = |dry: bool| -> f64 {
+            frames
+                .iter()
+                .take(44100)
+                .map(|frame| {
+                    let sum = (0usize..6)
+                        .map(|deck| {
+                            let levels = if dry {
+                                [1.; 3]
+                            } else if deck.is_multiple_of(2) {
+                                [0., 1., 0.]
+                            } else {
+                                [1., 0., 0.]
+                            };
+                            let weight = if deck == pair[0] {
+                                buses[0]
+                            } else if deck == pair[1] {
+                                buses[1]
+                            } else {
+                                1.
+                            };
+                            stereo_frame(*frame, true, levels, false)[0]
+                                * 0.1
+                                * weight
+                                * std::f32::consts::FRAC_1_SQRT_2
+                                * 0.5
+                        })
+                        .sum::<f32>();
+                    f64::from(sum).powi(2)
+                })
+                .sum()
+        };
+        let expected = reference_energy(false);
+        let dry = reference_energy(true);
+        eprintln!(
+            "Decoded fixture filtered-reference energy={expected}; dry-reference energy={dry}"
+        );
+        assert!(
+            expected > 1e-6 && expected < dry * 0.5,
+            "independent filters must change the decoded dry reference"
+        );
+        // The production limiter's initial lookahead and channel gain smoothing
+        // remove a small leading transient; steady reference remains independent.
+        assert!(
+            (energy - expected).abs() < expected * 0.08,
+            "actual energy {energy} vs fixture reference {expected}; dry {dry}"
+        );
         for (deck, voice) in mixer.voices.iter().take(6).enumerate() {
             assert!(controls.position[deck].load(Relaxed) >= 44000);
+            assert!(
+                get(&controls.peak[deck]) > 1e-6,
+                "deck {deck} must contribute real filtered audio"
+            );
             let desired = if deck.is_multiple_of(2) {
                 [0., 1., 0.]
             } else {
