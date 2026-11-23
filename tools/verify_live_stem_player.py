@@ -53,11 +53,6 @@ def main():
         with wave.open(str(source), 'wb') as output:
             output.setparams((2, 2, 44100, 0, 'NONE', 'not compressed'))
             output.writeframes(integers.tobytes() * (20 if args.six_decks else 6))
-        prep_source = Path(directory) / 'original-preparation-input.wav'
-        with wave.open(str(prep_source), 'wb') as output:
-            output.setparams((2, 2, 44100, 0, 'NONE', 'not compressed'))
-            output.writeframes((integers.tobytes() * 3)[:44100 * 23 * 4])
-        env['AMP_PREP_TEST_SOURCE'] = str(prep_source)
         preparation_source = Path(directory) / 'original-selected-playlist-23sec.wav'
         with wave.open(str(preparation_source), 'wb') as output:
             output.setparams((2, 2, 44100, 0, 'NONE', 'not compressed'))
@@ -73,7 +68,6 @@ def main():
             ('onnx_stem_stream::live_acceptance::real_model_source_pipeline_preserves_mix_across_windows', True, env),
             ('dj_engine::live_stem_acceptance::two_native_live_stem_decks_play_filters_and_cancel_independently', True, env),
             ('prepared_stem_cache::tests::native_selected_playlist_preparation_roundtrips_compressed_stems', True, preparation_env),
-            ('prepared_stem_cache::tests::native_selected_playlist_preparation_roundtrips_compressed_stems', True, env),
         ]
         if args.six_decks:
             tests.append(('dj_engine::live_stem_acceptance::six_native_live_stem_decks_play_distinct_filters_and_cancel_independently', True, gpu_env))
@@ -88,7 +82,7 @@ def main():
                 command.append('--ignored')
             command.extend(['--exact', '--test-threads=1', '--nocapture'])
             subprocess.run(command, env=run_env, check=True)
-        assert sorted(p.name for p in Path(directory).iterdir()) == sorted([source.name, prep_source.name])
+        assert sorted(p.name for p in Path(directory).iterdir()) == sorted([source.name, preparation_source.name])
     receipt = {
         'full_player_live_pipeline': 'passed',
         'concurrent_live_decks_with_different_filters': 'passed',
