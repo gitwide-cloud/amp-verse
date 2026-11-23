@@ -1,5 +1,7 @@
 //! Optional background separation and device-local prepared audio cache.
 //! Never writes source audio, NAS preparation, or active deck snapshots.
+#[path = "stems/playlist_prep.rs"]
+mod playlist_prep;
 use eframe::egui;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -15,6 +17,9 @@ use std::{
     },
     time::{Duration, SystemTime},
 };
+pub(crate) fn playlist_preparing() -> bool {
+    playlist_prep::PREPARING.load(Relaxed)
+}
 fn cache_root() -> Option<PathBuf> {
     crate::theme::settings_path().and_then(|p| p.parent().map(|p| p.join("prepared-stems")))
 }
@@ -408,6 +413,7 @@ impl Drop for Job {
     }
 }
 pub struct Panel {
+    playlist_prep: playlist_prep::State,
     pub manual_change: Option<(usize, [f32; 3])>,
     job: Option<Job>,
     batch: Option<Job>,
@@ -424,6 +430,7 @@ pub struct Panel {
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            playlist_prep: Default::default(),
             job: None,
             manual_change: None,
             batch: None,
@@ -441,7 +448,7 @@ impl Default for Panel {
 }
 impl Panel {
     pub fn busy(&self) -> bool {
-        self.job.is_some() || self.batch.is_some()
+        self.job.is_some() || self.batch.is_some() || self.playlist_prep.busy()
     }
     pub fn prepare_song(&mut self, ui: &mut egui::Ui, source: &Path) -> bool {
         if crate::onnx_stem_worker::configured() {
@@ -780,7 +787,8 @@ impl Panel {
             }
         }
         let previous_levels = self.level[deck];
-        let on_demand_configured = crate::onnx_stem_worker::configured();
+        let cached = source.is_some_and(crate::prepared_stem_playback::candidate);
+        let on_demand_configured = crate::onnx_stem_worker::configured() || cached;
         let mut reload = false;
         let response = ui.push_id(("deck-stems", deck), |ui| {
             ui.colored_label(
@@ -800,7 +808,7 @@ impl Panel {
                 a.load_current(deck) && a.controls.stems_loaded[deck].load(Relaxed)
             });
             if on_demand_configured {
-                let mode_label = ui.label("Live stems · memory only");
+                let mode_label = ui.label(if cached {"Prepared stems · local compressed cache"} else {"Live stems · memory only"});
                 if let Some((slots, per_worker_mib, live, _peak)) =
                     crate::onnx_stem_worker::pool_status()
                 {
@@ -809,10 +817,11 @@ impl Panel {
                         slots as u64 * u64::from(per_worker_mib)
                     ));
                 }
+                if cached {ui.weak("Prepared playback uses no live separation slot. Cached audio is fully verified before playback.");}
                 let policy = crate::stem_capability::current();
                 ui.label(format!("Live stem limit: {} decks · {}", policy.limit, policy.reason));
                 ui.weak("Normal six-deck playback stays available. Live stem audio remains in memory; initial processing can take several seconds.");
-                let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().filter(|v| v.load(Relaxed)).count());
+                let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().enumerate().filter(|(d,v)| v.load(Relaxed) && !a.controls.prepared_stems[*d].load(Relaxed)).count());
                 let previous = crate::stem_capability::maximum();
                 let mut maximum = previous;
                 egui::ComboBox::from_id_salt("live-stem-maximum").selected_text(format!("Maximum {maximum} live decks")).show_ui(ui, |ui| {
@@ -823,15 +832,16 @@ impl Panel {
                 if let Some(audio) = audio {
                     let enabled = audio.controls.on_demand_stems[deck].load(Relaxed);
                     let has_source = source.is_some_and(|path| path.is_file());
-                    let reserved = std::array::from_fn(|d| audio.controls.on_demand_stems[d].load(Relaxed));
-                    let admitted = policy.allows(&reserved,deck);
+                    let reserved = std::array::from_fn(|d| audio.controls.on_demand_stems[d].load(Relaxed) && !audio.controls.prepared_stems[d].load(Relaxed));
+                    let admitted = cached || (!playlist_preparing() && policy.allows(&reserved,deck));
+                    if !cached && playlist_preparing() {ui.weak("Cancel or finish playlist preparation before enabling live stems.");}
                     if !enabled && !admitted { ui.weak(policy.error()); }
                     if ui.add_enabled(
                         can_reload && has_source && (enabled || admitted),
                         egui::Button::new(if enabled {
                             "Use original audio"
                         } else {
-                            "Enable live stems"
+                            if cached {"Enable prepared stems"} else {"Enable live stems"}
                         }),
                     ).clicked() {
                         audio.controls.on_demand_stems[deck].store(!enabled, Relaxed);

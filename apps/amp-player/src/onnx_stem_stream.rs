@@ -25,7 +25,7 @@ impl Admission {
         let limit = crate::stem_capability::current().limit;
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while !stop.load(Relaxed) && std::time::Instant::now() < deadline {
-            if reserve(&ACTIVE, limit) {
+            if !crate::stems::playlist_preparing() && reserve(&ACTIVE, limit) {
                 return Some(Self);
             }
             std::thread::sleep(Duration::from_millis(10));

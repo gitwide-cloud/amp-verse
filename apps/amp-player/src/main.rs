@@ -41,6 +41,9 @@ mod mix_schedule;
 mod onnx_stem_stream;
 mod onnx_stem_worker;
 mod output_admission;
+mod playlist_stem_prep;
+mod prepared_stem_cache;
+mod prepared_stem_playback;
 mod receiver_process;
 mod startup_index;
 mod station_receiver;
@@ -3279,6 +3282,7 @@ impl Player {
 }
 impl eframe::App for Player {
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        self.stem_panel.shutdown_playlist_preparation();
         if let Some(lab) = self.lab.get_mut() {
             lab.shutdown();
         }

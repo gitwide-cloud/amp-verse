@@ -241,6 +241,19 @@ impl Player {
     fn organized_smart(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.heading("Smart Playlists");
         ui.weak("Choose music. Choose a style. Save.");
+        let selected_prep = self.show_editor.selected_id().map(str::to_owned);
+        if ui
+            .add_enabled(
+                selected_prep.is_some(),
+                egui::Button::new("Prepare selected playlist stems…"),
+            )
+            .clicked()
+            && let Some(id) = selected_prep
+        {
+            self.offer_smart_playlist_stems(&id);
+        }
+        let (live, cached) = self.playlist_processing_state();
+        self.stem_panel.playlist_preparation_ui(ui, live, cached);
         ui.add_space(12.);
         ui.horizontal_top(|ui| {
             let width = (ui.available_width() * 0.25).clamp(180., 260.);
@@ -394,6 +407,18 @@ impl Player {
     fn organized_playlists(&mut self, ui: &mut egui::Ui, height: f32) {
         ui.heading("Playlists");
         ui.weak("Create, manage and organize your playlists.");
+        if ui
+            .add_enabled(
+                self.playlist_snapshot.is_some(),
+                egui::Button::new("Prepare selected playlist stems…"),
+            )
+            .clicked()
+            && let Some((_, playlist)) = &self.playlist_snapshot
+        {
+            self.offer_playlist_stems(playlist.name.clone(), playlist.tracks.clone());
+        }
+        let (live, cached) = self.playlist_processing_state();
+        self.stem_panel.playlist_preparation_ui(ui, live, cached);
         if let Some((path, list)) = &self.playlist_snapshot {
             if let Some(entry) = self
                 .dj_browser

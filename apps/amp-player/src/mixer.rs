@@ -92,6 +92,7 @@ pub struct Controls {
     pub stem_knobs: [[AtomicU32; 3]; 6],
     pub stems_loaded: [AtomicBool; 6],
     pub on_demand_stems: [AtomicBool; 6],
+    pub prepared_stems: [AtomicBool; 6],
     pub eq_kill: [[AtomicBool; 3]; 6],
     pub sweep: [AtomicU32; 6],
     pub cue: [AtomicBool; 6],
@@ -205,6 +206,7 @@ impl Default for Controls {
             stem_knobs: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             stems_loaded: std::array::from_fn(|_| AtomicBool::new(false)),
             on_demand_stems: std::array::from_fn(|_| AtomicBool::new(false)),
+            prepared_stems: std::array::from_fn(|_| AtomicBool::new(false)),
             eq_kill: std::array::from_fn(|_| std::array::from_fn(|_| AtomicBool::new(false))),
             sweep: std::array::from_fn(|_| atom(0.)),
             cue: std::array::from_fn(|_| AtomicBool::new(false)),
@@ -1836,13 +1838,15 @@ fn check_live_stem_admission(
     deck: usize,
     policy: crate::stem_capability::Policy,
 ) -> Result<(), String> {
-    let mut existing =
-        std::array::from_fn(|d| loaded[d] || controls.on_demand_stems[d].load(Relaxed));
+    let mut existing = std::array::from_fn(|d| {
+        (loaded[d] || controls.on_demand_stems[d].load(Relaxed))
+            && !controls.prepared_stems[d].load(Relaxed)
+    });
     // The current intent is not a second reservation; existing loads may be replaced.
     if deck >= existing.len() {
         return Err("Unknown deck".into());
     }
-    existing[deck] = loaded[deck];
+    existing[deck] = loaded[deck] && !controls.prepared_stems[deck].load(Relaxed);
     if policy.allows(&existing, deck) {
         Ok(())
     } else {
@@ -2120,33 +2124,12 @@ impl Engine {
         let DecodeOptions { section, original } = options;
         track.preparation.validate()?;
         let stem_knobs = runtime_stem_knobs(&track.preparation, original)?;
-        let onnx = !original
+        let stem_mode = !original
             && self.controls.on_demand_stems[deck].load(Relaxed)
             && !track
                 .preparation
                 .extensions
                 .contains_key("podcast_stream_url");
-        if onnx {
-            check_live_stem_admission(
-                &self.loaded_on_demand,
-                &self.controls,
-                deck,
-                crate::stem_capability::current(),
-            )?;
-        }
-        if onnx && !crate::onnx_stem_worker::configured() {
-            return Err("On-demand stem worker/model is not configured".into());
-        }
-        if onnx && self.sample_rate > 48000 {
-            return Err("Live stems currently support output rates up to48kHz".into());
-        }
-        let stems = if onnx { None } else { stems };
-        if amp_core::stem_mix::changed(stem_knobs) && stems.is_none() && !onnx {
-            return Err(
-                "This song has a saved stem mix. Prepare its stems in Library before playback."
-                    .into(),
-            );
-        }
         let stream = track
             .preparation
             .extensions
@@ -2160,6 +2143,32 @@ impl Engine {
             amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?
         };
 
+        let cached = stem_mode && crate::prepared_stem_playback::candidate(&path);
+        let onnx = stem_mode && !cached;
+        if onnx {
+            if crate::stems::playlist_preparing() {
+                return Err("Cancel or finish playlist preparation before loading live stems. Prepared and original audio remain available.".into());
+            }
+            check_live_stem_admission(
+                &self.loaded_on_demand,
+                &self.controls,
+                deck,
+                crate::stem_capability::current(),
+            )?;
+            if !crate::onnx_stem_worker::configured() {
+                return Err("On-demand stem worker/model is not configured".into());
+            }
+            if self.sample_rate > 48000 {
+                return Err("Live stems currently support output rates up to48kHz".into());
+            }
+        }
+        let stems = if stem_mode { None } else { stems };
+        if amp_core::stem_mix::changed(stem_knobs) && stems.is_none() && !stem_mode {
+            return Err(
+                "This song has a saved stem mix. Enable live or prepared stems before playback."
+                    .into(),
+            );
+        }
         if section.is_none() {
             self.cancel_section(deck);
             set(
@@ -2177,7 +2186,7 @@ impl Engine {
                 Relaxed,
             );
         }
-        let separated = stems.is_some() || onnx;
+        let separated = stems.is_some() || stem_mode;
         let stem_degraded = Arc::new(AtomicBool::new(false));
         let worker_degraded = stem_degraded.clone();
         if section.is_none()
@@ -2233,6 +2242,21 @@ impl Engine {
                     duration_worker.store(
                         ((seconds - prep.cue_in).max(0.) * rate as f64) as u64,
                         Relaxed,
+                    );
+                }
+                if cached {
+                    return crate::prepared_stem_playback::decode(
+                        &path,
+                        &prep,
+                        rate,
+                        &mut producer,
+                        crate::onnx_stem_stream::Context {
+                            stop: stopped.clone(),
+                            controls: errors.clone(),
+                            deck,
+                            degraded_flag: worker_degraded,
+                            generation,
+                        },
                     );
                 }
                 if onnx {
@@ -2457,7 +2481,8 @@ impl Engine {
         self.cancel[deck] = Some(cancel);
         self.send(Command::Load(deck, source, play, generation))?;
         self.requested_generation[deck] = generation;
-        self.loaded_on_demand[deck] = onnx;
+        self.loaded_on_demand[deck] = stem_mode;
+        self.controls.prepared_stems[deck].store(cached, Relaxed);
         self.controls.play[deck].store(play, Relaxed);
         Ok(())
     }
@@ -5060,7 +5085,7 @@ mod live_admission_tests {
             flag.store(true, Relaxed);
         }
         let loaded = [true, true, false, false, false, false];
-        let cpu = crate::stem_capability::Policy::new(4, false);
+        let cpu = crate::stem_capability::Policy::new(4, 2);
         assert!(check_live_stem_admission(&loaded, &controls, 2, cpu).is_err());
         assert!(check_live_stem_admission(&loaded, &controls, 0, cpu).is_ok());
         assert!(controls.on_demand_stems[0].load(Relaxed));
@@ -5070,10 +5095,84 @@ mod live_admission_tests {
                 &loaded,
                 &controls,
                 2,
-                crate::stem_capability::Policy::new(4, true)
+                crate::stem_capability::Policy::new(4, 6)
             )
             .is_ok()
         );
         assert_eq!(loaded, [true, true, false, false, false, false]);
+    }
+}
+
+#[cfg(test)]
+mod prepared_playback_tests {
+    use super::*;
+    #[test]
+    fn six_prepared_rings_apply_filters_without_live_slots_and_cancel_independently() {
+        let fixture = crate::prepared_stem_playback::tests::fixture();
+        let (frames, degraded) =
+            crate::prepared_stem_playback::tests::frames(&fixture, Default::default());
+        assert!(!degraded);
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(64);
+        let mut mixer = Mixer::new(44100, rx, controls.clone());
+        set(&controls.master, 0.5);
+        for (deck, prepared_flag) in controls.prepared_stems.iter().enumerate() {
+            let (mut producer, ring) = RingBuffer::new(frames.len() + 1);
+            for frame in &frames {
+                producer.push(*frame).unwrap();
+            }
+            let source = Source {
+                key_lock: None,
+                ring,
+                duration: Arc::new(AtomicU64::new(frames.len() as u64)),
+                done: Arc::new(AtomicBool::new(true)),
+                failed: Arc::new(AtomicBool::new(false)),
+                history: VecDeque::new(),
+                history_start: 0,
+                position: 0.,
+                primed: false,
+                separated: true,
+                stem_degraded: Arc::new(AtomicBool::new(false)),
+                stem_knobs: [0.; 3],
+            };
+            prepared_flag.store(true, Relaxed);
+            set(&controls.gain[deck], 0.1);
+            tx.send(Command::Load(deck, source, false, 1)).unwrap();
+            tx.send(Command::StemLevels(
+                deck,
+                if deck.is_multiple_of(2) {
+                    [0., 1., 0.]
+                } else {
+                    [1., 0., 0.]
+                },
+            ))
+            .unwrap();
+        }
+        tx.send(Command::Fader(0.5)).unwrap();
+        mixer.process_commands();
+        for playing in &controls.play {
+            playing.store(true, Relaxed);
+        }
+        let mut energy = 0.;
+        mixer.render(44100, |_, frame| {
+            energy += frame[0] as f64 * frame[0] as f64;
+        });
+        assert!(energy > 1.);
+        for (deck, voice) in mixer.voices.iter().take(6).enumerate() {
+            assert!(controls.position[deck].load(Relaxed) >= 44000);
+            let desired = if deck.is_multiple_of(2) {
+                [0., 1., 0.]
+            } else {
+                [1., 0., 0.]
+            };
+            assert_eq!(voice.stem_mix, desired);
+            assert_eq!(controls.underruns[deck].load(Relaxed), 0);
+        }
+        let before = controls.position[1].load(Relaxed);
+        tx.send(Command::Stop(0)).unwrap();
+        mixer.render(4410, |_, _| {});
+        assert!(!controls.play[0].load(Relaxed));
+        assert!(controls.position[1].load(Relaxed) > before);
+        assert!(controls.play.iter().skip(1).all(|v| v.load(Relaxed)));
     }
 }
