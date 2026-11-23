@@ -430,6 +430,10 @@ mod tests {
         out.input_frame += RATE as u64 * 10;
         controls.play[0].store(true, Relaxed);
         controls.position[0].store(48000 * 2, Relaxed);
+        assert_eq!(
+            out.live_inference_budget(&controls, 0, 7, false),
+            Duration::from_secs_f64(17.75)
+        );
         assert_eq!(guard(), Duration::from_secs_f64(7.75));
         controls.rate[0].store(2f32.to_bits(), Relaxed);
         assert_eq!(guard(), Duration::from_secs_f64(3.75));
