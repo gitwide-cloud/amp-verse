@@ -220,6 +220,8 @@ jobs:
           mkdir -p dist/licenses/mp3-lab
           cp third-party/mp3-lab/LICENSE third-party/mp3-lab/PROVENANCE.md dist/licenses/mp3-lab/
       - name: Package and verify memory-only live stems
+        env:
+          AMP_STEM_TRACE: '1'
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then stem_target="windows-x64"; else stem_target="linux-x64"; fi

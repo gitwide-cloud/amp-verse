@@ -211,7 +211,29 @@ impl Config {
     }
 }
 
+// Diagnostic only: bounded metadata, never PCM, paths, or worker stderr.
+pub(crate) fn trace_enabled() -> bool {
+    static ENABLED: OnceLock<bool> = OnceLock::new();
+    *ENABLED.get_or_init(|| std::env::var("AMP_STEM_TRACE").is_ok_and(|v| v == "1"))
+}
+pub(crate) fn trace(event: Value) {
+    static COUNT: AtomicUsize = AtomicUsize::new(0);
+    if trace_enabled() && COUNT.fetch_add(1, Ordering::Relaxed) < 4096 {
+        // Diagnostics must not panic if stderr has been closed.
+        let _ = writeln!(std::io::stderr().lock(), "[stem-trace] {event}");
+    }
+}
+fn margin_ms(deadline: Instant, now: Instant) -> f64 {
+    if deadline >= now {
+        deadline.duration_since(now).as_secs_f64() * 1000.
+    } else {
+        -now.duration_since(deadline).as_secs_f64() * 1000.
+    }
+}
+
 struct Request {
+    id: String,
+    submitted: Instant,
     pcm: Arc<Vec<f32>>,
     cancel: Arc<AtomicBool>,
     state: Arc<AtomicU8>,
@@ -266,6 +288,12 @@ impl RequestQueue {
                 || now >= work.deadline
             {
                 let work = pending.requests.remove(index);
+                if trace_enabled() {
+                    trace(json!({"event":"queue_discard", "id":work.id,
+                        "queue_ms":now.duration_since(work.submitted).as_secs_f64()*1000.,
+                        "request_margin_ms":margin_ms(work.deadline, now),
+                        "cancelled":work.cancel.load(Ordering::Acquire)}));
+                }
                 work.state.store(CANCELLED, Ordering::Release);
                 pending
                     .outstanding
@@ -377,12 +405,23 @@ impl Broker {
         }
         self.finished.load(Ordering::Acquire) == self.width
     }
+    #[cfg(test)]
     fn submit(
+        &self,
+        pcm: Vec<f32>,
+        cancel: Arc<AtomicBool>,
+        config: Config,
+        budget: Duration,
+    ) -> Reply {
+        self.submit_traced(pcm, cancel, config, budget, None)
+    }
+    fn submit_traced(
         &self,
         pcm: Vec<f32>,
         cancel: Arc<AtomicBool>,
         mut config: Config,
         budget: Duration,
+        source: Option<(usize, u64, u64)>,
     ) -> Reply {
         if let Some(memory) = self.memory_mib {
             if self.width > 1 && (!config.native || config.provider != "cpu") {
@@ -401,8 +440,16 @@ impl Broker {
         }
         let (reply, rx) = mpsc::sync_channel(1);
         let state = Arc::new(AtomicU8::new(PENDING));
-        let deadline = Instant::now() + budget.min(REQUEST_TIMEOUT);
+        let submitted = Instant::now();
+        let deadline = submitted + budget.min(REQUEST_TIMEOUT);
+        let id = format!("window-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+        if trace_enabled() {
+            trace(json!({"event":"submit", "id":id, "source":source,
+                "budget_ms":budget.as_secs_f64()*1000., "pool_width":self.width}));
+        }
         let request = Request {
+            id,
+            submitted,
             pcm: Arc::new(pcm),
             cancel: cancel.clone(),
             state: state.clone(),
@@ -511,13 +558,21 @@ pub(crate) fn configured() -> bool {
 /// At most three native CPU inferences plus six queued windows; overload rejects immediately.
 /// Budget includes queue time; expiry never cancels the caller's deck/source token.
 pub(crate) fn separate(pcm: Vec<f32>, cancel: Arc<AtomicBool>, budget: Duration) -> Reply {
+    separate_traced(pcm, cancel, budget, None)
+}
+pub(crate) fn separate_traced(
+    pcm: Vec<f32>,
+    cancel: Arc<AtomicBool>,
+    budget: Duration,
+    source: Option<(usize, u64, u64)>,
+) -> Reply {
     validate_input(&pcm)?;
     let config = Config::environment()?;
     BROKER
         .get_or_init(|| Broker::start_pool(&config))
         .as_ref()
         .map_err(Clone::clone)?
-        .submit(pcm, cancel, config, budget)
+        .submit_traced(pcm, cancel, config, budget, source)
 }
 /// App-exit only: bounded (three seconds) cancellation/reap acknowledgement.
 /// Normal deck Stop must use its cancellation token, not block the UI here.
@@ -790,7 +845,20 @@ fn broker_loop(
             queue.finish(&work);
             continue;
         }
+        let started = Instant::now();
+        if trace_enabled() {
+            trace(json!({"event":"dequeue", "id":work.id,
+                "queue_ms":started.duration_since(work.submitted).as_secs_f64()*1000.,
+                "request_margin_ms":margin_ms(work.deadline, started)}));
+        }
         let result = process_window_tracked(&mut worker, &work, &stopping, Some(&metrics));
+        if trace_enabled() {
+            trace(
+                json!({"event":"complete", "id":work.id, "ok":result.is_ok(),
+                "active_ms":started.elapsed().as_secs_f64()*1000.,
+                "request_margin_ms":margin_ms(work.deadline, Instant::now())}),
+            );
+        }
         work.state.store(DONE, Ordering::Release);
         queue.finish(&work);
         let _ = work.reply.send(result);
@@ -844,15 +912,22 @@ fn process_window_tracked(
         ));
     }
     let active = worker.as_mut().ok_or("ONNX worker unavailable")?;
-    let deadline = work.deadline.min(
-        Instant::now()
-            + if active.warmed {
-                WARM_TIMEOUT
-            } else {
-                REQUEST_TIMEOUT
-            },
-    );
-    let id = format!("window-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed));
+    let exchange_started = Instant::now();
+    let exchange_deadline = exchange_started
+        + if active.warmed {
+            WARM_TIMEOUT
+        } else {
+            REQUEST_TIMEOUT
+        };
+    let deadline = work.deadline.min(exchange_deadline);
+    if trace_enabled() {
+        trace(
+            json!({"event":"exchange_start", "id":work.id, "warm":active.warmed,
+            "request_margin_ms":margin_ms(work.deadline, exchange_started),
+            "exchange_margin_ms":margin_ms(exchange_deadline, exchange_started)}),
+        );
+    }
+    let id = work.id.clone();
     let (reply, rx) = mpsc::sync_channel(1);
     // The broker has one active exchange; this channel cannot accumulate windows.
     if active
@@ -872,7 +947,18 @@ fn process_window_tracked(
             || stopping.load(Ordering::Acquire)
             || Instant::now() >= deadline
         {
+            let observed = Instant::now();
+            let cancelled = work.cancel.load(Ordering::Acquire);
+            let shutdown = stopping.load(Ordering::Acquire);
             let reaped = stop_worker(worker);
+            if trace_enabled() {
+                trace(json!({"event":"exchange_stop", "id":work.id,
+                    "cancelled":cancelled, "shutdown":shutdown, "reaped":reaped,
+                    "exchange_ms":observed.duration_since(exchange_started).as_secs_f64()*1000.,
+                    "request_margin_ms":margin_ms(work.deadline, observed),
+                    "exchange_margin_ms":margin_ms(exchange_deadline, observed),
+                    "binding_deadline":if work.deadline <= exchange_deadline {"request"} else {"exchange"}}));
+            }
             return Err(if reaped {
                 "Stem window cancelled or timed out; ONNX process stopped"
             } else {
@@ -882,6 +968,13 @@ fn process_window_tracked(
         }
         match rx.recv_timeout(TICK) {
             Ok(Ok(parts)) => {
+                if trace_enabled() {
+                    let now = Instant::now();
+                    trace(json!({"event":"exchange_complete", "id":work.id,
+                        "exchange_ms":now.duration_since(exchange_started).as_secs_f64()*1000.,
+                        "request_margin_ms":margin_ms(work.deadline, now),
+                        "exchange_margin_ms":margin_ms(exchange_deadline, now)}));
+                }
                 if let Some(worker) = worker {
                     worker.warmed = true;
                 }
@@ -972,6 +1065,12 @@ fn exchange_with_limit(
         || h["persistent_audio_bytes"] != 0
     {
         return Err("Response identity, shape, provider or memory contract mismatch".into());
+    }
+    if trace_enabled() {
+        trace(json!({"event":"worker_header", "id":id,
+            "inference_seconds":h["inference_seconds"].as_f64(),
+            "load_seconds":h["load_seconds"].as_f64(),
+            "peak_worker_rss_bytes":h["peak_worker_rss_bytes"].as_u64()}));
     }
     let mut read_part = || -> Result<Vec<f32>, String> {
         let mut raw = vec![0u8; pcm.len() * 4];
@@ -1522,6 +1621,8 @@ while True:
         let (reply, _) = mpsc::sync_channel(1);
         let deadline = Instant::now() + Duration::from_secs(5);
         Request {
+            id: format!("window-{}", NEXT_ID.fetch_add(1, Ordering::Relaxed)),
+            submitted: Instant::now(),
             pcm: Arc::new(vec![0.; 4]),
             cancel,
             state: Arc::new(AtomicU8::new(RUNNING)),

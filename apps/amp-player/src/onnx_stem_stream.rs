@@ -281,7 +281,26 @@ pub(crate) fn decode(
             [pcm, vec![0.; frames * 2], vec![0.; frames * 2]]
         } else {
             let budget = output.inference_budget(&controls, deck, generation, first);
-            match crate::onnx_stem_worker::separate(pcm, stop.clone(), budget) {
+            let trace_start = std::time::Instant::now();
+            let result = crate::onnx_stem_worker::separate_traced(
+                pcm,
+                stop.clone(),
+                budget,
+                Some((deck, generation, output.input_frame)),
+            );
+            if crate::onnx_stem_worker::trace_enabled() {
+                crate::onnx_stem_worker::trace(serde_json::json!({
+                    "event":"stream_return", "source":[deck, generation, output.input_frame],
+                    "wall_ms":trace_start.elapsed().as_secs_f64()*1000.,
+                    "budget_ms":budget.as_secs_f64()*1000.,
+                    "current_budget_ms":output.inference_budget(&controls, deck, generation, first).as_secs_f64()*1000.,
+                    "emitted_source_frames":output.input_frame,
+                    "consumed_device_frames":controls.position[deck].load(Relaxed),
+                    "device_rate":output.rate, "effective_rate":controls.effective_rate(deck),
+                    "ok":result.is_ok()
+                }));
+            }
+            match result {
                 Ok(parts) => parts,
                 Err(error) => {
                     if stop.load(Relaxed) {
