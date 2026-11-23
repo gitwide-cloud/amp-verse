@@ -732,7 +732,7 @@ impl Dashboard {
         ui.horizontal_top(|ui| {
             if size.x > 850. {
                 crate::skin::panel(ui, false, |ui| {
-                    ui.set_width(178.);
+                    ui.set_width(200.);
                     ui.set_min_height((size.y - 32.).max(180.));
                     ui.heading("AMP Cast");
                     ui.add_space(14.);
@@ -770,11 +770,17 @@ impl Dashboard {
                     .id_salt("cast-card-workspace")
                     .auto_shrink([false, false])
                     .max_height((size.y - 70.).max(120.))
-                    .show(ui, |ui| self.show_content(ui, root, ready));
+                    .show(ui, |ui| self.show_content(ui, root, ready, size.x > 850.));
             });
         });
     }
-    fn show_content(&mut self, ui: &mut egui::Ui, root: &std::path::Path, ready: bool) {
+    fn show_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &std::path::Path,
+        ready: bool,
+        sidebar: bool,
+    ) {
         self.poll();
         if self.listen_after_play
             && !self.busy
@@ -834,14 +840,16 @@ impl Dashboard {
             }
             self.radio_job = None;
         }
-        ui.horizontal_wrapped(|ui| {
-            for (index, title) in ["Find Stations", "Broadcast", "Host Smart Station"]
-                .into_iter()
-                .enumerate()
-            {
-                ui.selectable_value(&mut self.section, index, title);
-            }
-        });
+        if !sidebar {
+            ui.horizontal_wrapped(|ui| {
+                for (index, title) in ["Find Stations", "Broadcast", "Host Smart Station"]
+                    .into_iter()
+                    .enumerate()
+                {
+                    ui.selectable_value(&mut self.section, index, title);
+                }
+            });
+        }
         ui.separator();
         crate::skin::panel(ui, false, |ui| {
             ui.set_min_width(ui.available_width());
@@ -1108,6 +1116,14 @@ impl Dashboard {
                 } else if snapshot.status.capabilities["smart_sharing"].as_bool() != Some(true) {
                     ui.weak("Live station. Offline playlists are available from a Smart Station.");
                 }
+            } else if self.busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Connecting to station…");
+                });
+            } else {
+                ui.strong("No station connected");
+                ui.weak("Find a station on your LAN, or start a broadcast.");
             }
         });
         if stop_remote {

@@ -181,6 +181,8 @@ jobs:
           fixture_music="$(mktemp -d)"
           ffmpeg -y -f lavfi -i sine=frequency=440:duration=3 "$fixture_music/Tone.wav"
           target/release/amp-prepare "$fixture_music"
+          mkdir -p target/release/addons
+          cp plugins/amp-podcasts/amp-podcasts.ampplugin target/release/addons/amp-podcasts.ampplugin
           python3 -c "import sys; sys.path.insert(0,'tools'); from fixture_catalog import read,write; d=read(sys.argv[1],'tracks/Tone.wav.json'); d['cue_in']=0.2; d['manual_override']=True; write(sys.argv[1],'tracks/Tone.wav.json',d)" "$fixture_music"
           target/release/amp-prepare "$fixture_music" --force
           for theme in classic modern-light modern-dark; do
