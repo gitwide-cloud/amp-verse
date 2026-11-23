@@ -38,6 +38,16 @@ fn entry(p: &Preparation, profile: Option<&SmartPlaylist>, target: Option<f64>) 
     {
         return c.seconds;
     }
+    if profile.is_some() {
+        return amp_core::energy_profile::automatic_entry(
+            p,
+            target.map_or(0.5, |e| (e - 1.) / 9.),
+            8.,
+        )
+        .map_or(p.cue_in, |choice| choice.seconds);
+    }
+    // Finite queues use profile=None. Keep their existing entry behavior;
+    // this shared automatic policy applies to Smart station selection only.
     if amp_core::energy_profile::mixing_allowed(p)
         && let Some(activity) = amp_core::energy_profile::read(p)
         && let Some(section) = activity.entry(
@@ -819,6 +829,102 @@ pub(super) async fn broadcast(cast: Arc<Cast>, owner: u64) -> Result<(), String>
             return Err("Station encoder stopped".into());
         }
         let _ = &output_guard;
+    }
+}
+
+#[cfg(test)]
+mod automatic_entry_tests {
+    use super::*;
+    fn prepared() -> Preparation {
+        let mut p = Preparation {
+            cue_out: Some(150.),
+            ..Default::default()
+        };
+        p.extensions.insert(
+            amp_core::energy_profile::FIELD.into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[],"sections":[
+                    {"id":"intro","name":"Intro","start":0.,"end":30.,"energy":0.2},
+                    {"id":"early","name":"Early","start":30.,"end":80.,"energy":0.6},
+                    {"id":"late","name":"Late","start":132.,"end":150.,"energy":0.9}
+                ]
+            }),
+        );
+        p
+    }
+    #[test]
+    fn smart_entry_snaps_only_inside_the_selected_section() {
+        let mut p = prepared();
+        p.cues.push(amp_core::preparation::Cue {
+            id: "good".into(),
+            kind: "drop".into(),
+            seconds: 42.,
+            ..Default::default()
+        });
+        let profile = show::Settings::default().playlists.remove(0);
+        assert_eq!(entry(&p, Some(&profile), Some(9.1)), 42.);
+        p.extensions
+            .get_mut(amp_core::energy_profile::FIELD)
+            .unwrap()["sections"] = serde_json::json!([
+            {"id":"intro","name":"Intro","start":0.,"end":16.,"energy":0.2},
+            {"id":"strong","name":"Strong","start":16.,"end":32.,"energy":0.9},
+            {"id":"quiet","name":"Quiet","start":32.,"end":150.,"energy":0.1}
+        ]);
+        p.cues[0].seconds = 40.;
+        assert_eq!(entry(&p, Some(&profile), Some(9.1)), 16.);
+    }
+    #[test]
+    fn smart_entry_preserves_manual_hype_priority_and_reviewed_cues() {
+        let mut p = prepared();
+        let mut profile = show::Settings::default().playlists.remove(0);
+        p.manual_cues.push(amp_core::preparation::Cue {
+            id: "manual".into(),
+            label: "Drop".into(),
+            kind: "drop".into(),
+            seconds: 100.,
+            ..Default::default()
+        });
+        let saved = p.clone();
+        profile.style = Style::Hype;
+        profile.use_manual_cues = true;
+        assert_eq!(entry(&p, Some(&profile), Some(9.1)), 100.);
+        profile.use_manual_cues = false;
+        assert_eq!(entry(&p, Some(&profile), Some(9.1)), 0.);
+        assert_eq!(p, saved);
+        p.manual_cues.clear();
+        p.manual_override = true;
+        assert_eq!(entry(&p, Some(&profile), Some(9.1)), 0.);
+        p.manual_override = false;
+        p.analysis = Some(amp_core::preparation::AnalysisInfo {
+            engine: "fixture".into(),
+            duration: 150.,
+            tempo_confidence: 0.,
+            key_confidence: 0.,
+            reviewed: true,
+        });
+        assert_eq!(entry(&p, Some(&profile), Some(9.1)), 0.);
+    }
+    #[test]
+    fn finite_queue_default_entry_keeps_its_existing_behavior() {
+        let p = prepared();
+        assert_eq!(entry(&p, None, None), 30.);
+        assert_eq!(
+            entry(
+                &Preparation {
+                    cue_in: 7.,
+                    ..Default::default()
+                },
+                None,
+                None
+            ),
+            7.
+        );
+    }
+    #[test]
+    fn smart_entry_uses_the_shared_early_section_instead_of_late_outro() {
+        let p = prepared();
+        let profile = show::Settings::default().playlists.remove(0);
+        assert_eq!(entry(&p, Some(&profile), Some(9.1)), 30.);
     }
 }
 

@@ -125,6 +125,27 @@ impl Output {
         {
             return Duration::from_secs(20);
         }
+        self.live_inference_budget(controls, deck, generation, first)
+            .max(Duration::from_millis(100))
+    }
+    // Rechecked on the background worker while playback/tempo can change. Unlike
+    // the initial request budget this must reach zero before the ring empties.
+    fn live_inference_budget(
+        &self,
+        controls: &crate::mixer::Controls,
+        deck: usize,
+        generation: u64,
+        first: bool,
+    ) -> Duration {
+        if first {
+            return Duration::from_secs(20);
+        }
+        if controls.deck_generation[deck].load(Relaxed) != generation {
+            return Duration::ZERO;
+        }
+        if !controls.play[deck].load(Relaxed) {
+            return Duration::from_secs(20);
+        }
         let speed = controls.effective_rate(deck).abs();
         let speed = if speed.is_finite() {
             f64::from(speed.max(0.01))
@@ -133,8 +154,22 @@ impl Output {
         };
         let emitted = self.input_frame as f64 / RATE as f64;
         let consumed = controls.position[deck].load(Relaxed) as f64 / self.rate.max(1) as f64;
-        // Allow time to publish the retained original before the playback ring empties.
-        Duration::from_secs_f64(((emitted - consumed) / speed - 0.25).clamp(0.1, 20.))
+        Duration::from_secs_f64(((emitted - consumed) / speed - 0.25).clamp(0., 20.))
+    }
+    fn live_budget_guard(
+        &self,
+        controls: Arc<crate::mixer::Controls>,
+        deck: usize,
+        generation: u64,
+        first: bool,
+    ) -> crate::onnx_stem_worker::LiveBudget {
+        // Capture the published boundary, not a later decoder window's boundary.
+        let boundary = Self {
+            input_frame: self.input_frame,
+            output_frame: self.output_frame,
+            rate: self.rate,
+        };
+        Arc::new(move || boundary.live_inference_budget(&controls, deck, generation, first))
     }
     fn emit(
         &mut self,
@@ -287,6 +322,7 @@ pub(crate) fn decode(
                 stop.clone(),
                 budget,
                 Some((deck, generation, output.input_frame)),
+                Some(output.live_budget_guard(controls.clone(), deck, generation, first)),
             );
             if crate::onnx_stem_worker::trace_enabled() {
                 crate::onnx_stem_worker::trace(serde_json::json!({
@@ -378,6 +414,42 @@ mod tests {
         }
         assert_eq!(count, 22);
         assert_eq!(out.input_frame, 20);
+    }
+    #[test]
+    fn live_budget_tracks_playback_after_paused_submission_and_expires() {
+        let controls = Arc::new(crate::mixer::Controls::default());
+        controls.deck_generation[0].store(7, Relaxed);
+        let mut out = Output {
+            input_frame: (RATE * 10) as u64,
+            output_frame: 0,
+            rate: 48000,
+        };
+        let guard = out.live_budget_guard(controls.clone(), 0, 7, false);
+        assert_eq!(guard(), Duration::from_secs(20));
+        // Moving the decoder boundary cannot extend an outstanding request.
+        out.input_frame += RATE as u64 * 10;
+        controls.play[0].store(true, Relaxed);
+        controls.position[0].store(48000 * 2, Relaxed);
+        assert_eq!(guard(), Duration::from_secs_f64(7.75));
+        controls.rate[0].store(2f32.to_bits(), Relaxed);
+        assert_eq!(guard(), Duration::from_secs_f64(3.75));
+        controls.position[0].store(48000 * 10, Relaxed);
+        assert_eq!(guard(), Duration::ZERO);
+        controls.play[0].store(false, Relaxed);
+        controls.deck_generation[0].store(8, Relaxed);
+        assert_eq!(guard(), Duration::ZERO);
+    }
+    #[test]
+    fn startup_window_can_prepare_before_audio_generation_is_installed() {
+        let controls = Arc::new(crate::mixer::Controls::default());
+        controls.play[0].store(true, Relaxed);
+        let out = Output {
+            input_frame: 0,
+            output_frame: 0,
+            rate: 48000,
+        };
+        let guard = out.live_budget_guard(controls, 0, 7, true);
+        assert_eq!(guard(), Duration::from_secs(20));
     }
     #[test]
     fn inference_deadline_follows_buffer_tempo_and_source_generation() {

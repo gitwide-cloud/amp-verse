@@ -20,33 +20,7 @@ pub(super) fn regular_playlist_id(path: &std::path::Path) -> String {
 /// Automatic target matching may choose an early section, never an outro.
 /// Explicit cue/manual selection is handled separately by call_track.
 fn automatic_energy_entry(p: &amp_core::Preparation, target: f64, minimum: f64) -> Option<f64> {
-    if p.manual_override
-        || !p.manual_cues.is_empty()
-        || p.analysis.as_ref().is_some_and(|a| a.reviewed)
-        || !amp_core::energy_profile::mixing_allowed(p)
-    {
-        return None;
-    }
-    let profile = amp_core::energy_profile::read(p)?;
-    let first = amp_core::energy_profile::entry_bound(p);
-    let end = p.cue_out.unwrap_or(profile.duration).min(profile.duration);
-    let limit = amp_core::cue_policy::automatic_entry_limit(first, end);
-    let section = profile.entry(target, first, end.min(limit + minimum), minimum)?;
-    p.cues
-        .iter()
-        .filter(|c| {
-            matches!(c.kind.as_str(), "drop" | "chorus" | "chorus_start")
-                && c.seconds >= first
-                && c.seconds <= limit
-                && c.seconds + minimum <= end
-        })
-        .min_by(|a, b| {
-            (a.seconds - section.start)
-                .abs()
-                .total_cmp(&(b.seconds - section.start).abs())
-        })
-        .map(|feature| feature.seconds)
-        .or(Some(section.start))
+    amp_core::energy_profile::automatic_entry(p, target, minimum).map(|entry| entry.seconds)
 }
 fn scratch_phrase(seconds: f32, flourish: bool) -> f32 {
     if !flourish {

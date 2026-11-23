@@ -460,24 +460,19 @@ pub fn ranked_with_snapshot(
     let wanted = target.or(p.target_energy).or(playing.and_then(energy));
     let score = |t: &Track| {
         let mut prepared = t.preparation.clone();
-        if let Some(profile) = crate::energy_profile::read(&prepared) {
-            let entry = if !crate::energy_profile::mixing_allowed(&prepared) {
-                profile.at(prepared.cue_in)
-            } else {
-                profile
-                    .entry(
-                        wanted.map_or(0.5, |e| (e - 1.) / 9.),
-                        crate::energy_profile::entry_bound(&prepared),
-                        prepared.cue_out.unwrap_or(profile.duration),
-                        8.,
-                    )
-                    .map(|s| s.energy)
-            };
-            if let Some(e) = entry {
-                prepared
-                    .extensions
-                    .insert("energy".into(), serde_json::json!(e));
-            }
+        let entry = crate::energy_profile::automatic_entry(
+            &prepared,
+            wanted.map_or(0.5, |e| (e - 1.) / 9.),
+            8.,
+        )
+        .map(|entry| entry.energy)
+        .or_else(|| {
+            crate::energy_profile::read(&prepared).and_then(|profile| profile.at(prepared.cue_in))
+        });
+        if let Some(e) = entry {
+            prepared
+                .extensions
+                .insert("energy".into(), serde_json::json!(e));
         }
         playing.map_or_else(
             || match (wanted, energy(&prepared)) {
@@ -612,6 +607,168 @@ mod tests {
             choose(&profile, &tracks, Some(0), &[], Some(8.2), 0),
             Some(1)
         );
+    }
+    #[test]
+    fn selection_does_not_rank_an_unreachable_late_energy_section() {
+        let make = |name: &str, early: f64, late: f64| {
+            let mut preparation = Preparation {
+                cue_out: Some(150.),
+                ..Default::default()
+            };
+            preparation.extensions.insert(
+                "energy_profile".into(),
+                serde_json::json!({
+                    "version":1,"duration":150.,"step":1.,"curve":[],"sections":[
+                        {"id":"early","name":"Early","start":0.,"end":132.,"energy":early},
+                        {"id":"late","name":"Late","start":132.,"end":150.,"energy":late}
+                    ]
+                }),
+            );
+            Track {
+                path: name.into(),
+                title: name.into(),
+                preparation,
+            }
+        };
+        let tracks = vec![
+            make("late-match.wav", 0.2, 0.9),
+            make("early-match.wav", 0.8, 0.8),
+        ];
+        let profile = Settings::default().playlists.remove(0);
+        // The .9 outro is outside the automatic entry horizon; .8 is the
+        // closest energy that can actually be used when loading the next song.
+        assert_eq!(choose(&profile, &tracks, None, &[], Some(9.1), 0), Some(1));
+    }
+    #[test]
+    fn selection_scores_saved_entry_when_no_early_section_is_available() {
+        let mut unreachable = Preparation {
+            cue_out: Some(150.),
+            ..Default::default()
+        };
+        unreachable
+            .extensions
+            .insert("energy".into(), serde_json::json!(0.9));
+        unreachable.extensions.insert(
+            "energy_profile".into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[0.2],"sections":[
+                    {"id":"late","name":"Late","start":80.,"end":150.,"energy":0.9}
+                ]
+            }),
+        );
+        let mut available = unreachable.clone();
+        available.extensions.insert(
+            "energy_profile".into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[0.8],"sections":[
+                    {"id":"early","name":"Early","start":0.,"end":150.,"energy":0.8}
+                ]
+            }),
+        );
+        let tracks = vec![
+            Track {
+                path: "unreachable.wav".into(),
+                title: "Unreachable".into(),
+                preparation: unreachable,
+            },
+            Track {
+                path: "available.wav".into(),
+                title: "Available".into(),
+                preparation: available,
+            },
+        ];
+        let saved = tracks[0].preparation.clone();
+        assert_eq!(
+            crate::energy_profile::automatic_entry(&saved, 0.9, 8.),
+            None
+        );
+        let profile = Settings::default().playlists.remove(0);
+        assert_eq!(choose(&profile, &tracks, None, &[], Some(9.1), 0), Some(1));
+        assert_eq!(tracks[0].preparation, saved);
+    }
+    #[test]
+    fn selection_scores_saved_entry_when_automatic_section_selection_is_protected() {
+        let mut protected = Preparation {
+            cue_out: Some(150.),
+            ..Default::default()
+        };
+        protected.extensions.insert(
+            "energy_profile".into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[],"sections":[
+                    {"id":"saved","name":"Saved entry","start":0.,"end":16.,"energy":0.2},
+                    {"id":"strong","name":"Strong","start":16.,"end":150.,"energy":0.9}
+                ]
+            }),
+        );
+        let mut playable = Preparation {
+            cue_out: Some(150.),
+            ..Default::default()
+        };
+        playable.extensions.insert(
+            "energy_profile".into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[],"sections":[
+                    {"id":"main","name":"Main","start":0.,"end":150.,"energy":0.8}
+                ]
+            }),
+        );
+        let profile = Settings::default().playlists.remove(0);
+        for protection in ["manual_override", "manual_cue", "reviewed", "disabled"] {
+            let mut preparation = protected.clone();
+            // Explicit section-mixing opt-in must not bypass the desktop's
+            // existing protection for manual cues or reviewed preparation.
+            preparation
+                .extensions
+                .insert("energy_section_mixing".into(), serde_json::json!(true));
+            match protection {
+                "manual_override" => preparation.manual_override = true,
+                "manual_cue" => preparation.manual_cues.push(crate::preparation::Cue {
+                    id: "saved".into(),
+                    kind: "hot".into(),
+                    seconds: 0.,
+                    ..Default::default()
+                }),
+                "reviewed" => {
+                    preparation.analysis = Some(crate::preparation::AnalysisInfo {
+                        engine: "fixture".into(),
+                        duration: 150.,
+                        tempo_confidence: 0.,
+                        key_confidence: 0.,
+                        reviewed: true,
+                    })
+                }
+                _ => {
+                    preparation
+                        .extensions
+                        .insert("energy_section_mixing".into(), serde_json::json!(false));
+                }
+            }
+            let tracks = vec![
+                Track {
+                    path: "protected.wav".into(),
+                    title: "Protected".into(),
+                    preparation,
+                },
+                Track {
+                    path: "playable.wav".into(),
+                    title: "Playable".into(),
+                    preparation: playable.clone(),
+                },
+            ];
+            let saved = tracks[0].preparation.clone();
+            assert_eq!(
+                crate::energy_profile::automatic_entry(&saved, 0.9, 8.),
+                None,
+                "{protection}"
+            );
+            assert_eq!(
+                choose(&profile, &tracks, None, &[], Some(9.1), 0),
+                Some(1),
+                "{protection}"
+            );
+            assert_eq!(tracks[0].preparation, saved);
+        }
     }
     #[test]
     fn allow_exclude_and_recent_fallback_are_enforced() {

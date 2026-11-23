@@ -21,7 +21,6 @@ const HEADER_LIMIT: usize = 1024;
 const QUEUE_CAPACITY: usize = 2;
 const TICK: Duration = Duration::from_millis(10);
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
-const WARM_TIMEOUT: Duration = Duration::from_secs(8);
 const REAP_TIMEOUT: Duration = Duration::from_secs(2);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
 const PENDING: u8 = 0;
@@ -30,6 +29,21 @@ const DONE: u8 = 2;
 const CANCELLED: u8 = 3;
 type Parts = [Vec<f32>; 3];
 type Reply = Result<Parts, String>;
+/// Background-only, nonblocking snapshot of remaining playable buffer time.
+/// Zero irrevocably expires this request; it never cancels the shared source.
+pub(crate) type LiveBudget = Arc<dyn Fn() -> Duration + Send + Sync>;
+
+fn live_budget_expired(budget: Option<&LiveBudget>, state: &AtomicU8) -> bool {
+    if state.load(Ordering::Acquire) == CANCELLED {
+        return true;
+    }
+    if budget.is_some_and(|remaining| remaining().is_zero()) {
+        state.store(CANCELLED, Ordering::Release);
+        true
+    } else {
+        false
+    }
+}
 static BROKER: OnceLock<Result<Broker, String>> = OnceLock::new();
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -239,6 +253,7 @@ struct Request {
     state: Arc<AtomicU8>,
     config: Config,
     deadline: Instant,
+    live_budget: Option<LiveBudget>,
     reply: mpsc::SyncSender<Reply>,
 }
 #[derive(Default)]
@@ -286,6 +301,7 @@ impl RequestQueue {
             if work.state.load(Ordering::Acquire) == CANCELLED
                 || work.cancel.load(Ordering::Acquire)
                 || now >= work.deadline
+                || live_budget_expired(work.live_budget.as_ref(), &work.state)
             {
                 let work = pending.requests.remove(index);
                 if trace_enabled() {
@@ -413,7 +429,7 @@ impl Broker {
         config: Config,
         budget: Duration,
     ) -> Reply {
-        self.submit_traced(pcm, cancel, config, budget, None)
+        self.submit_traced(pcm, cancel, config, budget, None, None)
     }
     fn submit_traced(
         &self,
@@ -422,6 +438,7 @@ impl Broker {
         mut config: Config,
         budget: Duration,
         source: Option<(usize, u64, u64)>,
+        live_budget: Option<LiveBudget>,
     ) -> Reply {
         if let Some(memory) = self.memory_mib {
             if self.width > 1 && (!config.native || config.provider != "cpu") {
@@ -455,18 +472,22 @@ impl Broker {
             state: state.clone(),
             config,
             deadline,
+            live_budget: live_budget.clone(),
             reply,
         };
         self.queue.push(request)?;
         loop {
-            if Instant::now() >= deadline
-                && state
-                    .compare_exchange(PENDING, CANCELLED, Ordering::AcqRel, Ordering::Acquire)
-                    .is_ok()
-            {
+            // Return retained original audio without waiting for process kill/reap.
+            // The broker retains its slot and request ownership during cleanup.
+            if live_budget_expired(live_budget.as_ref(), &state) {
                 return Err(
-                    "Stem window timed out in the queue; original audio remains available".into(),
+                    "Stem window exceeded live playback budget; original audio remains available"
+                        .into(),
                 );
+            }
+            if Instant::now() >= deadline {
+                state.store(CANCELLED, Ordering::Release);
+                return Err("Stem window timed out; original audio remains available".into());
             }
             if (cancel.load(Ordering::Acquire) || self.stopping.load(Ordering::Acquire))
                 && state
@@ -482,7 +503,9 @@ impl Broker {
                         || self.stopping.load(Ordering::Acquire)
                     {
                         Err("Stem window cancelled".into())
-                    } else if Instant::now() >= deadline {
+                    } else if live_budget_expired(live_budget.as_ref(), &state)
+                        || Instant::now() >= deadline
+                    {
                         Err("Stem window timed out; original audio remains available".into())
                     } else {
                         result
@@ -558,13 +581,14 @@ pub(crate) fn configured() -> bool {
 /// At most three native CPU inferences plus six queued windows; overload rejects immediately.
 /// Budget includes queue time; expiry never cancels the caller's deck/source token.
 pub(crate) fn separate(pcm: Vec<f32>, cancel: Arc<AtomicBool>, budget: Duration) -> Reply {
-    separate_traced(pcm, cancel, budget, None)
+    separate_traced(pcm, cancel, budget, None, None)
 }
 pub(crate) fn separate_traced(
     pcm: Vec<f32>,
     cancel: Arc<AtomicBool>,
     budget: Duration,
     source: Option<(usize, u64, u64)>,
+    live_budget: Option<LiveBudget>,
 ) -> Reply {
     validate_input(&pcm)?;
     let config = Config::environment()?;
@@ -572,7 +596,7 @@ pub(crate) fn separate_traced(
         .get_or_init(|| Broker::start_pool(&config))
         .as_ref()
         .map_err(Clone::clone)?
-        .submit_traced(pcm, cancel, config, budget, source)
+        .submit_traced(pcm, cancel, config, budget, source, live_budget)
 }
 /// App-exit only: bounded (three seconds) cancellation/reap acknowledgement.
 /// Normal deck Stop must use its cancellation token, not block the UI here.
@@ -838,6 +862,7 @@ fn broker_loop(
             .is_err()
             || work.cancel.load(Ordering::Acquire)
             || Instant::now() >= work.deadline
+            || live_budget_expired(work.live_budget.as_ref(), &work.state)
         {
             let _ = work
                 .reply
@@ -878,7 +903,9 @@ fn process_window_tracked(
     if work.cancel.load(Ordering::Acquire) || stopping.load(Ordering::Acquire) {
         return Err("Stem window cancelled before inference".into());
     }
-    if Instant::now() >= work.deadline {
+    if Instant::now() >= work.deadline
+        || live_budget_expired(work.live_budget.as_ref(), &work.state)
+    {
         return Err(
             "Stem window timed out before inference; original audio remains available".into(),
         );
@@ -913,12 +940,7 @@ fn process_window_tracked(
     }
     let active = worker.as_mut().ok_or("ONNX worker unavailable")?;
     let exchange_started = Instant::now();
-    let exchange_deadline = exchange_started
-        + if active.warmed {
-            WARM_TIMEOUT
-        } else {
-            REQUEST_TIMEOUT
-        };
+    let exchange_deadline = exchange_started + REQUEST_TIMEOUT;
     let deadline = work.deadline.min(exchange_deadline);
     if trace_enabled() {
         trace(
@@ -946,6 +968,7 @@ fn process_window_tracked(
         if work.cancel.load(Ordering::Acquire)
             || stopping.load(Ordering::Acquire)
             || Instant::now() >= deadline
+            || live_budget_expired(work.live_budget.as_ref(), &work.state)
         {
             let observed = Instant::now();
             let cancelled = work.cancel.load(Ordering::Acquire);
@@ -954,6 +977,8 @@ fn process_window_tracked(
             if trace_enabled() {
                 trace(json!({"event":"exchange_stop", "id":work.id,
                     "cancelled":cancelled, "shutdown":shutdown, "reaped":reaped,
+                    "request_cancelled_or_expired":work.state.load(Ordering::Acquire) == CANCELLED,
+                    "live_budget_guard_present":work.live_budget.is_some(),
                     "exchange_ms":observed.duration_since(exchange_started).as_secs_f64()*1000.,
                     "request_margin_ms":margin_ms(work.deadline, observed),
                     "exchange_margin_ms":margin_ms(exchange_deadline, observed),
@@ -968,6 +993,14 @@ fn process_window_tracked(
         }
         match rx.recv_timeout(TICK) {
             Ok(Ok(parts)) => {
+                if work.cancel.load(Ordering::Acquire)
+                    || stopping.load(Ordering::Acquire)
+                    || Instant::now() >= deadline
+                    || live_budget_expired(work.live_budget.as_ref(), &work.state)
+                {
+                    let _ = stop_worker(worker);
+                    return Err("Stem result expired before publication".into());
+                }
                 if trace_enabled() {
                     let now = Instant::now();
                     trace(json!({"event":"exchange_complete", "id":work.id,
@@ -1128,6 +1161,8 @@ while True:
   child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'])
   with open(mode,'w') as marker: marker.write(str(child.pid))
   time.sleep(60)
+ if mode.endswith('slowwarm') and count==2:
+  time.sleep(9)
  if mode.endswith('stderr'):
   sys.stderr.buffer.write((b'x\x00'*10000)+b'\x00FAIL\x00');sys.stderr.buffer.flush()
   sys.exit(2)
@@ -1493,6 +1528,149 @@ while True:
         assert!(broker.shutdown());
     }
     #[test]
+    fn warm_worker_finishes_within_remaining_audio_budget_instead_of_fixed_cutoff() {
+        let broker = Broker::start().unwrap();
+        let config = config("slowwarm".into());
+        broker
+            .submit(
+                vec![0.25; 4],
+                token(),
+                config.clone(),
+                Duration::from_secs(2),
+            )
+            .unwrap();
+        let source_cancel = token();
+        let result = broker.submit(
+            vec![0.5; 4],
+            source_cancel.clone(),
+            config,
+            Duration::from_secs(15),
+        );
+        assert!(
+            result.is_ok(),
+            "warm request still had six seconds of its caller budget: {result:?}"
+        );
+        assert!(!source_cancel.load(Ordering::Acquire));
+        assert_eq!(result.unwrap()[0], vec![2.; 4]);
+        assert!(broker.shutdown());
+    }
+    #[test]
+    fn live_budget_expiry_is_latched_even_if_playback_pauses_again() {
+        let remaining = Arc::new(AtomicU64::new(20));
+        let read = remaining.clone();
+        let guard: LiveBudget = Arc::new(move || Duration::from_secs(read.load(Ordering::Acquire)));
+        let state = AtomicU8::new(RUNNING);
+        assert!(!live_budget_expired(Some(&guard), &state));
+        remaining.store(0, Ordering::Release);
+        assert!(live_budget_expired(Some(&guard), &state));
+        remaining.store(20, Ordering::Release);
+        assert!(live_budget_expired(Some(&guard), &state));
+    }
+    #[test]
+    fn running_live_expiry_returns_original_before_cleanup_releases_slot() {
+        // A broker-owned RUNNING request with deliberately withheld cleanup/reply.
+        // This makes delayed cleanup deterministic, without platform kill timing.
+        let broker = Arc::new(unstarted(1));
+        let background = broker.clone();
+        let remaining = Arc::new(AtomicU64::new(20));
+        let read = remaining.clone();
+        let guard: LiveBudget = Arc::new(move || Duration::from_secs(read.load(Ordering::Acquire)));
+        let cancel = token();
+        let source_cancel = cancel.clone();
+        let handle = thread::spawn(move || {
+            background.submit_traced(
+                vec![0.; 4],
+                cancel,
+                config("good".into()),
+                Duration::from_secs(15),
+                None,
+                Some(guard),
+            )
+        });
+        let state = wait_pending(&broker);
+        let work = broker.queue.pending.lock().unwrap().requests.remove(0);
+        state.store(RUNNING, Ordering::Release);
+        let before = Instant::now();
+        remaining.store(0, Ordering::Release);
+        assert!(
+            handle
+                .join()
+                .unwrap()
+                .unwrap_err()
+                .contains("live playback budget")
+        );
+        assert!(before.elapsed() < Duration::from_millis(250));
+        assert!(!source_cancel.load(Ordering::Acquire));
+        assert_eq!(state.load(Ordering::Acquire), CANCELLED);
+        assert_eq!(
+            broker.queue.pending.lock().unwrap().outstanding.len(),
+            1,
+            "caller fallback must not release the broker-owned cleanup slot"
+        );
+        broker.queue.finish(&work);
+        assert!(broker.queue.pending.lock().unwrap().outstanding.is_empty());
+    }
+    #[test]
+    fn live_expiry_rejects_already_arriving_successful_reply() {
+        let broker = Arc::new(unstarted(1));
+        let background = broker.clone();
+        let remaining = Arc::new(AtomicU64::new(20));
+        let read = remaining.clone();
+        let guard: LiveBudget = Arc::new(move || Duration::from_secs(read.load(Ordering::Acquire)));
+        let source_cancel = token();
+        let cancel = source_cancel.clone();
+        let handle = thread::spawn(move || {
+            background.submit_traced(
+                vec![0.; 4],
+                cancel,
+                config("good".into()),
+                Duration::from_secs(15),
+                None,
+                Some(guard),
+            )
+        });
+        wait_pending(&broker);
+        let work = broker.queue.pending.lock().unwrap().requests.remove(0);
+        work.state.store(RUNNING, Ordering::Release);
+        remaining.store(0, Ordering::Release);
+        let _ = work.reply.send(Ok([vec![1.; 4], vec![2.; 4], vec![3.; 4]]));
+        assert!(
+            handle.join().unwrap().is_err(),
+            "expired PCM must not publish"
+        );
+        assert!(!source_cancel.load(Ordering::Acquire));
+        broker.queue.finish(&work);
+    }
+    #[test]
+    fn live_budget_expiry_stops_real_fake_process_without_cancelling_source() {
+        let directory = tempfile::tempdir().unwrap();
+        let marker = directory.path().join("hang");
+        let broker = Arc::new(Broker::start().unwrap());
+        let background = broker.clone();
+        let remaining = Arc::new(AtomicU64::new(20));
+        let read = remaining.clone();
+        let guard: LiveBudget = Arc::new(move || Duration::from_secs(read.load(Ordering::Acquire)));
+        let cancel = token();
+        let source_cancel = cancel.clone();
+        let cfg = config(marker.clone());
+        let handle = thread::spawn(move || {
+            background.submit_traced(
+                vec![0.; 4],
+                cancel,
+                cfg,
+                Duration::from_secs(15),
+                None,
+                Some(guard),
+            )
+        });
+        let pid = wait_for_child(&marker);
+        remaining.store(0, Ordering::Release);
+        assert!(handle.join().unwrap().is_err());
+        assert!(!source_cancel.load(Ordering::Acquire));
+        assert!(broker.shutdown());
+        wait_descendant_stopped(pid);
+    }
+    #[test]
     fn invalid_or_oversized_input_is_rejected_before_ipc() {
         for pcm in [
             vec![],
@@ -1628,6 +1806,7 @@ while True:
             state: Arc::new(AtomicU8::new(RUNNING)),
             config,
             deadline,
+            live_budget: None,
             reply,
         }
     }
