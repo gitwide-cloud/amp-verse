@@ -56,11 +56,19 @@ jobs:
           sudo udevadm trigger --name-match=kvm
           cat > "$RUNNER_TEMP/amp-card-ui.sh" <<'SCRIPT'
           #!/usr/bin/env bash
-          set +e
+          set -e
           adb shell settings put global window_animation_scale 0
           adb shell settings put global transition_animation_scale 0
           adb shell settings put global animator_duration_scale 0
-          adb shell input keyevent 82
+          adb wait-for-device
+          # The disposable Google API image's Pixel Launcher produced an ANR
+          # over the tested Activity. Stop that exact unrelated package before
+          # instrumentation; leave ANR detection and all application tests intact.
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell wm dismiss-keyguard
+          adb shell am force-stop com.google.android.apps.nexuslauncher
+          sleep 10
+          set +e
           gradle -p android :app:connectedFullDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=cloud.gitwide.ampverse.CardUiDeviceTest,cloud.gitwide.ampverse.CleanUiDeviceTest
           result=$?
           mkdir -p test-output/android-card-ui
@@ -86,7 +94,7 @@ jobs:
           arch: x86_64
           profile: pixel_6
           cores: 2
-          ram-size: 2048M
+          ram-size: 3072M
           disk-size: 4096M
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
