@@ -1,6 +1,7 @@
 //! DJ Engine: device rendering and stem preparation. Musical decisions live in DJ Logic.
 #[path = "stems.rs"]
 pub(crate) mod stems;
+#[path = "mixer/vinyl_follow.rs"]
 mod vinyl_follow;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Consumer, PushError, RingBuffer};
