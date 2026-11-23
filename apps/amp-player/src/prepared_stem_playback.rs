@@ -76,9 +76,11 @@ pub(crate) fn decode_at(
                 .min(prepared.manifest.frames);
             let mut graph = String::new();
             for (index, part) in prepared.manifest.parts.iter().enumerate() {
-                graph.push_str(&format!("[{index}:a]atrim=start_sample={start}:end_sample={end},asetpts=PTS-STARTPTS,volume={}[p{index}];",part.restore_gain));
+                graph.push_str(&format!("[{index}:a]aformat=sample_fmts=fltp:sample_rates=44100:channel_layouts=stereo,asettb=1/44100,asetpts=N/SR/TB,atrim=start_sample={start}:end_sample={end},asetpts=PTS-STARTPTS,volume={}[p{index}];",part.restore_gain));
             }
-            graph.push_str("[p0][p1][p2]join=inputs=3:channel_layout=5.1:map=0.0-FL|0.1-FR|1.0-FC|1.1-LFE|2.0-BL|2.1-BR[out]");
+            graph.push_str(
+                "[p0][p1][p2]amerge=inputs=3,pan=5.1|FL=c0|FR=c1|FC=c2|LFE=c3|BL=c4|BR=c5[out]",
+            );
             command.args(["-filter_complex", &graph, "-map", "[out]"]);
             6
         }
@@ -326,13 +328,28 @@ pub(crate) mod tests {
         );
         assert!(!degraded);
         assert_eq!(trimmed.len(), 88200);
+        let original = amp_core::command("ffmpeg")
+            .args(["-v", "error", "-i"])
+            .arg(&f.source)
+            .args(["-ac", "2", "-ar", "44100", "-f", "f32le", "pipe:1"])
+            .output()
+            .unwrap();
+        assert!(original.status.success());
+        let original: Vec<f32> = original
+            .stdout
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .map(|b| f32::from_le_bytes(*b))
+            .collect();
+        assert_eq!(original.len(), full.len() * 2);
         let mut error = 0.;
         let mut changed = 0.;
         for (i, frame) in full.iter().enumerate() {
             assert!((frame[2] - 2. * frame[0]).abs() < 1e-6);
             assert!((frame[4] - frame[0]).abs() < 1e-6);
             let dry = frame[0] + frame[2] + frame[4];
-            let expected = (2. * std::f64::consts::PI * 997. * i as f64 / 44100.).sin() * 0.125;
+            let expected = original[i * 2] as f64;
             error += (dry as f64 - expected).powi(2);
             changed += (dry - frame[2]).powi(2) as f64;
         }
