@@ -2476,7 +2476,10 @@ impl Player {
     }
     fn loaded_auto_playlist_info(&self) -> Option<(&str, &str)> {
         if let Some(profile) = &self.run.profile {
-            Some(("Smart", profile.name.as_str()))
+            Some((
+                "Smart",
+                dj_browser::smart_playlist_name(profile, &self.run.settings),
+            ))
         } else if self.run.has_regular_playlist() {
             self.run.playlist.as_deref().map(|name| ("Regular", name))
         } else {

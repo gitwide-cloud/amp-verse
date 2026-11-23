@@ -110,6 +110,7 @@ mod tests {
         assert!(text.contains("Auto Mix") && text.contains("DJ Settings"));
         assert!(!text.contains("Playlist") && !text.contains("remembered-choice"));
         let mut profile = player.run.settings.playlists[0].clone();
+        profile.id = "loaded-only".into();
         profile.name = "R&B loaded snapshot".into();
         player.run.profile = Some(profile);
         let (text, gear) = status_frame(&ctx, &mut player, vec![]);
@@ -147,6 +148,15 @@ mod tests {
         assert!(!player.run.auto);
         assert_eq!(player.playback_owner, owner);
         assert!(player.loaded.iter().all(Option::is_none));
+        assert_eq!(
+            player.run.profile.as_ref().unwrap().name,
+            "R&B loaded snapshot"
+        );
+        let mut renamed = player.run.profile.clone().unwrap();
+        renamed.name = "R&B renamed".into();
+        player.run.settings.playlists.push(renamed);
+        let (text, _) = status_frame(&ctx, &mut player, vec![]);
+        assert!(text.contains("R&B renamed") && !text.contains("R&B loaded snapshot"));
         assert_eq!(
             player.run.profile.as_ref().unwrap().name,
             "R&B loaded snapshot"

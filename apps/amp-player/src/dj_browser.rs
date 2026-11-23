@@ -189,7 +189,7 @@ impl Browser {
         self.smart = id.into();
     }
 }
-fn smart_playlist_name<'a>(
+pub(super) fn smart_playlist_name<'a>(
     profile: &'a amp_core::show::SmartPlaylist,
     saved: &'a amp_core::show::Settings,
 ) -> &'a str {
