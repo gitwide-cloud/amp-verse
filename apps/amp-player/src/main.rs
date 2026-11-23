@@ -1647,7 +1647,7 @@ impl Player {
     fn player_ui(&mut self, ui: &mut egui::Ui) {
         skin::panel(ui, true, |ui| {
             self.header(ui, "AMP VERSE", true);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for (caption, action) in [
                     ("|<", 0),
                     (
@@ -1697,6 +1697,17 @@ impl Player {
                             _ => self.next(),
                         }
                     }
+                }
+                if self.workspace.rendering {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(62., 62.), egui::Sense::hover());
+                    organized_library::artwork(
+                        ui,
+                        rect,
+                        self.loaded_origin[0].as_deref().unwrap_or(&self.root),
+                        self.loaded_track(0),
+                        &self.title(0),
+                    );
                 }
                 skin::display(ui, |ui| {
                     let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
@@ -3751,6 +3762,9 @@ fn main() -> eframe::Result {
     }
     if player.screenshot_view == "v1-analysis" {
         player.library_page = 6;
+    }
+    if player.screenshot_view == "v1-playlists" {
+        player.library_page = 2;
     }
     if player.screenshot_view.is_empty() {
         player.recovery = session::Recovery::open(&player.root);

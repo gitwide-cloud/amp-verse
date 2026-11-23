@@ -115,14 +115,14 @@ impl Theme {
                 muted: C::from_rgb(84, 96, 111),
             },
             Self::ModernDark => Palette {
-                background: C::from_rgb(13, 16, 22),
-                surface: C::from_rgb(24, 29, 38),
-                elevated: C::from_rgb(34, 41, 53),
-                border: C::from_rgb(70, 81, 99),
-                text: C::from_rgb(231, 236, 243),
-                accent: C::from_rgb(255, 197, 54),
-                signal: C::from_rgb(130, 212, 155),
-                muted: C::from_rgb(155, 168, 187),
+                background: C::from_rgb(6, 13, 18),
+                surface: C::from_rgb(14, 23, 29),
+                elevated: C::from_rgb(30, 38, 44),
+                border: C::from_rgb(60, 75, 84),
+                text: C::from_rgb(245, 247, 249),
+                accent: C::from_rgb(255, 211, 0),
+                signal: C::from_rgb(63, 224, 101),
+                muted: C::from_rgb(170, 185, 198),
             },
         }
     }
@@ -254,6 +254,41 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
         style
             .text_styles
             .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.));
+    }
+    if theme == Theme::ModernDark {
+        let display_family = if ctx
+            .data(|data| data.get_temp::<bool>(egui::Id::unique("amp-brand-fonts")))
+            .unwrap_or(false)
+        {
+            egui::FontFamily::Name("AMP Display".into())
+        } else {
+            egui::FontFamily::Proportional
+        };
+        style.visuals.extreme_bg_color = p.background;
+        style.visuals.faint_bg_color = p.surface;
+        style.visuals.text_edit_bg_color = Some(p.background);
+        style.visuals.window_corner_radius = egui::CornerRadius::same(14);
+        style.visuals.menu_corner_radius = egui::CornerRadius::same(12);
+        style.visuals.widgets.noninteractive.bg_fill = p.surface;
+        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1., p.border);
+        style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(12);
+        style.visuals.widgets.inactive.weak_bg_fill = p.elevated;
+        style.visuals.slider_trailing_fill = true;
+        style.visuals.selection.bg_fill = p.accent;
+        style.visuals.selection.stroke = egui::Stroke::new(1., p.background);
+        style.spacing.button_padding = egui::vec2(14., 9.);
+        style.spacing.item_spacing = egui::vec2(9., 8.);
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            egui::FontId::new(27., display_family.clone()),
+        );
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(15.));
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::new(17., display_family),
+        );
     }
     ctx.set_global_style(style);
     for id in [

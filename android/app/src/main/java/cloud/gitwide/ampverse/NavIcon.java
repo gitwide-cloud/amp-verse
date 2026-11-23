@@ -9,7 +9,7 @@ final class NavIcon extends Drawable {
     private final String name;
     private final Paint paint=new Paint(Paint.ANTI_ALIAS_FLAG);
     private final int size;
-    NavIcon(Context context,String name,int color){this.name=name;size=(int)(20*context.getResources().getDisplayMetrics().density);paint.setColor(color);paint.setStrokeWidth(1.8f);paint.setStrokeCap(Paint.Cap.ROUND);}
+    NavIcon(Context context,String name,int color){this.name=name;size=(int)(24*context.getResources().getDisplayMetrics().density);paint.setColor(color);paint.setStrokeWidth(1.8f);paint.setStrokeCap(Paint.Cap.ROUND);}
     @Override public void draw(Canvas canvas){canvas.save();canvas.translate(getBounds().left,getBounds().top);canvas.scale(getBounds().width()/24f,getBounds().height()/24f);paint.setStyle(Paint.Style.STROKE);
         if(name.equals("Player")){Path p=new Path();p.moveTo(7,4);p.lineTo(20,12);p.lineTo(7,20);p.close();canvas.drawPath(p,paint);}
         else if(name.equals("Library")){for(int y=5;y<=19;y+=7){canvas.drawCircle(4,y,1,paint);canvas.drawLine(9,y,21,y,paint);}}

@@ -346,26 +346,20 @@ fn timestamp() -> u64 {
         .as_secs()
 }
 fn tile(ui: &mut egui::Ui, title: &str, detail: Option<usize>, size: egui::Vec2) -> egui::Response {
-    let (r, response) = ui.allocate_exact_size(size, egui::Sense::click());
+    let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let p = crate::theme::current(ui.ctx()).palette();
-    let painter = ui.painter();
-    painter.rect_filled(
-        r,
-        3.,
+    ui.painter().rect_filled(
+        rect,
+        12.,
         if response.hovered() {
             p.elevated
         } else {
             p.surface
         },
     );
-    painter.rect_filled(
-        egui::Rect::from_min_size(r.min, egui::vec2(r.width(), 5.)),
-        2.,
-        p.elevated,
-    );
-    painter.rect_stroke(
-        r,
-        3.,
+    ui.painter().rect_stroke(
+        rect,
+        12.,
         egui::Stroke::new(
             1.,
             if response.hovered() {
@@ -376,29 +370,71 @@ fn tile(ui: &mut egui::Ui, title: &str, detail: Option<usize>, size: egui::Vec2)
         ),
         egui::StrokeKind::Inside,
     );
-    painter.line_segment(
-        [
-            r.left_bottom() + egui::vec2(5., -3.),
-            r.right_bottom() + egui::vec2(-5., -3.),
-        ],
-        egui::Stroke::new(2., p.accent),
+    let hash = title
+        .bytes()
+        .fold(0usize, |a, b| a.wrapping_add(b as usize));
+    let colors = [
+        egui::Color32::from_rgb(116, 84, 11),
+        egui::Color32::from_rgb(22, 103, 44),
+        egui::Color32::from_rgb(6, 115, 117),
+        egui::Color32::from_rgb(95, 49, 133),
+        egui::Color32::from_rgb(143, 42, 71),
+        egui::Color32::from_rgb(22, 91, 139),
+    ];
+    let badge = egui::Rect::from_min_size(
+        rect.min + egui::vec2(8., 8.),
+        egui::vec2(54., (size.y - 16.).min(62.)),
     );
-    painter.text(
-        r.center() - egui::vec2(0., if detail.is_some() { 14. } else { 0. }),
-        egui::Align2::CENTER_CENTER,
-        title,
+    if detail.is_none() {
+        ui.painter()
+            .rect_filled(badge, 10., colors[hash % colors.len()]);
+    }
+    let icon = match title {
+        "Recently Played" => crate::icons::Icon::Play,
+        "Downloaded" => crate::icons::Icon::Next,
+        "Retention Soon" => crate::icons::Icon::History,
+        "Subscriptions" => crate::icons::Icon::Cast,
+        "Technology" => crate::icons::Icon::Device,
+        "Music" => crate::icons::Icon::Headphones,
+        "Business" => crate::icons::Icon::Folder,
+        "News" => crate::icons::Icon::List,
+        "Investing" => crate::icons::Icon::Analyze,
+        _ => crate::icons::Icon::Layers,
+    };
+    crate::icons::draw(
+        ui,
+        badge.shrink(7.),
+        icon,
+        if detail.is_some() {
+            p.accent
+        } else {
+            egui::Color32::from_rgb(245, 237, 202)
+        },
+    );
+    let text = egui::pos2(
+        rect.left() + 76.,
+        rect.center().y - if detail.is_some() { 14. } else { 0. },
+    );
+    let galley = ui.painter().layout(
+        title.to_owned(),
         egui::FontId::proportional(16.),
         p.text,
+        (rect.width() - 84.).max(40.),
     );
+    let origin = egui::pos2(text.x, text.y - galley.size().y * 0.5);
+    ui.painter()
+        .with_clip_rect(rect.shrink(6.))
+        .galley(origin, galley, p.text);
     if let Some(count) = detail {
-        painter.text(
-            r.center() + egui::vec2(0., 15.),
-            egui::Align2::CENTER_CENTER,
+        ui.painter().text(
+            text + egui::vec2(0., 29.),
+            egui::Align2::LEFT_CENTER,
             count.to_string(),
-            egui::FontId::proportional(22.),
+            egui::FontId::proportional(24.),
             p.accent,
         );
     }
+    response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), title));
     response
 }
 fn podcast_brand(ui: &mut egui::Ui) {
@@ -989,18 +1025,20 @@ impl Podcasts {
         let available = ui.available_size();
         ui.horizontal_top(|ui| {
             ui.vertical(|ui| {
-                ui.set_width(if available.x>900. {180.}else{136.});
+                ui.set_width(if available.x>900. {205.}else{150.});
+                egui::ScrollArea::vertical().id_salt("podcast-sidebar").max_height(available.y.max(80.)).show(ui,|ui| {
                 crate::skin::panel(ui,false,|ui| {
                     podcast_brand(ui);
                     ui.weak("Discover. Listen. Follow.");
                 });
                 for (i,title) in ["Home","Search","Browse / Categories","Subscriptions","Downloaded","Recently Played","Expiring","Play Queues","Show details","Settings"].iter().enumerate() {
                     if i==8 {continue;}
-                    if ui.add_sized([ui.available_width(),34.],egui::Button::new(*title).selected(self.page==i)).clicked(){self.page=i;}
+                    if ui.add_sized([ui.available_width(),44.],egui::Button::new(*title).selected(self.page==i)).clicked(){self.page=i;}
                 }
                 ui.separator();ui.weak("Audio: AMP Player");
                 if self.active.is_some() && ui.button("Open Player controls").clicked(){self.open_player=true;}
                 if self.active.is_some() && ui.button("Return to music queue").clicked(){self.resume_music=true;self.active=None;}
+                });
             });
             ui.separator();
             crate::skin::panel(ui,false,|ui| {
@@ -1015,7 +1053,7 @@ impl Podcasts {
                     match self.page {
                         0|2 => {
                             if self.page==0 {
-                                let tile_width=((ui.available_width()-24.)/4.).max(100.);
+                                let cols=((ui.available_width()/240.).floor() as usize).clamp(1,4);let tile_width=((ui.available_width()-9.*(cols-1) as f32)/cols as f32).max(160.);
                                 ui.horizontal_wrapped(|ui| {
                                     for (page,title,count) in [(5,"Recently Played",self.history.values().filter(|h|h.episode.is_some()).count()),(4,"Downloaded",self.cache.count()),(6,"Retention Soon",self.cache.expiring_count()),(3,"Subscriptions",self.feeds.len())] {
                                         if tile(ui,title,Some(count),egui::vec2(tile_width,88.)).clicked(){self.page=page;}
@@ -1023,7 +1061,7 @@ impl Podcasts {
                                 });ui.add_space(12.);
                             }
                             ui.heading("Categories");ui.weak("Apple Podcasts directory categories");
-                            let cols=((ui.available_width()/190.).floor() as usize).clamp(1,4);
+                            let cols=((ui.available_width()/260.).floor() as usize).clamp(1,4);
                             let tile_width=(ui.available_width()-8.*(cols-1) as f32)/cols as f32;
                             egui::Grid::new("podcast-categories").spacing([8.,8.]).show(ui,|ui| {
                                 for (i,(name,id)) in CATEGORIES.iter().enumerate(){if tile(ui,name,None,egui::vec2(tile_width,82.)).clicked(){self.search((*name).into(),Some((*id).into()));}
@@ -1096,7 +1134,26 @@ if let Some((a,b))=swap{self.queue.swap(a,b);self.persist_listening();}
     }
     fn subscriptions(&mut self, ui: &mut egui::Ui) {
         if self.feeds.is_empty() {
-            ui.label("Find a podcast you enjoy and subscribe to follow new episodes.");
+            crate::skin::panel(ui, false, |ui| {
+                ui.set_min_width(ui.available_width());
+                ui.set_min_height(180.);
+                ui.vertical_centered(|ui| {
+                    ui.add_space(20.);
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(48., 48.), egui::Sense::hover());
+                    crate::icons::draw(
+                        ui,
+                        rect,
+                        crate::icons::Icon::Microphone,
+                        crate::theme::current(ui.ctx()).palette().muted,
+                    );
+                    ui.heading("No subscriptions yet");
+                    ui.label("Search for a podcast or browse categories to get started.");
+                    if ui.button("Find Podcasts").clicked() {
+                        self.page = 1;
+                    }
+                });
+            });
         }
         for feed in self.feeds.clone() {
             crate::skin::panel(ui, false, |ui| {

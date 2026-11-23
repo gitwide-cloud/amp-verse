@@ -7,13 +7,17 @@ pub struct Workspace {
 }
 impl Default for Workspace {
     fn default() -> Self {
-        let enabled = std::env::var_os("AMP_V1_MODE").is_some();
+        let enabled = std::env::var_os("AMP_V1_MODE").is_some()
+            || std::env::var("AMP_SCREENSHOT_VIEW").is_ok_and(|view| view.starts_with("v1-"));
         let pane = std::env::var("AMP_SCREENSHOT_VIEW")
             .ok()
             .and_then(|view| match view.as_str() {
                 "v1-dj" => Some(2),
                 "v1-player" => Some(0),
                 "v1-podcasts" => Some(6),
+                "v1-library" | "v1-playlists" => Some(1),
+                "v1-cast" => Some(4),
+                "v1-lab" => Some(3),
                 _ => None,
             })
             .unwrap_or(1);
@@ -68,54 +72,82 @@ impl Player {
             .audio
             .as_ref()
             .map_or(0., |audio| audio.source_position(0));
-        if track
-            .as_ref()
-            .is_some_and(|t| t.preparation.extensions.contains_key("podcast_stream_url"))
-        {
-            ui.weak("Publisher audio stream. Download this episode for local offline playback.");
-        } else {
-            self.waveforms[0].height = Some(110.);
-            self.waveforms[0].show(
-                ui,
-                self.loaded_origin[0].as_deref().unwrap_or(&self.root),
-                track.as_ref(),
-                position,
-                self.wave_span,
-                0,
-            );
-        }
-        ui.add_space(12.);
-        ui.horizontal(|ui| {
-            ui.heading("Play queue");
-            ui.weak(format!("{} songs", self.queue.len()));
-            if ui.button("Browse music").clicked() {
-                self.workspace.pane = 1;
+        skin::panel(ui, false, |ui| {
+            ui.set_min_width(ui.available_width());
+            if track
+                .as_ref()
+                .is_some_and(|t| t.preparation.extensions.contains_key("podcast_stream_url"))
+            {
+                ui.weak(
+                    "Publisher audio stream. Download this episode for local offline playback.",
+                );
+            } else {
+                self.waveforms[0].height = Some(110.);
+                self.waveforms[0].show(
+                    ui,
+                    self.loaded_origin[0].as_deref().unwrap_or(&self.root),
+                    track.as_ref(),
+                    position,
+                    self.wave_span,
+                    0,
+                );
             }
         });
+        ui.add_space(12.);
         let mut play = None;
-        egui::ScrollArea::vertical()
-            .id_salt("v1-player-queue")
-            .max_height(ui.available_height().max(40.))
-            .show(ui, |ui| {
-                if self.queue.is_empty() {
-                    ui.weak("Choose songs or a playlist in Library to build your queue.");
-                }
-                if let Some(library) = &self.library {
-                    for (order, index) in self.queue.iter().enumerate() {
-                        if let Some(track) = library.tracks.get(*index)
-                            && ui
-                                .add_sized(
-                                    [ui.available_width(), 32.],
-                                    egui::Button::new(format!("{}   {}", order + 1, track.title))
-                                        .selected(self.loaded[0] == Some(*index)),
-                                )
-                                .clicked()
-                        {
-                            play = Some(*index);
-                        }
-                    }
+        skin::panel(ui, false, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.horizontal(|ui| {
+                ui.heading("Play queue");
+                ui.weak(format!("{} songs", self.queue.len()));
+                if ui.button("Browse music").clicked() {
+                    self.workspace.pane = 1;
                 }
             });
+            egui::ScrollArea::vertical()
+                .id_salt("v1-player-queue")
+                .max_height(ui.available_height().max(40.))
+                .show(ui, |ui| {
+                    if self.queue.is_empty() {
+                        ui.weak("Choose songs or a playlist in Library to build your queue.");
+                        ui.vertical_centered(|ui| {
+                            ui.add_space(40.);
+                            let (rect, _) =
+                                ui.allocate_exact_size(egui::vec2(60., 60.), egui::Sense::hover());
+                            icons::draw(
+                                ui,
+                                rect,
+                                icons::Icon::List,
+                                theme::current(ui.ctx()).palette().muted,
+                            );
+                            ui.heading("Your queue is empty");
+                            ui.label("Add songs from your Library to get started.");
+                            if ui.button("Go to Library").clicked() {
+                                self.workspace.pane = 1;
+                            }
+                        });
+                    }
+                    if let Some(library) = &self.library {
+                        for (order, index) in self.queue.iter().enumerate() {
+                            if let Some(track) = library.tracks.get(*index)
+                                && ui
+                                    .add_sized(
+                                        [ui.available_width(), 32.],
+                                        egui::Button::new(format!(
+                                            "{}   {}",
+                                            order + 1,
+                                            track.title
+                                        ))
+                                        .selected(self.loaded[0] == Some(*index)),
+                                    )
+                                    .clicked()
+                            {
+                                play = Some(*index);
+                            }
+                        }
+                    }
+                });
+        });
         if let Some(index) = play {
             self.play(0, index);
         }
@@ -127,6 +159,22 @@ impl Player {
             theme::current(ui.ctx()).palette().background,
         );
         crate::dragdrop::prepare_drag(ui.ctx());
+        let scope: Vec<f32> = self
+            .audio
+            .as_ref()
+            .map(|audio| {
+                (0..48)
+                    .map(|i| {
+                        f32::from_bits(
+                            audio.controls.scope[0][i * 2]
+                                .load(std::sync::atomic::Ordering::Relaxed),
+                        )
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::unique("workspace-master-scope"), scope));
         self.header(
             ui,
             match self.workspace.pane {
@@ -150,10 +198,41 @@ impl Player {
                 (5, "Add-ons"),
                 (6, "Podcasts"),
             ] {
-                let tab = ui.add_sized(
-                    [104., 36.],
-                    egui::Button::new(label).selected(self.workspace.pane == pane),
-                );
+                let icon = match pane {
+                    0 => icons::Icon::Play,
+                    1 => icons::Icon::Folder,
+                    2 => icons::Icon::Headphones,
+                    3 => icons::Icon::Flask,
+                    4 => icons::Icon::Cast,
+                    5 => icons::Icon::Puzzle,
+                    _ => icons::Icon::Microphone,
+                };
+                let tab = ui
+                    .scope(|ui| {
+                        // Full gold tab, matching the touch and desktop module navigation.
+                        let selected = self.workspace.pane == pane;
+                        let palette = theme::current(ui.ctx()).palette();
+                        if selected {
+                            ui.visuals_mut().override_text_color = Some(palette.background);
+                        }
+                        icons::button(
+                            ui,
+                            icon,
+                            label,
+                            selected,
+                            egui::vec2(
+                                if pane == 4 {
+                                    170.
+                                } else if pane == 6 {
+                                    135.
+                                } else {
+                                    115.
+                                },
+                                42.,
+                            ),
+                        )
+                    })
+                    .inner;
                 #[cfg(test)]
                 ui.ctx().data_mut(|data| {
                     data.insert_temp(egui::Id::unique(("workspace-tab", pane)), tab.rect)
@@ -166,16 +245,29 @@ impl Player {
                     self.lab_open = pane == 3;
                 }
             }
-            ui.weak(format!("{} Beta 6", env!("CARGO_PKG_VERSION")));
-            if ui
-                .button("Classic windows")
-                .on_hover_text("Return to the separate player and dockable windows")
-                .clicked()
-            {
-                self.workspace.enabled = false;
-                ui.ctx()
-                    .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(400., 150.)));
-            }
+            ui.weak(format!("{} Beta 7", env!("CARGO_PKG_VERSION")));
+            let settings_menu = ui.menu_button("   ", |ui| {
+                ui.label("Appearance");
+                theme::selector(ui);
+                ui.separator();
+                if ui.button("Separate module windows").clicked() {
+                    self.workspace.enabled = false;
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+                            400., 150.,
+                        )));
+                    ui.close();
+                }
+            });
+            icons::draw(
+                ui,
+                settings_menu.response.rect.shrink(4.),
+                icons::Icon::Settings,
+                skin::foreground(ui),
+            );
+            settings_menu
+                .response
+                .on_hover_text("Settings and appearance");
         });
         ui.separator();
         let content_height = ui.available_height().max(60.);
