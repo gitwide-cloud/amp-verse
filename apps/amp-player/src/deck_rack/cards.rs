@@ -136,7 +136,7 @@ impl Player {
         }
     }
     pub(super) fn card_rack(&mut self, ui: &mut egui::Ui, height: f32) {
-        let available = (ui.available_width() - 8.).max(1.);
+        let available = (ui.available_width() - 24.).max(1.);
         let total = available.min(1900.);
         let gap = 8.;
         let center = if total < 1250. { 94. } else { 108. };
@@ -362,9 +362,10 @@ impl Player {
                     ui.set_min_height(height - 24.);
                     ui.spacing_mut().item_spacing.y = 3.;
                     let compact_card = width < 1000.;
+                    let minimum_wheel = if self.rack.six { 130. } else { 160. };
                     let wheel = (height - if compact_card { 222. } else { 180. })
-                        .clamp(130., 218.)
-                        .min((width * 0.43).max(130.));
+                        .clamp(minimum_wheel, 218.)
+                        .min((width * 0.43).max(minimum_wheel));
                     let info = (width
                         - 20.
                         - wheel
@@ -492,186 +493,188 @@ impl Player {
                     } else {
                         10000.
                     };
-                    egui::ScrollArea::vertical()
-                        .id_salt(("card-lower-controls", d))
-                        .max_height(lower_height)
-                        .min_scrolled_height(0.)
-                        .auto_shrink([false, true])
-                        .show(ui, |ui| {
-                            let mode_key = egui::Id::unique(("card-knob-mode-stems", d));
-                            let mut stems = ui
-                                .ctx()
-                                .data(|data| data.get_temp::<bool>(mode_key))
-                                .unwrap_or(true);
-                            ui.horizontal(|ui| {
-                                ui.selectable_value(&mut stems, false, "EQ");
-                                ui.selectable_value(&mut stems, true, "Stems");
-                                if stems && ui.small_button("Enable / reload").clicked() {
-                                    self.card_open_tools(ui.ctx(), d, 1);
-                                }
-                            });
-                            ui.ctx().data_mut(|data| data.insert_temp(mode_key, stems));
-                            let knobs = ui.scope(|ui| {
-                                ui.columns(5, |columns| {
-                                    for (band, label) in [(0, "LOW"), (1, "MID"), (2, "HIGH")] {
-                                        columns[band].vertical_centered(|ui| {
-                                            ui.spacing_mut().interact_size.y = 34.;
-                                            if stems {
-                                                let (stem, label) =
-                                                    [(0, "VOC"), (2, "BEAT"), (1, "INST")][band];
-                                                self.card_stem_dial(ui, d, stem, label);
-                                                return;
-                                            }
-                                            if dj_mixer::dial(
-                                                ui,
-                                                label,
-                                                &mut self.eq[d][band],
-                                                -24. ..=12.,
-                                                accent(d),
-                                            )
-                                            .changed()
-                                                && let Some(audio) = &self.audio
-                                            {
-                                                if self.pair().contains(&d) {
-                                                    self.run.cancel_effects(audio);
-                                                }
-                                                audio.set_eq(d, band, self.eq[d][band]);
-                                            }
-                                            ui.small(label);
-                                        });
-                                    }
-                                    columns[3].vertical_centered(|ui| {
+                    let lower_controls = |ui: &mut egui::Ui| {
+                        let mode_key = egui::Id::unique(("card-knob-mode-stems", d));
+                        let mut stems = ui
+                            .ctx()
+                            .data(|data| data.get_temp::<bool>(mode_key))
+                            .unwrap_or(true);
+                        ui.horizontal(|ui| {
+                            ui.selectable_value(&mut stems, false, "EQ");
+                            ui.selectable_value(&mut stems, true, "Stems");
+                            if stems && ui.small_button("Enable / reload").clicked() {
+                                self.card_open_tools(ui.ctx(), d, 1);
+                            }
+                        });
+                        ui.ctx().data_mut(|data| data.insert_temp(mode_key, stems));
+                        let knobs = ui.scope(|ui| {
+                            ui.columns(5, |columns| {
+                                for (band, label) in [(0, "LOW"), (1, "MID"), (2, "HIGH")] {
+                                    columns[band].vertical_centered(|ui| {
                                         ui.spacing_mut().interact_size.y = 34.;
-                                        if self.mixer_panel.filter_knob(ui, d, accent(d))
+                                        if stems {
+                                            let (stem, label) =
+                                                [(0, "VOC"), (2, "BEAT"), (1, "INST")][band];
+                                            self.card_stem_dial(ui, d, stem, label);
+                                            return;
+                                        }
+                                        if dj_mixer::dial(
+                                            ui,
+                                            label,
+                                            &mut self.eq[d][band],
+                                            -24. ..=12.,
+                                            accent(d),
+                                        )
+                                        .changed()
                                             && let Some(audio) = &self.audio
                                         {
                                             if self.pair().contains(&d) {
                                                 self.run.cancel_effects(audio);
                                             }
-                                            self.mixer_panel.apply(audio);
+                                            audio.set_eq(d, band, self.eq[d][band]);
                                         }
-                                        ui.small("FILTER");
+                                        ui.small(label);
                                     });
-                                    columns[4]
-                                        .vertical_centered(|ui| self.deck_headphones_button(ui, d));
+                                }
+                                columns[3].vertical_centered(|ui| {
+                                    ui.spacing_mut().interact_size.y = 34.;
+                                    if self.mixer_panel.filter_knob(ui, d, accent(d))
+                                        && let Some(audio) = &self.audio
+                                    {
+                                        if self.pair().contains(&d) {
+                                            self.run.cancel_effects(audio);
+                                        }
+                                        self.mixer_panel.apply(audio);
+                                    }
+                                    ui.small("FILTER");
                                 });
+                                columns[4]
+                                    .vertical_centered(|ui| self.deck_headphones_button(ui, d));
+                            });
+                        });
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(
+                                egui::Id::unique(("rack-knobs", d)),
+                                knobs.response.rect,
+                            );
+                            data.insert_temp(
+                                egui::Id::unique(("rack-knobs", d)).with("screen"),
+                                (knobs.response.rect, ui.layer_id()),
+                            );
+                        });
+                        #[cfg(not(test))]
+                        let _ = knobs;
+                        ui.separator();
+                        // Keep saved banks restored even when the compact card opens
+                        // their pads in a panel: keyboard sampler actions stay ready.
+                        if d.is_multiple_of(2) {
+                            if !self.sampler.started {
+                                self.sampler.started = true;
+                                if self.sampler.has_saved() && self.ensure_audio().is_ok() {
+                                    self.sampler.restore();
+                                }
+                            }
+                        } else if !self.right_sampler.started {
+                            self.right_sampler.started = true;
+                            if self.right_sampler.has_saved() && self.ensure_right_samples().is_ok()
+                            {
+                                self.right_sampler.restore();
+                            }
+                        }
+                        if width < 400. {
+                            let cues = ui.scope(|ui| {
+                                ui.horizontal(|ui| {
+                                    ui.small("HOT CUES");
+                                    if ui.small_button("1–8").clicked() {
+                                        self.card_open_tools(ui.ctx(), d, 3);
+                                        self.dj_cues[d] = true;
+                                    }
+                                    if ui.small_button("Sampler / Cue").clicked() {
+                                        self.card_open_tools(ui.ctx(), d, 2);
+                                    }
+                                });
+                                self.main_hot_cues_count(ui, d, accent(d), 4);
                             });
                             #[cfg(test)]
                             ui.ctx().data_mut(|data| {
                                 data.insert_temp(
-                                    egui::Id::unique(("rack-knobs", d)),
-                                    knobs.response.rect,
-                                );
-                                data.insert_temp(
-                                    egui::Id::unique(("rack-knobs", d)).with("screen"),
-                                    (knobs.response.rect, ui.layer_id()),
-                                );
+                                    egui::Id::unique(("dj-cue-pads", d)).with("screen"),
+                                    (cues.response.rect, ui.layer_id()),
+                                )
                             });
                             #[cfg(not(test))]
-                            let _ = knobs;
-                            ui.separator();
-                            // Keep saved banks restored even when the compact card opens
-                            // their pads in a panel: keyboard sampler actions stay ready.
-                            if d.is_multiple_of(2) {
-                                if !self.sampler.started {
-                                    self.sampler.started = true;
-                                    if self.sampler.has_saved() && self.ensure_audio().is_ok() {
-                                        self.sampler.restore();
-                                    }
-                                }
-                            } else if !self.right_sampler.started {
-                                self.right_sampler.started = true;
-                                if self.right_sampler.has_saved()
-                                    && self.ensure_right_samples().is_ok()
-                                {
-                                    self.right_sampler.restore();
-                                }
-                            }
-                            if width < 400. {
-                                let cues = ui.scope(|ui| {
+                            let _ = cues;
+                        } else {
+                            ui.columns(2, |columns| {
+                                let cues = columns[0].scope(|ui| {
                                     ui.horizontal(|ui| {
                                         ui.small("HOT CUES");
                                         if ui.small_button("1–8").clicked() {
                                             self.card_open_tools(ui.ctx(), d, 3);
                                             self.dj_cues[d] = true;
                                         }
-                                        if ui.small_button("Sampler / Cue").clicked() {
-                                            self.card_open_tools(ui.ctx(), d, 2);
-                                        }
                                     });
                                     self.main_hot_cues_count(ui, d, accent(d), 4);
                                 });
                                 #[cfg(test)]
-                                ui.ctx().data_mut(|data| {
+                                columns[0].ctx().data_mut(|data| {
                                     data.insert_temp(
                                         egui::Id::unique(("dj-cue-pads", d)).with("screen"),
-                                        (cues.response.rect, ui.layer_id()),
+                                        (cues.response.rect, columns[0].layer_id()),
                                     )
                                 });
                                 #[cfg(not(test))]
                                 let _ = cues;
-                            } else {
-                                ui.columns(2, |columns| {
-                                    let cues = columns[0].scope(|ui| {
-                                        ui.horizontal(|ui| {
-                                            ui.small("HOT CUES");
-                                            if ui.small_button("1–8").clicked() {
-                                                self.card_open_tools(ui.ctx(), d, 3);
-                                                self.dj_cues[d] = true;
-                                            }
-                                        });
-                                        self.main_hot_cues_count(ui, d, accent(d), 4);
-                                    });
-                                    #[cfg(test)]
-                                    columns[0].ctx().data_mut(|data| {
-                                        data.insert_temp(
-                                            egui::Id::unique(("dj-cue-pads", d)).with("screen"),
-                                            (cues.response.rect, columns[0].layer_id()),
-                                        )
-                                    });
-                                    #[cfg(not(test))]
-                                    let _ = cues;
-                                    columns[1].horizontal(|ui| {
-                                        ui.small("SAMPLER");
-                                        if ui.small_button("Bank / Cue").clicked() {
-                                            self.card_open_tools(ui.ctx(), d, 2);
-                                        }
-                                    });
-                                    let actions = if d.is_multiple_of(2) {
-                                        if !self.sampler.started {
-                                            self.sampler.started = true;
-                                            if self.sampler.has_saved()
-                                                && self.ensure_audio().is_ok()
-                                            {
-                                                self.sampler.restore();
-                                            }
-                                        }
-                                        self.sampler.inline_pads(
-                                            &mut columns[1],
-                                            self.audio.as_ref(),
-                                            false,
-                                        )
-                                    } else {
-                                        if !self.right_sampler.started {
-                                            self.right_sampler.started = true;
-                                            if self.right_sampler.has_saved()
-                                                && self.ensure_right_samples().is_ok()
-                                            {
-                                                self.right_sampler.restore();
-                                            }
-                                        }
-                                        self.right_sampler.inline_pads(
-                                            &mut columns[1],
-                                            self.right_sample_audio.as_ref(),
-                                            false,
-                                        )
-                                    };
-                                    for action in actions {
-                                        self.side_sample_action(d % 2, action);
+                                columns[1].horizontal(|ui| {
+                                    ui.small("SAMPLER");
+                                    if ui.small_button("Bank / Cue").clicked() {
+                                        self.card_open_tools(ui.ctx(), d, 2);
                                     }
                                 });
-                            }
-                        });
+                                let actions = if d.is_multiple_of(2) {
+                                    if !self.sampler.started {
+                                        self.sampler.started = true;
+                                        if self.sampler.has_saved() && self.ensure_audio().is_ok() {
+                                            self.sampler.restore();
+                                        }
+                                    }
+                                    self.sampler.inline_pads(
+                                        &mut columns[1],
+                                        self.audio.as_ref(),
+                                        false,
+                                    )
+                                } else {
+                                    if !self.right_sampler.started {
+                                        self.right_sampler.started = true;
+                                        if self.right_sampler.has_saved()
+                                            && self.ensure_right_samples().is_ok()
+                                        {
+                                            self.right_sampler.restore();
+                                        }
+                                    }
+                                    self.right_sampler.inline_pads(
+                                        &mut columns[1],
+                                        self.right_sample_audio.as_ref(),
+                                        false,
+                                    )
+                                };
+                                for action in actions {
+                                    self.side_sample_action(d % 2, action);
+                                }
+                            });
+                        }
+                    };
+                    if height < 370. {
+                        egui::ScrollArea::vertical()
+                            .id_salt(("card-lower-controls", d))
+                            .max_height(lower_height)
+                            .min_scrolled_height(0.)
+                            .auto_shrink([false, true])
+                            .show(ui, lower_controls);
+                    } else {
+                        ui.scope(lower_controls);
+                    }
                 });
             },
         );

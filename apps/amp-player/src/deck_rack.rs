@@ -871,6 +871,12 @@ impl Player {
                 });
                 #[cfg(test)] ui.ctx().data_mut(|data| { data.insert_temp(egui::Id::unique(("dj-cue-pads", d)).with("screen"), (cues.response.rect, ui.layer_id())); });
                 #[cfg(not(test))] let _ = cues;
+                if height<310. {
+                    if ui.button("Sampler / Cue Deck").clicked(){self.card_open_tools(ui.ctx(),d,2);}
+                    if d.is_multiple_of(2) {
+                        if !self.sampler.started {self.sampler.started=true;if self.sampler.has_saved()&&self.ensure_audio().is_ok(){self.sampler.restore();}}
+                    }else if !self.right_sampler.started {self.right_sampler.started=true;if self.right_sampler.has_saved()&&self.ensure_right_samples().is_ok(){self.right_sampler.restore();}}
+                }else{
                 ui.horizontal(|ui| {
                     ui.small(if full_bank {
                         "Sampler · full bank"
@@ -897,6 +903,7 @@ impl Player {
                 };
                 for action in actions {
                     self.side_sample_action(d % 2, action);
+                }
                 }
             },
         );
@@ -1432,9 +1439,17 @@ mod tests {
                 );
                 output.textures_delta.clear();
             }
+            let layer = ctx
+                .data(|data| {
+                    data.get_temp::<egui::LayerId>(egui::Id::unique(("pane-layer", 2usize)))
+                })
+                .unwrap();
+            let transform = ctx.layer_transform_to_global(layer).unwrap_or_default();
             let rect = |kind: &str, d: usize| {
-                ctx.data(|data| data.get_temp::<egui::Rect>(egui::Id::unique((kind, d))))
-                    .unwrap()
+                transform
+                    * ctx
+                        .data(|data| data.get_temp::<egui::Rect>(egui::Id::unique((kind, d))))
+                        .unwrap()
             };
             let wave_a = rect("waveform-lane", 0);
             let wave_b = rect("waveform-lane", 1);
@@ -1479,7 +1494,10 @@ mod tests {
                     "A/B wheels must scale equally"
                 );
             }
-            assert!(a.right() < size.x && b.right() < size.x);
+            assert!(
+                a.right() < size.x && b.right() < size.x,
+                "wheel bounds at {size:?}, six={six}: {a:?} {b:?}"
+            );
         }
     }
     #[test]
