@@ -120,8 +120,14 @@ impl Output {
         generation: u64,
         first: bool,
     ) -> Duration {
-        if generation == 0
-            || first
+        if generation == 0 {
+            return if first {
+                Duration::from_secs(20)
+            } else {
+                Duration::from_secs(8)
+            };
+        }
+        if first
             || !controls.play[deck].load(Relaxed)
             || controls.deck_generation[deck].load(Relaxed) != generation
         {
@@ -139,10 +145,16 @@ impl Output {
         generation: u64,
         first: bool,
     ) -> Duration {
-        // Sections use their own pending timeline and cancellation token; the
-        // main deck position/generation cannot describe their buffered audio.
+        // Sections use a separate pending/adopted timeline and cancellation
+        // token, so the main deck clock cannot measure their buffered audio.
+        // Retain the legacy warm ceiling conservatively; this is not a timing
+        // guarantee at every playback rate or buffer fill.
         if generation == 0 {
-            return Duration::from_secs(20);
+            return if first {
+                Duration::from_secs(20)
+            } else {
+                Duration::from_secs(8)
+            };
         }
         if controls.deck_generation[deck].load(std::sync::atomic::Ordering::Acquire) == generation {
             self.owner_observed
@@ -518,13 +530,29 @@ mod tests {
         };
         assert_eq!(
             out.inference_budget(&controls, 0, 0, false),
+            Duration::from_secs(8)
+        );
+        assert_eq!(
+            out.inference_budget(&controls, 0, 0, true),
+            Duration::from_secs(20)
+        );
+        assert_eq!(
+            out.live_inference_budget(&controls, 0, 0, true),
             Duration::from_secs(20)
         );
         controls.deck_generation[0].store(7, Relaxed);
         let section = out.live_budget_guard(controls.clone(), 0, 0, false);
-        assert_eq!(section(), Duration::from_secs(20));
+        assert_eq!(section(), Duration::from_secs(8));
+        assert_eq!(
+            out.inference_budget(&controls, 0, 0, false),
+            Duration::from_secs(8)
+        );
         controls.deck_generation[0].store(8, Relaxed);
-        assert_eq!(section(), Duration::from_secs(20));
+        assert_eq!(section(), Duration::from_secs(8));
+        assert_eq!(
+            out.inference_budget(&controls, 0, 0, false),
+            Duration::from_secs(8)
+        );
     }
     #[test]
     fn inference_deadline_follows_buffer_tempo_and_source_generation() {
