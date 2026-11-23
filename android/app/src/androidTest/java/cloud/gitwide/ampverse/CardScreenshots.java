@@ -12,6 +12,7 @@ final class CardScreenshots {
         try{
             String path="/sdcard/Download/amp-verse-card-ui/"+name;
             UiDevice device=UiDevice.getInstance(InstrumentationRegistry.getInstrumentation());
+            device.waitForIdle(1000);android.os.SystemClock.sleep(100);
             // UiAutomation executes an argv command, not a shell script. Keep
             // these separate so && is never passed literally to mkdir.
             device.executeShellCommand("mkdir -p /sdcard/Download/amp-verse-card-ui");

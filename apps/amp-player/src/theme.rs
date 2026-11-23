@@ -256,6 +256,14 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
             .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.));
     }
     if theme == Theme::ModernDark {
+        // Let egui use the black selection stroke for text on the gold fill.
+        // A global white override also recolors selected labels and loses contrast.
+        style.visuals.override_text_color = None;
+        style.visuals.widgets.noninteractive.fg_stroke.color = p.text;
+        style.visuals.widgets.inactive.fg_stroke.color = p.text;
+        style.visuals.widgets.hovered.fg_stroke.color = p.text;
+        style.visuals.widgets.active.bg_fill = p.accent;
+        style.visuals.widgets.active.fg_stroke.color = p.background;
         let display_family = if ctx
             .data(|data| data.get_temp::<bool>(egui::Id::unique("amp-brand-fonts")))
             .unwrap_or(false)
