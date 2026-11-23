@@ -140,7 +140,11 @@ impl Config {
                 "cuda".into()
             }
         });
-        let memory_mib = if native { 3072 } else { 6144 };
+        let memory_mib = if native && provider == "cpu" {
+            3072
+        } else {
+            6144
+        };
         if !matches!(provider.as_str(), "cuda" | "cpu" | "dml") || (native && provider == "dml") {
             return Err(
                 "AMP_ONNX_PROVIDER must be cpu or cuda for native stems (legacy also supports dml)"
@@ -1320,7 +1324,8 @@ while True:
         assert!(memory <= 3072);
         assert!(width as u32 * memory <= 6144);
         cfg.provider = "cuda".into();
-        assert_eq!(pool_plan(&cfg), (1, 3072));
+        cfg.memory_mib = 6144;
+        assert_eq!(pool_plan(&cfg), (1, 6144));
     }
     #[test]
     fn fake_persistent_worker_reuses_model_slot_and_combines_exact_parts() {

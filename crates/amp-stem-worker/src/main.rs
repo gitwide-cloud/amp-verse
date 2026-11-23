@@ -26,7 +26,7 @@ impl Config {
         }
         let mut model = None;
         let mut requests = 0;
-        let mut memory_mib = 3072;
+        let mut memory_mib = None;
         let mut provider = "cpu".to_owned();
         let mut cuda_dll_dir = None;
         let mut seen = std::collections::HashSet::new();
@@ -57,10 +57,11 @@ impl Config {
                     }
                 }
                 "--memory-mib" => {
-                    memory_mib = integer()?;
-                    if !(512..=6144).contains(&memory_mib) {
+                    let value = integer()?;
+                    if !(512..=6144).contains(&value) {
                         return Err("memory-mib must be512..6144".into());
                     }
+                    memory_mib = Some(value);
                 }
                 _ => return Err(format!("Unknown option: {flag}")),
             }
@@ -74,6 +75,7 @@ impl Config {
         if provider == "cuda" && cuda_dll_dir.is_none() {
             return Err("CUDA provider needs --cuda-dll-dir for installed vendor libraries".into());
         }
+        let memory_mib = memory_mib.unwrap_or(if provider == "cuda" { 6144 } else { 3072 });
         Ok(Self {
             provider,
             cuda_dll_dir,
@@ -364,6 +366,31 @@ mod tests {
         let text = dir.to_str().unwrap();
         let cfg = parse(&["--model", "a", "--provider", "cuda", "--cuda-dll-dir", text]).unwrap();
         assert_eq!(cfg.provider, "cuda");
+        assert_eq!(cfg.memory_mib, 6144);
+        let limited = parse(&[
+            "--model",
+            "a",
+            "--provider",
+            "cuda",
+            "--cuda-dll-dir",
+            text,
+            "--memory-mib",
+            "2048",
+        ])
+        .unwrap();
+        assert_eq!(limited.memory_mib, 2048);
+        let reverse = parse(&[
+            "--model",
+            "a",
+            "--memory-mib",
+            "1024",
+            "--provider",
+            "cuda",
+            "--cuda-dll-dir",
+            text,
+        ])
+        .unwrap();
+        assert_eq!(reverse.memory_mib, 1024);
         assert_eq!(cfg.cuda_dll_dir, Some(dir.clone()));
         assert!(parse(&["--model", "a", "--provider", "cuda"]).is_err());
         assert!(parse(&["--model", "a", "--provider", "dml"]).is_err());
