@@ -1648,8 +1648,9 @@ impl Player {
     }
     fn player_ui(&mut self, ui: &mut egui::Ui) {
         if self.workspace.rendering {
+            let short = ui.available_height() < 600.;
             self.workspace_player_transport(ui);
-            ui.add_space(8.);
+            ui.add_space(if short { 0. } else { 8. });
             skin::panel(ui, false, |ui| {
                 ui.set_min_width(ui.available_width());
                 self.player_toolbar(ui);
@@ -1875,7 +1876,7 @@ impl Player {
                 ui.weak(&self.status);
             }
         };
-        if workspace {
+        if workspace && ui.available_width() < 650. {
             ui.horizontal_wrapped(controls);
         } else {
             ui.horizontal(controls);
@@ -1885,6 +1886,7 @@ impl Player {
         skin::panel(ui, true, |ui| {
             ui.set_min_width(ui.available_width());
             let wide = ui.available_width() >= 1050.;
+            let short = ui.available_height() < 600.;
             let row_height = if wide { 72. } else { 62. };
             ui.allocate_ui_with_layout(
                 egui::vec2(ui.available_width(), row_height),
@@ -1914,6 +1916,9 @@ impl Player {
                         |ui| {
                             ui.set_min_width(width);
                             ui.set_max_width(width);
+                            if short {
+                                ui.spacing_mut().item_spacing.y = 2.;
+                            }
                             self.workspace_player_track_display(ui);
                         },
                     );
@@ -1925,7 +1930,9 @@ impl Player {
                 },
             );
             if !wide {
-                ui.add_space(8.);
+                if !short {
+                    ui.add_space(8.);
+                }
                 ui.allocate_ui_with_layout(
                     egui::vec2(ui.available_width(), 60.),
                     egui::Layout::left_to_right(egui::Align::Center),
@@ -2062,7 +2069,7 @@ impl Player {
     }
     fn workspace_player_volume(&mut self, ui: &mut egui::Ui) {
         ui.allocate_ui_with_layout(
-            egui::vec2(180., 58.),
+            egui::vec2(180., 54.),
             egui::Layout::top_down(egui::Align::Center),
             |ui| {
                 ui.set_min_width(180.);
@@ -2073,7 +2080,7 @@ impl Player {
     }
     fn workspace_player_eq(&mut self, ui: &mut egui::Ui) {
         ui.allocate_ui_with_layout(
-            egui::vec2(180., 60.),
+            egui::vec2(180., 54.),
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 ui.set_min_width(180.);

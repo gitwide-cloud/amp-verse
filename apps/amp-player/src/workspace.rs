@@ -35,6 +35,11 @@ impl Player {
             ui.available_width()
                 .min((ui.clip_rect().right() - ui.cursor().left()).max(1.)),
         );
+        let card_gap = if ui.available_height() < 600. {
+            4.
+        } else {
+            12.
+        };
         self.player_ui(ui);
         if self.podcasts.is_active() {
             let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
@@ -71,7 +76,7 @@ impl Player {
                 }
             });
         }
-        ui.add_space(12.);
+        ui.add_space(card_gap);
         let track = self.loaded_track(0).cloned();
         let position = self
             .audio
@@ -102,7 +107,7 @@ impl Player {
                 );
             }
         });
-        ui.add_space(12.);
+        ui.add_space(card_gap);
         let mut play = None;
         let queue_card_height = ui.available_height();
         skin::panel(ui, false, |ui| {
@@ -377,11 +382,15 @@ mod tests {
                 _ => {}
             }
         }
-        for size in [
-            egui::vec2(760., 540.),
-            egui::vec2(1280., 900.),
-            egui::vec2(1568., 1003.),
-            egui::vec2(2560., 1536.),
+        for (size, shell) in [
+            (egui::vec2(760., 540.), false),
+            (egui::vec2(1280., 900.), false),
+            (egui::vec2(1568., 1003.), false),
+            (egui::vec2(2560., 1536.), false),
+            (egui::vec2(760., 540.), true),
+            (egui::vec2(1280., 900.), true),
+            (egui::vec2(1568., 1003.), true),
+            (egui::vec2(2560., 1536.), true),
         ] {
             let ctx = egui::Context::default();
             skin::configure(&ctx);
@@ -390,7 +399,7 @@ mod tests {
                 workspace: Workspace {
                     enabled: true,
                     pane: 0,
-                    rendering: true,
+                    rendering: !shell,
                 },
                 playback_owner: playback_owner::Owner::Dj,
                 ..Default::default()
@@ -402,7 +411,13 @@ mod tests {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                     ..Default::default()
                 },
-                |ui| player.workspace_player(ui),
+                |ui| {
+                    if shell {
+                        player.workspace_ui(ui);
+                    } else {
+                        player.workspace_player(ui);
+                    }
+                },
             );
             let mut cards = Vec::new();
             let mut labels = Vec::new();
@@ -418,6 +433,9 @@ mod tests {
             output.textures_delta.clear();
             cards.sort_by(|a, b| a.top().total_cmp(&b.top()));
             cards.dedup();
+            if shell && cards.len() > 4 {
+                cards.drain(..cards.len() - 4);
+            }
             assert_eq!(
                 cards.len(),
                 4,
