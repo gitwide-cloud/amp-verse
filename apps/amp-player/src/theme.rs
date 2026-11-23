@@ -262,8 +262,9 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
         style.visuals.widgets.noninteractive.fg_stroke.color = p.text;
         style.visuals.widgets.inactive.fg_stroke.color = p.text;
         style.visuals.widgets.hovered.fg_stroke.color = p.text;
-        style.visuals.widgets.active.bg_fill = p.accent;
-        style.visuals.widgets.active.fg_stroke.color = p.background;
+        // egui also uses the active foreground for ordinary strong labels.
+        style.visuals.widgets.active.bg_fill = p.elevated;
+        style.visuals.widgets.active.fg_stroke.color = p.text;
         let display_family = if ctx
             .data(|data| data.get_temp::<bool>(egui::Id::unique("amp-brand-fonts")))
             .unwrap_or(false)
@@ -353,6 +354,47 @@ pub fn selector(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn card_headings_and_selected_controls_keep_readable_contrast() {
+        fn luminance(color: C) -> f32 {
+            let linear = |v: u8| {
+                let v = f32::from(v) / 255.;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r()) + 0.7152 * linear(color.g()) + 0.0722 * linear(color.b())
+        }
+        let contrast = |a: C, b: C| {
+            let a = luminance(a);
+            let b = luminance(b);
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        };
+        let ctx = egui::Context::default();
+        apply(&ctx, Theme::ModernDark);
+        let style = ctx.global_style();
+        let visuals = &style.visuals;
+        assert!(
+            contrast(
+                visuals.strong_text_color(),
+                Theme::ModernDark.palette().surface
+            ) >= 7.,
+            "Normal strong card text must remain readable"
+        );
+        assert!(
+            contrast(
+                visuals.widgets.active.text_color(),
+                visuals.widgets.active.bg_fill
+            ) >= 7.,
+            "Pressed controls need readable labels"
+        );
+        assert!(
+            contrast(visuals.selection.stroke.color, visuals.selection.bg_fill) >= 7.,
+            "Selected gold controls need dark text"
+        );
+    }
     #[test]
     fn preferences_replace_and_round_trip_all_themes() {
         let dir = tempfile::tempdir().unwrap();
