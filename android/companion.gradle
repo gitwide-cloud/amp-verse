@@ -17,7 +17,7 @@ android {
         java.includes = ['**/CompanionActivity.java','**/ModuleRpc.java','**/FeatureScreen.java','**/Appearance.java','**/Chrome.java','**/CardIcon.java','**/UiSections.java']
         if(ampModule == 'lab') java.includes += ['**/lab/*.java']
         if(ampModule == 'remote') java.includes += ['**/RemotePanel.java','**/ControlDiscovery.java','**/CastDiscovery.java','**/CastClient.java','**/StationAudioStatus.java','**/ProtectedCastSource.java']
-        if(ampModule == 'cast') java.includes += ['**/CastPanel.java','**/CastHostSession.java','**/CastHostSelection.java','**/CastHostReconnect.java','**/CastLibraryView.java','**/CastLibraryModel.java','**/RadioDirectory.java','**/CastClient.java','**/StationAudioStatus.java','**/CastDiscovery.java','**/ProtectedCastSource.java','**/GoogleCastActivity.java','**/GoogleCastOptions.java']
+        if(ampModule == 'cast') java.includes += ['**/CastPanel.java','**/DevicesIcon.java','**/CastHostSession.java','**/CastHostSelection.java','**/CastHostReconnect.java','**/CastLibraryView.java','**/CastLibraryModel.java','**/RadioDirectory.java','**/CastClient.java','**/StationAudioStatus.java','**/CastDiscovery.java','**/ProtectedCastSource.java','**/GoogleCastActivity.java','**/GoogleCastOptions.java']
         if(ampModule == 'podcasts') java.includes += ['**/PodcastsPanel.java']
         res.srcDirs += ['../../app/src/main/res']
         if(ampModule == 'lab') res.srcDirs += ['../../features/lab/res']
