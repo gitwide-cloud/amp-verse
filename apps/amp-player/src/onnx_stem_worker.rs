@@ -472,6 +472,19 @@ pub(crate) fn pool_status() -> Option<(usize, u32, usize, usize)> {
     ))
 }
 /// Configuration check only: no Python launch, model probing or ordinary-playback warm-up.
+/// Qualification is tied to the selected native CUDA runtime, not a CPU/core-count guess.
+pub(crate) fn qualified_cuda() -> bool {
+    let Ok(config) = Config::environment() else {
+        return false;
+    };
+    config.native
+        && config.provider == "cuda"
+        && config
+            .runtime
+            .as_ref()
+            .and_then(|p| p.parent())
+            .is_some_and(verified_cuda_module)
+}
 pub(crate) fn configured() -> bool {
     Config::environment().is_ok()
 }

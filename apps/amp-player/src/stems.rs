@@ -809,12 +809,27 @@ impl Panel {
                         slots as u64 * u64::from(per_worker_mib)
                     ));
                 }
-                ui.weak("All six decks can use independent stem filters. The shared engine keeps stem audio in memory; no stem audio files are saved. Initial preparation can take several seconds.");
+                let policy = crate::stem_capability::current();
+                ui.label(format!("Live stem limit: {} decks · {}", policy.limit, policy.reason));
+                ui.weak("Normal six-deck playback stays available. Live stem audio remains in memory; initial processing can take several seconds.");
+                let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().filter(|v| v.load(Relaxed)).count());
+                let previous = crate::stem_capability::maximum();
+                let mut maximum = previous;
+                egui::ComboBox::from_id_salt("live-stem-maximum").selected_text(format!("Maximum {maximum} live decks")).show_ui(ui, |ui| {
+                    for count in [2,4,6] { ui.selectable_value(&mut maximum,count,format!("{count} decks")); }
+                });
+                if maximum != previous {
+                    if let Err(error) = crate::stem_capability::save_maximum(maximum,enabled_count) { self.status[deck] = error; }
+                }
+                if crate::stem_capability::maximum() > policy.hardware_limit { ui.weak("Your chosen maximum is limited by this engine's hardware qualification."); }
                 if let Some(audio) = audio {
                     let enabled = audio.controls.on_demand_stems[deck].load(Relaxed);
                     let has_source = source.is_some_and(|path| path.is_file());
+                    let reserved = std::array::from_fn(|d| audio.controls.on_demand_stems[d].load(Relaxed));
+                    let admitted = policy.allows(&reserved,deck);
+                    if !enabled && !admitted { ui.weak(policy.error()); }
                     if ui.add_enabled(
-                        can_reload && has_source,
+                        can_reload && has_source && (enabled || admitted),
                         egui::Button::new(if enabled {
                             "Use original audio"
                         } else {

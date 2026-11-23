@@ -14,15 +14,18 @@ const RATE: usize = 44100;
 const WINDOW: usize = RATE * 11;
 const OVERLAP: usize = RATE / 2;
 type Parts = [Vec<f32>; 3];
-pub(crate) const MAX_LIVE_DECKS: usize = 6;
 static ACTIVE: AtomicUsize = AtomicUsize::new(0);
+fn reserve(active: &AtomicUsize, limit: usize) -> bool {
+    let n = active.load(Relaxed);
+    n < limit && active.compare_exchange(n, n + 1, Relaxed, Relaxed).is_ok()
+}
 struct Admission;
 impl Admission {
     fn acquire(stop: &AtomicBool) -> Option<Self> {
+        let limit = crate::stem_capability::current().limit;
         let deadline = std::time::Instant::now() + Duration::from_secs(3);
         while !stop.load(Relaxed) && std::time::Instant::now() < deadline {
-            let n = ACTIVE.load(Relaxed);
-            if n < MAX_LIVE_DECKS && ACTIVE.compare_exchange(n, n + 1, Relaxed, Relaxed).is_ok() {
+            if reserve(&ACTIVE, limit) {
                 return Some(Self);
             }
             std::thread::sleep(Duration::from_millis(10));
@@ -250,7 +253,7 @@ pub(crate) fn decode(
             &controls,
             deck,
             generation,
-            "Local stem workers busy; playing original audio".into(),
+            crate::stem_capability::current().error(),
         );
     }
     loop {
@@ -489,5 +492,24 @@ mod live_acceptance {
             crate::onnx_stem_worker::shutdown(),
             "worker must acknowledge app shutdown"
         );
+    }
+}
+
+#[cfg(test)]
+mod admission_tests {
+    use super::*;
+    #[test]
+    fn stream_reservation_obeys_every_tier_without_revoking_existing_slots() {
+        for limit in [2, 4, 6] {
+            let active = AtomicUsize::new(0);
+            for _ in 0..limit {
+                assert!(reserve(&active, limit));
+            }
+            assert!(!reserve(&active, limit));
+            assert!(!reserve(&active, 2));
+            assert_eq!(active.load(Relaxed), limit);
+            active.fetch_sub(1, Relaxed);
+            assert!(reserve(&active, limit));
+        }
     }
 }

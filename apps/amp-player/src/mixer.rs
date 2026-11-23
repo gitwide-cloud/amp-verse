@@ -1830,6 +1830,25 @@ pub struct Engine {
     sample_retired: Vec<(usize, u64, Arc<[Frame]>)>,
     sample_generation: u64,
 }
+fn check_live_stem_admission(
+    loaded: &[bool; 6],
+    controls: &Controls,
+    deck: usize,
+    policy: crate::stem_capability::Policy,
+) -> Result<(), String> {
+    let mut existing =
+        std::array::from_fn(|d| loaded[d] || controls.on_demand_stems[d].load(Relaxed));
+    // The current intent is not a second reservation; existing loads may be replaced.
+    if deck >= existing.len() {
+        return Err("Unknown deck".into());
+    }
+    existing[deck] = loaded[deck];
+    if policy.allows(&existing, deck) {
+        Ok(())
+    } else {
+        Err(policy.error())
+    }
+}
 impl Engine {
     pub fn new() -> Result<Self, String> {
         Self::with_output(None)
@@ -2107,6 +2126,14 @@ impl Engine {
                 .preparation
                 .extensions
                 .contains_key("podcast_stream_url");
+        if onnx {
+            check_live_stem_admission(
+                &self.loaded_on_demand,
+                &self.controls,
+                deck,
+                crate::stem_capability::current(),
+            )?;
+        }
         if onnx && !crate::onnx_stem_worker::configured() {
             return Err("On-demand stem worker/model is not configured".into());
         }
@@ -5022,3 +5049,31 @@ mod tests {
 #[cfg(test)]
 #[path = "mixer/live_stem_acceptance.rs"]
 mod live_stem_acceptance;
+
+#[cfg(test)]
+mod live_admission_tests {
+    use super::*;
+    #[test]
+    fn mixer_rejects_extra_intent_before_load_and_keeps_existing_decks() {
+        let controls = Controls::default();
+        for flag in controls.on_demand_stems.iter().take(3) {
+            flag.store(true, Relaxed);
+        }
+        let loaded = [true, true, false, false, false, false];
+        let cpu = crate::stem_capability::Policy::new(4, false);
+        assert!(check_live_stem_admission(&loaded, &controls, 2, cpu).is_err());
+        assert!(check_live_stem_admission(&loaded, &controls, 0, cpu).is_ok());
+        assert!(controls.on_demand_stems[0].load(Relaxed));
+        assert!(controls.on_demand_stems[1].load(Relaxed));
+        assert!(
+            check_live_stem_admission(
+                &loaded,
+                &controls,
+                2,
+                crate::stem_capability::Policy::new(4, true)
+            )
+            .is_ok()
+        );
+        assert_eq!(loaded, [true, true, false, false, false, false]);
+    }
+}

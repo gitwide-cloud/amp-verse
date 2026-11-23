@@ -44,6 +44,7 @@ mod output_admission;
 mod receiver_process;
 mod startup_index;
 mod station_receiver;
+mod stem_capability;
 use dj_engine as mixer;
 #[path = "performance.rs"]
 mod dj_logic;
