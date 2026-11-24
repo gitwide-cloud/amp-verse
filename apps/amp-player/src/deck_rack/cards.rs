@@ -545,7 +545,6 @@ impl Player {
                         egui::Margin::same(10)
                     })
                     .show(ui, |ui| {
-                        let card_top = ui.next_widget_position().y;
                         ui.set_width(width - 24.);
                         ui.set_min_height(height - 24.);
                         ui.spacing_mut().item_spacing.y = 3.;
@@ -692,11 +691,6 @@ impl Player {
                             self.card_transport(ui, d, width - 24., short_controls);
                         }
                         ui.separator();
-                        let lower_height = if height < 370. {
-                            (height - (ui.next_widget_position().y - card_top) - 28.).max(44.)
-                        } else {
-                            10000.
-                        };
                         // Sampling readiness is independent of the responsive presentation.
                         self.card_restore_samples(d);
                         let lower_controls = |ui: &mut egui::Ui| {
@@ -857,19 +851,30 @@ impl Player {
                                 });
                             }
                         };
-                        if short_controls {
+                        if height < 370. {
                             // A short performance card keeps the vinyl and transport pinned.
                             // Real, named control panels replace a clipped fragment of knobs.
                             let tools = ui.horizontal_wrapped(|ui| {
                                 for (label, tab) in
                                     [("EQ", 0), ("Stems", 1), ("Cues", 3), ("Sampler", 2)]
                                 {
-                                    if ui.small_button(label).clicked() {
+                                    let action = ui.small_button(label);
+                                    #[cfg(test)]
+                                    ui.ctx().data_mut(|data| {
+                                        data.insert_temp(
+                                            egui::Id::unique(("card-visible-tool", d, tab)),
+                                            (action.rect, ui.layer_id(), ui.clip_rect()),
+                                        );
+                                    });
+                                    if action.clicked() {
                                         self.card_open_tools(ui.ctx(), d, tab);
                                         if tab == 3 {
                                             self.dj_cues[d] = true;
                                         }
                                     }
+                                }
+                                if !short_controls {
+                                    self.deck_headphones_button(ui, d);
                                 }
                             });
                             // Geometry consumers follow the current controls surface, not
@@ -887,13 +892,6 @@ impl Player {
                             });
                             #[cfg(not(test))]
                             let _ = tools;
-                        } else if height < 370. {
-                            egui::ScrollArea::vertical()
-                                .id_salt(("card-lower-controls", d))
-                                .max_height(lower_height)
-                                .min_scrolled_height(0.)
-                                .auto_shrink([false, true])
-                                .show(ui, lower_controls);
                         } else {
                             ui.scope(lower_controls);
                         }
@@ -1036,6 +1034,101 @@ mod tests {
             .data(|d| d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((name, deck))))
             .unwrap_or_else(|| panic!("Missing actual layout rectangle {name}/{deck}"));
         ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
+    }
+    #[test]
+    fn intermediate_cards_show_complete_actionable_tools_in_both_themes() {
+        for appearance in [theme::Theme::Classic, theme::Theme::ModernDark] {
+            for height in [296., 329., 369.] {
+                let ctx = egui::Context::default();
+                crate::skin::configure(&ctx);
+                theme::apply(&ctx, appearance);
+                let mut player = Player::default();
+                let root = tempfile::tempdir().unwrap();
+                player.root = root.path().into();
+                let loaded = player.loaded;
+                let live = player.rack.live;
+                let ratios = player.rack.strip_ratios;
+                let mut stems = egui::Pos2::ZERO;
+                for frame in 0..5 {
+                    let events = match frame {
+                        2 => vec![
+                            egui::Event::PointerMoved(stems),
+                            egui::Event::PointerButton {
+                                pos: stems,
+                                button: egui::PointerButton::Primary,
+                                pressed: true,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                        3 => vec![egui::Event::PointerButton {
+                            pos: stems,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: Default::default(),
+                        }],
+                        _ => vec![],
+                    };
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(
+                                egui::Pos2::ZERO,
+                                egui::vec2(1000., 1024.),
+                            )),
+                            events,
+                            ..Default::default()
+                        },
+                        |ui| player.card_main_deck(ui, 0, 480., height),
+                    );
+                    output.textures_delta.clear();
+                    let main = screen_rect(&ctx, "rack-main-extent", 0);
+                    for tab in [0u8, 1, 3, 2] {
+                        let (rect, layer, clip) = ctx
+                            .data(|d| {
+                                d.get_temp::<(egui::Rect, egui::LayerId, egui::Rect)>(
+                                    egui::Id::unique(("card-visible-tool", 0usize, tab)),
+                                )
+                            })
+                            .expect("Actual named tool must be rendered");
+                        let transform = ctx.layer_transform_to_global(layer).unwrap_or_default();
+                        let control = transform * rect;
+                        assert!(
+                            main.expand(1.).contains_rect(control)
+                                && (transform * clip).expand(1.).contains_rect(control)
+                                && control.height() > 15.,
+                            "Tool {tab} clipped: {control:?} card{main:?} clip{clip:?}"
+                        );
+                        if tab == 1 {
+                            stems = control.center();
+                        }
+                    }
+                    let phones = ctx
+                        .data(|d| {
+                            d.get_temp::<egui::Rect>(egui::Id::unique((
+                                "deck-phones-bounds",
+                                0usize,
+                            )))
+                        })
+                        .unwrap();
+                    assert!(
+                        main.expand(1.).contains_rect(phones) && phones.height() >= 37.,
+                        "Private cue must remain complete"
+                    );
+                }
+                assert!(
+                    ctx.data(|d| d.get_temp::<bool>(tool_key(0)))
+                        .unwrap_or(false),
+                    "Actual Stems button must open its persistent controls"
+                );
+                assert_eq!(
+                    ctx.data(|d| d.get_temp::<u8>(tool_key(0).with("tab"))),
+                    Some(1)
+                );
+                assert_eq!(player.loaded, loaded);
+                assert_eq!(player.rack.live, live);
+                assert_eq!(player.rack.strip_ratios, ratios);
+                assert!(player.audio.is_none());
+            }
+        }
     }
     #[test]
     fn responsive_rack_keeps_real_controls_inside_native_and_fitted_windows() {
