@@ -172,7 +172,7 @@ impl Player {
         let width = (ui.available_width() - 24.).max(640.);
         let center = 94.;
         let main = (width - center - gap * 2.) / 2.;
-        let row = ((height - gap * 2.) / 3.).max(232.);
+        let row = ((height - gap * 2.) / 3.).max(210.);
         ui.spacing_mut().item_spacing.x = gap;
         ui.horizontal_top(|ui| {
             // Stable identities: A1/A2/A3 left; B1/B2/B3 right. No deck is
@@ -652,7 +652,260 @@ impl Player {
             }
         }
     }
+    fn card_compact_six_deck(&mut self, ui: &mut egui::Ui, d: usize, width: f32, height: f32) {
+        let area = ui.allocate_ui_with_layout(
+            egui::vec2(width, height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                panel(ui, Some(accent(d)))
+                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .show(ui, |ui| {
+                        let content = (width - 19.).max(240.);
+                        ui.set_width(content);
+                        ui.set_min_height((height - 11.).max(0.));
+                        ui.spacing_mut().item_spacing = egui::vec2(3., 3.);
+                        ui.spacing_mut().button_padding = egui::vec2(4., 2.);
+                        ui.spacing_mut().interact_size.y = 20.;
+                        ui.horizontal(|ui| {
+                            ui.label(
+                                egui::RichText::new(NAMES[d])
+                                    .size(17.)
+                                    .strong()
+                                    .color(accent(d)),
+                            );
+                            self.card_live_button(ui, d);
+                            let load = ui
+                                .add_enabled(
+                                    self.selected.is_some(),
+                                    egui::Button::new("Load").min_size(egui::vec2(48., 26.)),
+                                )
+                                .on_hover_text(
+                                    "Load the selected library song without starting playback",
+                                )
+                                .on_disabled_hover_text("Select a song in the DJ Library first");
+                            #[cfg(test)]
+                            ui.ctx().data_mut(|data| {
+                                data.insert_temp(
+                                    egui::Id::unique(("deck-load-button", d)),
+                                    (load.rect, ui.layer_id()),
+                                )
+                            });
+                            if load.clicked()
+                                && let Some(index) = self.selected
+                            {
+                                self.load_deck(d, index, false);
+                            }
+                            if ui
+                                .add_sized([24., 26.], egui::Button::new("···"))
+                                .on_hover_text("Deck settings, pitch, cues, effects and sampler")
+                                .clicked()
+                            {
+                                self.card_open_tools(ui.ctx(), d, 0);
+                            }
+                            ui.add_sized(
+                                [ui.available_width().max(1.), 22.],
+                                egui::Label::new(egui::RichText::new(self.title(d)).strong())
+                                    .truncate(),
+                            )
+                            .on_hover_text(self.title(d));
+                        });
+                        ui.horizontal_top(|ui| {
+                            self.rack_platter(ui, d, 74.);
+                            let right = (content - 77.).max(163.);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(right, 84.),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    ui.set_width(right);
+                                    let track = self.loaded_track(d);
+                                    let position =
+                                        self.audio.as_ref().map_or(0., |a| a.source_position(d));
+                                    let duration = self
+                                        .audio
+                                        .as_ref()
+                                        .and_then(|a| a.remaining(d))
+                                        .map(|r| position + r as f64)
+                                        .or_else(|| {
+                                            track.and_then(|t| {
+                                                t.preparation.analysis.as_ref().map(|a| a.duration)
+                                            })
+                                        });
+                                    let bpm = track
+                                        .and_then(|t| t.preparation.bpm)
+                                        .map(|b| b * self.deck_rate(d));
+                                    let key = track
+                                        .and_then(|t| t.preparation.harmonic_key.as_deref())
+                                        .unwrap_or("—");
+                                    let time = |s: f64| {
+                                        format!(
+                                            "{}:{:02}",
+                                            (s.max(0.) / 60.) as u64,
+                                            (s.max(0.) as u64) % 60
+                                        )
+                                    };
+                                    ui.add(
+                                        egui::Label::new(format!(
+                                            "{} BPM · {key} · {} / {}",
+                                            bpm.map_or("—".into(), |v| format!("{v:.1}")),
+                                            time(position),
+                                            duration.map_or("—:—".into(), time)
+                                        ))
+                                        .truncate(),
+                                    );
+                                    ui.columns(2, |columns| {
+                                        let seek_width = columns[0].available_width();
+                                        columns[0].spacing_mut().slider_width = seek_width;
+                                        let mut seek = position as f32;
+                                        let response = columns[0]
+                                            .add_enabled(
+                                                duration.is_some(),
+                                                egui::Slider::new(
+                                                    &mut seek,
+                                                    0. ..=duration.unwrap_or(1.).max(0.01) as f32,
+                                                )
+                                                .show_value(false),
+                                            )
+                                            .on_hover_text("Seek within this source");
+                                        if response.drag_stopped()
+                                            || response.changed() && !response.dragged()
+                                        {
+                                            self.mix_to_waveform_section(
+                                                columns[0].ctx(),
+                                                d,
+                                                seek as f64,
+                                            );
+                                        }
+                                        columns[1].horizontal(|ui| {
+                                            ui.small("VOL");
+                                            ui.spacing_mut().slider_width =
+                                                (ui.available_width() - 3.).max(40.);
+                                            let gain = ui
+                                                .add(
+                                                    egui::Slider::new(
+                                                        &mut self.channel_gain[d],
+                                                        0. ..=1.,
+                                                    )
+                                                    .show_value(false),
+                                                )
+                                                .on_hover_text("Deck volume");
+                                            #[cfg(test)]
+                                            ui.ctx().data_mut(|data| {
+                                                data.insert_temp(
+                                                    egui::Id::unique(("deck-volume-control", d)),
+                                                    (gain.rect, ui.layer_id()),
+                                                )
+                                            });
+                                            if gain.changed()
+                                                && let Some(audio) = &self.audio
+                                            {
+                                                audio.set_gain(d, self.channel_gain[d]);
+                                            }
+                                        });
+                                    });
+                                    ui.spacing_mut().button_padding.x = 2.;
+                                    self.card_transport(ui, d, right, false);
+                                },
+                            );
+                        });
+                        self.card_restore_samples(d);
+                        let mode_key = egui::Id::unique(("card-knob-mode-stems", d));
+                        let mut stems = ui
+                            .ctx()
+                            .data(|data| data.get_temp::<bool>(mode_key))
+                            .unwrap_or(true);
+                        ui.horizontal(|ui| {
+                            ui.spacing_mut().button_padding.y = 1.;
+                            ui.selectable_value(&mut stems, false, "EQ");
+                            ui.selectable_value(&mut stems, true, "Stems");
+                            if stems && ui.small_button("Enable / reload").clicked() {
+                                self.card_open_tools(ui.ctx(), d, 1);
+                            }
+                        });
+                        ui.ctx().data_mut(|data| data.insert_temp(mode_key, stems));
+                        let knobs = ui.scope(|ui| {
+                            ui.columns(5, |columns| {
+                                for (band, column) in columns.iter_mut().enumerate().take(3) {
+                                    column.vertical_centered(|ui| {
+                                        ui.spacing_mut().interact_size.y = 32.;
+                                        if stems {
+                                            let (stem, label) =
+                                                [(0, "VOC"), (2, "BEAT"), (1, "INST")][band];
+                                            self.card_stem_dial(ui, d, stem, label);
+                                        } else {
+                                            let label = ["LOW", "MID", "HIGH"][band];
+                                            if dj_mixer::dial(
+                                                ui,
+                                                label,
+                                                &mut self.eq[d][band],
+                                                -24. ..=12.,
+                                                accent(d),
+                                            )
+                                            .changed()
+                                                && let Some(audio) = &self.audio
+                                            {
+                                                if self.pair().contains(&d) {
+                                                    self.run.cancel_effects(audio);
+                                                }
+                                                audio.set_eq(d, band, self.eq[d][band]);
+                                            }
+                                            ui.small(label);
+                                        }
+                                    });
+                                }
+                                columns[3].vertical_centered(|ui| {
+                                    ui.spacing_mut().interact_size.y = 32.;
+                                    if self.mixer_panel.filter_knob(ui, d, accent(d))
+                                        && let Some(audio) = &self.audio
+                                    {
+                                        if self.pair().contains(&d) {
+                                            self.run.cancel_effects(audio);
+                                        }
+                                        self.mixer_panel.apply(audio);
+                                    }
+                                    ui.small("FILTER");
+                                });
+                                columns[4]
+                                    .vertical_centered(|ui| self.deck_headphones_button(ui, d));
+                            });
+                        });
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(
+                                egui::Id::unique(("rack-knobs", d)),
+                                knobs.response.rect,
+                            );
+                            data.insert_temp(
+                                egui::Id::unique(("rack-knobs", d)).with("screen"),
+                                (knobs.response.rect, ui.layer_id()),
+                            );
+                        });
+                        #[cfg(not(test))]
+                        let _ = knobs;
+                    });
+            },
+        );
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::unique(("rack-jog-drop", d)),
+                (area.response.interact_rect, area.response.layer_id),
+            );
+            data.insert_temp(
+                egui::Id::unique(("rack-main-extent", d)),
+                (area.response.rect, area.response.layer_id),
+            );
+        });
+        if let Some(path) = dragdrop::target(&area.response, accent(d))
+            && let Err(error) = self.safe_load_path(d, path, None)
+        {
+            self.status = error;
+        }
+    }
     fn card_main_deck(&mut self, ui: &mut egui::Ui, d: usize, width: f32, height: f32) {
+        if self.rack.six {
+            self.card_compact_six_deck(ui, d, width, height);
+            return;
+        }
         let area = ui.allocate_ui_with_layout(
             egui::vec2(width, height),
             egui::Layout::top_down(egui::Align::Min),
@@ -1181,6 +1434,107 @@ mod tests {
             .data(|d| d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((name, deck))))
             .unwrap_or_else(|| panic!("Missing actual layout rectangle {name}/{deck}"));
         ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
+    }
+    #[test]
+    fn all_six_live_load_play_targets_are_initially_visible_in_wide_workspace() {
+        for appearance in [theme::Theme::Classic, theme::Theme::ModernDark] {
+            for size in [egui::vec2(1280., 1100.), egui::vec2(1570., 1000.)] {
+                let ctx = egui::Context::default();
+                crate::skin::configure(&ctx);
+                theme::apply(&ctx, appearance);
+                let root = tempfile::tempdir().unwrap();
+                let mut player = Player {
+                    root: root.path().into(),
+                    rack: Rack {
+                        six: true,
+                        ..Default::default()
+                    },
+                    ..Default::default()
+                };
+                player.loaded_snapshot = std::array::from_fn(|deck| {
+                    Some(amp_core::Track {
+                        path: format!("missing-{deck}.wav").into(),
+                        title: "A long imported title with remix and artist details ".repeat(4),
+                        preparation: amp_core::Preparation {
+                            bpm: Some(128.),
+                            harmonic_key: Some("8A".into()),
+                            ..Default::default()
+                        },
+                    })
+                });
+                let live = player.rack.live;
+                let gains = player.channel_gain;
+                let ratios = player.rack.strip_ratios;
+                for _ in 0..3 {
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                            ..Default::default()
+                        },
+                        |ui| player.group_ui(ui, 2),
+                    );
+                    output.textures_delta.clear();
+                }
+                for deck in 0..6 {
+                    let bank = screen_rect(&ctx, "six-bank-viewport", deck % 2);
+                    let card = screen_rect(&ctx, "rack-main-extent", deck);
+                    for name in ["deck-live-button", "deck-load-button"] {
+                        let target = screen_rect(&ctx, name, deck);
+                        assert!(
+                            bank.expand(1.).contains_rect(target)
+                                && card.expand(1.).contains_rect(target),
+                            "All six {name} targets must be visible without scrolling at{size:?}, deck{deck}: {target:?}, bank{bank:?}, card{card:?}"
+                        );
+                    }
+                    let play = ctx
+                        .data(|d| {
+                            d.get_temp::<egui::Rect>(egui::Id::unique(("rack-main-play", deck)))
+                        })
+                        .unwrap();
+                    assert!(
+                        play.height() >= 37. && bank.expand(1.).contains_rect(play),
+                        "All six full-size PLAY targets must be initially visible at{size:?}, deck{deck}: {play:?},bank{bank:?}"
+                    );
+                    if size.x == 1280. {
+                        assert!(
+                            bank.expand(1.).contains_rect(card),
+                            "All six full cards must fit initial1280x1100 view: {card:?} bank{bank:?}"
+                        );
+                        let (_, layer) = ctx
+                            .data(|d| {
+                                d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
+                                    "rack-main-extent",
+                                    deck,
+                                )))
+                            })
+                            .unwrap();
+                        let transform = ctx.layer_transform_to_global(layer).unwrap_or_default();
+                        for stem in 0usize..3 {
+                            let target = ctx
+                                .data(|d| {
+                                    d.get_temp::<egui::Rect>(egui::Id::unique((
+                                        "card-stem-knob",
+                                        deck,
+                                        stem,
+                                    )))
+                                })
+                                .unwrap();
+                            let target = transform * target;
+                            assert!(
+                                target.width() >= 32.
+                                    && target.height() >= 32.
+                                    && bank.expand(1.).contains_rect(target),
+                                "All six cards' real32px stems must be initially complete: deck{deck}stem{stem} target{target:?} bank{bank:?}"
+                            );
+                        }
+                    }
+                }
+                assert_eq!(player.rack.live, live);
+                assert_eq!(player.channel_gain, gains);
+                assert_eq!(player.rack.strip_ratios, ratios);
+                assert!(player.audio.is_none());
+            }
+        }
     }
     #[test]
     fn intermediate_cards_show_complete_actionable_tools_in_both_themes() {
