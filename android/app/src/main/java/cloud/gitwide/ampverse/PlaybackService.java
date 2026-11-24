@@ -13,8 +13,52 @@ import androidx.media3.session.MediaSessionService;
 @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
 public final class PlaybackService extends MediaSessionService {
     private MediaSession session;
-    private static PlaybackService instance;
+    private static volatile PlaybackService instance;
     private DjEngine dj;
+    private volatile OwnedAudioOutput ownedOutput;
+    private volatile PhoneMasterBroadcast phoneBroadcast;
+    private volatile boolean phoneSourceAllowed;
+    private volatile long phoneSourceVersion;
+    private volatile String phoneTargetBase="";
+    static OwnedAudioOutput ownedOutput(){return instance==null?null:instance.ownedOutput;}
+    static boolean mixerSettingsBusy(){
+        PlaybackService service=instance;if(service==null)return false;
+        if(service.phoneBroadcast!=null&&service.phoneBroadcast.active())return true;
+        Player player=service.session==null?null:service.session.getPlayer();
+        return (player!=null&&(player.getPlayWhenReady()||player.isPlaying()))||(service.dj!=null&&service.dj.mixerSettingsBusy());
+    }
+    static boolean samplerPadsBusy(){DjEngine current=existingDj();return current!=null&&current.samplerPadsBusy();}
+    static void stopSamplerPads(){DjEngine current=existingDj();if(current!=null)current.stopSamplerPads();}
+    static boolean phoneSending(){return instance!=null&&instance.phoneBroadcast!=null&&instance.phoneBroadcast.active();}
+    static String phoneBroadcastStatus(){if(android.os.Build.VERSION.SDK_INT<30)return "Phone master sending requires Android 11 or newer; station listening stays available.";return instance==null||instance.phoneBroadcast==null?"Phone master sending is not enabled in this build":instance.phoneBroadcast.status();}
+    static boolean phoneSenderAvailable(){return instance!=null&&instance.phoneBroadcast!=null&&instance.ownedOutput.ready()&&phoneEncoderAvailable();}
+    private static boolean phoneEncoderAvailable(){if(android.os.Build.VERSION.SDK_INT<30)return false;try{Class.forName("cloud.gitwide.ampverse.FullPhoneMp3Encoder",false,PlaybackService.class.getClassLoader());return true;}catch(ClassNotFoundException unavailable){return false;}}
+    static void stopPhoneBroadcast(){if(instance!=null&&instance.phoneBroadcast!=null)instance.phoneBroadcast.stop();}
+    static void phoneSourceChanged(){if(instance!=null)instance.notePhoneSource();}
+    private static boolean ampReceiver(androidx.media3.common.MediaItem item){
+        return item!=null&&item.localConfiguration!=null&&PhoneSourceIdentity.receiver(item.localConfiguration.uri.toString(),instance==null?"":instance.phoneTargetBase);
+    }
+    private void notePhoneSource(){
+        phoneSourceVersion++;
+        boolean allowed=djOwner?(dj!=null&&!ampReceiver(dj.decks[0].getCurrentMediaItem())&&!ampReceiver(dj.decks[1].getCurrentMediaItem())):session!=null&&!ampReceiver(session.getPlayer().getCurrentMediaItem());
+        phoneSourceAllowed=allowed;if(!allowed&&phoneBroadcast!=null)phoneBroadcast.stop();
+    }
+    static String startPhoneBroadcast(CastClient selected){
+        PlaybackService service=instance;
+        if(service==null||service.phoneBroadcast==null||!service.ownedOutput.ready()||!phoneEncoderAvailable())return "Phone master sending needs the qualified Full audio path; current playback is unchanged.";
+        if(service.phoneBroadcast.active())return "Stop the current phone sender before choosing another source.";
+        service.notePhoneSource();
+        if(!service.phoneSourceAllowed)return "This phone is receiving an AMP station. Choose a local Player or DJ source before sending; playback is unchanged.";
+        boolean loaded=service.djOwner?service.dj!=null&&(service.dj.active(0)||service.dj.active(1)||service.dj.samplesActive()):service.session!=null&&service.session.getPlayer().getPlayWhenReady()&&service.session.getPlayer().getPlaybackState()==Player.STATE_READY&&service.session.getPlayer().getPlayerError()==null;
+        if(!loaded||!service.ownedOutput.hasOwnedPcm())return "Start this phone’s Player, DJ mix or pad, then send it after audio begins.";
+        final String[] result={"Preparing this phone’s master broadcast"};
+        selected.withLiveAuthorization((base,password,server,station,library)->{
+            try{service.phoneTargetBase=base;service.notePhoneSource();if(!service.phoneSourceAllowed){result[0]="This phone is receiving the selected AMP station. Choose local Player music or DJ before sending; playback is unchanged.";return;}PhoneLiveSession.Identity identity=new PhoneLiveSession.Identity(server,station,library);PhoneLiveSession live=new PhoneLiveSession(identity,new PhoneLiveHttpTransport(base,password,identity));final long version=service.phoneSourceVersion;
+                service.phoneBroadcast.start(live,()->instance==service&&service.phoneSourceAllowed&&service.phoneSourceVersion==version&&service.ownedOutput.hasOwnedPcm(),()->instance==service&&service.phoneSourceAllowed&&service.ownedOutput.ready());
+            }catch(Exception unavailable){result[0]="Phone broadcast could not start. Verify the selected host and stop any existing phone sender; playback is unchanged.";}
+        });return result[0];
+    }
+    static void suppressOwnedOutput(boolean suppressed){OwnedAudioOutput output=ownedOutput();if(output!=null)output.suppress(suppressed);if(suppressed)stopPhoneBroadcast();}
     private boolean djOwner;
     static Player player(){return instance==null||instance.session==null?null:instance.session.getPlayer();}
     static DjEngine existingDj(){return instance==null?null:instance.dj;}
@@ -25,15 +69,15 @@ public final class PlaybackService extends MediaSessionService {
     private String hlsAttemptUri="";
     private boolean hlsReady;
     private final android.os.Handler handler=new android.os.Handler(android.os.Looper.getMainLooper());
-    static void claimDj(){if(instance!=null){instance.djOwner=true;if(instance.session!=null)instance.session.getPlayer().pause();}}
+    static void claimDj(){if(instance!=null){instance.djOwner=true;instance.notePhoneSource();suppressOwnedOutput(false);if(instance.ownedOutput!=null)instance.ownedOutput.mixer.owner(OwnedPcmMixer.Owner.DJ);if(instance.session!=null)instance.session.getPlayer().pause();}}
     static void claimDjForScratch(Runnable afterPause){
         PlaybackService service=instance;
         if(service==null||service.session==null){afterPause.run();return;}
-        service.djOwner=true;Player player=service.session.getPlayer();player.pause();
+        service.djOwner=true;service.notePhoneSource();suppressOwnedOutput(false);if(service.ownedOutput!=null)service.ownedOutput.mixer.owner(OwnedPcmMixer.Owner.DJ);Player player=service.session.getPlayer();player.pause();
         if(player instanceof ExoPlayer) ((ExoPlayer)player).createMessage((type,payload)->service.handler.post(afterPause)).send();
         else service.handler.post(afterPause);
     }
-    private void claimPlayer(){if(djOwner){djOwner=false;if(dj!=null)dj.pauseForPlayer();}}
+    private void claimPlayer(){suppressOwnedOutput(false);if(ownedOutput!=null)ownedOutput.mixer.owner(OwnedPcmMixer.Owner.PLAYER);if(djOwner){djOwner=false;if(dj!=null)dj.pauseForPlayer();}notePhoneSource();}
     static void switchToPlayer(){if(instance!=null)instance.adoptDjPlaylist();}
     static String owner(){return instance!=null&&instance.djOwner?"dj":"player";}
     private void adoptDjPlaylist(){
@@ -63,6 +107,8 @@ public final class PlaybackService extends MediaSessionService {
     @Override public void onCreate() {
         super.onCreate();
         instance=this;
+        // Candidate cutover stays off until sampler, scratch and handset acceptance pass.
+        if(getSharedPreferences("settings",MODE_PRIVATE).getBoolean("owned-pcm-master-candidate",false))ownedOutput=new OwnedAudioOutput();
         settings=getSharedPreferences("settings",MODE_PRIVATE);AudioDsp.load(settings);settings.registerOnSharedPreferenceChangeListener(changed);
         ExoPlayer player = new ExoPlayer.Builder(this,renderers(this,true))
             .setMediaSourceFactory(new StationMediaSourceFactory(this))
@@ -77,9 +123,9 @@ public final class PlaybackService extends MediaSessionService {
         player.setRepeatMode(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("repeat", false) ? Player.REPEAT_MODE_ALL : Player.REPEAT_MODE_OFF);
         player.setShuffleModeEnabled(settings.getBoolean("shuffle",false));
         player.addListener(new Player.Listener(){
-            @Override public void onPlayWhenReadyChanged(boolean ready,int reason){if(ready)claimPlayer();else{cancelRadioRetry();bufferingSince=0;hlsAttemptSince=0;}}
+            @Override public void onPlayWhenReadyChanged(boolean ready,int reason){if(ready)claimPlayer();else{if(reason==Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS||reason==Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY)suppressOwnedOutput(true);cancelRadioRetry();bufferingSince=0;hlsAttemptSince=0;}}
             @Override public void onMediaItemTransition(androidx.media3.common.MediaItem item,int reason){
-                bufferingSince=0;lastLiveCatchup=0;
+                notePhoneSource();bufferingSince=0;lastLiveCatchup=0;
                 String selected=item!=null&&item.localConfiguration!=null?item.localConfiguration.uri.toString():"";
                 if(!selected.equals(hlsAttemptUri)){hlsAttemptUri=selected;hlsReady=false;hlsAttemptSince=android.os.SystemClock.elapsedRealtime();}
                 player.setWakeMode(isRadio(item)?C.WAKE_MODE_NETWORK:C.WAKE_MODE_LOCAL);
@@ -96,7 +142,11 @@ public final class PlaybackService extends MediaSessionService {
             }
         });
         session = new MediaSession.Builder(this, player).setSessionActivity(PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT)).build();
-        handler.post(fades);handler.post(liveWatchdog);
+        if(ownedOutput!=null)phoneBroadcast=new PhoneMasterBroadcast(ownedOutput.mixer,()->{
+            try{return (PhoneMasterBroadcast.Encoder)Class.forName("cloud.gitwide.ampverse.FullPhoneMp3Encoder").getDeclaredConstructor(android.content.Context.class).newInstance(this);}
+            catch(ReflectiveOperationException|LinkageError unavailable){throw new java.io.IOException("Full phone encoder unavailable",unavailable);}
+        },text->{});
+        notePhoneSource();handler.post(fades);handler.post(liveWatchdog);
     }
     private static boolean isRadio(androidx.media3.common.MediaItem item){return item!=null&&item.mediaId.equals("amp-radio");}
     private void cancelRadioRetry(){if(radioRetry!=null){handler.removeCallbacks(radioRetry);radioRetry=null;}}
@@ -152,8 +202,16 @@ public final class PlaybackService extends MediaSessionService {
     }};
     static androidx.media3.exoplayer.DefaultRenderersFactory renderers(android.content.Context context) {return renderers(context,false);}
     static androidx.media3.exoplayer.DefaultRenderersFactory renderers(android.content.Context context,boolean playerFade) {
+        return renderers(context,playerFade,playerFade?OwnedPcmMixer.Source.PLAYER:OwnedPcmMixer.Source.PRIVATE_CUE);
+    }
+    static androidx.media3.exoplayer.DefaultRenderersFactory renderers(android.content.Context context,boolean playerFade,OwnedPcmMixer.Source source) {
         androidx.media3.exoplayer.DefaultRenderersFactory renderers=new androidx.media3.exoplayer.DefaultRenderersFactory(context){
             @Override protected androidx.media3.exoplayer.audio.AudioSink buildAudioSink(android.content.Context context,boolean floating,boolean playbackParameters){
+                OwnedAudioOutput owned=ownedOutput();
+                if(owned!=null&&source!=OwnedPcmMixer.Source.PRIVATE_CUE){
+                    try{owned.prepare();return new OwnedMediaAudioSink(owned,source,playerFade);}
+                    catch(java.io.IOException unavailable){owned.disqualify();android.util.Log.w("AMPVerse","Owned output unavailable; preserving normal playback");}
+                }
                 return new androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(context).setEnableFloatOutput(false).setAudioProcessors(new androidx.media3.common.audio.AudioProcessor[]{new AudioDsp(playerFade)}).build();
             }
         };
@@ -165,10 +223,12 @@ public final class PlaybackService extends MediaSessionService {
     }
     @Override public void onDestroy() {
         handler.removeCallbacks(fades);handler.removeCallbacks(liveWatchdog);cancelRadioRetry();
+        if(phoneBroadcast!=null){phoneBroadcast.close();phoneBroadcast=null;}
         instance=null;
         if(dj!=null){dj.close(this);dj=null;}
         if(settings!=null)settings.unregisterOnSharedPreferenceChangeListener(changed);
         if (session != null) { session.getPlayer().release(); session.release(); }
+        if(ownedOutput!=null){ownedOutput.close();ownedOutput=null;}
         super.onDestroy();
     }
 }

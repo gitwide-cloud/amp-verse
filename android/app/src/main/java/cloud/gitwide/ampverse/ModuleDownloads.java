@@ -23,7 +23,7 @@ final class ModuleDownloads {
     String text(String url)throws Exception{try(InputStream in=open(url);ByteArrayOutputStream bytes=new ByteArrayOutputStream()){byte[] buffer=new byte[8192];int n;while((n=in.read(buffer))!=-1){if(bytes.size()+n>1048576)throw new IOException("Module catalog is too large");bytes.write(buffer,0,n);}return bytes.toString("UTF-8");}}
     JSONObject catalog()throws Exception{
         JSONArray releases=new JSONArray(text("https://api.github.com/repos/gitwide-cloud/amp-verse/releases?per_page=20"));
-        for(int i=0;i<releases.length();i++){JSONObject release=releases.getJSONObject(i);if(release.optBoolean("draft"))continue;if(release.optBoolean("prerelease")&&!BuildConfig.DEBUG&&!(ReleaseCheck.betaVersion(BuildConfig.VERSION_NAME)&&ReleaseCheck.betaVersion(release.optString("tag_name"))))continue;JSONArray assets=release.getJSONArray("assets");for(int j=0;j<assets.length();j++){JSONObject asset=assets.getJSONObject(j);if(asset.optString("name").equals("amp-modules.json"))return new JSONObject(text(asset.getString("browser_download_url")));}}
+        for(int i=0;i<releases.length();i++){JSONObject release=releases.getJSONObject(i);if(release.optBoolean("draft"))continue;if(release.optBoolean("prerelease")&&!BuildConfig.DEBUG&&!(ReleaseCheck.samePrereleaseChannel(BuildConfig.VERSION_NAME,release.optString("tag_name"))))continue;JSONArray assets=release.getJSONArray("assets");for(int j=0;j<assets.length();j++){JSONObject asset=assets.getJSONObject(j);if(asset.optString("name").equals("amp-modules.json"))return new JSONObject(text(asset.getString("browser_download_url")));}}
         throw new IOException("No compatible module catalog has been published on GitHub");
     }
 }

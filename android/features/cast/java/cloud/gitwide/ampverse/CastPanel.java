@@ -9,7 +9,13 @@ import java.util.concurrent.*;
 
 /** Integrated Android station controls; local listening uses the existing playback service. */
 class CastPanel extends LinearLayout {
-    interface Listener {default boolean phoneListening(){return false;}default void remote(){}default boolean phoneAvailable(){return true;}default boolean playlistSyncAvailable(){return false;}default void playlistSync(CastClient selected){}void listen(String url,String name);void stopListening();default void playlist(java.util.List<androidx.media3.common.MediaItem> items){}}
+    interface Listener {
+        default boolean phoneSending(){return false;}
+        default boolean phoneSenderAvailable(){return false;}
+        default String phoneBroadcastStatus(){return "Phone master sending requires the Full Player/DJ host.";}
+        default String startPhoneBroadcast(CastClient selected){return "Open the Full Player/DJ host to send its master.";}
+        default void stopPhoneBroadcast(){}
+        default boolean phoneListening(){return false;}default void remote(){}default boolean phoneAvailable(){return true;}default boolean playlistSyncAvailable(){return false;}default void playlistSync(CastClient selected){}void listen(String url,String name);void stopListening();default void playlist(java.util.List<androidx.media3.common.MediaItem> items){}}
     final Activity activity;
     private final Appearance colors;
     final Listener listener;
@@ -21,7 +27,8 @@ class CastPanel extends LinearLayout {
     private TextView capabilityNote,diagnostics,serverSummary,stationSummary;
     private LinearLayout dashboardStations;
     private Button selectedStation;
-    private Button chromecast,hostBroadcast,serverPlay,serverStop,stationPlaylist;
+    private Button chromecast,hostBroadcast,serverPlay,serverStop,stationPlaylist,phoneSend,phoneStop;
+    private TextView phoneSendNote;
     private volatile boolean verified;
     private boolean hostLaunchSupported,serverOutputSupported,playlistSupported,serverOutputRunning;
     final EditText address,password,search;
@@ -66,7 +73,7 @@ class CastPanel extends LinearLayout {
         stationControls=new LinearLayout(activity);stationControls.setOrientation(VERTICAL);addView(stationControls);
         localNote=path("Local listening · host → this phone");
         stationControls.addView(label("These destinations receive the selected host’s program, not this phone’s music. Buffered output may be delayed.",14));
-        listen=action("Listen to host on this phone",()->{if(client!=null)listener.listen(client.phoneStream(),stationName);});stationControls.addView(listen);
+        listen=action("Listen to host on this phone",()->{if(listener.phoneSending()){report("Stop this phone’s broadcast before switching it to station listening.");return;}if(client!=null)listener.listen(client.phoneStream(),stationName);});stationControls.addView(listen);
         stationControls.addView(action("Stop phone playback",listener::stopListening));
         castNote=path("Google Cast · host → Google speaker");
         chromecast=action("Send host stream to Chromecast",()->{if(client==null||!running){status.setText("Connect and start a station or live DJ broadcast first.");return;}activity.startActivity(new android.content.Intent(activity,GoogleCastActivity.class).putExtra("stream",client.stream()).putExtra("title",stationName));});stationControls.addView(chromecast);
@@ -82,8 +89,12 @@ class CastPanel extends LinearLayout {
         UiSections.fold(stationControls,colors,"Station controls",stationAdvanced);
         desktopNote=path("Remote desktop broadcast · desktop master → host");
         hostBroadcast=action("Request desktop host Player/DJ master…",()->{final CastClient selected=client;if(selected==null||!verified||!hostLaunchSupported)return;EditText secret=new EditText(activity);secret.setHint("Desktop Player/DJ control password, if configured");secret.setInputType(129);new android.app.AlertDialog.Builder(activity).setTitle("Change host source to desktop master?").setMessage("This requests the Player/DJ on the host machine. It does not send phone audio. The desktop must be running with its control endpoint enabled; command support does not confirm it is reachable. Existing station listeners will hear the new program.").setView(secret).setPositiveButton("Request host master",(d,n)->{if(!selected(selected))return;final String value=secret.getText().toString();work(()->{postAndRefresh(selected,"/api/live/launch",new JSONObject().put("source_password",value));return "Host sender requested. Check Source and ON AIR status for readiness. Phone audio was not sent.";});}).setNegativeButton("Cancel",null).show();});stationControls.addView(hostBroadcast);
-        Button phoneSend=action("Send this phone’s current playback",()->{});phoneSend.setEnabled(false);phoneSend.setAlpha(.35f);stationControls.addView(phoneSend);
-        stationControls.addView(label("Phone-source sending is not implemented in this Android build. Station listening and Chromecast forwarding do not capture the phone Player or DJ master.",14));
+        phoneSend=action("Send this phone’s current playback",()->{
+            final CastClient selected=client;if(selected==null||!selected(selected))return;
+            new android.app.AlertDialog.Builder(activity).setTitle("Send this phone’s master to "+stationName+"?").setMessage("The selected host’s listeners will hear this phone’s Player or DJ master, including pads and scratch. Headphone cue stays private. The phone must stay connected while sending.").setPositiveButton("Send phone master",(dialog,index)->{if(selected(selected))report(listener.startPhoneBroadcast(selected));}).setNegativeButton("Cancel",null).show();
+        });stationControls.addView(phoneSend);
+        phoneStop=action("Stop only this phone’s sender",()->{listener.stopPhoneBroadcast();report("Stopping this phone’s sender; unrelated host programs are not stopped.");});stationControls.addView(phoneStop);
+        phoneSendNote=label(listener.phoneBroadcastStatus(),14);stationControls.addView(phoneSendNote);
         capabilityNote=label("Host capabilities have not been checked.",14);stationControls.addView(capabilityNote);
         UiSections.fold(this,colors,"Advanced · station source and diagnostics",getChildCount()-1);
         feedbackForActions=null;
@@ -118,7 +129,7 @@ class CastPanel extends LinearLayout {
         addView(section("Discover"));LinearLayout discovery=new LinearLayout(activity);discovery.setOrientation(VERTICAL);addView(discovery);find.setText("Nearby AMP servers");
         android.view.View radioToggle=null,radioBody=null;for(int i=0;i<original.size();i++)if(android.text.TextUtils.equals("Internet radio · tap a result to listen",original.get(i).getContentDescription())){radioToggle=original.get(i);radioBody=original.get(i+1);break;}
         final android.view.View toggle=radioToggle,body=radioBody;Button internet=action("Internet radio",()->{if(toggle!=null)toggle.performClick();if(body!=null&&body.getVisibility()==VISIBLE)reveal(body);});icon(find,new DevicesIcon(activity,"radio",colors.accent));icon(internet,new DevicesIcon(activity,"globe",colors.accent));tiles(discovery,find,internet);discovery.addView(serverList);if(radioBody!=null)discovery.addView(radioBody);
-        addView(section("Quick Actions"));LinearLayout quick=new LinearLayout(activity);quick.setOrientation(VERTICAL);addView(quick);Button offline=action("Offline",this::offline),saved=action("Saved Playlists",()->reveal(libraryView)),remote=action("Remote",listener::remote);icon(offline,new CardIcon(activity,"download",colors.accent));icon(saved,new CardIcon(activity,"playlist",colors.accent));icon(remote,new DevicesIcon(activity,"remote",colors.accent));tiles(quick,offline,saved,remote);
+        addView(section("Quick Actions"));LinearLayout quick=new LinearLayout(activity);quick.setOrientation(VERTICAL);addView(quick);Button offline=action("Offline",this::offline),saved=action("Saved Playlists",()->reveal(libraryView)),remote=action("Remote",listener::remote);offline.setTag("cast-offline-playlists");offline.setContentDescription("Open offline playlists");icon(offline,new CardIcon(activity,"download",colors.accent));icon(saved,new CardIcon(activity,"playlist",colors.accent));icon(remote,new DevicesIcon(activity,"remote",colors.accent));tiles(quick,offline,saved,remote);
         int advancedStart=getChildCount();LinearLayout advanced=new LinearLayout(activity);advanced.setOrientation(VERTICAL);addView(advanced);for(android.view.View view:original)if(view.getParent()==null&&view!=radioToggle)advanced.addView(view);UiSections.fold(this,colors,"More · library, station controls & diagnostics",advancedStart);
         enabled(client!=null);status.setAccessibilityLiveRegion(android.view.View.ACCESSIBILITY_LIVE_REGION_POLITE);
     }
@@ -151,6 +162,7 @@ class CastPanel extends LinearLayout {
         boolean control=ready&&(!passwordRequired||client.hasPassword())&&!authRejected;
         if(selectedStation!=null){selectedStation.setText(stationName+" · "+(running?"ON AIR · Listen":"Host not on air"));selectedStation.setEnabled(ready&&running&&listener.phoneAvailable());}
         start.setEnabled(control&&playlistSupported&&!running&&!preparing);stop.setEnabled(control&&(running||preparing));listen.setText(listener.phoneListening()?"■ Stop Listening":"▶ Listen");listen.setTextColor(listener.phoneListening()||ready&&running?android.graphics.Color.BLACK:colors.text);listen.setEnabled(listener.phoneListening()||ready&&running&&listener.phoneAvailable());chromecast.setEnabled(ready&&running);
+        phoneSend.setEnabled(control&&listener.phoneSenderAvailable()&&!listener.phoneSending());phoneStop.setEnabled(listener.phoneSending());phoneSendNote.setText(listener.phoneBroadcastStatus());
         hostBroadcast.setEnabled(control&&hostLaunchSupported);serverPlay.setEnabled(control&&serverOutputSupported&&running&&!serverOutputRunning);serverStop.setEnabled(control&&serverOutputSupported&&serverOutputRunning);stationPlaylist.setEnabled(control&&playlistSupported);
         setChildrenEnabled(sharedLists,control);
         String prerequisite=!connected?"Connect to a host first.":!verified?"Refresh or reconnect to verify this host.":preparing?"Host is preparing audio; listening becomes available when on air.":!running?"Host is stopped; start a source first.":"Host stream is on air.";

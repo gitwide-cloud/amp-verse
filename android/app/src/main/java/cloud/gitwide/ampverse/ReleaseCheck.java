@@ -34,10 +34,17 @@ final class ReleaseCheck {
     static boolean betaVersion(String version){
         return version!=null&&version.matches("[vV]?(?:0|[1-9][0-9]{0,7})\\.(?:0|[1-9][0-9]{0,7})\\.(?:0|[1-9][0-9]{0,7})-beta\\.[1-9][0-9]{0,7}");
     }
+    static boolean rcVersion(String version){
+        return version!=null&&version.matches("[vV]?(?:0|[1-9][0-9]{0,7})\\.(?:0|[1-9][0-9]{0,7})\\.(?:0|[1-9][0-9]{0,7})-rc\\.[1-9][0-9]{0,7}");
+    }
+    static boolean samePrereleaseChannel(String installed,String candidate){
+        return betaVersion(installed)&&betaVersion(candidate)||rcVersion(installed)&&rcVersion(candidate);
+    }
     private static int[] version(String value){
-        java.util.regex.Matcher match=java.util.regex.Pattern.compile("[vV]?((?:0|[1-9][0-9]{0,7}))\\.((?:0|[1-9][0-9]{0,7}))\\.((?:0|[1-9][0-9]{0,7}))(?:-beta\\.([1-9][0-9]{0,7}))?").matcher(value);
+        java.util.regex.Matcher match=java.util.regex.Pattern.compile("[vV]?((?:0|[1-9][0-9]{0,7}))\\.((?:0|[1-9][0-9]{0,7}))\\.((?:0|[1-9][0-9]{0,7}))(?:-(beta|rc)\\.([1-9][0-9]{0,7}))?").matcher(value);
         if(!match.matches())throw new IllegalArgumentException("Unsupported version tag");
-        return new int[]{Integer.parseInt(match.group(1)),Integer.parseInt(match.group(2)),Integer.parseInt(match.group(3)),match.group(4)==null?Integer.MAX_VALUE:Integer.parseInt(match.group(4))};
+        String channel=match.group(4);int rank=channel==null?2:channel.equals("rc")?1:0;
+        return new int[]{Integer.parseInt(match.group(1)),Integer.parseInt(match.group(2)),Integer.parseInt(match.group(3)),rank,channel==null?0:Integer.parseInt(match.group(5))};
     }
     static int compare(String left,String right){
         int[] a=version(left),b=version(right);

@@ -24,9 +24,9 @@ final class VinylScratch {
     }
     private static final class Session {
         final int deck;final long epoch,token;final String key;final VinylPcm pcm;
-        final VinylRelease release;volatile float gain;volatile AudioTrack track;long playedFrames;boolean launched;
-        Session(int deck,long epoch,long token,String key,ExoPlayer player,VinylPcm window){this.deck=deck;this.epoch=epoch;this.token=token;this.key=key;release=new VinylRelease(player.getPlayWhenReady());gain=player.getVolume();pcm=new VinylPcm(window.samples,window.rate,window.startMs,player.getCurrentPosition());pcm.hold(System.nanoTime());}
-        void stop(boolean resume){synchronized(this){if(!release.stop(resume))return;AudioTrack current=track;if(current!=null)try{current.pause();playedFrames=current.getPlaybackHeadPosition()&0xffffffffL;current.flush();}catch(IllegalStateException ignored){}}}
+        final VinylRelease release;final OwnedAudioOutput owned;volatile OwnedPcmMixer.Voice ownedVoice;volatile float gain;volatile AudioTrack track;long playedFrames;boolean launched;
+        Session(int deck,long epoch,long token,String key,ExoPlayer player,VinylPcm window){this.deck=deck;this.epoch=epoch;this.token=token;this.key=key;owned=deck<2?PlaybackService.ownedOutput():null;release=new VinylRelease(player.getPlayWhenReady());gain=player.getVolume();pcm=new VinylPcm(window.samples,window.rate,window.startMs,player.getCurrentPosition());pcm.hold(System.nanoTime());}
+        void stop(boolean resume){synchronized(this){if(!release.stop(resume))return;OwnedPcmMixer.Voice voice=ownedVoice;if(voice!=null){playedFrames=Math.max(0,voice.positionFrames(owned.presentedFrames()));voice.pause();voice.flush();}AudioTrack current=track;if(current!=null)try{current.pause();playedFrames=current.getPlaybackHeadPosition()&0xffffffffL;current.flush();}catch(IllegalStateException ignored){}}}
     }
     private final Context context;private final ExoPlayer[] decks;private final Consumer<String> message;private final Barrier owner;
     private final Handler main=new Handler(Looper.getMainLooper());private final Slot[] slots={new Slot(),new Slot(),new Slot(),new Slot()};
@@ -92,7 +92,7 @@ final class VinylScratch {
     private void handoff(Session session){
         Slot slot=slots[session.deck];
         if(closed||slot.session!=session||session.release.stopped()||slot.epoch!=session.epoch||!key(session.deck).equals(session.key)){finish(session,null);return;}
-        owner.quiet(()->activate(session));
+        if(session.deck<2)owner.quiet(()->activate(session));else activate(session);
     }
     private void activate(Session session){
         Slot slot=slots[session.deck];if(closed||slot.session!=session||slot.epoch!=session.epoch||!key(session.deck).equals(session.key)){session.stop(false);finish(session,null);return;}
@@ -112,6 +112,7 @@ final class VinylScratch {
         if(routeRegistered){routeRegistered=false;try{context.unregisterReceiver(routeReceiver);}catch(IllegalArgumentException alreadyRemoved){}}
     }
     private void voice(Session session){
+        if(session.owned!=null){ownedVoice(session);return;}
         String error=null;AudioTrack track=null;
         try{
             android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO);
@@ -134,6 +135,33 @@ final class VinylScratch {
             }
         }catch(Exception failure){if(!session.release.stopped()){session.stop(false);error="Scratch output unavailable. Normal deck is paused; press Play to retry.";}}
         finally{if(track!=null){synchronized(session){if(!session.release.stopped())session.stop(false);try{track.pause();track.flush();}catch(IllegalStateException ignored){}session.track=null;}try{track.release();}catch(IllegalStateException ignored){}}String problem=error;main.post(()->finish(session,problem));}
+    }
+    /** Main scratch joins the same post-EQ bus as decks/sampler; private cue stays separate. */
+    private void ownedVoice(Session session){
+        String error=null;OwnedPcmMixer.Voice voice=null;
+        try{
+            android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO);
+            session.owned.prepare();
+            voice=session.owned.mixer.voice(session.deck==0?OwnedPcmMixer.Source.SCRATCH_A:OwnedPcmMixer.Source.SCRATCH_B,960);
+            synchronized(session){session.ownedVoice=voice;if(session.release.stopped())return;voice.play();}
+            short[] pcm=new short[480];AudioDsp dsp=new AudioDsp(false);
+            dsp.configure(new androidx.media3.common.audio.AudioProcessor.AudioFormat(48000,2,C.ENCODING_PCM_16BIT));dsp.flush();
+            java.nio.ByteBuffer input=java.nio.ByteBuffer.allocateDirect(960).order(java.nio.ByteOrder.LITTLE_ENDIAN);
+            long generation=voice.generation();
+            while(!session.release.stopped()){
+                if(session.owned.failure()!=null)throw new java.io.IOException("Owned scratch output stopped");
+                session.pcm.render(pcm,240);input.clear();for(short sample:pcm)input.putShort(sample);input.flip();dsp.queueInput(input);
+                java.nio.ByteBuffer processed=dsp.getOutput().order(java.nio.ByteOrder.LITTLE_ENDIAN);for(int i=0;i<pcm.length;i++)pcm[i]=processed.getShort();
+                int offset=0;while(offset<240&&!session.release.stopped()){
+                    voice.gain(session.gain);int wrote=voice.write(pcm,offset,240-offset,generation);
+                    if(wrote==0)Thread.sleep(1);else offset+=wrote;
+                }
+            }
+        }catch(Exception failure){if(!session.release.stopped()){session.stop(false);error="Scratch output unavailable. Normal deck is paused; press Play to retry.";}}
+        finally{
+            synchronized(session){if(!session.release.stopped())session.stop(false);session.ownedVoice=null;}
+            if(voice!=null)voice.close();String problem=error;main.post(()->finish(session,problem));
+        }
     }
     private void finish(Session session,String error){
         Slot slot=slots[session.deck];if(slot.session!=session)return;slot.session=null;
