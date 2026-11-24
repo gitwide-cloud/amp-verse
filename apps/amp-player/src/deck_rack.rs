@@ -120,6 +120,15 @@ fn transport_button(
 impl Player {
     pub(super) fn deck_workspace_ui(&mut self, ui: &mut egui::Ui) {
         let compact = ui.available_width() < 1280. || ui.available_height() < 900.;
+        // In short windows, identity and tempo remain on the deck cards; lane
+        // badges replace duplicate waveform captions to preserve browser space.
+        let native_height = (ui
+            .ctx()
+            .layer_transform_to_global(ui.layer_id())
+            .unwrap_or_default()
+            * ui.clip_rect())
+        .height();
+        let compact_wave_captions = native_height < 760.;
         let wave_id = egui::Id::unique("dj-wave-height");
         let mut wave_height = if self.rack.six {
             if compact {
@@ -135,6 +144,9 @@ impl Player {
                 .unwrap_or(if compact { 40. } else { 56. })
                 .clamp(28., 96.)
         };
+        if compact_wave_captions && !self.rack.six {
+            wave_height = wave_height.min(28.);
+        }
         ui.spacing_mut().item_spacing.y = if compact { 3. } else { 5. };
         let scope = self
             .audio
@@ -157,7 +169,7 @@ impl Player {
         ui.separator();
         for side in 0..2 {
             let d = self.rack.live[side];
-            if ui.available_width() < 950. {
+            if ui.available_width() < 950. && !compact_wave_captions {
                 ui.horizontal(|ui| {
                     ui.label(
                         egui::RichText::new(NAMES[d])
@@ -220,7 +232,7 @@ impl Player {
                 self.wave_span,
                 d,
             );
-            if ui.available_width() >= 950. {
+            if ui.available_width() >= 950. || compact_wave_captions {
                 let label = egui::Rect::from_min_size(
                     egui::pos2(
                         ui.min_rect().left(),
@@ -321,9 +333,28 @@ impl Player {
             }
         }
         ui.add_space(6.);
+        let rack_width = ui.available_width();
+        let card_breakpoint = if self.rack.six { 1100. } else { 950. };
+        let narrow_cards = (640. ..card_breakpoint).contains(&rack_width);
+        let minimum_rack = if narrow_cards {
+            if self.rack.six {
+                if native_height < 760. { 314. } else { 380. }
+            } else {
+                310.
+            }
+        } else if compact {
+            278.
+        } else {
+            300.
+        };
         let library_id = egui::Id::unique("dj-library-height");
         let minimum_library = if compact { 112. } else { 160. };
-        let max_library = (ui.available_height() - 370.).max(minimum_library);
+        let rack_reserve = if narrow_cards {
+            minimum_rack + 52.
+        } else {
+            370.
+        };
+        let max_library = (ui.available_height() - rack_reserve).max(minimum_library);
         let mut library_height = ui
             .ctx()
             .data_mut(|d| d.get_persisted::<f32>(library_id))
@@ -335,18 +366,30 @@ impl Player {
             } else {
                 library_height + 52.
             })
-        .max(if compact { 278. } else { 300. })
-        .min(if self.rack.expanded { 430. } else { 380. });
+        .max(minimum_rack)
+        .min(if narrow_cards {
+            if self.rack.expanded { 470. } else { 430. }
+        } else if self.rack.expanded {
+            430.
+        } else {
+            380.
+        });
+        // Magnetic fitting expands logical space; budget the short native window
+        // as well so its browser remains reachable without changing saved sizes.
+        let height = if !narrow_cards && native_height < 760. {
+            height.min(270.)
+        } else {
+            height
+        };
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
             data.insert_temp(egui::Id::unique("dj-requested-rack-height"), height)
         });
-        let rack_width = ui.available_width();
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
             data.insert_temp(
                 egui::Id::unique("native-dj-card-layout"),
-                rack_width >= if self.rack.six { 1100. } else { 950. },
+                rack_width >= 640.,
             )
         });
         let mixer = if compact { 126. } else { 146. };
@@ -370,46 +413,53 @@ impl Player {
             .ctx()
             .data_mut(|d| *d.get_temp_mut_or_insert_with(saved_id, || self.rack.strip_ratios));
         let rendered = if self.rack.six { strips } else { [0.; 2] };
-        if rack_width >= if self.rack.six { 1100. } else { 950. } {
+        if rack_width >= 640. {
             self.card_rack(ui, height);
         } else {
-            ui.horizontal_top(|ui| {
-                if self.rack.six {
-                    self.deck_strips(ui, 0, rendered[0], height, compact);
-                    window_layout::splitter(
-                        ui,
-                        "dj-deck-left-divider",
-                        &mut strips[0],
-                        minimum..=maximum,
-                        true,
-                        1.,
-                        height,
-                    );
-                }
-                ui.push_id(("live-jog", self.rack.live[0]), |ui| {
-                    self.jog_section(ui, self.rack.live[0], half - rendered[0], height)
+            // Below the native DJ window minimum, retain a reachable overflow
+            // path rather than clipping the right bank or shrinking its controls.
+            egui::ScrollArea::horizontal()
+                .id_salt("dj-rack-overflow")
+                .auto_shrink([false, true])
+                .show(ui, |ui| {
+                    ui.horizontal_top(|ui| {
+                        if self.rack.six {
+                            self.deck_strips(ui, 0, rendered[0], height, compact);
+                            window_layout::splitter(
+                                ui,
+                                "dj-deck-left-divider",
+                                &mut strips[0],
+                                minimum..=maximum,
+                                true,
+                                1.,
+                                height,
+                            );
+                        }
+                        ui.push_id(("live-jog", self.rack.live[0]), |ui| {
+                            self.jog_section(ui, self.rack.live[0], half - rendered[0], height)
+                        });
+                        self.rack_mixer(ui, mixer, height);
+                        ui.push_id(("live-jog", self.rack.live[1]), |ui| {
+                            self.jog_section(ui, self.rack.live[1], half - rendered[1], height)
+                        });
+                        if self.rack.six {
+                            window_layout::splitter(
+                                ui,
+                                "dj-deck-right-divider",
+                                &mut strips[1],
+                                minimum..=maximum,
+                                true,
+                                -1.,
+                                height,
+                            );
+                            self.deck_strips(ui, 1, rendered[1], height, compact);
+                        }
+                    })
                 });
-                self.rack_mixer(ui, mixer, height);
-                ui.push_id(("live-jog", self.rack.live[1]), |ui| {
-                    self.jog_section(ui, self.rack.live[1], half - rendered[1], height)
-                });
-                if self.rack.six {
-                    window_layout::splitter(
-                        ui,
-                        "dj-deck-right-divider",
-                        &mut strips[1],
-                        minimum..=maximum,
-                        true,
-                        -1.,
-                        height,
-                    );
-                    self.deck_strips(ui, 1, rendered[1], height, compact);
-                }
-            });
         }
         self.card_tool_windows(ui.ctx());
         // Only deliberate drags change the stored ratios; ordinary window resizing must not clamp them permanently.
-        if rack_width < if self.rack.six { 1100. } else { 950. } {
+        if rack_width < 640. {
             for (side, width) in strips.into_iter().enumerate() {
                 let old = (rack_width * self.rack.strip_ratios[side]).clamp(minimum, maximum);
                 if (old - width).abs() > 0.01 {
@@ -435,7 +485,7 @@ impl Player {
                 Err(error) => self.status = format!("Could not remember deck widths: {error}"),
             }
         }
-        ui.horizontal_wrapped(|ui| {
+        ui.horizontal(|ui| {
             if ui
                 .button(if self.dj_library_hidden {
                     "Show Library"
@@ -449,18 +499,21 @@ impl Player {
             ui.spacing_mut().slider_width = 100.;
             ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Master"));
             let pair = self.pair();
-            ui.label(format!(
-                "{} · LIVE {} / {} · Crossfade {} / {}",
-                if self.rack.six {
-                    "3+3 decks"
-                } else {
-                    "2 decks"
-                },
-                NAMES[self.rack.live[0]],
-                NAMES[self.rack.live[1]],
-                NAMES[pair[0]],
-                NAMES[pair[1]]
-            ));
+            ui.add(
+                egui::Label::new(format!(
+                    "{} · LIVE {} / {} · Crossfade {} / {}",
+                    if self.rack.six {
+                        "3+3 decks"
+                    } else {
+                        "2 decks"
+                    },
+                    NAMES[self.rack.live[0]],
+                    NAMES[self.rack.live[1]],
+                    NAMES[pair[0]],
+                    NAMES[pair[1]]
+                ))
+                .truncate(),
+            );
             ui.add(egui::Label::new(&self.status).truncate());
         });
         #[cfg(test)]
@@ -468,6 +521,7 @@ impl Player {
             d.insert_temp(egui::Id::unique("six-deck-content-bounds"), ui.min_rect())
         });
         if !self.dj_library_hidden {
+            let rendered_library_height = library_height;
             window_layout::splitter(
                 ui,
                 "dj-library-divider",
@@ -477,8 +531,12 @@ impl Player {
                 -1.,
                 12.,
             );
-            ui.ctx()
-                .data_mut(|d| d.insert_persisted(library_id, library_height));
+            // Window resizing may clamp the displayed browser; only an actual
+            // splitter drag replaces the user's remembered browser height.
+            if library_height != rendered_library_height {
+                ui.ctx()
+                    .data_mut(|d| d.insert_persisted(library_id, library_height));
+            }
             #[cfg(test)]
             {
                 let transform = ui
@@ -1590,10 +1648,30 @@ mod tests {
                         cue.right() <= play.left() + 1.,
                         "Cue and Play stay together in the card transport"
                     );
-                    assert!(
-                        phones.top() >= play.bottom() - 1.,
-                        "Headphone monitoring stays in the card controls row"
-                    );
+                    let (main, layer) = ctx
+                        .data(|data| {
+                            data.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
+                                "rack-main-extent",
+                                deck,
+                            )))
+                        })
+                        .unwrap();
+                    if main.height() < 280. {
+                        let global =
+                            ctx.layer_transform_to_global(layer).unwrap_or_default() * main;
+                        assert!(
+                            phones.left() >= play.right() - 1.
+                                && (phones.center().y - play.center().y).abs() <= 1.
+                                && phones.height() >= 37.
+                                && global.expand(1.).contains_rect(phones),
+                            "Short-card private monitoring stays full size in its transport row: phones={phones:?}, play={play:?}, card={global:?}"
+                        );
+                    } else {
+                        assert!(
+                            phones.top() >= play.bottom() - 1.,
+                            "Headphone monitoring stays in the tall card controls row"
+                        );
+                    }
                 } else if deck == 0 {
                     assert!(
                         play.right() <= cue.left() && cue.right() <= phones.left(),
