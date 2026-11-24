@@ -17,6 +17,7 @@ public final class PlaybackService extends MediaSessionService {
     private DjEngine dj;
     private OwnedAudioOutput ownedOutput;
     static OwnedAudioOutput ownedOutput(){return instance==null?null:instance.ownedOutput;}
+    static void suppressOwnedOutput(boolean suppressed){OwnedAudioOutput output=ownedOutput();if(output!=null)output.suppress(suppressed);}
     private boolean djOwner;
     static Player player(){return instance==null||instance.session==null?null:instance.session.getPlayer();}
     static DjEngine existingDj(){return instance==null?null:instance.dj;}
@@ -27,15 +28,15 @@ public final class PlaybackService extends MediaSessionService {
     private String hlsAttemptUri="";
     private boolean hlsReady;
     private final android.os.Handler handler=new android.os.Handler(android.os.Looper.getMainLooper());
-    static void claimDj(){if(instance!=null){instance.djOwner=true;if(instance.ownedOutput!=null)instance.ownedOutput.mixer.owner(OwnedPcmMixer.Owner.DJ);if(instance.session!=null)instance.session.getPlayer().pause();}}
+    static void claimDj(){if(instance!=null){instance.djOwner=true;suppressOwnedOutput(false);if(instance.ownedOutput!=null)instance.ownedOutput.mixer.owner(OwnedPcmMixer.Owner.DJ);if(instance.session!=null)instance.session.getPlayer().pause();}}
     static void claimDjForScratch(Runnable afterPause){
         PlaybackService service=instance;
         if(service==null||service.session==null){afterPause.run();return;}
-        service.djOwner=true;if(service.ownedOutput!=null)service.ownedOutput.mixer.owner(OwnedPcmMixer.Owner.DJ);Player player=service.session.getPlayer();player.pause();
+        service.djOwner=true;suppressOwnedOutput(false);if(service.ownedOutput!=null)service.ownedOutput.mixer.owner(OwnedPcmMixer.Owner.DJ);Player player=service.session.getPlayer();player.pause();
         if(player instanceof ExoPlayer) ((ExoPlayer)player).createMessage((type,payload)->service.handler.post(afterPause)).send();
         else service.handler.post(afterPause);
     }
-    private void claimPlayer(){if(ownedOutput!=null)ownedOutput.mixer.owner(OwnedPcmMixer.Owner.PLAYER);if(djOwner){djOwner=false;if(dj!=null)dj.pauseForPlayer();}}
+    private void claimPlayer(){suppressOwnedOutput(false);if(ownedOutput!=null)ownedOutput.mixer.owner(OwnedPcmMixer.Owner.PLAYER);if(djOwner){djOwner=false;if(dj!=null)dj.pauseForPlayer();}}
     static void switchToPlayer(){if(instance!=null)instance.adoptDjPlaylist();}
     static String owner(){return instance!=null&&instance.djOwner?"dj":"player";}
     private void adoptDjPlaylist(){
@@ -81,7 +82,7 @@ public final class PlaybackService extends MediaSessionService {
         player.setRepeatMode(getSharedPreferences("settings", MODE_PRIVATE).getBoolean("repeat", false) ? Player.REPEAT_MODE_ALL : Player.REPEAT_MODE_OFF);
         player.setShuffleModeEnabled(settings.getBoolean("shuffle",false));
         player.addListener(new Player.Listener(){
-            @Override public void onPlayWhenReadyChanged(boolean ready,int reason){if(ready)claimPlayer();else{cancelRadioRetry();bufferingSince=0;hlsAttemptSince=0;}}
+            @Override public void onPlayWhenReadyChanged(boolean ready,int reason){if(ready)claimPlayer();else{if(reason==Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_FOCUS_LOSS||reason==Player.PLAY_WHEN_READY_CHANGE_REASON_AUDIO_BECOMING_NOISY)suppressOwnedOutput(true);cancelRadioRetry();bufferingSince=0;hlsAttemptSince=0;}}
             @Override public void onMediaItemTransition(androidx.media3.common.MediaItem item,int reason){
                 bufferingSince=0;lastLiveCatchup=0;
                 String selected=item!=null&&item.localConfiguration!=null?item.localConfiguration.uri.toString():"";

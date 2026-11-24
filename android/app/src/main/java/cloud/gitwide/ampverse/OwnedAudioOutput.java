@@ -9,41 +9,56 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
   final OwnedPcmMixer mixer = new OwnedPcmMixer();
   private volatile long presentedFrames;
   private volatile IOException failure;
-  private volatile boolean closed;
-  private AudioTrack track;
+  private volatile boolean closed, suppressed;
+
+  void suppress(boolean value) {
+    suppressed = value;
+  }
+
+  interface Device {
+    int write(short[] pcm, int offset, int count) throws IOException;
+
+    long head();
+
+    int bufferFrames();
+
+    void play();
+
+    void pause();
+
+    void flush();
+
+    void release();
+  }
+
+  interface DeviceFactory {
+    Device create() throws IOException;
+  }
+
+  private final DeviceFactory devices;
+  private final Runnable priority;
+  private Device track;
+
+  OwnedAudioOutput() {
+    this(
+        OwnedAudioOutput::hardware,
+        () -> android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO));
+  }
+
+  OwnedAudioOutput(DeviceFactory devices, Runnable priority) {
+    this.devices = devices;
+    this.priority = priority;
+  }
+
   private Thread renderer;
 
   public synchronized void prepare() throws IOException {
     if (closed) throw new IOException("Owned output is closed");
     if (failure != null) throw failure;
     if (track != null) return;
-    int minimum =
-        AudioTrack.getMinBufferSize(
-            48000, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT);
-    if (minimum <= 0 || minimum > 48000)
-      throw new IOException("Bounded stereo PCM output is unavailable");
-    AudioTrack candidate = null;
+    Device candidate = null;
     try {
-      candidate =
-          new AudioTrack.Builder()
-              .setAudioAttributes(
-                  new android.media.AudioAttributes.Builder()
-                      .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
-                      .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
-                      .build())
-              .setAudioFormat(
-                  new AudioFormat.Builder()
-                      .setSampleRate(48000)
-                      .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                      .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
-                      .build())
-              .setTransferMode(AudioTrack.MODE_STREAM)
-              .setBufferSizeInBytes(Math.max(minimum, 3840))
-              .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
-              .build();
-      if (candidate.getState() != AudioTrack.STATE_INITIALIZED)
-        throw new IOException("Owned PCM output could not initialize");
-      candidate.setVolume(1f);
+      candidate = devices.create();
       candidate.play();
       track = candidate;
       renderer = new Thread(this::render, "amp-owned-master");
@@ -54,6 +69,65 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
       throw new IOException(
           "Owned PCM output is unavailable; existing playback was not replaced", error);
     }
+  }
+
+  private static Device hardware() throws IOException {
+    int minimum =
+        AudioTrack.getMinBufferSize(
+            48000, AudioFormat.CHANNEL_OUT_STEREO, AudioFormat.ENCODING_PCM_16BIT);
+    if (minimum <= 0 || minimum > 48000)
+      throw new IOException("Bounded stereo PCM output is unavailable");
+    AudioTrack output =
+        new AudioTrack.Builder()
+            .setAudioAttributes(
+                new android.media.AudioAttributes.Builder()
+                    .setUsage(android.media.AudioAttributes.USAGE_MEDIA)
+                    .setContentType(android.media.AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build())
+            .setAudioFormat(
+                new AudioFormat.Builder()
+                    .setSampleRate(48000)
+                    .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                    .setChannelMask(AudioFormat.CHANNEL_OUT_STEREO)
+                    .build())
+            .setTransferMode(AudioTrack.MODE_STREAM)
+            .setBufferSizeInBytes(Math.max(minimum, 3840))
+            .setPerformanceMode(AudioTrack.PERFORMANCE_MODE_LOW_LATENCY)
+            .build();
+    if (output.getState() != AudioTrack.STATE_INITIALIZED) {
+      output.release();
+      throw new IOException("Owned PCM output could not initialize");
+    }
+    output.setVolume(1f);
+    return new Device() {
+      public int write(short[] pcm, int offset, int count) {
+        return output.write(pcm, offset, count, AudioTrack.WRITE_NON_BLOCKING);
+      }
+
+      public long head() {
+        return Integer.toUnsignedLong(output.getPlaybackHeadPosition());
+      }
+
+      public int bufferFrames() {
+        return output.getBufferSizeInFrames();
+      }
+
+      public void play() {
+        output.play();
+      }
+
+      public void pause() {
+        output.pause();
+      }
+
+      public void flush() {
+        output.flush();
+      }
+
+      public void release() {
+        output.release();
+      }
+    };
   }
 
   @Override
@@ -68,25 +142,40 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
 
   @Override
   public long bufferDurationUs() {
-    AudioTrack output = track;
-    return output == null ? 0 : output.getBufferSizeInFrames() * 1000000L / 48000;
+    Device output = track;
+    return output == null ? 0 : output.bufferFrames() * 1000000L / 48000;
   }
 
   private void render() {
-    android.os.Process.setThreadPriority(android.os.Process.THREAD_PRIORITY_AUDIO);
+    priority.run();
     short[] block = new short[960];
     long wraps = 0, previous = 0;
+    int offset = block.length;
+    boolean hardwarePlaying = true;
     try {
       while (!closed) {
-        mixer.render(block, 480);
-        int offset = 0;
-        while (offset < block.length && !closed) {
-          int written =
-              track.write(block, offset, block.length - offset, AudioTrack.WRITE_NON_BLOCKING);
+        if (suppressed) {
+          if (hardwarePlaying) {
+            track.pause();
+            hardwarePlaying = false;
+          }
+          Thread.sleep(4);
+          continue;
+        }
+        if (!hardwarePlaying) {
+          track.play();
+          hardwarePlaying = true;
+        }
+        if (offset == block.length) {
+          mixer.render(block, 480);
+          offset = 0;
+        }
+        while (offset < block.length && !closed && !suppressed) {
+          int written = track.write(block, offset, block.length - offset);
           if (written < 0) throw new IOException("Owned PCM hardware output stopped");
           if (written == 0) Thread.sleep(1);
           else offset += written;
-          long raw = Integer.toUnsignedLong(track.getPlaybackHeadPosition());
+          long raw = track.head();
           if (raw < previous && previous - raw > 0x80000000L) wraps += 0x100000000L;
           previous = raw;
           presentedFrames = Math.min(mixer.frames(), wraps + raw);
@@ -100,7 +189,7 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
               ? (IOException) error
               : new IOException("Owned output failed", error);
     } finally {
-      AudioTrack output = track;
+      Device output = track;
       if (output != null) {
         try {
           output.pause();

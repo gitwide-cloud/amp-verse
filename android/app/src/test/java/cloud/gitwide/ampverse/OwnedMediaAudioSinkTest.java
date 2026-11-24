@@ -191,6 +191,73 @@ public final class OwnedMediaAudioSinkTest {
   }
 
   @Test
+  public void seekKeepsLatestPendingFormatAndTempoButResetDropsStaleFormat() throws Exception {
+    Output out = new Output();
+    OwnedMediaAudioSink sink = new OwnedMediaAudioSink(out, OwnedPcmMixer.Source.PLAYER, false);
+    sink.configure(format(48000, 2), 0, null);
+    sink.play();
+    sink.handleBuffer(pcm(480, 2), 1000000, 1);
+    sink.configure(format(44100, 1), 0, null);
+    sink.setPlaybackParameters(new PlaybackParameters(2f, 1f));
+    sink.flush();
+    ByteBuffer next = pcm(4410, 1);
+    for (int i = 0; i < 100 && next.hasRemaining(); i++) {
+      sink.handleBuffer(next, 5000000, 1);
+      out.render(480, true);
+    }
+    assertFalse(next.hasRemaining());
+    for (int i = 0; i < 100 && !sink.isEnded(); i++) {
+      sink.playToEndOfStream();
+      out.render(480, true);
+    }
+    assertTrue(sink.isEnded());
+    assertEquals(5100000, sink.getCurrentPositionUs(true), 3000);
+    sink.configure(format(8000, 1), 0, null);
+    sink.reset();
+    sink.configure(format(48000, 2), 0, null);
+    ByteBuffer afterReset = pcm(4800, 2);
+    for (int i = 0; i < 100 && afterReset.hasRemaining(); i++) {
+      sink.handleBuffer(afterReset, 7000000, 1);
+      out.render(480, true);
+    }
+    for (int i = 0; i < 100 && !sink.isEnded(); i++) {
+      sink.playToEndOfStream();
+      out.render(480, true);
+    }
+    assertTrue(sink.isEnded());
+    assertEquals(7100000, sink.getCurrentPositionUs(true), 3000);
+    sink.release();
+  }
+
+  @Test
+  public void pausedTempoChangeResumesOldQueueBeforeChangingClock() throws Exception {
+    Output out = new Output();
+    OwnedMediaAudioSink sink = new OwnedMediaAudioSink(out, OwnedPcmMixer.Source.PLAYER, false);
+    sink.configure(format(48000, 2), 0, null);
+    sink.play();
+    sink.handleBuffer(pcm(480, 2), 1000000, 1);
+    sink.pause();
+    sink.setPlaybackParameters(new PlaybackParameters(2f, 1f));
+    ByteBuffer next = pcm(4800, 2);
+    assertFalse(sink.handleBuffer(next, 1010000, 1));
+    assertArrayEquals(new short[960], out.render(480, true));
+    assertEquals(1000000, sink.getCurrentPositionUs(false));
+    sink.play();
+    out.render(480, true);
+    for (int i = 0; i < 100 && next.hasRemaining(); i++) {
+      sink.handleBuffer(next, 1010000, 1);
+      out.render(480, true);
+    }
+    for (int i = 0; i < 100 && !sink.isEnded(); i++) {
+      sink.playToEndOfStream();
+      out.render(480, true);
+    }
+    assertTrue(sink.isEnded());
+    assertEquals(1110000, sink.getCurrentPositionUs(true), 3000);
+    sink.release();
+  }
+
+  @Test
   public void unsupportedPassthroughAndChannelMapsCannotBypassMaster() throws Exception {
     Output out = new Output();
     OwnedMediaAudioSink sink = new OwnedMediaAudioSink(out, OwnedPcmMixer.Source.PLAYER, false);

@@ -28,8 +28,8 @@ def main():
     classpath = os.pathsep.join([str(classes)] + [str(path) for path in jars])
     production = ["OwnedPcmMixer", "MasterPcmQueue", "OwnedPcmOutput", "OwnedAudioOutput",
                   "OwnedMediaAudioSink", "OwnedInputPcm", "AudioDsp", "PhoneLiveSession",
-                  "PhoneLiveHttpTransport"]
-    tests = ["OwnedPcmMixerTest", "PhoneLiveSessionTest", "OwnedInputPcmTest", "OwnedMediaAudioSinkTest"]
+                  "PhoneLiveHttpTransport", "OwnedSamplerVoices", "OwnedSamplerAudio"]
+    tests = ["OwnedPcmMixerTest", "PhoneLiveSessionTest", "OwnedInputPcmTest", "OwnedMediaAudioSinkTest", "OwnedAudioOutputTest", "OwnedSamplerVoicesTest"]
     files = [source / "main/java/cloud/gitwide/ampverse" / (name + ".java") for name in production]
     files += [source / "test/java/cloud/gitwide/ampverse" / (name + ".java") for name in tests]
     compile_result = subprocess.run([str(args.java_home / "bin/javac"), "-J-Xmx128m", "--release", "17",
