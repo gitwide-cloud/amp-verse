@@ -218,7 +218,8 @@ fn playlist_indices(
 }
 impl Player {
     fn use_browser_smart_source(&mut self) {
-        self.run.choice = self.dj_browser.smart.clone();
+        // The control action validates the saved source before committing choice.
+        // A rejected draft or empty source must leave the current session intact.
         if let Err(error) = self.execute_control(control::Action::LoadSmartPlaylist {
             playlist: self.dj_browser.smart.clone(),
             execution: control::Execution::LoadOnly,
@@ -1036,6 +1037,37 @@ mod tests {
         assert_eq!(player.run.profile.as_ref().unwrap().id, current.id);
         assert!(player.run.auto);
         assert!(player.audio.is_none());
+    }
+
+    #[test]
+    fn browser_smart_source_reports_matches_without_starting_manual_decks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("song.mp3"), b"fixture").unwrap();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            ..Default::default()
+        };
+        let mut profile = player.run.settings.playlists[0].clone();
+        profile.id = "edm".into();
+        profile.name = "EDM".into();
+        player.run.settings.playlists = vec![profile];
+        player.dj_browser.smart = "edm".into();
+        player.run.choice = "previous-source".into();
+        let previous_pair = player.rack.live;
+
+        player.use_browser_smart_source();
+
+        assert_eq!(player.run.choice, "edm");
+        assert_eq!(player.run.playlist.as_deref(), Some("edm"));
+        assert_eq!(player.run.profile.as_ref().unwrap().name, "EDM");
+        assert!(!player.run.auto);
+        assert!(player.audio.is_none());
+        assert_eq!(player.rack.live, previous_pair);
+        assert_eq!(
+            player.status,
+            "EDM selected for Auto Mix (1 matching tracks). Turn Auto Mix ON to load and play its songs."
+        );
     }
 
     #[test]
