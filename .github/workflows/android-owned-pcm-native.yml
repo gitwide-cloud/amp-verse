@@ -10,7 +10,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: android-owned-pcm-${{ github.ref }}
+  group: android-owned-pcm-native-v2-${{ github.ref }}
   cancel-in-progress: true
 jobs:
   native-emulator:
@@ -73,7 +73,7 @@ jobs:
         if: always()
         run: |
           mkdir -p test-output/android-owned-native
-          adb logcat -d > test-output/android-owned-native/logcat.txt || true
+          timeout 10s adb logcat -d > test-output/android-owned-native/logcat.txt || true
       - uses: actions/upload-artifact@v4
         if: always()
         with:
