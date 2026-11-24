@@ -29,13 +29,13 @@ def main():
     classpath = os.pathsep.join([str(classes)] + [str(path) for path in jars])
     production = ["OwnedPcmMixer", "MasterPcmQueue", "OwnedPcmOutput", "OwnedAudioOutput",
                   "OwnedMediaAudioSink", "OwnedInputPcm", "AudioDsp", "PhoneLiveSession",
-                  "PhoneLiveHttpTransport", "OwnedSamplerVoices", "OwnedSamplerAudio", "PhoneMasterBroadcast", "PhoneSourceIdentity"]
-    tests = ["OwnedPcmMixerTest", "PhoneLiveSessionTest", "OwnedInputPcmTest", "OwnedMediaAudioSinkTest", "OwnedAudioOutputTest", "OwnedSamplerVoicesTest", "PhoneMasterBroadcastTest", "PhoneSourceIdentityTest"]
+                  "PhoneLiveHttpTransport", "OwnedSamplerVoices", "OwnedSamplerAudio", "PhoneMasterBroadcast", "PhoneSourceIdentity", "PhoneMp3Warmup"]
+    tests = ["OwnedPcmMixerTest", "PhoneLiveSessionTest", "OwnedInputPcmTest", "OwnedMediaAudioSinkTest", "OwnedAudioOutputTest", "OwnedSamplerVoicesTest", "PhoneMasterBroadcastTest", "PhoneSourceIdentityTest", "PhoneMp3WarmupTest"]
     files = [source / "main/java/cloud/gitwide/ampverse" / (name + ".java") for name in production]
     files += [source / "test/java/cloud/gitwide/ampverse" / (name + ".java") for name in tests]
     if args.full_cast:
         files.append(root / "android/features/cast/java/cloud/gitwide/ampverse/FullPhoneMp3Encoder.java")
-    compile_result = subprocess.run([str(args.java_home / "bin/javac"), "-J-Xmx128m", "--release", "17",
+    compile_result = subprocess.run([str(args.java_home / "bin/javac"), "-J-Xmx128m", "--release", "8",
                                      "-cp", classpath, "-d", str(classes), *map(str, files)],
                                     capture_output=True, text=True, timeout=60)
     (args.output / "compile.log").write_text(compile_result.stdout + compile_result.stderr)

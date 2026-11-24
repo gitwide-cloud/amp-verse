@@ -97,6 +97,8 @@ final class FullPhoneMp3Encoder implements PhoneMasterBroadcast.Encoder {
       writer.start();
       byte[] packet = new byte[PhoneLiveSession.MAX_PACKET];
       long last = System.nanoTime();
+      PhoneMp3Warmup warmup = new PhoneMp3Warmup();
+      boolean warmed = false;
       while (!stopped.get() && !cancelled.get()) {
         IOException problem = failure.get();
         if (problem != null) throw problem;
@@ -110,7 +112,18 @@ final class FullPhoneMp3Encoder implements PhoneMasterBroadcast.Encoder {
           count = 0;
         }
         if (count > 0) {
-          packets.packet(packet, count);
+          if (!warmed) {
+            warmup.append(packet, count);
+            if (warmup.ready()) {
+              byte[] prefix = warmup.take();
+              for (int offset = 0; offset < prefix.length; offset += PhoneLiveSession.MAX_PACKET) {
+                int length = Math.min(PhoneLiveSession.MAX_PACKET, prefix.length - offset);
+                packets.packet(
+                    java.util.Arrays.copyOfRange(prefix, offset, offset + length), length);
+              }
+              warmed = true;
+            }
+          } else packets.packet(packet, count);
           last = System.nanoTime();
         } else {
           if (terminal(session) || System.nanoTime() - last > 3000000000L)

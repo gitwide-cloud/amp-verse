@@ -50,7 +50,8 @@ public final class OwnedMediaAudioSinkTest {
   static ByteBuffer pcm(int frames, int channels) {
     ByteBuffer data = ByteBuffer.allocate(frames * channels * 2).order(ByteOrder.LITTLE_ENDIAN);
     while (data.hasRemaining()) data.putShort((short) 1000);
-    return data.flip();
+    data.flip();
+    return data;
   }
 
   @Test
