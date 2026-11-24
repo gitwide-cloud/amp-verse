@@ -67,8 +67,7 @@ final class PhoneMasterBroadcast implements AutoCloseable {
 
   void stop() {
     Job job = current;
-    if (job != null) {
-      job.cancelled.set(true);
+    if (job != null && job.cancelled.compareAndSet(false, true)) {
       job.session.cancel();
       Encoder encoder = job.encoder;
       if (encoder != null) encoder.cancel();

@@ -229,4 +229,65 @@ public final class PhoneMasterBroadcastTest {
     assertEquals(1, transport.stops);
     broadcast.close();
   }
+
+  @Test
+  public void repeatedStopDoesNotAbortItsOwnGuardedCleanup() throws Exception {
+    AtomicInteger aborts = new AtomicInteger();
+    CountDownLatch cleaning = new CountDownLatch(1), release = new CountDownLatch(1);
+    Transport transport =
+        new Transport() {
+          public void abort() {
+            aborts.incrementAndGet();
+          }
+
+          public void stop(String token) {
+            cleaning.countDown();
+            try {
+              release.await(2, TimeUnit.SECONDS);
+            } catch (InterruptedException error) {
+              Thread.currentThread().interrupt();
+            }
+            super.stop(token);
+          }
+        };
+    PhoneMasterBroadcast broadcast =
+        new PhoneMasterBroadcast(
+            new OwnedPcmMixer(),
+            () ->
+                new PhoneMasterBroadcast.Encoder() {
+                  public void encode(
+                      MasterPcmQueue pcm,
+                      AtomicBoolean stop,
+                      PhoneMasterBroadcast.PacketSink packets)
+                      throws IOException {
+                    packets.packet(new byte[] {1}, 1);
+                    while (!stop.get())
+                      try {
+                        Thread.sleep(2);
+                      } catch (InterruptedException error) {
+                        Thread.currentThread().interrupt();
+                        return;
+                      }
+                  }
+
+                  public void cancel() {}
+
+                  public void close() {}
+                },
+            s -> {});
+    try {
+      broadcast.start(new PhoneLiveSession(ID, transport), () -> true);
+      await(() -> transport.uploads == 1);
+      broadcast.stop();
+      assertTrue(cleaning.await(2, TimeUnit.SECONDS));
+      broadcast.stop();
+      broadcast.close();
+      assertEquals(1, aborts.get());
+    } finally {
+      release.countDown();
+      broadcast.close();
+      await(() -> !broadcast.active());
+    }
+    assertEquals(1, transport.stops);
+  }
 }
