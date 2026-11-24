@@ -352,6 +352,7 @@ enum Command {
     Clock(f32, u32),
     Launch(usize),
     Pair([usize; 2]),
+    SelectLive(usize),
     Monitor(Option<rtrb::Producer<Frame>>),
     Broadcast(Option<rtrb::Producer<Frame>>),
     SampleLoad(usize, u64, Option<Arc<[Frame]>>),
@@ -434,6 +435,10 @@ struct Mixer {
     pub controls: Arc<Controls>,
     rate: u32,
     fade: Option<Fade>,
+    // Audio-clock smoothing only for deliberate live routing changes. Sources
+    // and transport stay untouched, including decks leaving the pair.
+    route_weights: [f32; DECKS],
+    route_frames: u32,
     levels: [Option<LevelFade>; 7],
     monitor: Option<rtrb::Producer<Frame>>,
     broadcast: Option<rtrb::Producer<Frame>>,
@@ -454,6 +459,8 @@ impl Mixer {
             controls,
             rate,
             fade: None,
+            route_weights: [1., 0., 1., 1., 1., 1.],
+            route_frames: 0,
             levels: Default::default(),
             monitor: None,
             broadcast: None,
@@ -516,6 +523,20 @@ impl Mixer {
                         for (side, d) in pair.into_iter().enumerate() {
                             self.controls.pair[side].store(d as u32, Relaxed);
                         }
+                    }
+                }
+                Command::SelectLive(deck) => {
+                    // A deliberate manual takeover cancels only the pair
+                    // handoff: never finish it by stopping its outgoing source.
+                    self.fade = None;
+                    self.pending_handoff = 0;
+                    self.controls.fading.store(false, Relaxed);
+                    self.controls.mashup_active.store(false, Relaxed);
+                    // Even the same pair may be leaving a mashup's overridden
+                    // buses; ramp back to the current manual fader weights.
+                    self.route_frames = (self.rate / 100).max(1);
+                    if self.controls.pair_indices()[deck % 2] != deck {
+                        self.controls.pair[deck % 2].store(deck as u32, Relaxed);
                     }
                 }
                 Command::Monitor(producer) => self.monitor = producer,
@@ -1230,6 +1251,22 @@ impl Mixer {
             if let Some(masks) = handoff_masks {
                 stem_masks = masks;
             }
+            let pair = c.pair_indices();
+            for (deck, weight) in self.route_weights.iter_mut().enumerate() {
+                let target = if deck == pair[0] {
+                    buses[0]
+                } else if deck == pair[1] {
+                    buses[1]
+                } else {
+                    1.
+                };
+                if self.route_frames > 0 {
+                    *weight += (target - *weight) / self.route_frames as f32;
+                } else {
+                    *weight = target;
+                }
+            }
+            self.route_frames = self.route_frames.saturating_sub(1);
             c.mashup_active.store(
                 self.fade.as_ref().is_some_and(|f| f.mashup.is_some()),
                 Relaxed,
@@ -1463,15 +1500,7 @@ impl Mixer {
                         player_mix[ch] = frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
                     }
                     peaks[d] = peaks[d].max(frame[ch].abs());
-                    let pair = c.pair_indices();
-                    let weight = if d == pair[0] {
-                        buses[0]
-                    } else if d == pair[1] {
-                        buses[1]
-                    } else {
-                        1.
-                    };
-                    mix[ch] += frame[ch] * weight * std::f32::consts::FRAC_1_SQRT_2;
+                    mix[ch] += frame[ch] * self.route_weights[d] * std::f32::consts::FRAC_1_SQRT_2;
                 }
                 let bin = i * 96 / frames.max(1);
                 waves[d][bin] = waves[d][bin].max((frame[0] + frame[1]).abs() * 0.5);
@@ -2008,6 +2037,14 @@ impl Engine {
             );
         }
         self.send(Command::Pair(pair))
+    }
+    /// Make this deck its side's live crossfader channel without pausing,
+    /// seeking or replacing any deck. Other playing decks remain independent.
+    pub fn select_live(&self, deck: usize) -> Result<(), String> {
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        self.send(Command::SelectLive(deck))
     }
     pub fn fade_deck(
         &self,
@@ -4704,6 +4741,155 @@ mod tests {
         m.render(500, |_, _| {});
         assert!(!c.play[2].load(Relaxed));
         assert!(c.play[5].load(Relaxed));
+    }
+    #[test]
+    fn direct_live_reassignment_preserves_playing_sources_and_ramps_only_routing() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        for deck in 0..DECKS {
+            tx.send(Command::Load(deck, source(0.02, 10000), true, 7))
+                .unwrap();
+        }
+        tx.send(Command::Fader(0.75)).unwrap();
+        m.render(100, |_, _| {});
+        let before = m.route_weights;
+        let generations: Vec<_> = c.deck_generation.iter().map(|g| g.load(Relaxed)).collect();
+        tx.send(Command::SelectLive(2)).unwrap();
+        m.render(1, |_, _| {});
+        assert_eq!(c.pair_indices(), [2, 1]);
+        assert_eq!(get(&c.crossfader), 0.75);
+        assert!(m.route_weights[0] > before[0] && m.route_weights[0] < 1.);
+        assert!(m.route_weights[2] < 1. && m.route_weights[2] > before[0]);
+        for deck in [1, 3, 4, 5] {
+            assert_eq!(
+                m.route_weights[deck], before[deck],
+                "unrelated routing changed"
+            );
+        }
+        m.render(9, |_, _| {});
+        assert!((m.route_weights[0] - 1.).abs() < 1e-6);
+        assert!((m.route_weights[2] - before[0]).abs() < 1e-6);
+        assert!(c.play.iter().all(|p| p.load(Relaxed)));
+        assert!(c.position.iter().all(|p| p.load(Relaxed) == 110));
+        assert_eq!(
+            generations,
+            c.deck_generation
+                .iter()
+                .map(|g| g.load(Relaxed))
+                .collect::<Vec<_>>()
+        );
+        assert!(c.gain.iter().all(|g| get(g) == 1.));
+        // B-side selection is independent; no pause or reload after A's takeover.
+        tx.send(Command::SelectLive(5)).unwrap();
+        m.render(10, |_, _| {});
+        assert_eq!(c.pair_indices(), [2, 5]);
+        assert!(c.play.iter().all(|p| p.load(Relaxed)));
+        assert!(c.position.iter().all(|p| p.load(Relaxed) == 120));
+    }
+    #[test]
+    fn direct_live_takeover_cancels_handoff_without_stopping_its_sources() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        for deck in 0..3 {
+            tx.send(Command::Load(deck, source(0.02, 10000), true, 1))
+                .unwrap();
+        }
+        tx.send(Command::Fade {
+            to: 1.,
+            seconds: 1.,
+        })
+        .unwrap();
+        m.render(200, |_, _| {});
+        let fader = get(&c.crossfader);
+        assert!(c.fading.load(Relaxed));
+        tx.send(Command::SelectLive(2)).unwrap();
+        m.render(1500, |_, _| {});
+        assert!(!c.fading.load(Relaxed));
+        assert!(!c.mashup_active.load(Relaxed));
+        assert_eq!(get(&c.crossfader), fader);
+        assert_eq!(c.pair_indices(), [2, 1]);
+        for deck in 0..3 {
+            assert!(
+                c.play[deck].load(Relaxed),
+                "manual takeover stopped a source"
+            );
+            assert_eq!(c.position[deck].load(Relaxed), 1700);
+        }
+    }
+    #[test]
+    fn direct_live_routing_changes_rendered_audio_gradually() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.1, 10000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(2, source(0.02, 10000), true, 1))
+            .unwrap();
+        tx.send(Command::Fader(0.75)).unwrap();
+        let mut previous = 0.;
+        m.render(2000, |_, frame| previous = frame[0]);
+        let before = previous;
+        tx.send(Command::SelectLive(2)).unwrap();
+        let mut maximum_step = 0_f32;
+        m.render(100, |_, frame| {
+            maximum_step = maximum_step.max((frame[0] - previous).abs());
+            previous = frame[0];
+        });
+        assert!(
+            previous - before > 0.02,
+            "retiring deck must return to the independent unity bus"
+        );
+        assert!(
+            maximum_step < 0.01,
+            "routing jumped instead of ramping: {maximum_step}"
+        );
+        assert_eq!(
+            c.underruns[0].load(Relaxed) + c.underruns[2].load(Relaxed),
+            0
+        );
+        assert!(c.play[0].load(Relaxed) && c.play[2].load(Relaxed));
+    }
+    #[test]
+    fn direct_live_same_pair_smooths_mashup_bus_takeover() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        for deck in 0..2 {
+            tx.send(Command::Load(deck, source(0.02, 10000), true, 1))
+                .unwrap();
+        }
+        tx.send(Command::Mashup {
+            to: 1.,
+            fade: 0.1,
+            hold: 2.,
+            grid: crate::mix_schedule::Grid {
+                period: 0.5,
+                anchor: 0.,
+            },
+        })
+        .unwrap();
+        m.render(700, |_, _| {});
+        assert!(c.mashup_active.load(Relaxed));
+        assert_eq!(
+            m.route_weights[1], 1.,
+            "mashup must override the manual bus"
+        );
+        let fader = get(&c.crossfader);
+        let target = amp_core::show::crossfade_weights(fader)[1];
+        assert!(target < 0.5);
+        tx.send(Command::SelectLive(1)).unwrap();
+        m.render(1, |_, _| {});
+        assert_eq!(c.pair_indices(), [0, 1]);
+        assert_eq!(get(&c.crossfader), fader);
+        assert!(!c.fading.load(Relaxed));
+        assert!(m.route_weights[1] < 1. && m.route_weights[1] > target);
+        m.render(9, |_, _| {});
+        assert!((m.route_weights[1] - target).abs() < 1e-6);
+        assert!(c.play[0].load(Relaxed) && c.play[1].load(Relaxed));
+        assert_eq!(c.position[0].load(Relaxed), 710);
+        assert_eq!(c.position[1].load(Relaxed), 710);
     }
     #[test]
     fn quantized_background_launch_uses_audio_clock_not_ui_ticks() {
