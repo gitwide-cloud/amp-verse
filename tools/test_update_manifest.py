@@ -5,6 +5,7 @@ from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
+from package_android_modules import release_identity
 from package_downloads import desktop_version, write_desktop_manifest
 from update_manifest import generate
 
@@ -43,6 +44,13 @@ class UpdateManifestTests(unittest.TestCase):
                 properties.write_text("versionName=1.0.22\nversionCode=42\n")
                 with self.assertRaisesRegex(ValueError, "product versions disagree"):
                     desktop_version(root)
+
+    def test_android_package_accepts_rc_and_preserves_other_channels(self):
+        self.assertEqual(release_identity("1.1.0-rc.1"), {"release_channel": "rc", "rc": 1})
+        self.assertEqual(release_identity("0.3.2-beta.6"), {"release_channel": "beta", "beta": 6})
+        self.assertEqual(release_identity("1.1.0"), {"release_channel": "stable"})
+        with self.assertRaises(ValueError):
+            release_identity("1.1.0-rc.0")
 
     def test_stable_tag_names_match_assets_selected_by_updater(self):
         with tempfile.TemporaryDirectory() as directory:
