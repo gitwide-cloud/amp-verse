@@ -26,14 +26,14 @@ try {
     $rejected=$false
     try { Get-SettingsSnapshot $settings | Out-Null } catch { $rejected=$true }
     if (!$rejected) { throw 'Arbitrary settings link was accepted' }
-    Remove-Item -LiteralPath $linked
+    [IO.Directory]::Delete($linked)
     Write-Output 'PASS: ordinary settings retained; generated cache omitted; cache junction not traversed; other settings links rejected; target unchanged. No installation ran.'
 } finally {
     # Remove junction objects first; never recursively delete through them.
     foreach ($link in @($cache,(Join-Path $settings 'unapproved-settings-link'))) {
         if (Test-Path -LiteralPath $link) {
             $item=Get-Item -LiteralPath $link -Force
-            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { Remove-Item -LiteralPath $link }
+            if ($item.Attributes -band [IO.FileAttributes]::ReparsePoint) { [IO.Directory]::Delete($link) }
         }
     }
     $resolved=[IO.Path]::GetFullPath($root)
