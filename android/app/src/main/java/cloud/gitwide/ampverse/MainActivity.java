@@ -177,14 +177,14 @@ public final class MainActivity extends Activity {
                 public String phoneBroadcastStatus(){return PlaybackService.phoneBroadcastStatus();}
                 public String startPhoneBroadcast(CastClient selected){return PlaybackService.startPhoneBroadcast(selected);}
                 public void stopPhoneBroadcast(){PlaybackService.stopPhoneBroadcast();}
-                public boolean phoneListening(){return isRadio()&&player.getPlayWhenReady();}public void remote(){selectModule("AMP Remote");}public boolean playlistSyncAvailable(){return true;}public void playlistSync(CastClient selected){selected.withPrivateAuthorization((base,secret,server,library)->PlaylistSyncUi.authorize(MainActivity.this,base,secret,server,library));}
+                public boolean phoneListening(){return PhoneListening.active(player,isRadio());}public void remote(){selectModule("AMP Remote");}public boolean playlistSyncAvailable(){return true;}public void playlistSync(CastClient selected){selected.withPrivateAuthorization((base,secret,server,library)->PlaylistSyncUi.authorize(MainActivity.this,base,secret,server,library));}
                 public void listen(String url,String name){
                     if(player==null){message="Playback service is still connecting. Try Listen again.";castPanel.phoneFeedback(message);refresh();return;}
                     PlaybackService.switchToPlayer();player.setMediaItem(new MediaItem.Builder().setMediaId("amp-radio").setUri(url).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle(name).build()).build());
                     player.setRepeatMode(Player.REPEAT_MODE_OFF);player.setShuffleModeEnabled(false);player.prepare();player.play();message="Phone listening requested: "+name;castPanel.phoneFeedback(message);refresh();
                 }
                 public void playlist(java.util.List<MediaItem> items){if(player==null||items.isEmpty()){message="No offline songs available.";return;}player.setMediaItems(items);player.setRepeatMode(Player.REPEAT_MODE_OFF);player.prepare();player.play();message="Playing offline station playlist";refresh();}
-                public void stopListening(){if(player!=null&&(isRadio()||PrivateLibraryPlayback.owns(player.getCurrentMediaItem()))){player.stop();message="Phone listening stopped. Server station remains independent.";}else message="Phone station listening is already stopped. Other phone playback is unchanged.";castPanel.phoneFeedback(message);refresh();}
+                public void stopListening(){if(player!=null&&(isRadio()||PrivateLibraryPlayback.owns(player.getCurrentMediaItem()))){PhoneListening.stop(player);message="Phone listening stopped. Server station remains independent.";}else message="Phone station listening is already stopped. Other phone playback is unchanged.";castPanel.phoneFeedback(message);refresh();}
             });page.addView(castPanel);
         }else if(module.equals("AMP Podcasts")){podcastsPanel=new PodcastsPanel(this,appearance);page.addView(podcastsPanel);
         }else{

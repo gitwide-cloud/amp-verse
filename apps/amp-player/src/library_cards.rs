@@ -259,14 +259,18 @@ pub(super) fn collection(
             rect.min + egui::vec2(79., 11.),
             egui::vec2((width - 92.).max(20.), 26.),
         ),
-        egui::Label::new(RichText::new(name).size(17.).strong().color(p.text)).truncate(),
+        egui::Label::new(RichText::new(name).size(17.).strong().color(p.text))
+            .selectable(false)
+            .truncate(),
     );
     ui.put(
         egui::Rect::from_min_size(
             rect.min + egui::vec2(79., 39.),
             egui::vec2((width - 92.).max(20.), 23.),
         ),
-        egui::Label::new(RichText::new(detail).size(14.).color(p.muted)).truncate(),
+        egui::Label::new(RichText::new(detail).size(14.).color(p.muted))
+            .selectable(false)
+            .truncate(),
     );
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), name));
     response
@@ -417,6 +421,310 @@ pub(super) fn duration<'a>(tracks: impl Iterator<Item = &'a amp_core::Track>) ->
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn input(events: Vec<egui::Event>) -> egui::RawInput {
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(700., 500.),
+            )),
+            events,
+            ..Default::default()
+        }
+    }
+    fn pointer(pos: egui::Pos2, button: egui::PointerButton, pressed: bool) -> egui::Event {
+        egui::Event::PointerButton {
+            pos,
+            button,
+            pressed,
+            modifiers: Default::default(),
+        }
+    }
+    fn key(key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key {
+            key,
+            physical_key: None,
+            pressed,
+            repeat: false,
+            modifiers,
+        }
+    }
+    fn copied(output: &egui::FullOutput) -> String {
+        output
+            .platform_output
+            .commands
+            .iter()
+            .filter_map(|c| {
+                if let egui::OutputCommand::CopyText(s) = c {
+                    Some(s.as_str())
+                } else {
+                    None
+                }
+            })
+            .collect()
+    }
+
+    #[test]
+    fn switch_captions_toggle_without_selecting_control_text() {
+        for label in ["Auto Mix", "Enable sync"] {
+            for drag in [false, true] {
+                let ctx = egui::Context::default();
+                let mut value = false;
+                let mut rect = egui::Rect::NOTHING;
+                let mut text = String::new();
+                for frame in 0..6 {
+                    let start = rect.left_center() + egui::vec2(1., 0.);
+                    let end = if drag {
+                        rect.right_center() - egui::vec2(1., 0.)
+                    } else {
+                        start
+                    };
+                    let events = match frame {
+                        2 => vec![
+                            egui::Event::PointerMoved(start),
+                            pointer(start, egui::PointerButton::Primary, true),
+                        ],
+                        3 => vec![egui::Event::PointerMoved(end)],
+                        4 => vec![pointer(end, egui::PointerButton::Primary, false)],
+                        5 => vec![egui::Event::Copy],
+                        _ => vec![],
+                    };
+                    let mut output = ctx.run_ui(input(events), |ui| {
+                        crate::skin::switch(ui, &mut value, label);
+                    });
+                    rect = ctx
+                        .data(|data| {
+                            data.get_temp::<egui::Rect>(egui::Id::unique(("switch-caption", label)))
+                        })
+                        .unwrap();
+                    text.push_str(&copied(&output));
+                    output.textures_delta.clear();
+                }
+                assert!(
+                    text.is_empty(),
+                    "Switch caption must not be copied: {text:?}"
+                );
+                if !drag {
+                    assert!(value, "Caption click must toggle {label}");
+                }
+            }
+        }
+    }
+    #[test]
+    fn collection_title_detail_artwork_and_blank_activate_the_same_card() {
+        for appearance in [theme::Theme::Classic, theme::Theme::ModernDark] {
+            for offset in [
+                egui::vec2(100., 24.),
+                egui::vec2(100., 49.),
+                egui::vec2(35., 35.),
+                egui::vec2(340., 68.),
+            ] {
+                let ctx = egui::Context::default();
+                theme::apply(&ctx, appearance);
+                let root = tempfile::tempdir().unwrap();
+                let mut point = egui::Pos2::ZERO;
+                let mut activated = 0;
+                for frame in 0..5 {
+                    let events = match frame {
+                        2 => vec![
+                            egui::Event::PointerMoved(point),
+                            pointer(point, egui::PointerButton::Primary, true),
+                        ],
+                        3 => vec![pointer(point, egui::PointerButton::Primary, false)],
+                        _ => vec![],
+                    };
+                    let mut output = ctx.run_ui(input(events), |ui| {
+                        let r = collection(
+                            ui,
+                            root.path(),
+                            None,
+                            "R&B Test Playlist",
+                            "Smart · 200 tracks",
+                            false,
+                            360.,
+                        );
+                        point = r.rect.min + offset;
+                        if r.clicked() {
+                            activated += 1;
+                        }
+                    });
+                    output.textures_delta.clear();
+                }
+                assert_eq!(
+                    activated, 1,
+                    "Card must activate exactly once at {offset:?}"
+                );
+            }
+        }
+    }
+    #[test]
+    fn collection_keyboard_activation_keeps_button_semantics() {
+        for k in [egui::Key::Enter, egui::Key::Space] {
+            let ctx = egui::Context::default();
+            let root = tempfile::tempdir().unwrap();
+            let mut count = 0;
+            for frame in 0..4 {
+                let events = match frame {
+                    2 => vec![key(k, true, Default::default())],
+                    3 => vec![key(k, false, Default::default())],
+                    _ => vec![],
+                };
+                let mut output = ctx.run_ui(input(events), |ui| {
+                    let r = collection(ui, root.path(), None, "Playlist", "Smart", false, 360.);
+                    if frame == 1 {
+                        r.request_focus();
+                    }
+                    if r.clicked() {
+                        count += 1;
+                    }
+                });
+                output.textures_delta.clear();
+            }
+            assert_eq!(count, 1, "{k:?} must activate focused card once");
+        }
+    }
+    #[test]
+    fn dragging_collection_caption_never_copies_button_text() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let start = egui::pos2(83., 24.);
+        let end = egui::pos2(220., 24.);
+        let mut text = String::new();
+        for frame in 0..6 {
+            let events = match frame {
+                2 => vec![
+                    egui::Event::PointerMoved(start),
+                    pointer(start, egui::PointerButton::Primary, true),
+                ],
+                3 => vec![egui::Event::PointerMoved(end)],
+                4 => vec![pointer(end, egui::PointerButton::Primary, false)],
+                5 => vec![egui::Event::Copy],
+                _ => vec![],
+            };
+            let mut output = ctx.run_ui(input(events), |ui| {
+                collection(
+                    ui,
+                    root.path(),
+                    None,
+                    "R&B Test Playlist",
+                    "Smart · 200 tracks",
+                    false,
+                    360.,
+                );
+            });
+            text.push_str(&copied(&output));
+            output.textures_delta.clear();
+        }
+        assert!(
+            text.is_empty(),
+            "Button caption was selected/copied: {text:?}"
+        );
+    }
+    #[test]
+    fn collection_context_menu_action_does_not_activate_parent() {
+        let ctx = egui::Context::default();
+        let root = tempfile::tempdir().unwrap();
+        let point = egui::pos2(110., 24.);
+        let mut menu_point = egui::Pos2::ZERO;
+        let mut parent = 0;
+        let mut menu = 0;
+        for frame in 0..8 {
+            let events = match frame {
+                2 => vec![
+                    egui::Event::PointerMoved(point),
+                    pointer(point, egui::PointerButton::Secondary, true),
+                ],
+                3 => vec![pointer(point, egui::PointerButton::Secondary, false)],
+                5 => vec![
+                    egui::Event::PointerMoved(menu_point),
+                    pointer(menu_point, egui::PointerButton::Primary, true),
+                ],
+                6 => vec![pointer(menu_point, egui::PointerButton::Primary, false)],
+                _ => vec![],
+            };
+            let mut output = ctx.run_ui(input(events), |ui| {
+                let r = collection(
+                    ui,
+                    root.path(),
+                    None,
+                    "R&B Test Playlist",
+                    "Smart",
+                    false,
+                    360.,
+                );
+                if r.clicked() {
+                    parent += 1;
+                }
+                r.context_menu(|ui| {
+                    let action = ui.button("Rename playlist");
+                    menu_point = action.rect.center();
+                    if action.clicked() {
+                        menu += 1;
+                        ui.close();
+                    }
+                });
+            });
+            output.textures_delta.clear();
+        }
+        assert_eq!(menu, 1, "Nested action must remain actionable");
+        assert_eq!(parent, 0, "Nested menu must not activate the parent card");
+    }
+    #[test]
+    fn ordinary_information_and_editable_fields_keep_text_selection() {
+        let ctx = egui::Context::default();
+        let mut rect = egui::Rect::NOTHING;
+        let mut text = String::new();
+        for frame in 0..6 {
+            let start = rect.left_center() + egui::vec2(1., 0.);
+            let end = rect.right_center() - egui::vec2(1., 0.);
+            let events = match frame {
+                2 => vec![
+                    egui::Event::PointerMoved(start),
+                    pointer(start, egui::PointerButton::Primary, true),
+                ],
+                3 => vec![egui::Event::PointerMoved(end)],
+                4 => vec![pointer(end, egui::PointerButton::Primary, false)],
+                5 => vec![egui::Event::Copy],
+                _ => vec![],
+            };
+            let mut output = ctx.run_ui(input(events), |ui| {
+                rect = ui.label("Ordinary information stays selectable").rect;
+            });
+            text.push_str(&copied(&output));
+            output.textures_delta.clear();
+        }
+        assert!(
+            !text.is_empty(),
+            "Ordinary information selection must remain enabled"
+        );
+        // Exercise the editable-field positive control independently: the
+        // preceding label intentionally retained its own selection for Copy.
+        let ctx = egui::Context::default();
+        let mut field = String::from("Rename this playlist");
+        let mut field_id = egui::Id::NULL;
+        let mut output = ctx.run_ui(input(vec![]), |ui| {
+            field_id = ui.text_edit_singleline(&mut field).id;
+        });
+        output.textures_delta.clear();
+        ctx.memory_mut(|m| m.request_focus(field_id));
+        let command = egui::Modifiers {
+            ctrl: true,
+            command: true,
+            ..Default::default()
+        };
+        let mut output = ctx.run_ui(input(vec![key(egui::Key::A, true, command)]), |ui| {
+            ui.text_edit_singleline(&mut field);
+        });
+        output.textures_delta.clear();
+        let output = ctx.run_ui(input(vec![egui::Event::Copy]), |ui| {
+            ui.text_edit_singleline(&mut field);
+        });
+        assert_eq!(
+            copied(&output),
+            field,
+            "Editable text must retain select-all/copy"
+        );
+    }
     #[test]
     fn panel_content_stays_vertical_inside_horizontal_parent() {
         let ctx = egui::Context::default();

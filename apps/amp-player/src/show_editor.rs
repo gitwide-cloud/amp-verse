@@ -612,7 +612,7 @@ impl Editor {
                 }
                 if !self.preview_order.is_empty() {
                     ui.separator(); ui.strong("Mix preview · suggested order");
-                    for (index,title) in self.preview_order.iter().enumerate() { let row=ui.add(egui::Label::new(format!("{}. {title}",index+1)).truncate().sense(egui::Sense::click_and_drag()));if let Some(path)=self.preview_paths.get(index){crate::dragdrop::source(&row,amp_core::music_sources::audio_path(root,path));} }
+                    for (index,title) in self.preview_order.iter().enumerate() { let row=ui.add(egui::Label::new(format!("{}. {title}",index+1)).selectable(false).truncate().sense(egui::Sense::click_and_drag()));if let Some(path)=self.preview_paths.get(index){crate::dragdrop::source(&row,amp_core::music_sources::audio_path(root,path));} }
                     if ui.add_enabled(!self.audition_blocked,egui::Button::new("Audition first track")).on_hover_text("Available when player, DJ, sampler and Auto Mix are stopped").clicked() && let Some(lib)=library && let Some(index)=preview_mix(p,lib).first().copied() {
                         self.preview=Some((lib.tracks[index].path.clone(),lib.tracks[index].preparation.cue_in));
                     }

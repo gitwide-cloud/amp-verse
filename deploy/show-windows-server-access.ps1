@@ -6,6 +6,11 @@ function Read-AMPServerAccessCode {
     param([Parameter(Mandatory=$true)][string]$Directory)
     $file = Join-Path ([IO.Path]::GetFullPath($Directory)) 'lan-control.dpapi'
     if (!(Test-Path -LiteralPath $file -PathType Leaf)) {
+        $modeFile = Join-Path $Directory 'server-auth-mode.json'
+        if (Test-Path -LiteralPath $modeFile -PathType Leaf) {
+            $mode = Get-Content -LiteralPath $modeFile -Raw -Encoding UTF8 | ConvertFrom-Json
+            if ($mode.protected -eq $false) { return $null }
+        }
         throw 'Run this on the server PC as the Windows user who configured AMP Verse Server. No saved code was found.'
     }
     try {
@@ -24,6 +29,10 @@ function Show-AMPServerAccessCode {
     $plain = $null
     try {
         $secure = Read-AMPServerAccessCode -Directory $Directory
+        if ($null -eq $secure) {
+            [void][Windows.Forms.MessageBox]::Show('This server uses code-free trusted-LAN access. No access code is required.', 'AMP Verse Server access', [Windows.Forms.MessageBoxButtons]::OK, [Windows.Forms.MessageBoxIcon]::Information)
+            return
+        }
         $credential = [Net.NetworkCredential]::new('', $secure)
         $plain = $credential.Password
         if (!$plain -or $plain.IndexOf([char]0) -ge 0) { throw 'Invalid saved code' }
