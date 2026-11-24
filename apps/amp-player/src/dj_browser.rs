@@ -217,6 +217,18 @@ fn playlist_indices(
         .collect()
 }
 impl Player {
+    fn use_browser_smart_source(&mut self) {
+        self.run.choice = self.dj_browser.smart.clone();
+        if let Err(error) = self.execute_control(control::Action::LoadSmartPlaylist {
+            playlist: self.dj_browser.smart.clone(),
+            execution: control::Execution::LoadOnly,
+            style: None,
+            energy: None,
+        }) {
+            self.status = error;
+        }
+    }
+
     pub(super) fn dj_library_ui(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().interact_size.y = 26.;
         ui.spacing_mut().item_spacing.y = 3.;
@@ -963,15 +975,7 @@ impl Player {
             self.smart_playlist_action(ui, &id, action);
         }
         if load_smart {
-            self.run.choice = self.dj_browser.smart.clone();
-            if let Err(e) = self.execute_control(control::Action::LoadSmartPlaylist {
-                playlist: self.dj_browser.smart.clone(),
-                execution: control::Execution::LoadOnly,
-                style: None,
-                energy: None,
-            }) {
-                self.status = e;
-            }
+            self.use_browser_smart_source();
         }
         if let Some((song, within)) = request
             && let Err(error) = self.execute_control(control::Action::RequestSong { song, within })
@@ -996,6 +1000,36 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejected_browser_smart_source_keeps_the_active_choice() {
+        let mut player = Player {
+            library: Some(Library {
+                tracks: Vec::new(),
+                tree: Folder {
+                    name: "music".into(),
+                    folders: Vec::new(),
+                    tracks: Vec::new(),
+                },
+            }),
+            ..Default::default()
+        };
+        let current = player.run.settings.playlists[0].clone();
+        player.run.choice = current.id.clone();
+        player.run.playlist = Some(current.id.clone());
+        player.run.profile = Some(current.clone());
+        player.run.auto = true;
+        player.dj_browser.smart = player.run.settings.playlists[1].id.clone();
+
+        player.use_browser_smart_source();
+
+        assert!(player.status.contains("no matching songs"), "{}", player.status);
+        assert_eq!(player.run.choice, current.id);
+        assert_eq!(player.run.playlist.as_deref(), Some(current.id.as_str()));
+        assert_eq!(player.run.profile.as_ref().unwrap().id, current.id);
+        assert!(player.run.auto);
+        assert!(player.audio.is_none());
+    }
+
     #[test]
     fn smart_membership_reuses_matches_and_invalidates_rules_and_analysis() {
         let mut profile = amp_core::show::Settings::default().playlists.remove(0);
