@@ -71,6 +71,7 @@ pub fn show(ui: &mut egui::Ui, playlist: &mut SmartPlaylist, library: Option<&Li
                     }
                 }
             });
+            if filter.field()==Field::Clean {ui.weak("Yes includes only reliably marked Clean tracks. No includes Explicit and Unknown. Titles never establish Clean status. Update desktop and server together before syncing these rules.");}
             if filter.field()==Field::StemCount {ui.weak("Counts saved stem entries. Device-local stem readiness is shown separately in the DJ library.");}
             if filter.field()==Field::SectionName {ui.weak("Uses saved section labels; automatic energy sections are not semantic verse/chorus labels.");}
         });

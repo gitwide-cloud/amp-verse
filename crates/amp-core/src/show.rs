@@ -120,6 +120,13 @@ pub struct SmartPlaylist {
     #[serde(default = "yes")]
     pub use_manual_cues: bool,
 }
+impl SmartPlaylist {
+    pub fn requires_advisory(&self) -> bool {
+        self.filters
+            .iter()
+            .any(|f| f.field() == crate::smart_filters::Field::Clean)
+    }
+}
 fn default_recent() -> usize {
     5
 }
@@ -169,6 +176,16 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    pub fn required_version(&self) -> u32 {
+        if self.playlists.iter().any(|p| p.requires_advisory()) {
+            3
+        } else if self.playlists.iter().any(|p| !p.filters.is_empty()) {
+            2
+        } else {
+            1
+        }
+    }
+
     pub fn resolve_sources(&mut self, root: &Path) {
         if self.playlists.iter().all(|p| p.source_library.is_none()) {
             for p in &mut self.playlists {
@@ -185,8 +202,10 @@ impl Settings {
         }
     }
     fn normalize(&mut self) {
-        if (1..=2).contains(&self.version) {
-            self.version = if self.playlists.iter().any(|p| !p.filters.is_empty()) {
+        if (1..=3).contains(&self.version) {
+            self.version = if self.playlists.iter().any(|p| p.requires_advisory()) {
+                3
+            } else if self.playlists.iter().any(|p| !p.filters.is_empty()) {
                 2
             } else {
                 1
@@ -209,7 +228,7 @@ impl Settings {
         }
     }
     pub fn validate(&self) -> Result<(), String> {
-        if !(1..=2).contains(&self.version) || self.playlists.len() > 1000 {
+        if !(1..=3).contains(&self.version) || self.playlists.len() > 1000 {
             return Err("Unsupported show settings".into());
         }
         let mut ids = std::collections::HashSet::new();
@@ -220,6 +239,7 @@ impl Settings {
                 || p.target_energy
                     .is_some_and(|e| !e.is_finite() || !(1. ..=10.).contains(&e))
                 || p.recent_repeat > 1000
+                || (p.requires_advisory() && self.version < 3)
                 || p.filters.len() > 64
                 || p.filters.iter().any(|f| f.validate().is_err())
                 || p.genres.len() > 256
@@ -313,7 +333,9 @@ impl SmartPlaylistExport {
         }
         let package = Self {
             format: "ampverse-smart-playlist".into(),
-            version: if !playlist.filters.is_empty() {
+            version: if playlist.requires_advisory() {
+                4
+            } else if !playlist.filters.is_empty() {
                 3
             } else if playlist.playlist_sources.is_empty() {
                 1
@@ -330,10 +352,13 @@ impl SmartPlaylistExport {
         Ok(bytes)
     }
     fn validate(&self) -> Result<(), String> {
-        if self.format != "ampverse-smart-playlist" || !(1..=3).contains(&self.version) {
+        if self.format != "ampverse-smart-playlist" || !(1..=4).contains(&self.version) {
             return Err("Unsupported AMP Smart Playlist file".into());
         }
         let p = &self.playlist;
+        if p.requires_advisory() && self.version < 4 {
+            return Err("Clean rules require playlist export version 4".into());
+        }
         // Check both separator spellings, regardless of the importing operating system.
         if p.folders.iter().any(|f| {
             let s = f.to_string_lossy().replace('\\', "/");
@@ -346,7 +371,7 @@ impl SmartPlaylistExport {
         }
         Settings {
             sync: None,
-            version: 1,
+            version: if p.requires_advisory() { 3 } else { 1 },
             playlists: vec![p.clone()],
         }
         .validate()

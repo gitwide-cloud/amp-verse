@@ -3,6 +3,7 @@ use crate::{Preparation, Track};
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Field {
+    Clean,
     Bpm,
     TempoAlternative,
     Key,
@@ -44,6 +45,7 @@ pub enum Kind {
 }
 impl Field {
     pub const ALL: &'static [Self] = &[
+        Self::Clean,
         Self::Bpm,
         Self::TempoAlternative,
         Self::Key,
@@ -79,6 +81,7 @@ impl Field {
     ];
     pub fn label(self) -> &'static str {
         match self {
+            Self::Clean => "Clean / non-explicit (known clean only)",
             Self::Bpm => "BPM",
             Self::TempoAlternative => "Alternative BPM",
             Self::Key => "Musical key",
@@ -124,7 +127,8 @@ impl Field {
             | Self::Artist
             | Self::Album
             | Self::Year => Kind::Text,
-            Self::Analyzed
+            Self::Clean
+            | Self::Analyzed
             | Self::Reviewed
             | Self::BeatGrid
             | Self::ManualEdits
@@ -286,6 +290,10 @@ fn numbers(field: Field, p: &Preparation) -> Vec<f64> {
 }
 fn flag(field: Field, p: &Preparation) -> bool {
     match field {
+        Field::Clean => {
+            crate::content_advisory::classification(p)
+                == crate::content_advisory::Classification::Clean
+        }
         Field::Analyzed => p.analysis.is_some(),
         Field::Reviewed => p.analysis.as_ref().is_some_and(|a| a.reviewed),
         Field::BeatGrid => p.bpm.is_some() && p.beat_offset.is_some(),

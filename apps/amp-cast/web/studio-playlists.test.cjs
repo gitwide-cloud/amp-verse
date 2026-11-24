@@ -23,7 +23,7 @@ function page(){
   }
   throw Error('Unexpected request '+url);
  };
- const context={document:{getElementById:get,createElement:()=>new Element(),querySelectorAll:()=>[]},window:{confirm:()=>confirm,addEventListener(){}},fetch,AbortController,clearTimeout,location:{hash:''},history:{replaceState(){}},setTimeout(){},Audio:Element,URL,console};
+ const context={document:{getElementById:get,createElement:()=>new Element(),querySelectorAll:()=>[]},window:{confirm:()=>confirm,addEventListener(){}},fetch,AbortController,clearTimeout,location:{hash:''},history:{replaceState(){}},setTimeout(){},Audio:Element,URL,URLSearchParams,console};
  vm.runInNewContext(fs.readFileSync(__dirname+'/studio.js','utf8'),context);
  return {get,requests,data,rules,normal,setReject:value=>rejectSave=value,setConfirm:value=>confirm=value,settle:async()=>{for(let i=0;i<5;i++)await new Promise(resolve=>setImmediate(resolve));}};
 }

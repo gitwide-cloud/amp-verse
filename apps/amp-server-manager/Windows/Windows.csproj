@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup><OutputType>Exe</OutputType><TargetFramework>net10.0-windows</TargetFramework><UseWindowsForms>true</UseWindowsForms><EnableWindowsTargeting>true</EnableWindowsTargeting><ImplicitUsings>enable</ImplicitUsings><Nullable>enable</Nullable><TreatWarningsAsErrors>true</TreatWarningsAsErrors><AssemblyName>amp-server-manager</AssemblyName></PropertyGroup>
+  <ItemGroup><ProjectReference Include="../Core/Core.csproj"/><PackageReference Include="Microsoft.Web.WebView2" Version="1.0.3800.47"/></ItemGroup>
+  <ItemGroup>
+    <Content Include="../Open Server Manager.cmd" Link="Open Server Manager.cmd" CopyToOutputDirectory="PreserveNewest" />
+    <Content Include="../README.md" Link="MANAGER-README.md" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+  <!-- SDK also supplies WPF, but this host uses only WinForms. -->
+  <Target Name="RemoveUnusedWebViewWpf" BeforeTargets="ResolveAssemblyReferences">
+    <ItemGroup><Reference Remove="@(Reference)" Condition="$([System.String]::Copy('%(Reference.Identity)').EndsWith('Microsoft.Web.WebView2.Wpf.dll'))" /></ItemGroup>
+  </Target>
+</Project>
