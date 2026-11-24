@@ -51,10 +51,15 @@ public class RadioOfflineTest {
   StringBuilder checksum=new StringBuilder();for(byte b:java.security.MessageDigest.getInstance("SHA-256").digest(audio))checksum.append(String.format(java.util.Locale.ROOT,"%02x",b&255));
   JSONObject prep=new JSONObject().put("cue_in",1.25).put("cue_out",8.).put("bpm",128).put("manual_override",true).put("manual_cues",new JSONArray().put(new JSONObject().put("id","my-drop").put("number",3).put("seconds",1.25).put("label","My drop")));
   JSONObject metadata=new JSONObject().put("server_id","server").put("station_id","station").put("library_id","library").put("bytes",audio.length).put("sha256",checksum.toString()).put("preparation",prep);
+  java.util.concurrent.atomic.AtomicInteger audioRequests=new java.util.concurrent.atomic.AtomicInteger(),prepRequests=new java.util.concurrent.atomic.AtomicInteger();
   ServerSocket server=new ServerSocket(0,8,CastTestAddress.privateAddress());
   Thread thread=new Thread(()->{while(!server.isClosed())try(Socket client=server.accept()){
    BufferedReader reader=new BufferedReader(new InputStreamReader(client.getInputStream(),StandardCharsets.US_ASCII));String request=reader.readLine(),line;while((line=reader.readLine())!=null&&!line.isEmpty()){}
-   byte[] body=request.contains("/metadata ")?metadata.toString().getBytes(StandardCharsets.UTF_8):audio;
+   boolean basic=request.contains("/basic "),preparation=request.contains("/preparation ");
+   byte[] body;
+   if(basic){JSONObject value=new JSONObject(metadata.toString());value.remove("preparation");body=value.toString().getBytes(StandardCharsets.UTF_8);}
+   else if(preparation||request.contains("/metadata ")){prepRequests.incrementAndGet();body=metadata.toString().getBytes(StandardCharsets.UTF_8);}
+   else{audioRequests.incrementAndGet();body=audio;}
    OutputStream output=client.getOutputStream();output.write(("HTTP/1.1 200 OK\r\nContent-Length: "+body.length+"\r\nConnection: close\r\n\r\n").getBytes(StandardCharsets.US_ASCII));output.write(body);output.flush();
   }catch(Exception error){if(!server.isClosed())throw new RuntimeException(error);}});thread.start();
   try {
@@ -63,8 +68,21 @@ public class RadioOfflineTest {
    JSONObject playlist=new JSONObject().put("name","My station playlist").put("tracks",new JSONArray().put(0).put(0));
    java.util.List<Integer> progress=new java.util.ArrayList<>();
    try{RadioOffline.save(isolated,client,manifest,new JSONObject().put("tracks",new JSONArray()));fail("Empty playlist must not publish");}catch(IOException expected){assertTrue(expected.getMessage().contains("no songs"));}
-   File saved=RadioOffline.save(isolated,client,manifest,playlist,new RadioOffline.Progress(){public void song(int i,int n,String title){assertEquals(2,n);progress.add(i);}public boolean cancelled(){return false;}});
+   File saved=RadioOffline.save(isolated,client,manifest,playlist,new RadioOffline.Progress(){public void song(int i,int n,String title){assertEquals(2,n);progress.add(i);}public boolean cancelled(){return false;}},false);
    assertEquals(java.util.Arrays.asList(1,2),progress);
+   assertEquals(1,audioRequests.get());assertEquals(0,prepRequests.get());
+   assertFalse(RadioOffline.album(saved).getJSONArray("items").getJSONObject(0).has("preparation"));
+   androidx.media3.common.MediaItem basicSong=RadioOffline.items(saved).get(0);assertNull(basicSong.mediaMetadata.extras.getString("amp-preparation"));
+   PhoneCues.save(isolated,basicSong,0,2700);
+   RadioOffline.Progress uncancelled=new RadioOffline.Progress(){public void song(int i,int n,String title){}public boolean cancelled(){return false;}};
+   assertEquals(saved,RadioOffline.save(isolated,client,manifest,playlist,uncancelled,true));
+   assertEquals("Preparation catch-up must not download audio",1,audioRequests.get());assertEquals(1,prepRequests.get());
+   assertEquals(basicSong.mediaId,RadioOffline.items(saved).get(0).mediaId);
+   assertEquals(2700,PhoneCues.seconds(isolated,RadioOffline.items(saved).get(0),0));
+   RadioOffline.save(isolated,client,manifest,playlist,uncancelled,false);
+   assertEquals(1,prepRequests.get());assertEquals(1,audioRequests.get());
+   assertTrue(RadioOffline.album(saved).getJSONArray("items").getJSONObject(0).has("remote_preparation"));
+
    java.util.concurrent.atomic.AtomicBoolean cancel=new java.util.concurrent.atomic.AtomicBoolean();
    try{RadioOffline.save(isolated,client,manifest,playlist,new RadioOffline.Progress(){public void song(int i,int n,String title){if(i==2)cancel.set(true);}public boolean cancelled(){return cancel.get();}});fail("Cancelled playlist must not publish");}catch(IOException expected){}
    assertEquals(1,RadioOffline.albums(isolated).size());
@@ -81,6 +99,6 @@ public class RadioOfflineTest {
    manifest.put("station_id","changed");try{RadioOffline.save(isolated,client,manifest,playlist);fail("Must reject changed station");}catch(IOException expected){}
    assertEquals(1,RadioOffline.albums(isolated).size());
    assertEquals(1,new File(sandbox,"radio-offline").listFiles().length);
-  } finally {for(File folder:RadioOffline.albums(isolated))try{for(androidx.media3.common.MediaItem item:RadioOffline.items(folder))if("content".equals(item.localConfiguration.uri.getScheme()))ManagedMusic.discard(isolated,item.localConfiguration.uri);}catch(Exception ignored){}server.close();thread.join(2000);try(java.util.stream.Stream<Path> paths=Files.walk(sandbox.toPath())){paths.sorted(java.util.Comparator.reverseOrder()).forEach(path->path.toFile().delete());}}
+  } finally {for(File folder:RadioOffline.albums(isolated))try{for(androidx.media3.common.MediaItem item:RadioOffline.items(folder))isolated.getSharedPreferences("phone-cues",0).edit().remove(item.mediaId+":0").remove(item.mediaId+":manual:0").commit();}catch(Exception ignored){}for(File folder:RadioOffline.albums(isolated))try{for(androidx.media3.common.MediaItem item:RadioOffline.items(folder))if("content".equals(item.localConfiguration.uri.getScheme()))ManagedMusic.discard(isolated,item.localConfiguration.uri);}catch(Exception ignored){}server.close();thread.join(2000);try(java.util.stream.Stream<Path> paths=Files.walk(sandbox.toPath())){paths.sorted(java.util.Comparator.reverseOrder()).forEach(path->path.toFile().delete());}}
  }
 }
