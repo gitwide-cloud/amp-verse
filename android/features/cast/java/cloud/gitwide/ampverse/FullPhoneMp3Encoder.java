@@ -41,6 +41,7 @@ final class FullPhoneMp3Encoder implements PhoneMasterBroadcast.Encoder {
       throws IOException {
     Thread writer = null;
     try {
+      if (cancelled.get() || stopped.get()) return;
       output = Os.open(outputPipe, OsConstants.O_RDONLY | OsConstants.O_NONBLOCK, 0);
       bound(output);
       session =

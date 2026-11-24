@@ -92,7 +92,7 @@ final class VinylScratch {
     private void handoff(Session session){
         Slot slot=slots[session.deck];
         if(closed||slot.session!=session||session.release.stopped()||slot.epoch!=session.epoch||!key(session.deck).equals(session.key)){finish(session,null);return;}
-        owner.quiet(()->activate(session));
+        if(session.deck<2)owner.quiet(()->activate(session));else activate(session);
     }
     private void activate(Session session){
         Slot slot=slots[session.deck];if(closed||slot.session!=session||slot.epoch!=session.epoch||!key(session.deck).equals(session.key)){session.stop(false);finish(session,null);return;}

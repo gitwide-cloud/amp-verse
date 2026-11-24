@@ -2,7 +2,6 @@ package cloud.gitwide.ampverse;
 
 import java.net.URI;
 import java.net.URLDecoder;
-import java.nio.charset.StandardCharsets;
 
 /** Distinguishes an AMP receiver from legitimate owned file/internet-radio playback. */
 final class PhoneSourceIdentity {
@@ -19,8 +18,8 @@ final class PhoneSourceIdentity {
         for (String part : query.split("&")) {
           String[] entry = part.split("=", 2);
           if (entry.length == 2
-              && "amp_receiver".equals(URLDecoder.decode(entry[0], StandardCharsets.UTF_8))
-              && "1".equals(URLDecoder.decode(entry[1], StandardCharsets.UTF_8))) return true;
+              && "amp_receiver".equals(URLDecoder.decode(entry[0], "UTF-8"))
+              && "1".equals(URLDecoder.decode(entry[1], "UTF-8"))) return true;
         }
       if (selectedBase == null || selectedBase.isEmpty()) return false;
       URI selected = new URI(selectedBase);

@@ -143,10 +143,10 @@ final class PhoneMasterBroadcast implements AutoCloseable {
         update("Phone broadcast stopped. Playback continues locally; reconnect explicitly.");
     } finally {
       job.session.finish();
+      if (job.cancelled.get()) update("Phone broadcast stopped");
       synchronized (this) {
         if (current == job) current = null;
       }
-      if (job.cancelled.get()) update("Phone broadcast stopped");
     }
   }
 

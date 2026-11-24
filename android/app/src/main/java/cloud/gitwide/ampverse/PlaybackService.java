@@ -136,7 +136,7 @@ public final class PlaybackService extends MediaSessionService {
         session = new MediaSession.Builder(this, player).setSessionActivity(PendingIntent.getActivity(this, 0, new Intent(this, MainActivity.class), PendingIntent.FLAG_IMMUTABLE | PendingIntent.FLAG_UPDATE_CURRENT)).build();
         if(ownedOutput!=null)phoneBroadcast=new PhoneMasterBroadcast(ownedOutput.mixer,()->{
             try{return (PhoneMasterBroadcast.Encoder)Class.forName("cloud.gitwide.ampverse.FullPhoneMp3Encoder").getDeclaredConstructor(android.content.Context.class).newInstance(this);}
-            catch(ReflectiveOperationException unavailable){throw new java.io.IOException("Full phone encoder unavailable",unavailable);}
+            catch(ReflectiveOperationException|LinkageError unavailable){throw new java.io.IOException("Full phone encoder unavailable",unavailable);}
         },text->{});
         notePhoneSource();handler.post(fades);handler.post(liveWatchdog);
     }
