@@ -16,12 +16,15 @@ from test_live_stems import fixture, validate_module
 def parse_args(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--module', type=Path, required=True)
-    parser.add_argument('--six-decks', action='store_true',
+    gpu = parser.add_mutually_exclusive_group()
+    gpu.add_argument('--four-decks', action='store_true',
+                     help='Qualify four real-model CUDA decks at 116%% for 90 seconds plus 8 seconds with three survivors.')
+    gpu.add_argument('--six-decks', action='store_true',
                         help='Run hardware qualification: six real-model decks at 116%% for 90 seconds, then five survivors for 8 seconds. Requires a qualified CUDA GPU; CPU runs do not qualify.')
     parser.add_argument('--cuda-module', type=Path,
-                        help='Pinned CUDA runtime bundle, required only with --six-decks.')
+                        help='Pinned CUDA runtime bundle, required with --four-decks or --six-decks.')
     parser.add_argument('--cuda-manifest-sha256',
-                        help='Expected SHA-256 of the CUDA module manifest; required with --six-decks.')
+                        help='Expected SHA-256 of the CUDA module manifest; required with --four-decks or --six-decks.')
     parser.add_argument('--sustained-cpu', action='store_true',
                         help='Opt in to CPU2 playback for 180 seconds plus 15 seconds with one survivor; defaults stay 30+6 seconds.')
     parser.add_argument('--source-seconds', type=int,
@@ -31,13 +34,14 @@ def parse_args(argv=None):
     parser.add_argument('--log-dir', type=Path,
                         help='New or empty directory for per-test logs and qualification.json (including failed runs).')
     args = parser.parse_args(argv)
-    if args.six_decks and (args.cuda_module is None or not args.cuda_manifest_sha256):
-        parser.error('--six-decks requires --cuda-module and --cuda-manifest-sha256')
-    if not args.six_decks and (args.cuda_module is not None or args.cuda_manifest_sha256):
-        parser.error('CUDA bundle options are used only with --six-decks')
-    minimum_source = max(210 if args.sustained_cpu else 54, 180 if args.six_decks else 0)
+    args.gpu_decks = 4 if args.four_decks else 6 if args.six_decks else 0
+    if args.gpu_decks and (args.cuda_module is None or not args.cuda_manifest_sha256):
+        parser.error('GPU qualification requires --cuda-module and --cuda-manifest-sha256')
+    if not args.gpu_decks and (args.cuda_module is not None or args.cuda_manifest_sha256):
+        parser.error('CUDA bundle options require --four-decks or --six-decks')
+    minimum_source = max(210 if args.sustained_cpu else 54, 180 if args.gpu_decks else 0)
     if args.source_seconds is None:
-        args.source_seconds = 220 if args.sustained_cpu or args.six_decks else 66
+        args.source_seconds = 220 if args.sustained_cpu or args.gpu_decks else 66
     if not minimum_source <= args.source_seconds <= 600:
         parser.error(f'--source-seconds must be between {minimum_source} and 600 for this qualification')
     return args
@@ -102,7 +106,7 @@ def main(argv=None):
     env.pop('AMP_ONNX_CUDA_DLL_DIR', None)
     env.pop('AMP_STEM_TEST_QUALIFIED_GPU', None)
     gpu_env = None
-    if args.six_decks:
+    if args.gpu_decks:
         from stem_cuda_module import validate_cuda_module
         cuda_root, _ = validate_cuda_module(args.cuda_module, args.cuda_manifest_sha256)
         gpu_env = env.copy()
@@ -141,8 +145,9 @@ def main(argv=None):
             ('dj_engine::live_stem_acceptance::two_native_live_stem_decks_play_filters_and_cancel_independently', True, env),
             ('prepared_stem_cache::tests::native_selected_playlist_preparation_roundtrips_compressed_stems', True, preparation_env),
         ]
-        if args.six_decks:
-            tests.append(('dj_engine::live_stem_acceptance::six_native_live_stem_decks_play_distinct_filters_and_cancel_independently', True, gpu_env))
+        if args.gpu_decks:
+            tier = 'four' if args.four_decks else 'six'
+            tests.append((f'dj_engine::live_stem_acceptance::{tier}_native_live_stem_decks_play_distinct_filters_and_cancel_independently', True, gpu_env))
         identity = {
             'status': 'running',
             'test_checkout': checkout_identity(),
@@ -182,6 +187,8 @@ def main(argv=None):
                 expected_report = None
                 if test.endswith('two_native_live_stem_decks_play_filters_and_cancel_independently'):
                     expected_report = f'Actual concurrent live decks:{identity["cpu_together_seconds"]}sec together+{identity["cpu_survivor_seconds"]}sec B-only'
+                if test.endswith('_native_live_stem_decks_play_distinct_filters_and_cancel_independently'):
+                    expected_report = f'Qualified CUDA {args.gpu_decks} live decks:90sec at116% together+8sec'
                 checked_test(command, run_env, logs / f'{index:02d}-{test.split("::")[-1]}.log' if logs else None,
                              expected_report=expected_report)
                 identity['tests_passed'].append(test)
@@ -198,6 +205,7 @@ def main(argv=None):
         'concurrent_live_decks_with_different_filters': 'passed',
         'cancel_one_other_continues': 'passed',
         'deterministic_six_deck_mixer_controls_without_model': 'passed',
+        'four_live_decks_gpu_qualification': 'passed' if args.four_decks else 'not_run',
         'six_live_decks_gpu_qualification': 'passed' if args.six_decks else 'not_run_requires_qualified_gpu',
         'selected_playlist_native_mp3_preparation': 'passed',
         'selected_playlist_preparation_fixture_seconds': 23,
@@ -210,6 +218,13 @@ def main(argv=None):
     }
     receipt.update(identity)
     receipt['status'] = 'passed'
+    if args.gpu_decks:
+        receipt.update({
+            'gpu_decks': args.gpu_decks,
+            'gpu_playback_seconds': 90,
+            'gpu_survivor_seconds': 8,
+            'cuda_manifest_sha256': args.cuda_manifest_sha256,
+        })
     if args.six_decks:
         receipt.update({
             'six_live_decks_with_distinct_filters': 'passed',

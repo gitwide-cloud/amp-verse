@@ -49,6 +49,13 @@ class QualificationCliTests(unittest.TestCase):
         self.assertTrue(args.six_decks)
         self.assertEqual(args.source_seconds, 220)
 
+    def test_four_deck_gpu_profile_is_explicit_and_excludes_six(self):
+        pins = ["--cuda-module", "unused-cuda", "--cuda-manifest-sha256", "a" * 64]
+        self.rejects("--four-decks")
+        self.rejects("--four-decks", "--six-decks", *pins)
+        self.assertEqual(self.parse("--four-decks", *pins).gpu_decks, 4)
+        self.assertEqual(self.parse("--six-decks", *pins).gpu_decks, 6)
+
     def test_gpu_source_minimum_is_enforced(self):
         options = ["--six-decks", "--cuda-module", "unused-cuda",
                    "--cuda-manifest-sha256", "a" * 64]
