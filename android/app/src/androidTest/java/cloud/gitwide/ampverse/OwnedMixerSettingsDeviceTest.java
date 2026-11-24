@@ -132,6 +132,29 @@ public final class OwnedMixerSettingsDeviceTest {
             assertSame("No live service recreation", original, PlaybackService.player());
             assertSame("No mixer replacement", originalOutput, PlaybackService.ownedOutput());
           });
+      settings.close();
+      settings = null;
+      home.close();
+      home = null;
+      context.stopService(new Intent(context, PlaybackService.class));
+      await(
+          () -> {
+            main(() -> ready.set(PlaybackService.player() == null));
+            return ready.get();
+          });
+      home = ActivityScenario.launch(MainActivity.class);
+      await(
+          () -> {
+            main(() -> ready.set(PlaybackService.player() != null));
+            return ready.get();
+          });
+      main(
+          () -> {
+            assertNotSame(
+                "Next service receives the saved setting", original, PlaybackService.player());
+            assertNotNull(
+                "Next service owns the opted-in master output", PlaybackService.ownedOutput());
+          });
     } finally {
       main(
           () -> {
