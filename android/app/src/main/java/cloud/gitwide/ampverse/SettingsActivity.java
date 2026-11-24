@@ -14,6 +14,8 @@ public final class SettingsActivity extends Activity {
     private SharedPreferences prefs;
     private Appearance colors;
     private LinearLayout page;
+    private CheckBox mixerToggle;
+    private TextView mixerHint;
     @Override public void onCreate(Bundle state) { super.onCreate(state); prefs=getSharedPreferences("settings",MODE_PRIVATE); draw(); }
     private int dp(int n) { return (int)(n*getResources().getDisplayMetrics().density); }
     private void label(String text, int size, int color) { TextView view=new TextView(this);view.setText(text);view.setTextSize(size);view.setTextColor(color);view.setPadding(0,dp(12),0,dp(8));page.addView(view); }
@@ -28,6 +30,17 @@ public final class SettingsActivity extends Activity {
         label("Appearance",20,colors.text);
         RadioGroup themes=new RadioGroup(this);String[] names={"Classic","Modern Light","Modern Dark"},ids={"classic","modern-light","modern-dark"};
         for(int i=0;i<names.length;i++){final String id=ids[i];RadioButton radio=new RadioButton(this);radio.setId(android.view.View.generateViewId());radio.setText(names[i]);radio.setTag(id);radio.setTextColor(colors.text);radio.setButtonTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{colors.accent,colors.muted}));themes.addView(radio);radio.setChecked(prefs.getString("theme","classic").equals(id));radio.setOnClickListener(v->{prefs.edit().putString("theme",id).apply();draw();});}page.addView(themes);
+        if("full".equals(BuildConfig.EDITION)&&android.os.Build.VERSION.SDK_INT>=30){
+            label("Audio",20,colors.text);
+            mixerToggle=new CheckBox(this);mixerToggle.setText("New mixer (beta)");mixerToggle.setTag("new-mixer-beta");mixerToggle.setContentDescription("New mixer beta");mixerToggle.setTextColor(colors.text);mixerToggle.setButtonTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{colors.accent,colors.muted}));
+            mixerToggle.setChecked(prefs.getBoolean("owned-pcm-master-candidate",false));
+            mixerToggle.setOnCheckedChangeListener((view,checked)->{
+                if(PlaybackService.mixerSettingsBusy()){Toast.makeText(this,"Stop playback and phone broadcasting before changing the mixer.",Toast.LENGTH_LONG).show();draw();return;}
+                if(!prefs.edit().putBoolean("owned-pcm-master-candidate",checked).commit()){Toast.makeText(this,"Could not save the mixer setting.",Toast.LENGTH_LONG).show();draw();return;}
+                Toast.makeText(this,"Saved. Close AMP Verse from Recents, then reopen it to apply the mixer change.",Toast.LENGTH_LONG).show();refreshMixerOption();
+            });page.addView(mixerToggle);
+            mixerHint=new TextView(this);mixerHint.setTextSize(14);mixerHint.setTextColor(colors.muted);page.addView(mixerHint);refreshMixerOption();
+        }
         label("Playback",20,colors.text);
         CheckBox repeat=new CheckBox(this);repeat.setText("Repeat queue");repeat.setTag("repeat");repeat.setTextColor(colors.text);repeat.setButtonTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{colors.accent,colors.muted}));repeat.setChecked(prefs.getBoolean("repeat",false));repeat.setOnCheckedChangeListener((v,checked)->prefs.edit().putBoolean("repeat",checked).apply());page.addView(repeat);
         label("Sequential playback uses locally saved songs. Changes apply when you return to the player.",14,colors.muted);
@@ -42,9 +55,13 @@ public final class SettingsActivity extends Activity {
         label("Update downloads the official APK, checks it, then opens Android’s installer. Approve the system installation prompt.",14,colors.muted);
         label("About",20,colors.text);label("AMP Verse "+BuildConfig.VERSION_NAME+" · Integrated Android app · No plugin loader",14,colors.muted);
     }
+    private void refreshMixerOption(){
+        if(mixerToggle==null)return;boolean busy=PlaybackService.mixerSettingsBusy();mixerToggle.setEnabled(!busy);mixerToggle.setAlpha(busy?.5f:1f);
+        mixerHint.setText(busy?"Stop all playback, pads and phone broadcasting to change the mixer.":"Enables phone Player/DJ broadcasting on compatible outputs. Applies next time AMP Verse starts: close it from Recents while stopped, then reopen. Your saved music and playlists stay in place.");
+    }
     private final android.os.Handler updateHandler=new android.os.Handler(android.os.Looper.getMainLooper());
     private String displayed="";
-    private final Runnable updateTick=new Runnable(){public void run(){AppUpdate.installPending(SettingsActivity.this);if(!displayed.equals(AppUpdate.status)){displayed=AppUpdate.status;draw();}updateHandler.postDelayed(this,300);}};
+    private final Runnable updateTick=new Runnable(){public void run(){AppUpdate.installPending(SettingsActivity.this);refreshMixerOption();if(!displayed.equals(AppUpdate.status)){displayed=AppUpdate.status;draw();}updateHandler.postDelayed(this,300);}};
     @Override protected void onResume(){super.onResume();SharedPreferences u=getSharedPreferences("updates",0);if(u.getBoolean("permission_pending",false)&&getPackageManager().canRequestPackageInstalls())u.edit().putBoolean("permission_pending",false).putBoolean("install",true).apply();updateHandler.post(updateTick);}
     @Override protected void onPause(){updateHandler.removeCallbacks(updateTick);super.onPause();}
 }

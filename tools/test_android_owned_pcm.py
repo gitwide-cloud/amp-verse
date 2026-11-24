@@ -29,8 +29,8 @@ def main():
     classpath = os.pathsep.join([str(classes)] + [str(path) for path in jars])
     production = ["OwnedPcmMixer", "MasterPcmQueue", "OwnedPcmOutput", "OwnedAudioOutput",
                   "OwnedMediaAudioSink", "OwnedInputPcm", "AudioDsp", "PhoneLiveSession",
-                  "PhoneLiveHttpTransport", "OwnedSamplerVoices", "OwnedSamplerAudio", "PhoneMasterBroadcast", "PhoneSourceIdentity", "PhoneMp3Warmup"]
-    tests = ["OwnedPcmMixerTest", "PhoneLiveSessionTest", "OwnedInputPcmTest", "OwnedMediaAudioSinkTest", "OwnedAudioOutputTest", "OwnedSamplerVoicesTest", "PhoneMasterBroadcastTest", "PhoneSourceIdentityTest", "PhoneMp3WarmupTest"]
+                  "PhoneLiveHttpTransport", "OwnedSamplerVoices", "OwnedSamplerAudio", "PhoneMasterBroadcast", "PhoneSourceIdentity", "PhoneMp3Warmup", "ReleaseCheck"]
+    tests = ["OwnedPcmMixerTest", "PhoneLiveSessionTest", "OwnedInputPcmTest", "OwnedMediaAudioSinkTest", "OwnedAudioOutputTest", "OwnedSamplerVoicesTest", "PhoneMasterBroadcastTest", "PhoneSourceIdentityTest", "PhoneMp3WarmupTest", "ReleaseChannelTest"]
     files = [source / "main/java/cloud/gitwide/ampverse" / (name + ".java") for name in production]
     files += [source / "test/java/cloud/gitwide/ampverse" / (name + ".java") for name in tests]
     if args.full_cast:

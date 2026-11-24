@@ -175,6 +175,12 @@ final class DjEngine {
     void collapse(int side){collapsed[side]=!collapsed[side];prefs.edit().putBoolean("collapsed-"+side,collapsed[side]).apply();}
     void destination(int deck){destination=deck;prefs.edit().putInt("destination",deck).apply();}
     void cueVolume(int side,float volume){decks[side+2].setVolume(volume);if(scratch!=null)scratch.gain(side+2,volume);prefs.edit().putFloat("cue-volume-"+side,volume).apply();}
+    boolean mixerSettingsBusy(){
+        if(auto||mixing||(scratch!=null&&scratch.any()))return true;
+        for(ExoPlayer deck:decks)if(deck.getPlayWhenReady()||deck.isPlaying())return true;
+        for(int[] side:streams)for(int stream:side)if(stream!=0)return true;
+        return false;
+    }
     boolean samplesActive(){return ownedSamples!=null&&ownedSamples.active();}
     private int loadSample(String path){return ownedSamples!=null?ownedSamples.load(path):pool.load(path,1);}
     private void unloadSample(int id){if(ownedSamples!=null)ownedSamples.unload(id);else pool.unload(id);}

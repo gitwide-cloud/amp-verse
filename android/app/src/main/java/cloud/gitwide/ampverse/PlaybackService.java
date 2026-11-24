@@ -21,6 +21,12 @@ public final class PlaybackService extends MediaSessionService {
     private volatile long phoneSourceVersion;
     private volatile String phoneTargetBase="";
     static OwnedAudioOutput ownedOutput(){return instance==null?null:instance.ownedOutput;}
+    static boolean mixerSettingsBusy(){
+        PlaybackService service=instance;if(service==null)return false;
+        if(service.phoneBroadcast!=null&&service.phoneBroadcast.active())return true;
+        Player player=service.session==null?null:service.session.getPlayer();
+        return (player!=null&&(player.getPlayWhenReady()||player.isPlaying()))||(service.dj!=null&&service.dj.mixerSettingsBusy());
+    }
     static boolean phoneSending(){return instance!=null&&instance.phoneBroadcast!=null&&instance.phoneBroadcast.active();}
     static String phoneBroadcastStatus(){if(android.os.Build.VERSION.SDK_INT<30)return "Phone master sending requires Android 11 or newer; station listening stays available.";return instance==null||instance.phoneBroadcast==null?"Phone master sending is not enabled in this build":instance.phoneBroadcast.status();}
     static boolean phoneSenderAvailable(){return instance!=null&&instance.phoneBroadcast!=null&&instance.ownedOutput.ready()&&phoneEncoderAvailable();}

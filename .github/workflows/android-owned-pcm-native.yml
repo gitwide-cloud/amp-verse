@@ -41,6 +41,7 @@ jobs:
       - name: Compile all editions, modules and native fixture
         run: |
           test -z "$AMP_ANDROID_KEYSTORE"
+          python3 tools/test_android_rc.py
           gradle -p android :app:assembleLiteDebug :app:assembleFullDebug :app:assembleFullDebugAndroidTest :app:testFullDebugUnitTest :app:lintFullDebug :app:lintLiteDebug :amp-dj:assembleDebug :amp-lab:assembleDebug :amp-cast:assembleDebug :amp-podcasts:assembleDebug :amp-remote:assembleDebug
           cargo build --locked -p amp-cast --bin amp-cast
           command -v ffmpeg || (sudo apt-get update && sudo apt-get install -y ffmpeg)
@@ -68,7 +69,7 @@ jobs:
           disk-size: 4096M
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
-          script: python3 tools/verify_android_owned_native.py --server-binary target/debug/amp-cast --output test-output/android-owned-native -- gradle -p android :app:connectedFullDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=cloud.gitwide.ampverse.OwnedMasterNativeDeviceTest -Pandroid.testInstrumentationRunnerArguments.amp_server=http://10.0.2.2:28987
+          script: python3 tools/verify_android_owned_native.py --server-binary target/debug/amp-cast --output test-output/android-owned-native -- gradle -p android :app:connectedFullDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=cloud.gitwide.ampverse.OwnedMasterNativeDeviceTest,cloud.gitwide.ampverse.OwnedMixerSettingsDeviceTest -Pandroid.testInstrumentationRunnerArguments.amp_server=http://10.0.2.2:28987
       - name: Collect emulator logs
         if: always()
         run: |
