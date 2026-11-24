@@ -5,6 +5,7 @@ import hashlib
 import math
 import json
 import os
+import shutil
 from pathlib import Path
 import subprocess
 import tempfile
@@ -33,7 +34,11 @@ def parse_args(argv=None):
                         help='Optional full-release amp-player test executable built from this test source; its hash is recorded, not its source provenance inferred.')
     parser.add_argument('--log-dir', type=Path,
                         help='New or empty directory for per-test logs and qualification.json (including failed runs).')
+    parser.add_argument('--export-test-binary', action='store_true',
+                        help='After successful release CPU acceptance, export the Cargo-identified test executable and pinned Windows key-lock DLL to --log-dir for internal hardware testing.')
     args = parser.parse_args(argv)
+    if args.export_test_binary and (args.log_dir is None or args.test_binary is not None):
+        parser.error('--export-test-binary requires --log-dir and a Cargo build, not --test-binary')
     args.gpu_decks = 4 if args.four_decks else 6 if args.six_decks else 0
     if args.gpu_decks and (args.cuda_module is None or not args.cuda_manifest_sha256):
         parser.error('GPU qualification requires --cuda-module and --cuda-manifest-sha256')
@@ -67,6 +72,93 @@ def checkout_identity():
         return {'commit': None, 'dirty': None}
 
 
+
+def tracked_checkout(root):
+    def git(*args):
+        return subprocess.check_output(['git', *args], cwd=root, text=True,
+                                       stderr=subprocess.DEVNULL).strip()
+    git('ls-files', '--error-unmatch', 'Cargo.lock', 'apps/amp-player/src/main.rs',
+        'tools/verify_live_stem_player.py')
+    if git('status', '--porcelain', '--untracked-files=no'):
+        raise RuntimeError('Export requires a clean tracked checkout')
+    return {'commit': git('rev-parse', 'HEAD'), 'tree': git('rev-parse', 'HEAD^{tree}')}
+
+
+def cargo_test_artifact(records, root):
+    expected = (root / 'apps/amp-player/src/main.rs').resolve()
+    matches = [record for record in records
+               if record.get('reason') == 'compiler-artifact'
+               and record.get('profile', {}).get('test') is True
+               and record.get('target', {}).get('name') == 'amp-player'
+               and 'bin' in record.get('target', {}).get('kind', [])
+               and record.get('target', {}).get('src_path')
+               and Path(record['target']['src_path']).is_absolute()
+               and Path(record['target']['src_path']).resolve() == expected
+               and record.get('executable')]
+    if len(matches) != 1:
+        raise RuntimeError('Cargo must identify exactly one current amp-player test executable')
+    artifact = matches[0]
+    if not artifact.get('package_id'):
+        raise RuntimeError('Cargo test artifact lacks its package identity')
+    path = Path(artifact['executable'])
+    if not path.is_absolute() or path.is_symlink() or not path.is_file():
+        raise RuntimeError('Cargo test executable must be an existing absolute regular file')
+    return artifact, path
+
+
+def export_test_binary(args, logs, source_pin, env, root):
+    if not args.export_test_binary:
+        return None
+    if tracked_checkout(root) != source_pin:
+        raise RuntimeError('Tracked source changed during qualification')
+    command = ['cargo', 'test', '-p', 'amp-player', '--bin', 'amp-player',
+               '--release', '--locked', '--no-run', '--message-format=json']
+    result = subprocess.run(command, cwd=root, env=env, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
+    (logs / 'cargo-export.jsonl').write_text(result.stdout, encoding='utf-8')
+    (logs / 'cargo-export.stderr.log').write_text(result.stderr, encoding='utf-8')
+    if result.returncode:
+        raise subprocess.CalledProcessError(result.returncode, command)
+    records = [json.loads(line) for line in result.stdout.splitlines() if line.strip()]
+    artifact, executable = cargo_test_artifact(records, root)
+    files = [(executable, 'amp-player-acceptance' + executable.suffix)]
+    if executable.suffix.lower() == '.exe':
+        outputs = [Path(record['out_dir']) / 'amp-keylock.dll' for record in records
+                   if record.get('reason') == 'build-script-executed'
+                   and record.get('package_id') == artifact.get('package_id')
+                   and record.get('out_dir')]
+        if len(outputs) != 1 or not outputs[0].is_absolute() or not outputs[0].is_file() or outputs[0].is_symlink():
+            raise RuntimeError('Cargo must identify the matching Windows key-lock DLL')
+        dll = outputs[0]
+        sibling = executable.parent / 'amp-keylock.dll'
+        if sibling.exists() and (sibling.is_symlink() or sha256_file(sibling) != sha256_file(dll)):
+            raise RuntimeError('Test executable has a stale sibling key-lock DLL')
+        files.append((dll, 'amp-keylock.dll'))
+    destination = logs / 'internal-test-binary'
+    if destination.exists():
+        raise RuntimeError('Internal export destination already exists')
+    exported = {
+        'source': source_pin,
+        'cargo_command': command,
+        'cargo_profile': artifact['profile'],
+        'cargo_package_id': artifact.get('package_id'),
+        'purpose': 'Internal acceptance tool; export does not qualify or admit GPU4/GPU6',
+        'files': [],
+    }
+    with tempfile.TemporaryDirectory(prefix='.test-export-', dir=logs) as stage:
+        for source, name in files:
+            target = Path(stage) / name
+            before = sha256_file(source)
+            shutil.copy2(source, target)
+            if sha256_file(target) != before or sha256_file(source) != before:
+                raise RuntimeError('Export file changed while copying')
+            exported['files'].append({'path': name, 'sha256': before, 'size': target.stat().st_size})
+        if tracked_checkout(root) != source_pin:
+            raise RuntimeError('Tracked source changed during export')
+        (Path(stage) / 'provenance.json').write_text(json.dumps(exported, indent=2), encoding='utf-8')
+        Path(stage).rename(destination)
+    return exported
+
 def checked_test(command, env, log_path=None, expected_report=None):
     result = subprocess.run(command, env=env, cwd=Path(__file__).resolve().parents[1],
                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, check=False)
@@ -83,6 +175,8 @@ def checked_test(command, env, log_path=None, expected_report=None):
 
 def main(argv=None):
     args = parse_args(argv)
+    root = Path(__file__).resolve().parents[1]
+    source_pin = tracked_checkout(root) if args.export_test_binary else None
     if args.test_binary is not None:
         args.test_binary = args.test_binary.resolve()
         if not args.test_binary.is_file():
@@ -162,7 +256,7 @@ def main(argv=None):
                                     for key, relative in manifest['relative_paths'].items()},
             'test_binary_sha256': sha256_file(args.test_binary) if args.test_binary else None,
             'test_binary_source_provenance': 'Operator must verify separately; a binary hash does not establish source identity.',
-            'cargo_profile': None if args.test_binary else ('release' if args.sustained_cpu else 'default'),
+            'cargo_profile': None if args.test_binary else ('release' if args.sustained_cpu or args.export_test_binary else 'default'),
             'tests_passed': [],
             'limits': 'Synthetic callback/model proof, not physical output or real-music listening acceptance.',
         }
@@ -178,7 +272,7 @@ def main(argv=None):
                     command = [str(args.test_binary), test]
                 else:
                     command = ['cargo', 'test', '-p', 'amp-player', '--bin', 'amp-player', test, '--locked']
-                    if args.sustained_cpu:
+                    if args.sustained_cpu or args.export_test_binary:
                         command.append('--release')
                     command.append('--')
                 if ignored:
@@ -195,6 +289,9 @@ def main(argv=None):
                 save_identity()
             assert sha256_file(source) == source_before, 'Original synthetic input was changed'
             assert sorted(p.name for p in Path(directory).iterdir()) == sorted([source.name, preparation_source.name])
+            if args.export_test_binary:
+                identity['exported_test_binary'] = export_test_binary(args, logs, source_pin, env, root)
+                save_identity()
         except Exception as error:
             identity.update(status='failed', failure=str(error))
             save_identity()

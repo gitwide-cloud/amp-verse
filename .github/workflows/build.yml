@@ -239,7 +239,7 @@ jobs:
         shell: bash
         run: |
           python -m unittest discover -s tools -p test_verify_live_stem_player.py
-          python tools/verify_live_stem_player.py --module dist/addons/stems-live --sustained-cpu --log-dir stem-qualification
+          python tools/verify_live_stem_player.py --module dist/addons/stems-live --sustained-cpu --log-dir stem-qualification --export-test-binary
       - name: Upload sustained CPU stem evidence
         if: ${{ always() && (github.head_ref == 'release/thanksgiving-20261126' || github.ref_name == 'release/thanksgiving-20261126' || startsWith(github.ref, 'refs/tags/v')) }}
         uses: actions/upload-artifact@v4
@@ -247,21 +247,6 @@ jobs:
           name: stem-qualification-${{ runner.os }}-${{ github.sha }}
           path: stem-qualification/
           if-no-files-found: ignore
-      - name: Export exact Windows release acceptance executable
-        if: runner.os == 'Windows' && (github.head_ref == 'release/thanksgiving-20261126' || github.ref_name == 'release/thanksgiving-20261126')
-        timeout-minutes: 8
-        shell: bash
-        run: |
-          mkdir -p windows-acceptance
-          cargo test -p amp-player --bin amp-player --release --locked --no-run --message-format=json > windows-acceptance/cargo-artifacts.jsonl
-          python -c 'import hashlib,json,os,pathlib,shutil; out=pathlib.Path("windows-acceptance"); records=map(json.loads,(out/"cargo-artifacts.jsonl").read_text(encoding="utf-8").splitlines()); files=[x["executable"] for x in records if x.get("reason")=="compiler-artifact" and x.get("profile",{}).get("test") and x.get("target",{}).get("name")=="amp-player" and x.get("executable")]; assert len(files)==1, files; exe=out/"amp-player-acceptance.exe"; shutil.copy2(files[0],exe); (out/"provenance.json").write_text(json.dumps({"source_commit":os.environ["GITHUB_SHA"],"run_id":os.environ["GITHUB_RUN_ID"],"test_binary_sha256":hashlib.sha256(exe.read_bytes()).hexdigest()},indent=2),encoding="utf-8")'
-          rm windows-acceptance/cargo-artifacts.jsonl
-      - uses: actions/upload-artifact@v4
-        if: runner.os == 'Windows' && (github.head_ref == 'release/thanksgiving-20261126' || github.ref_name == 'release/thanksgiving-20261126')
-        with:
-          name: windows-release-acceptance-${{ github.sha }}
-          path: windows-acceptance/
-          if-no-files-found: error
       - name: Package official AMP Lab YouTube tools
         shell: bash
         run: |
