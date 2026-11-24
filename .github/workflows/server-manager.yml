@@ -1,7 +1,7 @@
 name: Verify optional Windows server manager
 on:
   push:
-    branches: ['codex/sag75-server-manager']
+    branches: ['fix/thanksgiving-server-manager']
   pull_request:
     paths: ['apps/amp-server-manager/**', '.github/workflows/server-manager.yml']
   workflow_dispatch:

@@ -1,11 +1,12 @@
 name: Verify AMP Rust engines
 on:
   push:
-    branches: ['feature/rust-engine-knowledge-*']
+    branches: ['feature/rust-engine-knowledge-*', 'codex/sag75-server-manager']
     paths:
       - 'crates/**'
       - 'apps/amp-cast/**'
       - 'apps/amp-engine/**'
+      - 'apps/amp-server-manager/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'tests/sag65/**'
@@ -21,6 +22,7 @@ on:
       - 'crates/**'
       - 'apps/amp-cast/**'
       - 'apps/amp-engine/**'
+      - 'apps/amp-server-manager/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
       - 'tests/sag65/**'
@@ -112,6 +114,13 @@ jobs:
         run: powershell.exe -NoProfile -File tools/test_windows_server_install.ps1
       - name: Build standalone server and analysis engine
         run: cargo build -p amp-cast -p amp-engine --release --locked
+      - uses: actions/setup-dotnet@v4
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build optional Windows manager
+        if: runner.os == 'Windows'
+        run: dotnet publish apps/amp-server-manager/Windows -c Release -r win-x64 --self-contained true -o engine-checkpoint/manager
       - name: Stage source-identified engine build
         shell: bash
         run: |
@@ -122,6 +131,13 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then cp deploy/install-windows-server.ps1 deploy/show-windows-server-access.ps1 "deploy/Show Server Access Code.cmd" engine-checkpoint/; fi
           cp test-output/chroma/report.json engine-checkpoint/chroma-benchmark.json
           python -c "import hashlib,json,pathlib; d=pathlib.Path('engine-checkpoint'); files=[{'name':p.name,'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(d.iterdir()) if p.is_file()]; (d/'build.json').write_text(json.dumps({'commit':'${{ github.sha }}','os':'${{ runner.os }}','preview':True,'deployed':False,'files':files},indent=2))"
+      - name: Hash optional manager files
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = (Resolve-Path engine-checkpoint/manager).Path
+          $files = @(Get-ChildItem $root -File -Recurse | ForEach-Object { @{path=[IO.Path]::GetRelativePath($root, $_.FullName); sha256=(Get-FileHash $_.FullName).Hash.ToLowerInvariant(); size=$_.Length} })
+          @{source_commit='${{ github.sha }}'; installed=$false; files=$files} | ConvertTo-Json -Depth 5 | Set-Content engine-checkpoint/manager/build.json
       - uses: actions/upload-artifact@v4
         with:
           name: amp-engines-${{ runner.os }}-${{ github.sha }}
