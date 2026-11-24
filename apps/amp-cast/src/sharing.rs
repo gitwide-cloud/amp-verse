@@ -238,6 +238,73 @@ async fn manifest(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response
         _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
+fn basic_tags(track: &Track) -> serde_json::Map<String, Value> {
+    let mut tags = serde_json::Map::new();
+    for key in [
+        "title",
+        "artist",
+        "album",
+        "album_artist",
+        "genre",
+        "genres",
+        "year",
+        "date",
+        "track",
+        "disc",
+        "comment",
+        "content_advisory",
+        "media_kind",
+    ] {
+        if let Some(value) = track.preparation.extensions.get(key) {
+            tags.insert(key.to_string(), value.clone());
+        }
+    }
+    // Scanner keys are Lofty ItemKey names, not the manual extension names.
+    // Project only known ordinary tags; an explicit manual value (including empty) wins.
+    if let Some(embedded) = track.preparation.extensions.get("embedded_tags") {
+        for (key, source) in [
+            ("title", "TrackTitle"),
+            ("artist", "TrackArtist"),
+            ("album", "AlbumTitle"),
+            ("album_artist", "AlbumArtist"),
+            ("date", "RecordingDate"),
+            ("year", "Year"),
+            ("track", "TrackNumber"),
+            ("disc", "DiscNumber"),
+            ("comment", "Comment"),
+        ] {
+            if tags.contains_key(key) {
+                continue;
+            }
+            let Some(values) = embedded.get(source).and_then(Value::as_array) else {
+                continue;
+            };
+            let mut text = Vec::new();
+            for value in values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                if !text.contains(&value) {
+                    text.push(value);
+                }
+            }
+            if !text.is_empty() {
+                tags.insert(key.into(), json!(text.join("; ")));
+            }
+        }
+    }
+    let genres = amp_core::genres::values(&track.preparation);
+    if !genres.is_empty() {
+        tags.entry("genre")
+            .or_insert_with(|| json!(genres.join("; ")));
+        tags.insert("genres".into(), json!(genres));
+    }
+    tags.entry("title").or_insert_with(|| json!(track.title));
+    tags
+}
+
 // Basic playback has no dependency on a preparation record, its revision or schema.
 // Tags come from the already-loaded catalog snapshot; only non-DJ fields cross this API.
 async fn basic_metadata(
@@ -266,14 +333,8 @@ async fn basic_metadata(
         if before.len() != size || before.len() != after.len() || before.modified().ok() != after.modified().ok() {
             return Err(StatusCode::CONFLICT);
         }
-        let mut tags = serde_json::Map::new();
-        for key in ["title", "artist", "album", "album_artist", "genre", "genres", "year", "date", "track", "disc", "comment", "content_advisory", "media_kind"] {
-            if let Some(value) = track.preparation.extensions.get(key) {
-                tags.insert(key.to_string(), value.clone());
-            }
-        }
-        tags.entry("title").or_insert_with(|| json!(track.title));
-        Ok(json!({"version":1,"id":id,"title":track.title,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"bytes":size,"sha256":format!("{:x}",hasher.finalize()),"track_key":amp_core::show::song_id(track),"tags":tags}))
+        let tags = basic_tags(track);
+        Ok(json!({"version":1,"id":id,"title":tags.get("title").and_then(Value::as_str).unwrap_or(&track.title),"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"bytes":size,"sha256":format!("{:x}",hasher.finalize()),"track_key":amp_core::show::song_id(track),"tags":tags}))
     }).await;
     match work {
         Ok(Ok(value)) => Json(value).into_response(),
@@ -498,6 +559,74 @@ mod tests {
         assert_eq!(byte_range("bytes=0-0", 0), Err(()));
         assert_eq!(byte_range("bytes=-0", 10), Err(()));
     }
+    #[test]
+    fn basic_tags_include_scanned_metadata_without_exposing_analysis() {
+        let mut preparation = amp_core::Preparation::default();
+        preparation.extensions.insert(
+            "embedded_tags".into(),
+            json!({
+                "TrackTitle":["Embedded title"], "TrackArtist":["First artist","Second artist"],
+                "AlbumTitle":["Real album"], "AlbumArtist":["Album artist"],
+                "RecordingDate":["2024-03-12"], "TrackNumber":["7"], "DiscNumber":["2"],
+                "Comment":["Ordinary note"], "Bpm":["128"], "InitialKey":["8A"]
+            }),
+        );
+        preparation
+            .extensions
+            .insert("embedded_genres".into(), json!(["Rnb", "House"]));
+        preparation
+            .extensions
+            .insert("analysis".into(), json!({"secret_dj_data":true}));
+        let mut track = Track {
+            path: "song.mp3".into(),
+            title: "Catalog title".into(),
+            preparation,
+        };
+        let tags = basic_tags(&track);
+        assert_eq!(tags["artist"], "First artist; Second artist");
+        assert_eq!(tags["album"], "Real album");
+        assert_eq!(tags["album_artist"], "Album artist");
+        assert_eq!(tags["date"], "2024-03-12");
+        assert_eq!(tags["track"], "7");
+        assert_eq!(tags["disc"], "2");
+        assert_eq!(tags["comment"], "Ordinary note");
+        assert_eq!(tags["title"], "Embedded title");
+        assert_eq!(tags["genres"], json!(["R&B", "house"]));
+        for key in ["embedded_tags", "analysis", "bpm", "key", "InitialKey"] {
+            assert!(!tags.contains_key(key));
+        }
+        track
+            .preparation
+            .extensions
+            .insert("title".into(), json!("Manual title"));
+        track
+            .preparation
+            .extensions
+            .insert("artist".into(), json!("Manual artist"));
+        track
+            .preparation
+            .extensions
+            .insert("album".into(), json!("Manual album"));
+        track
+            .preparation
+            .extensions
+            .insert("genre".into(), json!("Rock"));
+        let tags = basic_tags(&track);
+        assert_eq!(tags["artist"], "Manual artist");
+        assert_eq!(tags["album"], "Manual album");
+        assert_eq!(tags["genres"], json!(["Rock"]));
+        assert_eq!(tags["title"], "Manual title");
+        track
+            .preparation
+            .extensions
+            .insert("artist".into(), json!(""));
+        assert_eq!(
+            basic_tags(&track)["artist"],
+            "",
+            "intentional manual clearing must not resurrect embedded tags"
+        );
+    }
+
     #[tokio::test]
     async fn basic_metadata_does_not_require_or_expose_dj_preparation() {
         let dir = tempfile::tempdir().unwrap();
