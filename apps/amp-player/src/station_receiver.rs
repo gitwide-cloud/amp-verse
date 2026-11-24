@@ -489,7 +489,9 @@ mod tests {
         let start = Instant::now();
         loop {
             let state = receiver.status();
-            if state.finished {
+            // The supervisor publishes finished just before its thread exits.
+            // Only a later nonblocking status poll may observe/join the handle.
+            if state.finished && receiver.worker.is_none() {
                 return state;
             }
             assert!(
@@ -520,6 +522,32 @@ mod tests {
         ] {
             assert!(Receiver::with_decoder(url, || panic!("Must not spawn")).is_err());
         }
+    }
+    #[test]
+    fn finished_status_can_precede_worker_exit_and_nonblocking_reap() {
+        let state = Arc::new(Mutex::new(Status::default()));
+        let worker_state = state.clone();
+        let (published, observed) = std::sync::mpsc::channel();
+        let (release, held) = std::sync::mpsc::channel();
+        let worker = thread::spawn(move || {
+            worker_state.lock().unwrap().finished = true;
+            published.send(()).unwrap();
+            // Hold the real publication-before-exit interval open without
+            // relying on scheduler timing or a larger cancellation timeout.
+            let _ = held.recv();
+        });
+        let mut receiver = Receiver {
+            cancel: Arc::new(AtomicBool::new(false)),
+            state,
+            worker: Some(worker),
+        };
+        observed.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(receiver.status().finished);
+        assert!(receiver.worker.is_some());
+        assert!(!receiver.worker.as_ref().unwrap().is_finished());
+        release.send(()).unwrap();
+        assert!(await_finished(&mut receiver, Duration::from_secs(3)).finished);
+        assert!(receiver.worker.is_none());
     }
     #[test]
     fn idle_and_stalled_pipe_cancellation_reaps_without_ui_wait() {
