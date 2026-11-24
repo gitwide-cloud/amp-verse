@@ -38,12 +38,9 @@ final class FullPhoneMp3Encoder implements PhoneMasterBroadcast.Encoder {
   }
 
   @Override
-  public void encode(
-      MasterPcmQueue source, AtomicBoolean cancelled, PhoneMasterBroadcast.PacketSink packets)
-      throws IOException {
-    Thread writer = null;
+  public void prepare() throws IOException {
+    if (stopped.get()) return;
     try {
-      if (cancelled.get() || stopped.get()) return;
       output = Os.open(outputPipe, OsConstants.O_RDONLY | OsConstants.O_NONBLOCK, 0);
       bound(output);
       session =
@@ -83,7 +80,7 @@ final class FullPhoneMp3Encoder implements PhoneMasterBroadcast.Encoder {
                 if (released) LEASE.compareAndSet(ticket, null);
               });
       long opening = System.nanoTime() + 2000000000L;
-      while (input == null && !stopped.get() && !cancelled.get()) {
+      while (input == null && !stopped.get()) {
         try {
           input = Os.open(inputPipe, OsConstants.O_WRONLY | OsConstants.O_NONBLOCK, 0);
           bound(input);
@@ -94,6 +91,19 @@ final class FullPhoneMp3Encoder implements PhoneMasterBroadcast.Encoder {
         }
       }
       if (input == null) return;
+    } catch (ErrnoException error) {
+      throw new IOException("Phone encoder pipe preparation failed", error);
+    }
+  }
+
+  @Override
+  public void encode(
+      MasterPcmQueue source, AtomicBoolean cancelled, PhoneMasterBroadcast.PacketSink packets)
+      throws IOException {
+    Thread writer = null;
+    try {
+      if (cancelled.get() || stopped.get()) return;
+      if (input == null || output == null) throw new IOException("Phone encoder was not prepared");
       writer = new Thread(() -> feed(source, cancelled), "amp-phone-encoder-pcm");
       writer.setDaemon(true);
       writer.start();

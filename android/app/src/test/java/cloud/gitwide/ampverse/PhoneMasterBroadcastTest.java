@@ -44,6 +44,62 @@ public final class PhoneMasterBroadcastTest {
   }
 
   @Test
+  public void coldEncoderPreparationDoesNotFillOrAttachTheLiveQueue() throws Exception {
+    OwnedPcmMixer mixer = new OwnedPcmMixer();
+    CountDownLatch preparing = new CountDownLatch(1), ready = new CountDownLatch(1);
+    AtomicBoolean prepared = new AtomicBoolean(), encoded = new AtomicBoolean();
+    AtomicLong rejected = new AtomicLong(-1);
+    PhoneMasterBroadcast broadcast =
+        new PhoneMasterBroadcast(
+            mixer,
+            () ->
+                new PhoneMasterBroadcast.Encoder() {
+                  public void prepare() throws IOException {
+                    preparing.countDown();
+                    try {
+                      if (!ready.await(2, TimeUnit.SECONDS))
+                        throw new IOException("Fixture preparation timed out");
+                    } catch (InterruptedException e) {
+                      Thread.currentThread().interrupt();
+                      throw new IOException(e);
+                    }
+                    prepared.set(true);
+                  }
+
+                  public void encode(
+                      MasterPcmQueue pcm,
+                      AtomicBoolean stop,
+                      PhoneMasterBroadcast.PacketSink packets) {
+                    encoded.set(true);
+                    rejected.set(pcm.rejectedFrames());
+                  }
+
+                  public void cancel() {
+                    ready.countDown();
+                  }
+
+                  public void close() {}
+                },
+            s -> {});
+    try {
+      broadcast.start(new PhoneLiveSession(ID, new Transport()), () -> true);
+      boolean staged = preparing.await(500, TimeUnit.MILLISECONDS);
+      short[] rendered = new short[960];
+      for (int block = 0; block < 100; block++) mixer.render(rendered, 480);
+      ready.countDown();
+      await(() -> !broadcast.active());
+      assertTrue("Native startup must run before attaching current audio", staged);
+      assertTrue(prepared.get());
+      assertTrue(encoded.get());
+      assertEquals("Cold startup must not consume the live latency budget", 0, rejected.get());
+      assertEquals(0, mixer.rejectedFanoutFrames());
+    } finally {
+      ready.countDown();
+      broadcast.close();
+    }
+  }
+
+  @Test
   public void encoderStartupFailureNeverClaimsOrStopsExistingHostProgram() throws Exception {
     OwnedPcmMixer mixer = new OwnedPcmMixer();
     Transport transport = new Transport();

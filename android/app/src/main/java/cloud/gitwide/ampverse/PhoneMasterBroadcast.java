@@ -12,6 +12,8 @@ final class PhoneMasterBroadcast implements AutoCloseable {
   }
 
   interface Encoder extends AutoCloseable {
+    default void prepare() throws IOException {}
+
     void encode(MasterPcmQueue source, AtomicBoolean cancelled, PacketSink sink) throws IOException;
 
     void cancel();
@@ -91,6 +93,9 @@ final class PhoneMasterBroadcast implements AutoCloseable {
         try {
           encoder = encoders.create();
           job.encoder = encoder;
+          // Native pipe/codec startup may take seconds; export only current audio once ready.
+          encoder.prepare();
+          if (job.cancelled.get()) break;
           mixer.fanout(queue);
           encoder.encode(
               queue,

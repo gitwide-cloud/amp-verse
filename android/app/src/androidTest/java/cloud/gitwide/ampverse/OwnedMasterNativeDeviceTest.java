@@ -75,6 +75,7 @@ public final class OwnedMasterNativeDeviceTest {
     AtomicInteger uploads = new AtomicInteger();
     AtomicReference<byte[]> latest = new AtomicReference<>();
     AtomicReference<String> lastEvent = new AtomicReference<>("");
+    AtomicReference<Throwable> encoderFailure = new AtomicReference<>();
     try {
       JSONObject snapshot = status();
       assertFalse("Fixture must start idle", snapshot.optBoolean("running"));
@@ -131,10 +132,42 @@ public final class OwnedMasterNativeDeviceTest {
               output.mixer,
               () -> {
                 try {
-                  return (PhoneMasterBroadcast.Encoder)
-                      Class.forName("cloud.gitwide.ampverse.FullPhoneMp3Encoder")
-                          .getDeclaredConstructor(Context.class)
-                          .newInstance(context);
+                  PhoneMasterBroadcast.Encoder nativeEncoder =
+                      (PhoneMasterBroadcast.Encoder)
+                          Class.forName("cloud.gitwide.ampverse.FullPhoneMp3Encoder")
+                              .getDeclaredConstructor(Context.class)
+                              .newInstance(context);
+                  return new PhoneMasterBroadcast.Encoder() {
+                    public void prepare() throws IOException {
+                      try {
+                        nativeEncoder.prepare();
+                      } catch (IOException error) {
+                        encoderFailure.set(error);
+                        throw error;
+                      }
+                    }
+
+                    public void encode(
+                        MasterPcmQueue pcm,
+                        AtomicBoolean cancel,
+                        PhoneMasterBroadcast.PacketSink packets)
+                        throws IOException {
+                      try {
+                        nativeEncoder.encode(pcm, cancel, packets);
+                      } catch (IOException error) {
+                        encoderFailure.set(error);
+                        throw error;
+                      }
+                    }
+
+                    public void cancel() {
+                      nativeEncoder.cancel();
+                    }
+
+                    public void close() {
+                      nativeEncoder.close();
+                    }
+                  };
                 } catch (ReflectiveOperationException error) {
                   throw new IOException("Full native encoder unavailable", error);
                 }
@@ -167,7 +200,12 @@ public final class OwnedMasterNativeDeviceTest {
         }
         Thread.sleep(10);
       }
-      assertTrue("Native MP3/HTTP never delivered: " + lastEvent.get(), uploads.get() > 50);
+      Throwable problem = encoderFailure.get();
+      String diagnostic = "";
+      for (int depth = 0; problem != null && depth < 4; depth++, problem = problem.getCause())
+        diagnostic += " / " + problem;
+      assertTrue(
+          "Native MP3/HTTP never delivered: " + lastEvent.get() + diagnostic, uploads.get() > 50);
       assertTrue(broadcast.active());
       assertTrue(status().optBoolean("on_air"));
       // An explicitly replaced session must survive the old sender's upload/cleanup.
