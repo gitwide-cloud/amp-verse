@@ -860,7 +860,7 @@ impl Player {
                         if short_controls {
                             // A short performance card keeps the vinyl and transport pinned.
                             // Real, named control panels replace a clipped fragment of knobs.
-                            ui.horizontal_wrapped(|ui| {
+                            let tools = ui.horizontal_wrapped(|ui| {
                                 for (label, tab) in
                                     [("EQ", 0), ("Stems", 1), ("Cues", 3), ("Sampler", 2)]
                                 {
@@ -872,6 +872,21 @@ impl Player {
                                     }
                                 }
                             });
+                            // Geometry consumers follow the current controls surface, not
+                            // the previous tall layout's knobs retained in egui data.
+                            #[cfg(test)]
+                            ui.ctx().data_mut(|data| {
+                                data.insert_temp(
+                                    egui::Id::unique(("rack-knobs", d)),
+                                    tools.response.rect,
+                                );
+                                data.insert_temp(
+                                    egui::Id::unique(("rack-knobs", d)).with("screen"),
+                                    (tools.response.rect, ui.layer_id()),
+                                );
+                            });
+                            #[cfg(not(test))]
+                            let _ = tools;
                         } else if height < 370. {
                             egui::ScrollArea::vertical()
                                 .id_salt(("card-lower-controls", d))

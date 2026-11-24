@@ -4727,6 +4727,14 @@ mod window_tests {
             },
             ..Default::default()
         };
+        let controls = [
+            egui::Id::unique(("dj-transport", 0usize)),
+            egui::Id::unique(("dj-transport", 1usize)),
+            egui::Id::unique("dj-auto-fade-bounds"),
+            egui::Id::unique(("rack-knobs", 0usize)),
+            egui::Id::unique(("rack-knobs", 1usize)),
+            egui::Id::unique("dj-browser-screen"),
+        ];
         for size in [
             egui::vec2(2560., 1550.),
             egui::vec2(1200., 900.),
@@ -4734,30 +4742,32 @@ mod window_tests {
             egui::vec2(540., 360.),
             egui::vec2(1000., 760.),
         ] {
+            // Each viewport must publish fresh bounds. Retaining an earlier tall
+            // layout's controls would incorrectly apply the new layer transform.
+            ctx.data_mut(|data| {
+                for id in controls {
+                    data.remove::<(egui::Rect, egui::LayerId)>(id.with("screen"));
+                }
+            });
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 ..Default::default()
             };
             let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 2));
             output.textures_delta.clear();
-            for id in [
-                egui::Id::unique(("dj-transport", 0usize)),
-                egui::Id::unique(("dj-transport", 1usize)),
-                egui::Id::unique("dj-auto-fade-bounds"),
-                egui::Id::unique(("rack-knobs", 0usize)),
-                egui::Id::unique(("rack-knobs", 1usize)),
-                egui::Id::unique("dj-browser-screen"),
-            ] {
+            for id in controls {
                 let (rect, layer) = ctx
                     .data(|d| d.get_temp::<(egui::Rect, egui::LayerId)>(id.with("screen")))
-                    .unwrap();
+                    .unwrap_or_else(|| {
+                        panic!("{size:?}: control {id:?} did not publish fresh bounds")
+                    });
                 let screen = ctx.layer_transform_to_global(layer).unwrap_or_default() * rect;
                 assert!(
                     screen.left() >= -1.
                         && screen.top() >= -1.
                         && screen.right() <= size.x + 1.
                         && screen.bottom() <= size.y + 1.,
-                    "{size:?}: control outside window {screen:?}"
+                    "{size:?}: control {id:?} outside window {screen:?}"
                 );
             }
         }
