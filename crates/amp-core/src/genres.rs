@@ -65,6 +65,7 @@ pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparatio
     // Derived tags never replace a user-saved genre. Refresh them on each background
     // scan so edits made in another tag editor become visible without reanalysis.
     preparation.extensions.remove("embedded_genres");
+    preparation.extensions.remove("embedded_tags");
     let Ok(probe) = lofty::probe::Probe::open(path) else {
         return;
     };
@@ -76,6 +77,20 @@ pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparatio
     };
     let mut tags = std::collections::BTreeMap::<String, Vec<String>>::new();
     for tag in file.tags() {
+        // Unknown Vorbis fields live in Lofty's companion tag, not Tag::items.
+        // Convert a clone back to the format-specific view; never write it.
+        if tag.tag_type() == lofty::tag::TagType::VorbisComments {
+            let comments: lofty::ogg::tag::VorbisComments = tag.clone().into();
+            for value in comments.get_all("ITUNESADVISORY") {
+                tags.entry("ITUNESADVISORY".into())
+                    .or_default()
+                    .push(value.to_owned());
+                tags.entry("ParentalAdvisory".into())
+                    .or_default()
+                    .push(value.to_owned());
+            }
+        }
+
         for item in tag.items() {
             let value = match item.value() {
                 lofty::tag::ItemValue::Text(text) | lofty::tag::ItemValue::Locator(text) => {

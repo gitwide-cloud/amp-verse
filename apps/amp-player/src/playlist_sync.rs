@@ -39,8 +39,13 @@ struct Document {
     revision: Value,
     document: Value,
 }
+fn legacy_smart_version() -> u32 {
+    2
+}
 #[derive(Deserialize)]
 struct Snapshot {
+    #[serde(default = "legacy_smart_version")]
+    max_smart_document_version: u32,
     protocol: u32,
     server_id: String,
     library_id: String,
@@ -620,12 +625,18 @@ fn cycle(binding: &Binding, directory: &Path) -> Result<String, String> {
                     } else {
                         Action::Create
                     };
+                    if doc.kind == Kind::Smart
+                        && doc.document_version > fresh.max_smart_document_version
+                    {
+                        record.conflict = Some("Selected server needs a compatible update before syncing Clean rules; local rules retained".into());
+                        continue;
+                    }
                     let mut op = operation(binding, doc, revision, action);
                     if op.kind == Kind::Smart {
                         // An empty settings-v2 snapshot has no document version. Create
                         // with known-supported v2 so it cannot downgrade that container.
                         if op.action == Action::Create {
-                            op.document_version = 2;
+                            op.document_version = op.document_version.max(2);
                         }
                         op.document_version = op.document_version.max(
                             fresh
@@ -871,6 +882,17 @@ impl Client {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn legacy_server_never_advertises_clean_rule_support() {
+        let legacy = json!({"protocol":1,"server_id":"s","library_id":"l","documents":[],"smart_revision":null});
+        let snapshot: Snapshot = serde_json::from_value(legacy.clone()).unwrap();
+        assert_eq!(snapshot.max_smart_document_version, 2);
+        let mut modern = legacy;
+        modern["max_smart_document_version"] = json!(3);
+        let snapshot: Snapshot = serde_json::from_value(modern).unwrap();
+        assert_eq!(snapshot.max_smart_document_version, 3);
+    }
+
     fn fixture() -> (tempfile::TempDir, Binding) {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("music");

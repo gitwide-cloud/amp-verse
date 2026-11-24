@@ -81,6 +81,7 @@ jobs:
         shell: powershell
         run: |
           powershell -NoProfile -File tools/test_install-tested-desktop.ps1
+          powershell -NoProfile -File tools/test_install-tested-desktop-cache.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           powershell -NoProfile -File tools/test_install-tested-desktop-transaction.ps1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
@@ -406,7 +407,7 @@ jobs:
           cd packages
           # Artifact storage strips executable bits. Restore them before making
           # Linux ZIPs so the updater can restart the newly installed binaries.
-          find . -type f \( -name amp-player -o -name amp-update -o -name amp-cast -o -name amp-prepare -o -name amp-engine -o -name amp-engine-linux-x86_64 -o -name deno -o -name yt-dlp \) -exec chmod +x {} +
+          find . -type f \( -name amp-player -o -name amp-update -o -name amp-cast -o -name amp-prepare -o -name amp-stem-worker -o -name amp-engine -o -name amp-engine-linux-x86_64 -o -name deno -o -name yt-dlp \) -exec chmod +x {} +
           for dir in amp-verse-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
           for dir in amp-analysis-engine-*; do (cd "$dir" && zip -r "../$dir-${GITHUB_REF_NAME}.zip" .); done
           cp amp-analysis-engine-Windows/amp-engine-windows-x86_64.exe* .

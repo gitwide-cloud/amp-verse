@@ -127,6 +127,28 @@ function Is-Within([string]$Child, [string]$Parent) {
     return $Child.Equals($Parent,[StringComparison]::OrdinalIgnoreCase) -or
         $Child.StartsWith($Parent.TrimEnd('\') + '\',[StringComparison]::OrdinalIgnoreCase)
 }
+function Get-SettingsSnapshot([string]$Source) {
+    $files = @()
+    $excluded = @()
+    $pending = New-Object 'System.Collections.Generic.Stack[string]'
+    $pending.Push($Source)
+    while ($pending.Count) {
+        $directory = $pending.Pop()
+        foreach ($entry in Get-ChildItem -LiteralPath $directory -Force) {
+            # Generated audio is unchanged by installation and can be very large.
+            # Do not inspect a legacy cache link's target, including NAS targets.
+            if ($directory -eq $Source -and $entry.Name -eq 'prepared-stems' -and
+                ($entry.PSIsContainer -or ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint))) {
+                $excluded += [pscustomobject]@{ Relative=$entry.Name; Reason='Generated stem cache preserved in place; not traversed or backed up' }
+                continue
+            }
+            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Linked settings entry: $($entry.FullName)" }
+            if ($entry.PSIsContainer) { $pending.Push($entry.FullName) }
+            else { $files += $entry.FullName }
+        }
+    }
+    return [pscustomobject]@{ Files=$files; ExcludedCaches=$excluded }
+}
 Assert-AppClosed
 $destination = [IO.Path]::GetFullPath((Join-Path $env:LOCALAPPDATA 'Programs\AMP Verse')).TrimEnd('\')
 Assert-NoLinks $destination
@@ -191,11 +213,10 @@ foreach ($directory in $settings) {
     Assert-NoLinks $source
     if (Test-Path -LiteralPath $source) {
         if (!(Test-Path -LiteralPath $source -PathType Container)) { throw "Settings path must be a directory: $source" }
-        foreach ($entry in Get-ChildItem -LiteralPath $source -Recurse -Force) {
-            if ($entry.Attributes -band [IO.FileAttributes]::ReparsePoint) { throw "Linked settings entry: $($entry.FullName)" }
-        }
+        $snapshot = Get-SettingsSnapshot $source
     }
-    $settingsPlan += [pscustomobject]@{ Source=$source; Existed=(Test-Path -LiteralPath $source); Backup=('settings\'+[Guid]::NewGuid().ToString('N')); Files=@() }
+    else { $snapshot = [pscustomobject]@{ Files=@(); ExcludedCaches=@() } }
+    $settingsPlan += [pscustomobject]@{ Source=$source; Existed=(Test-Path -LiteralPath $source); Backup=('settings\'+[Guid]::NewGuid().ToString('N')); Files=@(); ExcludedCaches=$snapshot.ExcludedCaches }
 }
 # Validate every target before creating backups or changing the installed application.
 $targets = @{}
@@ -233,10 +254,10 @@ foreach ($file in $plan) {
 }
 foreach ($snapshot in $settingsPlan) {
     if (!$snapshot.Existed) { continue }
-    foreach ($file in Get-ChildItem -LiteralPath $snapshot.Source -Recurse -Force -File) {
-        $relative = $file.FullName.Substring($snapshot.Source.Length+1)
-        $hash = (Get-FileHash -LiteralPath $file.FullName -Algorithm SHA256).Hash
-        Copy-Verified $file.FullName (Join-Path $backup ($snapshot.Backup+'\'+$relative)) $hash
+    foreach ($file in (Get-SettingsSnapshot $snapshot.Source).Files) {
+        $relative = $file.Substring($snapshot.Source.Length+1)
+        $hash = (Get-FileHash -LiteralPath $file -Algorithm SHA256).Hash
+        Copy-Verified $file (Join-Path $backup ($snapshot.Backup+'\'+$relative)) $hash
         $snapshot.Files += [pscustomobject]@{ Relative=$relative; Sha256=$hash }
     }
 }
