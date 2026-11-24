@@ -108,6 +108,7 @@ final class OwnedPcmMixer {
       for(int i=0;i<count;i++){int at=(oldest+i)%MARKERS;if(presentedFrame<b.outputStart[at])break;int elapsed=(int)Math.min(b.markerFrames[at],presentedFrame-b.outputStart[at]);position=b.mediaStart[at]+elapsed;if(elapsed<b.markerFrames[at])break;}
       return buffer==b&&b.version.get()==version?position:-1;
     }
+    boolean pending(long presentedFrame){Buffer b=buffer;return b.read!=b.write||presentedFrame<b.lastOutputFrame;}
     boolean drained(long presentedFrame){Buffer b=buffer;return b.ended&&b.read==b.write&&presentedFrame>=b.lastOutputFrame;}
   }
   private static final class Buffer {

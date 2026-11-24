@@ -15,6 +15,8 @@ public final class PlaybackService extends MediaSessionService {
     private MediaSession session;
     private static PlaybackService instance;
     private DjEngine dj;
+    private OwnedAudioOutput ownedOutput;
+    static OwnedAudioOutput ownedOutput(){return instance==null?null:instance.ownedOutput;}
     private boolean djOwner;
     static Player player(){return instance==null||instance.session==null?null:instance.session.getPlayer();}
     static DjEngine existingDj(){return instance==null?null:instance.dj;}
@@ -25,15 +27,15 @@ public final class PlaybackService extends MediaSessionService {
     private String hlsAttemptUri="";
     private boolean hlsReady;
     private final android.os.Handler handler=new android.os.Handler(android.os.Looper.getMainLooper());
-    static void claimDj(){if(instance!=null){instance.djOwner=true;if(instance.session!=null)instance.session.getPlayer().pause();}}
+    static void claimDj(){if(instance!=null){instance.djOwner=true;if(instance.ownedOutput!=null)instance.ownedOutput.mixer.owner(OwnedPcmMixer.Owner.DJ);if(instance.session!=null)instance.session.getPlayer().pause();}}
     static void claimDjForScratch(Runnable afterPause){
         PlaybackService service=instance;
         if(service==null||service.session==null){afterPause.run();return;}
-        service.djOwner=true;Player player=service.session.getPlayer();player.pause();
+        service.djOwner=true;if(service.ownedOutput!=null)service.ownedOutput.mixer.owner(OwnedPcmMixer.Owner.DJ);Player player=service.session.getPlayer();player.pause();
         if(player instanceof ExoPlayer) ((ExoPlayer)player).createMessage((type,payload)->service.handler.post(afterPause)).send();
         else service.handler.post(afterPause);
     }
-    private void claimPlayer(){if(djOwner){djOwner=false;if(dj!=null)dj.pauseForPlayer();}}
+    private void claimPlayer(){if(ownedOutput!=null)ownedOutput.mixer.owner(OwnedPcmMixer.Owner.PLAYER);if(djOwner){djOwner=false;if(dj!=null)dj.pauseForPlayer();}}
     static void switchToPlayer(){if(instance!=null)instance.adoptDjPlaylist();}
     static String owner(){return instance!=null&&instance.djOwner?"dj":"player";}
     private void adoptDjPlaylist(){
@@ -63,6 +65,8 @@ public final class PlaybackService extends MediaSessionService {
     @Override public void onCreate() {
         super.onCreate();
         instance=this;
+        // Candidate cutover stays off until sampler, scratch and handset acceptance pass.
+        if(getSharedPreferences("settings",MODE_PRIVATE).getBoolean("owned-pcm-master-candidate",false))ownedOutput=new OwnedAudioOutput();
         settings=getSharedPreferences("settings",MODE_PRIVATE);AudioDsp.load(settings);settings.registerOnSharedPreferenceChangeListener(changed);
         ExoPlayer player = new ExoPlayer.Builder(this,renderers(this,true))
             .setMediaSourceFactory(new StationMediaSourceFactory(this))
@@ -152,8 +156,16 @@ public final class PlaybackService extends MediaSessionService {
     }};
     static androidx.media3.exoplayer.DefaultRenderersFactory renderers(android.content.Context context) {return renderers(context,false);}
     static androidx.media3.exoplayer.DefaultRenderersFactory renderers(android.content.Context context,boolean playerFade) {
+        return renderers(context,playerFade,playerFade?OwnedPcmMixer.Source.PLAYER:OwnedPcmMixer.Source.PRIVATE_CUE);
+    }
+    static androidx.media3.exoplayer.DefaultRenderersFactory renderers(android.content.Context context,boolean playerFade,OwnedPcmMixer.Source source) {
         androidx.media3.exoplayer.DefaultRenderersFactory renderers=new androidx.media3.exoplayer.DefaultRenderersFactory(context){
             @Override protected androidx.media3.exoplayer.audio.AudioSink buildAudioSink(android.content.Context context,boolean floating,boolean playbackParameters){
+                OwnedAudioOutput owned=ownedOutput();
+                if(owned!=null&&source!=OwnedPcmMixer.Source.PRIVATE_CUE){
+                    try{owned.prepare();return new OwnedMediaAudioSink(owned,source,playerFade);}
+                    catch(java.io.IOException unavailable){android.util.Log.w("AMPVerse","Owned output unavailable; preserving normal playback");}
+                }
                 return new androidx.media3.exoplayer.audio.DefaultAudioSink.Builder(context).setEnableFloatOutput(false).setAudioProcessors(new androidx.media3.common.audio.AudioProcessor[]{new AudioDsp(playerFade)}).build();
             }
         };
@@ -169,6 +181,7 @@ public final class PlaybackService extends MediaSessionService {
         if(dj!=null){dj.close(this);dj=null;}
         if(settings!=null)settings.unregisterOnSharedPreferenceChangeListener(changed);
         if (session != null) { session.getPlayer().release(); session.release(); }
+        if(ownedOutput!=null){ownedOutput.close();ownedOutput=null;}
         super.onDestroy();
     }
 }
