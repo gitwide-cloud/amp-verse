@@ -625,8 +625,7 @@ mod tests {
                 };
                 // Reach the real full B3 card before beginning the browser drag;
                 // wheel animation gets 0.4s to settle between bounded corrections.
-                if frame >= 2
-                    && frame < 56
+                if (2..56).contains(&frame)
                     && frame % 8 == 2
                     && !bank.expand(1.).contains_rect(card)
                 {

@@ -1596,7 +1596,7 @@ mod tests {
                 for frame in 0..64 {
                     let mut events = vec![];
                     // Give smooth wheel corrections 0.4s of simulated settling time.
-                    if frame >= 2 && frame < 56 && frame % 8 == 2 {
+                    if (2..56).contains(&frame) && frame % 8 == 2 {
                         let bank = screen_rect(&ctx, "six-bank-viewport", deck % 2);
                         if !bank.expand(1.).contains_rect(card) {
                             let delta = (bank.center().y - card.center().y).clamp(-150., 150.);
@@ -1844,9 +1844,14 @@ mod tests {
             std::fs::write(&path, wav).unwrap();
             paths.push(path);
         }
-        let mut player = Player::default();
-        player.root = root.path().into();
-        player.rack.six = true;
+        let mut player = Player {
+            root: root.path().into(),
+            rack: Rack {
+                six: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         for (deck, path) in paths.into_iter().enumerate() {
             player.safe_load_path(deck, path, None).unwrap();
         }
@@ -1996,13 +2001,12 @@ mod tests {
         }
         let elapsed = before_time.elapsed().as_secs_f64();
         let audio = player.audio.as_ref().unwrap();
-        for deck in 0..3 {
+        for (deck, before_position) in before_positions.into_iter().enumerate() {
             let position = audio.source_position(deck);
             assert!(
-                position > before_positions[deck] + 0.1
-                    && position <= before_positions[deck] + elapsed + 0.25,
+                position > before_position + 0.1 && position <= before_position + elapsed + 0.25,
                 "Deck{deck} must advance continuously without seeks: before{} after{position} elapsed{elapsed}",
-                before_positions[deck]
+                before_position
             );
         }
         assert_eq!(player.rack.live, [2, 1]);
