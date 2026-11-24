@@ -75,7 +75,10 @@ jobs:
           ffmpeg -version
       - name: Windows codec fixtures
         if: runner.os == 'Windows'
-        run: choco install ffmpeg --yes --no-progress
+        timeout-minutes: 10
+        run: |
+          python tools/setup_ci_ffmpeg.py --self-test
+          python tools/setup_ci_ffmpeg.py
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
