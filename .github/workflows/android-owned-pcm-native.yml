@@ -81,4 +81,6 @@ jobs:
           path: |
             test-output/android-owned-native/
             android/app/build/reports/androidTests/
+            android/app/build/reports/tests/
+            android/app/build/test-results/
             android/app/build/outputs/androidTest-results/

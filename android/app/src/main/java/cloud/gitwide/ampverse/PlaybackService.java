@@ -15,8 +15,8 @@ public final class PlaybackService extends MediaSessionService {
     private MediaSession session;
     private static volatile PlaybackService instance;
     private DjEngine dj;
-    private OwnedAudioOutput ownedOutput;
-    private PhoneMasterBroadcast phoneBroadcast;
+    private volatile OwnedAudioOutput ownedOutput;
+    private volatile PhoneMasterBroadcast phoneBroadcast;
     private volatile boolean phoneSourceAllowed;
     private volatile long phoneSourceVersion;
     private volatile String phoneTargetBase="";
@@ -41,12 +41,12 @@ public final class PlaybackService extends MediaSessionService {
         if(service.phoneBroadcast.active())return "Stop the current phone sender before choosing another source.";
         service.notePhoneSource();
         if(!service.phoneSourceAllowed)return "This phone is receiving an AMP station. Choose a local Player or DJ source before sending; playback is unchanged.";
-        boolean loaded=service.djOwner?service.dj!=null&&(service.dj.decks[0].getCurrentMediaItem()!=null||service.dj.decks[1].getCurrentMediaItem()!=null):service.session!=null&&service.session.getPlayer().getCurrentMediaItem()!=null;
-        if(!loaded)return "Load a Player song or DJ mix before broadcasting.";
+        boolean loaded=service.djOwner?service.dj!=null&&(service.dj.active(0)||service.dj.active(1)||service.dj.samplesActive()):service.session!=null&&service.session.getPlayer().getPlayWhenReady()&&service.session.getPlayer().getPlaybackState()!=Player.STATE_IDLE&&service.session.getPlayer().getPlaybackState()!=Player.STATE_ENDED&&service.session.getPlayer().getPlayerError()==null;
+        if(!loaded||!service.ownedOutput.mixer.hasOwnedPcm())return "Start this phone’s Player, DJ mix or pad, then send it after audio begins.";
         final String[] result={"Preparing this phone’s master broadcast"};
         selected.withLiveAuthorization((base,password,server,station,library)->{
             try{service.phoneTargetBase=base;service.notePhoneSource();if(!service.phoneSourceAllowed){result[0]="This phone is receiving the selected AMP station. Choose local Player music or DJ before sending; playback is unchanged.";return;}PhoneLiveSession.Identity identity=new PhoneLiveSession.Identity(server,station,library);PhoneLiveSession live=new PhoneLiveSession(identity,new PhoneLiveHttpTransport(base,password,identity));final long version=service.phoneSourceVersion;
-                service.phoneBroadcast.start(live,()->instance==service&&service.phoneSourceAllowed&&service.phoneSourceVersion==version,()->instance==service&&service.phoneSourceAllowed&&service.ownedOutput.ready());
+                service.phoneBroadcast.start(live,()->instance==service&&service.phoneSourceAllowed&&service.phoneSourceVersion==version&&service.ownedOutput.mixer.hasOwnedPcm(),()->instance==service&&service.phoneSourceAllowed&&service.ownedOutput.ready());
             }catch(Exception unavailable){result[0]="Phone broadcast could not start. Verify the selected host and stop any existing phone sender; playback is unchanged.";}
         });return result[0];
     }

@@ -9,7 +9,13 @@ import java.util.concurrent.*;
 
 /** Integrated Android station controls; local listening uses the existing playback service. */
 class CastPanel extends LinearLayout {
-    interface Listener {default boolean phoneListening(){return false;}default void remote(){}default boolean phoneAvailable(){return true;}default boolean playlistSyncAvailable(){return false;}default void playlistSync(CastClient selected){}void listen(String url,String name);void stopListening();default void playlist(java.util.List<androidx.media3.common.MediaItem> items){}}
+    interface Listener {
+        default boolean phoneSending(){return false;}
+        default boolean phoneSenderAvailable(){return false;}
+        default String phoneBroadcastStatus(){return "Phone master sending requires the Full Player/DJ host.";}
+        default String startPhoneBroadcast(CastClient selected){return "Open the Full Player/DJ host to send its master.";}
+        default void stopPhoneBroadcast(){}
+        default boolean phoneListening(){return false;}default void remote(){}default boolean phoneAvailable(){return true;}default boolean playlistSyncAvailable(){return false;}default void playlistSync(CastClient selected){}void listen(String url,String name);void stopListening();default void playlist(java.util.List<androidx.media3.common.MediaItem> items){}}
     final Activity activity;
     private final Appearance colors;
     final Listener listener;
@@ -67,7 +73,7 @@ class CastPanel extends LinearLayout {
         stationControls=new LinearLayout(activity);stationControls.setOrientation(VERTICAL);addView(stationControls);
         localNote=path("Local listening · host → this phone");
         stationControls.addView(label("These destinations receive the selected host’s program, not this phone’s music. Buffered output may be delayed.",14));
-        listen=action("Listen to host on this phone",()->{if(PlaybackService.phoneSending()){report("Stop this phone’s broadcast before switching it to station listening.");return;}if(client!=null)listener.listen(client.phoneStream(),stationName);});stationControls.addView(listen);
+        listen=action("Listen to host on this phone",()->{if(listener.phoneSending()){report("Stop this phone’s broadcast before switching it to station listening.");return;}if(client!=null)listener.listen(client.phoneStream(),stationName);});stationControls.addView(listen);
         stationControls.addView(action("Stop phone playback",listener::stopListening));
         castNote=path("Google Cast · host → Google speaker");
         chromecast=action("Send host stream to Chromecast",()->{if(client==null||!running){status.setText("Connect and start a station or live DJ broadcast first.");return;}activity.startActivity(new android.content.Intent(activity,GoogleCastActivity.class).putExtra("stream",client.stream()).putExtra("title",stationName));});stationControls.addView(chromecast);
@@ -85,10 +91,10 @@ class CastPanel extends LinearLayout {
         hostBroadcast=action("Request desktop host Player/DJ master…",()->{final CastClient selected=client;if(selected==null||!verified||!hostLaunchSupported)return;EditText secret=new EditText(activity);secret.setHint("Desktop Player/DJ control password, if configured");secret.setInputType(129);new android.app.AlertDialog.Builder(activity).setTitle("Change host source to desktop master?").setMessage("This requests the Player/DJ on the host machine. It does not send phone audio. The desktop must be running with its control endpoint enabled; command support does not confirm it is reachable. Existing station listeners will hear the new program.").setView(secret).setPositiveButton("Request host master",(d,n)->{if(!selected(selected))return;final String value=secret.getText().toString();work(()->{postAndRefresh(selected,"/api/live/launch",new JSONObject().put("source_password",value));return "Host sender requested. Check Source and ON AIR status for readiness. Phone audio was not sent.";});}).setNegativeButton("Cancel",null).show();});stationControls.addView(hostBroadcast);
         phoneSend=action("Send this phone’s current playback",()->{
             final CastClient selected=client;if(selected==null||!selected(selected))return;
-            new android.app.AlertDialog.Builder(activity).setTitle("Send this phone’s master to "+stationName+"?").setMessage("The selected host’s listeners will hear this phone’s Player or DJ master, including pads and scratch. Headphone cue stays private. The phone must stay connected while sending.").setPositiveButton("Send phone master",(dialog,index)->{if(selected(selected))report(PlaybackService.startPhoneBroadcast(selected));}).setNegativeButton("Cancel",null).show();
+            new android.app.AlertDialog.Builder(activity).setTitle("Send this phone’s master to "+stationName+"?").setMessage("The selected host’s listeners will hear this phone’s Player or DJ master, including pads and scratch. Headphone cue stays private. The phone must stay connected while sending.").setPositiveButton("Send phone master",(dialog,index)->{if(selected(selected))report(listener.startPhoneBroadcast(selected));}).setNegativeButton("Cancel",null).show();
         });stationControls.addView(phoneSend);
-        phoneStop=action("Stop only this phone’s sender",()->{PlaybackService.stopPhoneBroadcast();report("Stopping this phone’s sender; unrelated host programs are not stopped.");});stationControls.addView(phoneStop);
-        phoneSendNote=label(PlaybackService.phoneBroadcastStatus(),14);stationControls.addView(phoneSendNote);
+        phoneStop=action("Stop only this phone’s sender",()->{listener.stopPhoneBroadcast();report("Stopping this phone’s sender; unrelated host programs are not stopped.");});stationControls.addView(phoneStop);
+        phoneSendNote=label(listener.phoneBroadcastStatus(),14);stationControls.addView(phoneSendNote);
         capabilityNote=label("Host capabilities have not been checked.",14);stationControls.addView(capabilityNote);
         UiSections.fold(this,colors,"Advanced · station source and diagnostics",getChildCount()-1);
         feedbackForActions=null;
@@ -156,7 +162,7 @@ class CastPanel extends LinearLayout {
         boolean control=ready&&(!passwordRequired||client.hasPassword())&&!authRejected;
         if(selectedStation!=null){selectedStation.setText(stationName+" · "+(running?"ON AIR · Listen":"Host not on air"));selectedStation.setEnabled(ready&&running&&listener.phoneAvailable());}
         start.setEnabled(control&&playlistSupported&&!running&&!preparing);stop.setEnabled(control&&(running||preparing));listen.setText(listener.phoneListening()?"■ Stop Listening":"▶ Listen");listen.setTextColor(listener.phoneListening()||ready&&running?android.graphics.Color.BLACK:colors.text);listen.setEnabled(listener.phoneListening()||ready&&running&&listener.phoneAvailable());chromecast.setEnabled(ready&&running);
-        phoneSend.setEnabled(control&&PlaybackService.phoneSenderAvailable()&&!PlaybackService.phoneSending());phoneStop.setEnabled(PlaybackService.phoneSending());phoneSendNote.setText(PlaybackService.phoneBroadcastStatus());
+        phoneSend.setEnabled(control&&listener.phoneSenderAvailable()&&!listener.phoneSending());phoneStop.setEnabled(listener.phoneSending());phoneSendNote.setText(listener.phoneBroadcastStatus());
         hostBroadcast.setEnabled(control&&hostLaunchSupported);serverPlay.setEnabled(control&&serverOutputSupported&&running&&!serverOutputRunning);serverStop.setEnabled(control&&serverOutputSupported&&serverOutputRunning);stationPlaylist.setEnabled(control&&playlistSupported);
         setChildrenEnabled(sharedLists,control);
         String prerequisite=!connected?"Connect to a host first.":!verified?"Refresh or reconnect to verify this host.":preparing?"Host is preparing audio; listening becomes available when on air.":!running?"Host is stopped; start a source first.":"Host stream is on air.";

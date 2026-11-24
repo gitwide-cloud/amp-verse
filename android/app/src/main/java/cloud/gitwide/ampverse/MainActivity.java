@@ -171,7 +171,13 @@ public final class MainActivity extends Activity {
         }else if(module.equals("AMP Remote")){
             remotePanel=new RemotePanel(this,appearance);page.addView(remotePanel);
         }else if(module.equals("AMP Cast")){
-            castPanel=new FullCastPanel(this,appearance,new CastPanel.Listener(){public boolean phoneListening(){return isRadio()&&player.getPlayWhenReady();}public void remote(){selectModule("AMP Remote");}public boolean playlistSyncAvailable(){return true;}public void playlistSync(CastClient selected){selected.withPrivateAuthorization((base,secret,server,library)->PlaylistSyncUi.authorize(MainActivity.this,base,secret,server,library));}
+            castPanel=new FullCastPanel(this,appearance,new CastPanel.Listener(){
+                public boolean phoneSending(){return PlaybackService.phoneSending();}
+                public boolean phoneSenderAvailable(){return PlaybackService.phoneSenderAvailable();}
+                public String phoneBroadcastStatus(){return PlaybackService.phoneBroadcastStatus();}
+                public String startPhoneBroadcast(CastClient selected){return PlaybackService.startPhoneBroadcast(selected);}
+                public void stopPhoneBroadcast(){PlaybackService.stopPhoneBroadcast();}
+                public boolean phoneListening(){return isRadio()&&player.getPlayWhenReady();}public void remote(){selectModule("AMP Remote");}public boolean playlistSyncAvailable(){return true;}public void playlistSync(CastClient selected){selected.withPrivateAuthorization((base,secret,server,library)->PlaylistSyncUi.authorize(MainActivity.this,base,secret,server,library));}
                 public void listen(String url,String name){
                     if(player==null){message="Playback service is still connecting. Try Listen again.";castPanel.phoneFeedback(message);refresh();return;}
                     PlaybackService.switchToPlayer();player.setMediaItem(new MediaItem.Builder().setMediaId("amp-radio").setUri(url).setMediaMetadata(new androidx.media3.common.MediaMetadata.Builder().setTitle(name).build()).build());

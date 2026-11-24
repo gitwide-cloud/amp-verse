@@ -111,4 +111,19 @@ public final class OwnedAudioOutputTest {
     assertEquals(0, output.mixer.frames());
     output.close();
   }
+
+  @Test
+  public void stalledHardwareIsReportedInsteadOfBlockingPlaybackForever() throws Exception {
+    Hardware device = new Hardware();
+    device.quota = 0;
+    OwnedAudioOutput output = new OwnedAudioOutput(() -> device, () -> {}, 20000000L);
+    try {
+      output.prepare();
+      await(() -> output.failure() != null);
+      assertFalse(output.ready());
+      assertTrue(device.closed.await(2, TimeUnit.SECONDS));
+    } finally {
+      output.close();
+    }
+  }
 }

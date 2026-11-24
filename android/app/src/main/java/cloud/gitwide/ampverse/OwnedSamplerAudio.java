@@ -132,6 +132,10 @@ final class OwnedSamplerAudio implements AutoCloseable {
     voices.loop(stream, value);
   }
 
+  boolean active() {
+    return voices.streams() > 0;
+  }
+
   void master(float value) {
     voices.master(value);
   }
@@ -149,7 +153,8 @@ final class OwnedSamplerAudio implements AutoCloseable {
   }
 
   private static short[] decode(String path, AtomicBoolean cancelled) throws Exception {
-    if(cancelled.get()||Thread.currentThread().isInterrupted())throw new IOException("Pad decode cancelled");
+    if (cancelled.get() || Thread.currentThread().isInterrupted())
+      throw new IOException("Pad decode cancelled");
     File file = new File(path);
     if (!file.isFile() || !file.canRead()) throw new IOException("Local pad unavailable");
     MediaExtractor source = new MediaExtractor();

@@ -45,6 +45,7 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
 
   private final DeviceFactory devices;
   private final Runnable priority;
+  private final long writeTimeoutNanos;
   private Device track;
 
   OwnedAudioOutput() {
@@ -54,8 +55,15 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
   }
 
   OwnedAudioOutput(DeviceFactory devices, Runnable priority) {
+    this(devices, priority, 2000000000L);
+  }
+
+  OwnedAudioOutput(DeviceFactory devices, Runnable priority, long writeTimeoutNanos) {
+    if (writeTimeoutNanos <= 0)
+      throw new IllegalArgumentException("Output timeout must be positive");
     this.devices = devices;
     this.priority = priority;
+    this.writeTimeoutNanos = writeTimeoutNanos;
   }
 
   private Thread renderer;
@@ -155,12 +163,13 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
   }
 
   private void render() {
-    priority.run();
     short[] block = new short[960];
     long wraps = 0, previous = 0;
     int offset = block.length;
     boolean hardwarePlaying = true;
     try {
+      priority.run();
+      long progress = System.nanoTime();
       while (!closed) {
         if (suppressed) {
           if (hardwarePlaying) {
@@ -168,6 +177,7 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
             hardwarePlaying = false;
           }
           Thread.sleep(4);
+          progress = System.nanoTime();
           continue;
         }
         if (!hardwarePlaying) {
@@ -181,8 +191,14 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
         while (offset < block.length && !closed && !suppressed) {
           int written = track.write(block, offset, block.length - offset);
           if (written < 0) throw new IOException("Owned PCM hardware output stopped");
-          if (written == 0) Thread.sleep(1);
-          else offset += written;
+          if (written == 0) {
+            if (System.nanoTime() - progress > writeTimeoutNanos)
+              throw new IOException("Owned hardware stopped accepting PCM");
+            Thread.sleep(1);
+          } else {
+            offset += written;
+            progress = System.nanoTime();
+          }
           long raw = track.head();
           if (raw < previous && previous - raw > 0x80000000L) wraps += 0x100000000L;
           previous = raw;
