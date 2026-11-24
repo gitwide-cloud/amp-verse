@@ -51,6 +51,27 @@ fn set(v: &AtomicU32, x: f32) {
 }
 pub const DECKS: usize = 6;
 pub const MASTER: usize = DECKS;
+/// Only effects owned by the departing automatic performance. Applying this
+/// value and selecting the live deck is one indivisible audio command.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LiveTakeoverCleanup {
+    pub auto_loop_deck: Option<usize>,
+    pub scratch_decks: u8,
+    pub restore_cutoff: Option<(usize, f32)>,
+}
+impl LiveTakeoverCleanup {
+    fn validate(self) -> Result<(), String> {
+        if self.auto_loop_deck.is_some_and(|deck| deck >= DECKS)
+            || self.scratch_decks & !((1 << DECKS) - 1) != 0
+            || self.restore_cutoff.is_some_and(|(deck, value)| {
+                deck >= DECKS || !value.is_finite() || !(20. ..=20000.).contains(&value)
+            })
+        {
+            return Err("Invalid live takeover cleanup".into());
+        }
+        Ok(())
+    }
+}
 pub struct Controls {
     pub(crate) output_gate: Arc<crate::output_admission::Gate>,
     pub broadcast_player_only: AtomicBool,
@@ -352,7 +373,7 @@ enum Command {
     Clock(f32, u32),
     Launch(usize),
     Pair([usize; 2]),
-    SelectLive(usize),
+    SelectLive(usize, LiveTakeoverCleanup),
     Monitor(Option<rtrb::Producer<Frame>>),
     Broadcast(Option<rtrb::Producer<Frame>>),
     SampleLoad(usize, u64, Option<Arc<[Frame]>>),
@@ -525,7 +546,27 @@ impl Mixer {
                         }
                     }
                 }
-                Command::SelectLive(deck) => {
+                Command::SelectLive(deck, cleanup) => {
+                    if let Some(owned) = cleanup.auto_loop_deck {
+                        // Unlike ordinary Loop(None), takeover must not seek to
+                        // the old loop end. Keep the decoder's current cursor.
+                        self.voices[owned].looped = None;
+                        self.voices[owned].pending_loop = None;
+                        self.controls.looping[owned].store(false, Relaxed);
+                    }
+                    for owned in 0..DECKS {
+                        if cleanup.scratch_decks & (1 << owned) != 0 {
+                            self.controls.tempo_recovery[owned].store(false, Relaxed);
+                            self.controls.scratching[owned]
+                                .store(false, std::sync::atomic::Ordering::Release);
+                            self.controls.vinyl_follow[owned]
+                                .store(false, std::sync::atomic::Ordering::Release);
+                            set(&self.controls.scratch_rate[owned], 1.);
+                        }
+                    }
+                    if let Some((owned, value)) = cleanup.restore_cutoff {
+                        set(&self.controls.cutoff[owned], value);
+                    }
                     // A deliberate manual takeover cancels only the pair
                     // handoff: never finish it by stopping its outgoing source.
                     self.fade = None;
@@ -2044,7 +2085,21 @@ impl Engine {
         if deck >= DECKS {
             return Err("Unknown deck".into());
         }
-        self.send(Command::SelectLive(deck))
+        self.send(Command::SelectLive(deck, LiveTakeoverCleanup::default()))
+    }
+    pub fn select_live_with_cleanup(
+        &self,
+        deck: usize,
+        cleanup: LiveTakeoverCleanup,
+    ) -> Result<(), String> {
+        cleanup.validate()?;
+        if cleanup == LiveTakeoverCleanup::default() {
+            return self.select_live(deck);
+        }
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        self.send(Command::SelectLive(deck, cleanup))
     }
     pub fn fade_deck(
         &self,
@@ -4755,7 +4810,7 @@ mod tests {
         m.render(100, |_, _| {});
         let before = m.route_weights;
         let generations: Vec<_> = c.deck_generation.iter().map(|g| g.load(Relaxed)).collect();
-        tx.send(Command::SelectLive(2)).unwrap();
+        tx.send(Command::SelectLive(2, Default::default())).unwrap();
         m.render(1, |_, _| {});
         assert_eq!(c.pair_indices(), [2, 1]);
         assert_eq!(get(&c.crossfader), 0.75);
@@ -4781,7 +4836,7 @@ mod tests {
         );
         assert!(c.gain.iter().all(|g| get(g) == 1.));
         // B-side selection is independent; no pause or reload after A's takeover.
-        tx.send(Command::SelectLive(5)).unwrap();
+        tx.send(Command::SelectLive(5, Default::default())).unwrap();
         m.render(10, |_, _| {});
         assert_eq!(c.pair_indices(), [2, 5]);
         assert!(c.play.iter().all(|p| p.load(Relaxed)));
@@ -4804,7 +4859,7 @@ mod tests {
         m.render(200, |_, _| {});
         let fader = get(&c.crossfader);
         assert!(c.fading.load(Relaxed));
-        tx.send(Command::SelectLive(2)).unwrap();
+        tx.send(Command::SelectLive(2, Default::default())).unwrap();
         m.render(1500, |_, _| {});
         assert!(!c.fading.load(Relaxed));
         assert!(!c.mashup_active.load(Relaxed));
@@ -4831,7 +4886,7 @@ mod tests {
         let mut previous = 0.;
         m.render(2000, |_, frame| previous = frame[0]);
         let before = previous;
-        tx.send(Command::SelectLive(2)).unwrap();
+        tx.send(Command::SelectLive(2, Default::default())).unwrap();
         let mut maximum_step = 0_f32;
         m.render(100, |_, frame| {
             maximum_step = maximum_step.max((frame[0] - previous).abs());
@@ -4879,7 +4934,7 @@ mod tests {
         let fader = get(&c.crossfader);
         let target = amp_core::show::crossfade_weights(fader)[1];
         assert!(target < 0.5);
-        tx.send(Command::SelectLive(1)).unwrap();
+        tx.send(Command::SelectLive(1, Default::default())).unwrap();
         m.render(1, |_, _| {});
         assert_eq!(c.pair_indices(), [0, 1]);
         assert_eq!(get(&c.crossfader), fader);
@@ -4890,6 +4945,91 @@ mod tests {
         assert!(c.play[0].load(Relaxed) && c.play[1].load(Relaxed));
         assert_eq!(c.position[0].load(Relaxed), 710);
         assert_eq!(c.position[1].load(Relaxed), 710);
+    }
+    #[test]
+    fn direct_live_cleanup_is_one_command_and_preserves_owned_loop_cursor_and_manual_effects() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        for deck in 0..4 {
+            tx.send(Command::Load(deck, source(0.02, 10000), true, 1))
+                .unwrap();
+        }
+        m.render(100, |_, _| {});
+        tx.send(Command::Loop(0, Some(Vec::with_capacity(40))))
+            .unwrap();
+        tx.send(Command::Loop(1, Some(Vec::with_capacity(30))))
+            .unwrap();
+        m.render(45, |_, _| {});
+        let cursor = m.voices[0].source.as_ref().unwrap().position;
+        let old = m.voices[0].looped.as_ref().unwrap();
+        assert!(!old.capturing);
+        assert!(
+            cursor < old.origin + old.frames.len() as f64 * old.rate as f64,
+            "Fixture must be inside its loop, where ordinary loop_stop would seek"
+        );
+        m.voices[0].pending_loop = Some((u64::MAX, Vec::with_capacity(20)));
+        m.voices[2].pending_loop = Some((u64::MAX, Vec::with_capacity(20)));
+        c.looping[2].store(true, Relaxed);
+        for deck in [2, 3] {
+            c.scratching[deck].store(true, Relaxed);
+            set(&c.scratch_rate[deck], 0.2);
+        }
+        set(&c.cutoff[0], 180.);
+        set(&c.cutoff[1], 321.);
+        let cleanup = LiveTakeoverCleanup {
+            auto_loop_deck: Some(0),
+            scratch_decks: 1 << 2,
+            restore_cutoff: Some((0, 10000.)),
+        };
+        cleanup.validate().unwrap();
+        tx.send(Command::SelectLive(2, cleanup)).unwrap();
+        m.process_commands();
+        assert_eq!(c.pair_indices(), [2, 1]);
+        assert_eq!(
+            m.voices[0].source.as_ref().unwrap().position,
+            cursor,
+            "Owned loop removal must not perform ordinary loop-end seek"
+        );
+        assert!(m.voices[0].looped.is_none() && m.voices[0].pending_loop.is_none());
+        assert!(!c.looping[0].load(Relaxed));
+        assert!(m.voices[1].looped.is_some(), "Manual loop was removed");
+        assert!(
+            m.voices[2].pending_loop.is_some(),
+            "Unowned pending loop was removed"
+        );
+        assert!(!c.scratching[2].load(Relaxed));
+        assert_eq!(get(&c.scratch_rate[2]), 1.);
+        assert!(c.scratching[3].load(Relaxed), "Manual scratch was cleared");
+        assert_eq!(get(&c.scratch_rate[3]), 0.2);
+        assert_eq!(get(&c.cutoff[0]), 10000.);
+        assert_eq!(get(&c.cutoff[1]), 321., "Manual filter was reset");
+        assert!(c.play[..4].iter().all(|play| play.load(Relaxed)));
+        m.render(1, |_, _| {});
+        assert_eq!(m.voices[0].source.as_ref().unwrap().position, cursor + 1.);
+    }
+    #[test]
+    fn direct_live_cleanup_rejects_unbounded_or_invalid_effect_targets() {
+        for cleanup in [
+            LiveTakeoverCleanup {
+                auto_loop_deck: Some(DECKS),
+                ..Default::default()
+            },
+            LiveTakeoverCleanup {
+                scratch_decks: 1 << DECKS,
+                ..Default::default()
+            },
+            LiveTakeoverCleanup {
+                restore_cutoff: Some((DECKS, 1000.)),
+                ..Default::default()
+            },
+            LiveTakeoverCleanup {
+                restore_cutoff: Some((0, f32::NAN)),
+                ..Default::default()
+            },
+        ] {
+            assert!(cleanup.validate().is_err());
+        }
     }
     #[test]
     fn quantized_background_launch_uses_audio_clock_not_ui_ticks() {

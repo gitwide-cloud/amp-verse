@@ -285,6 +285,31 @@ impl Run {
             audio.scratch(deck, false, 1.);
         }
     }
+    /// Prepare without consuming bridges: a full audio queue must leave the
+    /// automatic performance recoverable and its owned effects identifiable.
+    pub fn live_takeover_cleanup(&self) -> crate::mixer::LiveTakeoverCleanup {
+        use crate::transition_styles::Style;
+        let mut cleanup = crate::mixer::LiveTakeoverCleanup::default();
+        if let Some(effect) = &self.effect_bridge
+            && effect.engaged
+        {
+            match effect.style {
+                Style::Stutter | Style::LoopBuild => cleanup.auto_loop_deck = Some(effect.deck),
+                Style::Filter => cleanup.restore_cutoff = Some((effect.deck, effect.original)),
+                _ => cleanup.scratch_decks |= 1 << effect.deck,
+            }
+        }
+        if let Some((deck, _)) = self.scratch_bridge {
+            cleanup.scratch_decks |= 1 << deck;
+        }
+        cleanup
+    }
+    /// Called only after the single takeover command was accepted.
+    pub fn finish_live_takeover(&mut self) {
+        self.effect_bridge = None;
+        self.scratch_bridge = None;
+        self.cancel_automation();
+    }
     pub fn cancel_automation(&mut self) {
         self.paused = false;
         self.force_mashup = false;
@@ -2894,6 +2919,94 @@ impl Player {
 
 #[cfg(test)]
 mod tests {
+    fn takeover_effect(style: crate::transition_styles::Style) -> EffectBridge {
+        EffectBridge {
+            deck: 2,
+            style,
+            seconds: 1.,
+            grain: 0.1,
+            engaged: true,
+            original: 1234.,
+            start_progress: 0.,
+            halves: 0,
+        }
+    }
+    #[test]
+    fn live_takeover_cleanup_maps_owned_stutter_loop_brake_and_filter_only() {
+        use crate::transition_styles::Style;
+        for style in [
+            Style::Stutter,
+            Style::LoopBuild,
+            Style::Brake,
+            Style::Filter,
+        ] {
+            let run = Run {
+                effect_bridge: Some(takeover_effect(style)),
+                scratch_bridge: Some((1, Instant::now())),
+                auto: true,
+                ..Default::default()
+            };
+            let cleanup = run.live_takeover_cleanup();
+            assert_eq!(
+                cleanup.auto_loop_deck,
+                matches!(style, Style::Stutter | Style::LoopBuild).then_some(2)
+            );
+            assert_eq!(
+                cleanup.restore_cutoff,
+                (style == Style::Filter).then_some((2, 1234.))
+            );
+            assert_eq!(
+                cleanup.scratch_decks,
+                (1 << 1) | if style == Style::Brake { 1 << 2 } else { 0 }
+            );
+            assert!(run.effect_bridge.is_some() && run.scratch_bridge.is_some() && run.auto);
+        }
+        let mut run = Run {
+            effect_bridge: Some(takeover_effect(Style::Stutter)),
+            ..Default::default()
+        };
+        run.effect_bridge.as_mut().unwrap().engaged = false;
+        assert_eq!(
+            run.live_takeover_cleanup(),
+            crate::mixer::LiveTakeoverCleanup::default()
+        );
+        assert_eq!(
+            Run::default().live_takeover_cleanup(),
+            crate::mixer::LiveTakeoverCleanup::default(),
+            "Unowned manual effects must not be requested for cleanup"
+        );
+    }
+    #[test]
+    fn live_takeover_queue_failure_retains_bridges_until_accepted_for_retry() {
+        use crate::transition_styles::Style;
+        let mut run = Run {
+            effect_bridge: Some(takeover_effect(Style::Stutter)),
+            scratch_bridge: Some((1, Instant::now())),
+            auto: true,
+            preloaded: Some((2, 3)),
+            ..Default::default()
+        };
+        let (sender, receiver) = std::sync::mpsc::sync_channel(1);
+        sender
+            .try_send(crate::mixer::LiveTakeoverCleanup::default())
+            .unwrap();
+        let cleanup = run.live_takeover_cleanup();
+        let result = sender.try_send(cleanup);
+        assert!(matches!(
+            result,
+            Err(std::sync::mpsc::TrySendError::Full(_))
+        ));
+        // Preparation consumes nothing; the UI must call finish only after
+        // Engine's single try_send succeeds, so the same ownership can retry.
+        assert!(run.effect_bridge.is_some() && run.scratch_bridge.is_some() && run.auto);
+        assert_eq!(run.preloaded, Some((2, 3)));
+        receiver.recv().unwrap();
+        sender.try_send(run.live_takeover_cleanup()).unwrap();
+        run.finish_live_takeover();
+        assert_eq!(receiver.recv().unwrap(), cleanup);
+        assert!(run.effect_bridge.is_none() && run.scratch_bridge.is_none());
+        assert!(!run.auto && run.preloaded.is_none());
+    }
     #[test]
     fn automatic_energy_entry_and_feature_snap_stay_early_without_restricting_manual_cues() {
         use amp_core::energy_profile::{FIELD, Profile, Section};
