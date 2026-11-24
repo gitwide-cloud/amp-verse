@@ -53,4 +53,3 @@ Copy-Item -LiteralPath $original -Destination (Join-Path $notices 'vc_redist.x64
 $receipt=@{schema=1;vs_installation=$installation;redist_version=$version;source_directory=$source;files=$plan;original_redist_sha256=(Get-FileHash -LiteralPath $original).Hash.ToLowerInvariant();source_policy='Official VS redistributable directory only; no global install or owner runtime replacement';license_reference='https://learn.microsoft.com/visualstudio/releases/2022/redistribution'}
 [IO.File]::WriteAllText((Join-Path $Destination 'CRT-PROVENANCE.json'),($receipt|ConvertTo-Json -Depth 8),(New-Object Text.UTF8Encoding($false)))
 Write-Output "Exported verified app-local Microsoft CRT to $Destination"
-

@@ -72,4 +72,3 @@ if(!(Test-Path -LiteralPath $managerProfile)){
 $argument=if($Mode -eq 'Tray'){'--tray'}else{'--window'}
 $info=Child $manager ($argument+' '+(Quote $managerProfile)) $true
 [void][Diagnostics.Process]::Start($info)
-

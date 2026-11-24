@@ -128,4 +128,3 @@ if($CreateShortcuts){
 }
 Write-Output "Installed $($m.role) at $dest. Private state: $stateRoot. No startup task, service or firewall rule was created."
 if($StartAfterInstall -and !$NoStart){& (Join-Path $dest 'launch-windows-installed.ps1')}
-

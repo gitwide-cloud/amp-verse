@@ -160,4 +160,3 @@ if __name__ == "__main__":
     parser.add_argument("--run-id", required=True)
     args = parser.parse_args()
     package(args.role, args.application, args.engine, args.codec_archive, args.crt_directory, args.output, args.run_id)
-
