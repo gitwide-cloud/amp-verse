@@ -1,0 +1,39 @@
+name: Verify optional Windows server manager
+on:
+  push:
+    branches: ['fix/thanksgiving-server-manager']
+  pull_request:
+    paths: ['apps/amp-server-manager/**', '.github/workflows/server-manager.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  lifecycle:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+      - run: dotnet run --project apps/amp-server-manager/Tests -c Release
+      - name: Verify manager package installation and rollback guards
+        if: runner.os == 'Windows'
+        run: powershell.exe -NoProfile -File tools/test_windows_server_install.ps1
+      - name: Build embedded Windows manager
+        if: runner.os == 'Windows'
+        run: dotnet publish apps/amp-server-manager/Windows -c Release -r win-x64 --self-contained true -o manager-candidate
+      - name: Record candidate hashes
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $files = @(Get-ChildItem manager-candidate -File -Recurse | ForEach-Object { @{ path=[IO.Path]::GetRelativePath((Resolve-Path manager-candidate), $_.FullName); sha256=(Get-FileHash $_.FullName).Hash.ToLowerInvariant(); size=$_.Length } })
+          @{source_commit='${{ github.sha }}'; installed=$false; files=$files} | ConvertTo-Json -Depth 5 | Set-Content manager-candidate/build.json
+      - uses: actions/upload-artifact@v4
+        if: runner.os == 'Windows'
+        with:
+          name: amp-server-manager-Windows-${{ github.sha }}
+          path: manager-candidate/
