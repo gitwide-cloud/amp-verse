@@ -412,6 +412,32 @@ impl Drop for Job {
         }
     }
 }
+fn live_mode_action(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    cached: bool,
+    can_reload: bool,
+    has_source: bool,
+    admitted: bool,
+) -> egui::Response {
+    let response = ui.add_enabled(
+        can_reload && has_source && (enabled || admitted),
+        egui::Button::new(if enabled {
+            "Use original audio"
+        } else if cached {
+            "Enable prepared stems"
+        } else {
+            "Enable live stems"
+        }),
+    );
+    if !can_reload {
+        ui.weak("Turn AutoMix off and pause this deck before changing its audio mode.");
+    } else if !has_source {
+        ui.weak("Load an available local song into this deck first.");
+    }
+    response
+}
+
 pub struct Panel {
     playlist_prep: playlist_prep::State,
     pub manual_change: Option<(usize, [f32; 3])>,
@@ -808,6 +834,23 @@ impl Panel {
                 a.load_current(deck) && a.controls.stems_loaded[deck].load(Relaxed)
             });
             if on_demand_configured {
+                // Keep the deck action above diagnostics and tier preferences in short popups.
+                let policy = crate::stem_capability::current();
+                if let Some(audio) = audio {
+                    let enabled = audio.controls.on_demand_stems[deck].load(Relaxed);
+                    let has_source = source.is_some_and(|path| path.is_file());
+                    let reserved = std::array::from_fn(|d| audio.controls.on_demand_stems[d].load(Relaxed) && !audio.controls.prepared_stems[d].load(Relaxed));
+                    let admitted = cached || (!playlist_preparing() && policy.allows(&reserved,deck));
+                    if live_mode_action(ui, enabled, cached, can_reload, has_source, admitted).clicked() {
+                        audio.controls.on_demand_stems[deck].store(!enabled, Relaxed);
+                        reload = true;
+                    }
+                    if !cached && playlist_preparing() {ui.weak("Cancel or finish playlist preparation before enabling live stems.");}
+                    if !enabled && !admitted { ui.weak(policy.error()); }
+                } else {
+                    ui.weak("Start the audio engine and load a local song to choose this deck's mode.");
+                }
+                ui.separator();
                 let mode_label = ui.label(if cached {"Prepared stems · local compressed cache"} else {"Live stems · memory only"});
                 if let Some((slots, per_worker_mib, live, _peak)) =
                     crate::onnx_stem_worker::pool_status()
@@ -818,7 +861,6 @@ impl Panel {
                     ));
                 }
                 if cached {ui.weak("Prepared playback uses no live separation slot. Cached audio is fully verified before playback.");}
-                let policy = crate::stem_capability::current();
                 ui.label(format!("Live stem limit: {} decks · {}", policy.limit, policy.reason));
                 ui.weak("Normal six-deck playback stays available. Live stem audio remains in memory; initial processing can take several seconds.");
                 let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().enumerate().filter(|(d,v)| v.load(Relaxed) && !a.controls.prepared_stems[*d].load(Relaxed)).count());
@@ -830,32 +872,6 @@ impl Panel {
                 });
                 if maximum != previous && let Err(error) = crate::stem_capability::save_maximum(maximum,enabled_count) { self.status[deck] = error; }
                 if crate::stem_capability::maximum() > policy.hardware_limit { ui.weak("Your chosen maximum is limited by this engine's hardware qualification."); }
-                if let Some(audio) = audio {
-                    let enabled = audio.controls.on_demand_stems[deck].load(Relaxed);
-                    let has_source = source.is_some_and(|path| path.is_file());
-                    let reserved = std::array::from_fn(|d| audio.controls.on_demand_stems[d].load(Relaxed) && !audio.controls.prepared_stems[d].load(Relaxed));
-                    let admitted = cached || (!playlist_preparing() && policy.allows(&reserved,deck));
-                    if !cached && playlist_preparing() {ui.weak("Cancel or finish playlist preparation before enabling live stems.");}
-                    if !enabled && !admitted { ui.weak(policy.error()); }
-                    if ui.add_enabled(
-                        can_reload && has_source && (enabled || admitted),
-                        egui::Button::new(if enabled {
-                            "Use original audio"
-                        } else {
-                            if cached {"Enable prepared stems"} else {"Enable live stems"}
-                        }),
-                    ).clicked() {
-                        audio.controls.on_demand_stems[deck].store(!enabled, Relaxed);
-                        reload = true;
-                    }
-                    if !can_reload {
-                        ui.weak("Pause this deck before changing its audio mode.");
-                    } else if !has_source {
-                        ui.weak("Load an available local song into this deck first.");
-                    }
-                } else {
-                    ui.weak("Start the audio engine and load a local song to choose this deck's mode.");
-                }
             } else if let Some(job) = &self.job {
                 ui.horizontal(|ui| {
                     ui.spinner();
@@ -945,6 +961,43 @@ pub fn remix_gains(knobs: [f32; 3]) -> [f32; 3] {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_mode_action_is_visible_in_short_popup_and_preserves_reload_safety() {
+        for (enabled, can_reload, has_source, admitted, expected) in [
+            (false, true, true, true, true),
+            (false, false, true, true, false),
+            (false, true, false, true, false),
+            (false, true, true, false, false),
+            (true, true, true, false, true),
+        ] {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(380., 180.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let action = super::live_mode_action(
+                        ui, enabled, false, can_reload, has_source, admitted,
+                    );
+                    assert_eq!(action.enabled(), expected);
+                    assert!(
+                        ui.clip_rect().contains_rect(action.rect),
+                        "mode action must be visible without scrolling"
+                    );
+                    assert!(
+                        !action.clicked(),
+                        "rendering never changes a deck's audio mode"
+                    );
+                },
+            );
+            output.textures_delta.clear();
+        }
+    }
+
     #[test]
     fn withdrawn_preparation_cannot_create_cache_or_launch_worker() {
         let dir = tempfile::tempdir().unwrap();
