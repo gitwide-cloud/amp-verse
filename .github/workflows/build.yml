@@ -32,6 +32,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+      - name: Verify update packaging
+        run: python -m unittest discover -s tools -p test_update_manifest.py
       - name: Determine download version
         id: package_version
         shell: bash
@@ -202,8 +204,6 @@ jobs:
           name: amp-player-ui
           path: test-output/*.png
       - name: Package binaries and documentation
-        env:
-          AMP_DESKTOP_PACKAGE_VERSION: ${{ steps.package_version.outputs.version }}
         shell: bash
         run: |
           mkdir -p dist
@@ -214,7 +214,7 @@ jobs:
           cp README.md LICENSE THIRD_PARTY_NOTICES.md assets/amp-verse.ico dist/
           mkdir -p dist/licenses/Barlow
           cp apps/amp-player/assets/fonts/OFL.txt dist/licenses/Barlow/OFL.txt
-          python -c 'import json,os,pathlib,tomllib; version=tomllib.loads(pathlib.Path("Cargo.toml").read_text())["workspace"]["package"]["version"]; pathlib.Path("dist/build.json").write_text(json.dumps({"source_sha":os.environ["GITHUB_SHA"],"version":version,"release_channel":"beta","beta":int(os.environ["AMP_DESKTOP_PACKAGE_VERSION"].split("-beta.")[1].split(".")[0]),"package_version":os.environ["AMP_DESKTOP_PACKAGE_VERSION"]},indent=2)+"\n")'
+          python tools/package_downloads.py desktop-manifest --output dist/build.json
           python -c 'import shutil; shutil.copytree("docs", "dist/docs", ignore=shutil.ignore_patterns("tested-preview-install.md"))'
           cp -r licenses dist/
           mkdir -p dist/licenses/mp3-lab

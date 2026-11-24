@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<title>AMP Verse Beta 3 · Cast</title>
+<title>AMP Verse · Cast</title>
 <script>try{const theme=localStorage.getItem('amp-verse-theme');document.documentElement.dataset.theme=['classic','modern-light','modern-dark'].includes(theme)?theme:'classic';}catch{document.documentElement.dataset.theme='classic';}</script>
 <link rel="icon" type="image/png" href="/app-icon.png"><link rel="apple-touch-icon" href="/app-icon.png">
 <style>
@@ -16,7 +16,7 @@ html[data-theme="modern-dark"]{color-scheme:dark;--page:#0c0f17;--surface:#191c2
 </style>
 </head>
 <body>
-<header><div class="bar"><div class="brand">AMP<span class="bolt">ϟ</span>VERSE</div><div class="module">Cast · Beta 3</div><div class="server" role="status"><span class="dot" id="server-dot"></span><span id="server-status">Connecting</span></div><button class="settings-toggle" id="settings-toggle" aria-expanded="false" aria-controls="settings" aria-label="Appearance and access settings">☰</button></div></header>
+<header><div class="bar"><div class="brand">AMP<span class="bolt">ϟ</span>VERSE</div><div class="module">Cast</div><div class="server" role="status"><span class="dot" id="server-dot"></span><span id="server-status">Connecting</span></div><button class="settings-toggle" id="settings-toggle" aria-expanded="false" aria-controls="settings" aria-label="Appearance and access settings">☰</button></div></header>
 <main class="shell">
 <section class="settings" id="settings" hidden aria-label="Appearance and access"><label>Theme <select id="theme" aria-label="Theme"><option value="classic">Classic</option><option value="modern-light">Modern Light</option><option value="modern-dark">Modern Dark</option></select></label><span id="theme-note" role="status"></span><label>Admin password <input id="password" type="password" autocomplete="current-password" placeholder="If configured"></label><span class="note" id="access-note">Reading access settings…</span></section>
 <section class="hero" aria-label="Now broadcasting"><div class="art"><img src="/app-icon.png" alt="AMP Verse station icon"></div><div class="track-info"><div class="copy"><p class="eyebrow">NOW BROADCASTING</p><h1 id="display">Connecting to station…</h1><p id="details">Reading live server status</p><p class="format">MP3 · 192 kbps · 44.1 kHz · Stereo</p></div><div class="transport"><button id="local-toggle" class="primary" disabled>▶ Listen here</button><button id="disconnect" disabled>■ Disconnect</button><span class="listener-state" id="local-state" role="status">This device is not listening</span></div></div></section>
