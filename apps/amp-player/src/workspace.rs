@@ -317,7 +317,10 @@ impl Player {
         if self.workspace.pane == 0 {
             self.workspace_player(&mut child);
         } else if self.workspace.pane == 2 {
-            let available = child.available_size().max(egui::vec2(1., 1.));
+            let available = child
+                .available_size()
+                .min(child.clip_rect().max - child.next_widget_position())
+                .max(egui::vec2(1., 1.));
             let scale = (available.x / 980.).min(available.y / 850.).min(1.);
             window_layout::fitted_content(
                 &mut child,
@@ -612,55 +615,88 @@ mod tests {
             player.run.preloaded = Some((5, 0));
             let mut source = egui::Pos2::ZERO;
             let mut destination = source;
-            for frame in 0..8 {
-                let point = if frame < 3 { source } else { destination };
+            let mut bank = egui::Rect::NOTHING;
+            let mut card = bank;
+            for frame in 0..68 {
                 let mut raw = egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    time: Some(frame as f64 / 20.),
                     ..Default::default()
                 };
-                raw.events.push(egui::Event::PointerMoved(point));
-                if frame == 2 || frame == 6 {
-                    raw.events.push(egui::Event::PointerButton {
-                        pos: point,
-                        button: egui::PointerButton::Primary,
-                        pressed: frame == 2,
+                // Reach the real full B3 card before beginning the browser drag;
+                // wheel animation gets 0.4s to settle between bounded corrections.
+                if frame >= 2
+                    && frame < 56
+                    && frame % 8 == 2
+                    && !bank.expand(1.).contains_rect(card)
+                {
+                    raw.events.push(egui::Event::PointerMoved(bank.center()));
+                    raw.events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        delta: egui::vec2(
+                            0.,
+                            (bank.center().y - card.center().y).clamp(-150., 150.),
+                        ),
                         modifiers: Default::default(),
                     });
                 }
+                if frame >= 60 {
+                    let point = if frame == 60 { source } else { destination };
+                    raw.events.push(egui::Event::PointerMoved(point));
+                    if frame == 60 || frame == 65 {
+                        raw.events.push(egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed: frame == 60,
+                            modifiers: Default::default(),
+                        });
+                    }
+                }
                 let mut output = ctx.run_ui(raw, |ui| {
                     player.workspace_ui(ui);
-                    let (rect, layer) = ctx
-                        .data(|data| {
-                            data.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique(
-                                "dj-browser-first-track",
-                            ))
-                        })
-                        .unwrap();
-                    source =
-                        ctx.layer_transform_to_global(layer).unwrap_or_default() * rect.center();
-                    let (rect, layer) = ctx
-                        .data(|data| {
-                            data.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
-                                "rack-strip-drop",
-                                5,
-                            )))
-                        })
-                        .unwrap();
-                    destination =
-                        ctx.layer_transform_to_global(layer).unwrap_or_default() * rect.center();
+                    let screen = |id| {
+                        let (rect, layer) = ctx
+                            .data(|data| data.get_temp::<(egui::Rect, egui::LayerId)>(id))
+                            .expect("Actual current drag/drop bounds must exist");
+                        ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
+                    };
+                    source = screen(egui::Id::unique("dj-browser-first-track")).center();
+                    card = screen(egui::Id::unique(("rack-main-extent", 5usize)));
+                    bank = screen(egui::Id::unique(("six-bank-viewport", 1usize)));
+                    destination = screen(egui::Id::unique(("rack-jog-drop", 5usize))).center();
                 });
                 output.textures_delta.clear();
-                if frame == 4 {
+                if frame == 58 {
+                    assert!(
+                        bank.expand(1.).contains_rect(card),
+                        "Real B3 card must be fully reachable at{size:?}: {card:?} bank{bank:?}"
+                    );
+                    assert!(
+                        bank.contains(destination),
+                        "B3 drop point must be inside its actual bank viewport"
+                    );
+                    assert!(
+                        egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains(source),
+                        "Actual browser source must be visible"
+                    );
+                }
+                if frame == 63 {
                     assert!(
                         egui::DragAndDrop::has_payload_of_type::<PathBuf>(&ctx),
-                        "DJ browser failed to start drag at {size:?}, {source:?}"
+                        "Actual DJ browser failed to start drag at{size:?}, {source:?}"
                     );
                 }
             }
             assert_eq!(
                 player.pending_load[5].as_ref().map(|(path, _)| path),
                 Some(&folder.path().join("song.mp3")),
-                "{size:?}"
+                "Actual full B3 drop must stage on the reserved deck at{size:?}"
+            );
+            assert!(
+                player.run.auto && player.run.preloaded == Some((5, 0)),
+                "Drag must not replace the active automation reservation"
             );
         }
     }

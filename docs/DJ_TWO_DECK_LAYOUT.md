@@ -1,25 +1,29 @@
-# Two-deck layout — 1.0.19
+# Manual DJ decks and LIVE assignment
 
-The two- and six-deck views now share the same responsive performance layout.
-Two-deck mode omits the A1–A3/B1–B3 strips and gives that width to the two live
-deck panels. It no longer has a second, separately scaled 780-pixel mixer scene.
+Six-deck mode displays six complete, independent cards: A1/A2/A3 on the left,
+B1/B2/B3 on the right, with the crossfader between the banks. Each card keeps
+its transport, vinyl, volume and EQ/stem controls. Short windows scroll each
+bank independently instead of replacing four decks with tiny selectors.
+Two-deck mode remains available in DJ Settings.
 
-Jog wheels sit next to the central mixer; the stem/EQ banks sit on the outer
-sides. Knobs scale within a bounded 32–44 logical-pixel range as the deck area
-changes height. The monitoring/transport controls retain their mirrored order.
-Four hot cues and favorite sampler pads sit below each deck; eight cues and all
-nine sampler pads remain available through the existing expansion/bank controls.
-The real auxiliary Cue Deck remains in **Bank / Cue Deck**. Stem preparation,
-gain/filter/routing, Stop and staged-track application remain under **Controls**.
+Press **LIVE** on a deck to assign that deck to its crossfader side directly.
+The highlighted LIVE buttons and center labels show the assigned pair.
+This is manual takeover: Auto Mix is turned off, including any queued handoff,
+but playing sources are not paused, restarted, reloaded or sought. The fader
+position and channel gains remain unchanged. Routing changes ramp over 10 ms.
+LIVE does not start a paused deck; use its Play button to start it.
 
-Two-deck waveforms have a shared height divider with remembered sizing. The
-library divider can grow the list without an oversized knob bank preventing the
-deck area from shrinking. Ordinary resizing does not overwrite six-deck strip
-width preferences or change the playback owner.
+Other playing decks retain their independent channel-volume controls, so three
+or more decks can play together. A deck leaving the crossfader pair returns to
+its independent full-level bus; set its channel volume deliberately before
+reassigning if you want it quiet. Headphone cue remains private.
 
-Verification includes narrow/short/fullscreen geometry, long titles and deep
-folders, mirrored headphone/Cue placement, equal A/B wheel sizes, knob placement,
-library divider dragging, and existing waveform/deck drag-and-drop tests. Native
-screenshots are captured in isolated test profiles rather than replacing the
-user's live DJ session. Windows is exercised locally; Linux shares the renderer
-but has not been run on a Linux desktop for this change.
+The separate strict pair-assignment API retains its paused-deck checks for old
+session/control callers. The visible LIVE buttons use the live routing command,
+so manual performance does not require the old Settings/assign/pause sequence.
+
+Window resizing preserves loaded tracks, source positions, drafts, output and
+saved splitter preferences. Card layout and button-hit tests cover both themes;
+a clocked silent-output test exercises the actual A2 LIVE button with three
+real decoded sources. Synthetic routing tests separately cover six playing
+sources and a takeover during an automatic handoff, including same-pair takeover.

@@ -127,6 +127,7 @@ jobs:
           pactl info
           cargo test -p amp-player --bin amp-player dj_logic::tests::regular_playlist_automatic_preload_shuffle_cancel_and_handoff --locked -- --ignored --exact --test-threads=1 --nocapture
           cargo test -p amp-player --bin amp-player dj_logic::tests::smart_cycle_only_consumes_audible_loads_not_cancelled_preloads --locked -- --ignored --exact --test-threads=1
+          cargo test -p amp-player --bin amp-player deck_rack::cards::tests::actual_live_button_preserves_three_clocked_sources_and_manual_state --locked -- --ignored --exact --test-threads=1 --nocapture
           cargo test -p amp-player --bin amp-player window_tests::audio_mode_reload_preserves_paused_absolute_position_end_and_other_deck --locked -- --ignored --exact --test-threads=1 --nocapture | tee "$RUNNER_TEMP/amp-mode-reload.log"
           grep -Fq 'test result: ok. 1 passed;' "$RUNNER_TEMP/amp-mode-reload.log"
       - name: Verify supervised live sender recovers after a five-second outage

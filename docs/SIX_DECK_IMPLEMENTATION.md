@@ -33,7 +33,7 @@ Branch: `feature/six-deck-controls`. This is a development preview, not a produc
 
 ## Use
 
-Select LIVE on a mini strip to move the jog focus. Use Setup / Assign crossfader to LIVE pair after pausing both pairs and stopping Auto DJ. Background layers keep playing. Expanded shows eight cues/all pads; compact shows four cues/favorites. Transitions is directly on the toolbar; duration is the center stepper. Drag the divider above DJ Library. Setup also restores the original two-deck layout.
+The current manual workflow supersedes the old mini-strip assignment sequence: six complete A1/A2/A3 and B1/B2/B3 cards each have a direct LIVE button. LIVE assigns its crossfader side and takes over Auto Mix without pausing other decks or starting a paused deck. Volume and EQ/stems remain on each card; the full Cue Deck and sampler controls remain available. See [Manual DJ decks and LIVE assignment](DJ_TWO_DECK_LAYOUT.md). The older preview screenshots below document the previous presentation.
 
 In Library, enable Available in Companion on desired playlists and save. In Companion, refresh playlists, select a playlist/search/page, Learn songs, then Learn the chosen song's cues. Normal discovery returns 50-song pages, not the full library. Refer to `integrations/companion/README.md` for host setup.
 

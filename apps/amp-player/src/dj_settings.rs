@@ -54,9 +54,7 @@ impl Player {
             ui.separator();ui.heading("Layout");
             skin::switch(ui,&mut self.rack.expanded,"Expanded controls");
             self.card_view_tools(ui);
-            if ui.button("Assign crossfader to LIVE pair").on_hover_text("Pause both current and requested deck pairs first; stop Auto DJ.").clicked(){
-                self.status=if self.run.auto {"Stop Auto DJ before changing the crossfade pair".into()}else if let Err(error)=self.ensure_audio().and_then(|_|self.audio.as_ref().unwrap().assign_pair(self.rack.live)){error}else{"Crossfade assignment queued".into()};
-            }
+            ui.weak("Use LIVE on any deck to assign its crossfader side directly while mixing. Other decks keep playing.");
             ui.separator();ui.weak(&self.status);
         });
         ctx.data_mut(|d| {

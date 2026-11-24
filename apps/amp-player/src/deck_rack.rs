@@ -336,7 +336,9 @@ impl Player {
         let rack_width = ui.available_width();
         let card_breakpoint = if self.rack.six { 1100. } else { 950. };
         let narrow_cards = (640. ..card_breakpoint).contains(&rack_width);
-        let minimum_rack = if narrow_cards {
+        let minimum_rack = if self.rack.six {
+            220.
+        } else if narrow_cards {
             if self.rack.six {
                 if native_height < 760. { 314. } else { 380. }
             } else {
@@ -348,8 +350,16 @@ impl Player {
             300.
         };
         let library_id = egui::Id::unique("dj-library-height");
-        let minimum_library = if compact { 112. } else { 160. };
-        let rack_reserve = if narrow_cards {
+        let minimum_library = if self.rack.six {
+            180.
+        } else if compact {
+            112.
+        } else {
+            160.
+        };
+        let rack_reserve = if self.rack.six {
+            760.
+        } else if narrow_cards {
             minimum_rack + 52.
         } else {
             370.
@@ -364,10 +374,12 @@ impl Player {
             - if self.dj_library_hidden {
                 40.
             } else {
-                library_height + 52.
+                library_height + if self.rack.six { 60. } else { 52. }
             })
         .max(minimum_rack)
-        .min(if narrow_cards {
+        .min(if self.rack.six {
+            900.
+        } else if narrow_cards {
             if self.rack.expanded { 470. } else { 430. }
         } else if self.rack.expanded {
             430.
@@ -376,7 +388,7 @@ impl Player {
         });
         // Magnetic fitting expands logical space; budget the short native window
         // as well so its browser remains reachable without changing saved sizes.
-        let height = if !narrow_cards && native_height < 760. {
+        let height = if !self.rack.six && !narrow_cards && native_height < 760. {
             height.min(270.)
         } else {
             height
@@ -413,7 +425,7 @@ impl Player {
             .ctx()
             .data_mut(|d| *d.get_temp_mut_or_insert_with(saved_id, || self.rack.strip_ratios));
         let rendered = if self.rack.six { strips } else { [0.; 2] };
-        if rack_width >= 640. {
+        if rack_width >= 640. || self.rack.six {
             self.card_rack(ui, height);
         } else {
             // Below the native DJ window minimum, retain a reachable overflow
@@ -620,7 +632,7 @@ impl Player {
                             ui.label(egui::RichText::new(NAMES[d]).strong().color(skin::color(ui, accent(d))));
                             if ui.add(egui::Button::new(egui::RichText::new("LIVE").size(11.).color(if selected {egui::Color32::BLACK} else {accent(d)}))
                                 .fill(if selected {accent(d)} else {ui.visuals().widgets.inactive.bg_fill}))
-                                .on_hover_text("Control this deck with the jog wheel; keep its audio routing unchanged.").clicked() { self.rack.live[side] = d; }
+                                .on_hover_text("Make this deck live on its crossfader side without pausing other decks.").clicked() { self.make_deck_live(d); }
                         if transport_button(ui, d, self.playing[d], egui::vec2(24.,24.)).on_hover_text(if self.playing[d] {"Pause deck"} else {"Play deck"}).clicked() { self.toggle_deck(d); }
                         });
                         ui.add(egui::Label::new(self.title(d)).truncate());
@@ -1358,55 +1370,65 @@ mod tests {
         }
     }
     #[test]
-    fn deck_strip_grabbers_resize_each_side_independently() {
-        for (id, delta, side) in [
-            ("dj-deck-left-divider", 45., 0usize),
-            ("dj-deck-right-divider", -45., 1usize),
-        ] {
-            let ctx = egui::Context::default();
-            let mut player = Player::default();
-            let mut point = egui::Pos2::ZERO;
-            for frame in 0..5 {
-                let mut raw = egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(
-                        egui::Pos2::ZERO,
-                        egui::vec2(1570., 1000.),
-                    )),
-                    ..Default::default()
-                };
-                if frame == 3 {
-                    point.x += delta;
-                }
-                raw.events.push(egui::Event::PointerMoved(point));
-                if frame == 2 || frame == 4 {
-                    raw.events.push(egui::Event::PointerButton {
-                        pos: point,
-                        button: egui::PointerButton::Primary,
-                        pressed: frame == 2,
+    fn six_full_deck_bank_scrolls_independently_without_changing_saved_widths() {
+        let ctx = egui::Context::default();
+        crate::skin::configure(&ctx);
+        let mut player = Player::default();
+        player.rack.six = true;
+        let ratios = player.rack.strip_ratios;
+        let size = egui::vec2(1280., 500.);
+        let mut before = [egui::Rect::NOTHING; 2];
+        let mut point = egui::Pos2::ZERO;
+        for frame in 0..8 {
+            let events = if frame == 3 {
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        delta: egui::vec2(0., -400.),
                         modifiers: Default::default(),
-                    });
-                }
-                let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 2));
-                output.textures_delta.clear();
-                if frame == 1 {
-                    let (rect, layer) = ctx
-                        .data(|d| {
-                            d.get_temp::<(egui::Rect, egui::LayerId)>(
-                                egui::Id::unique(id).with("bounds"),
-                            )
-                        })
-                        .unwrap();
-                    point =
-                        ctx.layer_transform_to_global(layer).unwrap_or_default() * rect.center();
-                }
-            }
-            assert!(
-                player.rack.strip_ratios[side] > 0.15,
-                "Grabber did not widen its deck strip: {:?}",
-                player.rack.strip_ratios
+                    },
+                ]
+            } else {
+                vec![]
+            };
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    events,
+                    ..Default::default()
+                },
+                |ui| player.card_rack(ui, 450.),
             );
-            assert_eq!(player.rack.strip_ratios[1 - side], 0.14);
+            output.textures_delta.clear();
+            let screen = |name: &str, deck: usize| {
+                let (rect, layer) = ctx
+                    .data(|d| {
+                        d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((name, deck)))
+                    })
+                    .unwrap();
+                ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
+            };
+            if frame == 2 {
+                before = [screen("rack-main-extent", 4), screen("rack-main-extent", 5)];
+                point = screen("six-bank-viewport", 0).center();
+            }
+            if frame == 7 {
+                let after = [screen("rack-main-extent", 4), screen("rack-main-extent", 5)];
+                assert!(
+                    after[0].top() < before[0].top() - 20.,
+                    "Left full bank must actually scroll"
+                );
+                assert!(
+                    (after[1].top() - before[1].top()).abs() < 1.,
+                    "Scrolling A must not move B bank"
+                );
+            }
         }
+        assert_eq!(player.rack.strip_ratios, ratios);
+        assert!(player.audio.is_none());
     }
     #[test]
     fn overlay_waveforms_share_the_same_full_width_rectangle() {
@@ -1445,9 +1467,9 @@ mod tests {
     }
     #[test]
     fn native_deck_layout_keeps_vinyl_and_controls_readable_at_each_size() {
+        // Two-deck readability stays unchanged. Six full cards have dedicated
+        // parity, direct-control, LIVE-hit and bank-scroll coverage in cards.rs.
         for (size, six) in [
-            (egui::vec2(1600., 1000.), true),
-            (egui::vec2(2560., 1440.), true),
             (egui::vec2(1000., 760.), false),
             (egui::vec2(1280., 900.), false),
             (egui::vec2(1920., 1080.), false),
@@ -1579,6 +1601,12 @@ mod tests {
                 };
                 let mut output = ctx.run_ui(raw, |ui| {
                     player.group_ui(ui, 2);
+                    for side in 0usize..2 {
+                        let (bank,layer)=ui.ctx().data(|d|d.get_temp::<(egui::Rect,egui::LayerId)>(egui::Id::unique(("six-bank-viewport",side)))).expect("Full-bank scroll viewport must exist");
+                        let bank=ui.ctx().layer_transform_to_global(layer).unwrap_or_default()*bank;
+                        let library=ui.ctx().data(|d|d.get_temp::<f32>(egui::Id::unique("rack-library-top"))).unwrap();
+                        assert!(bank.left()>=-1. && bank.right()<=size.x+1. && bank.bottom()<=library && bank.top()>=-1.,"Full bank must remain bounded above library at{size:?}: {bank:?},library{library}");
+                    }
                     assert!(
                         ui.min_rect().right() <= size.x + 1.
                             && ui.min_rect().bottom() <= size.y + 1.,
@@ -1595,6 +1623,8 @@ mod tests {
         let ctx = egui::Context::default();
         theme::apply(&ctx, theme::Theme::ModernDark);
         let mut player = Player::default();
+        // This regression originally covered the default SIX-deck workspace.
+        player.rack.six = true;
         for (size, expanded, locked) in [
             (egui::vec2(1000., 700.), false, false),
             (egui::vec2(1000., 700.), false, true),
@@ -1640,49 +1670,45 @@ mod tests {
                 let cue = rect("deck-cue-bounds");
                 let phones = rect("deck-phones-bounds");
                 let play = rect("rack-main-play");
-                let cards = ctx
-                    .data(|data| data.get_temp::<bool>(egui::Id::unique("native-dj-card-layout")))
-                    .unwrap_or(false);
-                if cards {
-                    assert!(
-                        cue.right() <= play.left() + 1.,
-                        "Cue and Play stay together in the card transport"
-                    );
-                    let (main, layer) = ctx
-                        .data(|data| {
-                            data.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
-                                "rack-main-extent",
-                                deck,
-                            )))
-                        })
-                        .unwrap();
-                    if main.height() < 280. {
-                        let global =
-                            ctx.layer_transform_to_global(layer).unwrap_or_default() * main;
-                        assert!(
-                            phones.left() >= play.right() - 1.
-                                && (phones.center().y - play.center().y).abs() <= 1.
-                                && phones.height() >= 37.
-                                && global.expand(1.).contains_rect(phones),
-                            "Short-card private monitoring stays full size in its transport row: phones={phones:?}, play={play:?}, card={global:?}"
-                        );
-                    } else {
-                        assert!(
-                            phones.top() >= play.bottom() - 1.,
-                            "Headphone monitoring stays in the tall card controls row"
-                        );
-                    }
-                } else if deck == 0 {
-                    assert!(
-                        play.right() <= cue.left() && cue.right() <= phones.left(),
-                        "A monitoring belongs on the mixer edge at {size:?}"
-                    );
-                } else {
-                    assert!(
-                        phones.right() <= cue.left() && cue.right() <= play.left(),
-                        "B monitoring belongs on the mixer edge at {size:?}"
-                    );
-                }
+                assert!(
+                    ctx.data(
+                        |data| data.get_temp::<bool>(egui::Id::unique("native-dj-card-layout"))
+                    )
+                    .unwrap_or(false),
+                    "Six-deck workspace must render full cards"
+                );
+                assert!(
+                    cue.right() <= play.left() + 1.,
+                    "Cue and Play stay together in every full-card transport"
+                );
+                let (main, layer) = ctx
+                    .data(|data| {
+                        data.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
+                            "rack-main-extent",
+                            deck,
+                        )))
+                    })
+                    .unwrap();
+                let main = ctx.layer_transform_to_global(layer).unwrap_or_default() * main;
+                let (knobs, layer) = ctx
+                    .data(|data| {
+                        data.get_temp::<(egui::Rect, egui::LayerId)>(
+                            egui::Id::unique(("rack-knobs", deck)).with("screen"),
+                        )
+                    })
+                    .unwrap();
+                let knobs = ctx.layer_transform_to_global(layer).unwrap_or_default() * knobs;
+                assert!(
+                    play.height() >= 37.,
+                    "Full-card transport must retain its physical target size at{size:?}: {play:?}"
+                );
+                assert!(
+                    phones.top() >= play.bottom() - 1.
+                        && phones.height() >= 37.
+                        && main.expand(1.).contains_rect(phones)
+                        && knobs.expand(1.).contains_rect(phones),
+                    "Six-card private monitoring stays full size in its lower knob row: phones={phones:?}, play={play:?}, card={main:?}, knobs={knobs:?}"
+                );
                 assert!(phones.right() <= size.x && phones.bottom() <= size.y);
             }
         }
