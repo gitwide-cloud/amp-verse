@@ -252,7 +252,6 @@ fn basic_tags(track: &Track) -> serde_json::Map<String, Value> {
         "track",
         "disc",
         "comment",
-        "content_advisory",
         "media_kind",
     ] {
         if let Some(value) = track.preparation.extensions.get(key) {
@@ -301,6 +300,12 @@ fn basic_tags(track: &Track) -> serde_json::Map<String, Value> {
             .or_insert_with(|| json!(genres.join("; ")));
         tags.insert("genres".into(), json!(genres));
     }
+    tags.insert(
+        "content_advisory".into(),
+        json!(amp_core::content_advisory::classification(
+            &track.preparation
+        )),
+    );
     tags.entry("title").or_insert_with(|| json!(track.title));
     tags
 }
@@ -559,6 +564,44 @@ mod tests {
         assert_eq!(byte_range("bytes=0-0", 0), Err(()));
         assert_eq!(byte_range("bytes=-0", 10), Err(()));
     }
+    #[test]
+    fn basic_advisory_uses_shared_conservative_classification() {
+        let mut track = Track {
+            path: "song.mp3".into(),
+            title: "Song".into(),
+            preparation: amp_core::Preparation::default(),
+        };
+        assert_eq!(basic_tags(&track)["content_advisory"], "Unknown");
+        track.preparation.extensions.insert(
+            "embedded_tags".into(),
+            json!({"ParentalAdvisory":["2"], "Bpm":["128"]}),
+        );
+        assert_eq!(basic_tags(&track)["content_advisory"], "Clean");
+        amp_core::content_advisory::set_manual(
+            &mut track.preparation,
+            amp_core::content_advisory::Classification::Explicit,
+        );
+        assert_eq!(basic_tags(&track)["content_advisory"], "Explicit");
+        amp_core::content_advisory::set_manual(
+            &mut track.preparation,
+            amp_core::content_advisory::Classification::Unknown,
+        );
+        assert_eq!(
+            basic_tags(&track)["content_advisory"],
+            "Unknown",
+            "manual Unknown must defeat embedded Clean"
+        );
+        track.preparation.extensions.remove("content_advisory");
+        track.preparation.extensions.insert(
+            "embedded_tags".into(),
+            json!({"ParentalAdvisory":["2","1"]}),
+        );
+        let tags = basic_tags(&track);
+        assert_eq!(tags["content_advisory"], "Unknown");
+        assert!(!tags.contains_key("embedded_tags"));
+        assert!(!tags.contains_key("bpm"));
+    }
+
     #[test]
     fn basic_tags_include_scanned_metadata_without_exposing_analysis() {
         let mut preparation = amp_core::Preparation::default();
