@@ -902,8 +902,7 @@ impl Player {
             source.as_deref(),
             self.audio.as_ref(),
             !self.run.auto && !self.playing[d],
-        ) && let Some(path) = source
-            && let Err(error) = self.safe_load_path(d, path, None)
+        ) && let Err(error) = self.reload_deck_audio_mode(d)
         {
             self.status = error;
         }

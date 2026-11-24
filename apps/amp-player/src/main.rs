@@ -38,6 +38,7 @@ mod manual_load;
 mod mashup;
 mod media_lookup;
 mod mix_schedule;
+mod mode_reload;
 mod onnx_stem_stream;
 mod onnx_stem_worker;
 mod output_admission;
@@ -2840,6 +2841,55 @@ impl Player {
         );
         Ok(())
     }
+    /// Change only the loaded deck's audio representation, retaining its executed timeline.
+    fn reload_deck_audio_mode(&mut self, deck: usize) -> Result<(), String> {
+        let result = self.try_reload_deck_audio_mode(deck);
+        if result.is_err()
+            && let Some(audio) = &self.audio
+        {
+            audio.restore_stem_mode_request(deck);
+        }
+        result
+    }
+    fn try_reload_deck_audio_mode(&mut self, deck: usize) -> Result<(), String> {
+        if deck >= deck_rack::NAMES.len() {
+            return Err("Choose a deck from A1–A3 or B1–B3".into());
+        }
+        let mut track = self
+            .loaded_track(deck)
+            .cloned()
+            .ok_or("Load a local song first")?;
+        let root = self.loaded_origin[deck]
+            .clone()
+            .unwrap_or_else(|| self.root.clone());
+        let paired = self.pair().contains(&deck);
+        let audio = self.audio.as_mut().ok_or("Start the audio engine first")?;
+        if self.run.auto || audio.playing(deck) || (paired && audio.fading()) {
+            return Err(
+                "Turn AutoMix off and pause this deck before changing its audio mode.".into(),
+            );
+        }
+        if !audio.loaded(deck) || !audio.load_current(deck) {
+            return Err("Wait for this deck's current song to finish loading.".into());
+        }
+        let position = audio.source_position(deck);
+        let origin = position - audio.position(deck);
+        let (start, end) = mode_reload::range(
+            position,
+            origin,
+            audio.controls.duration_frames[deck].load(std::sync::atomic::Ordering::Relaxed),
+            audio.sample_rate,
+        )?;
+        track.preparation.cue_in = start;
+        track.preparation.cue_out = Some(end);
+        // No manual-load crop policy, queue mutation, song replacement or other-deck action.
+        audio.load(deck, &root, &track, false)?;
+        self.status = format!(
+            "Deck {} audio mode reloaded at its paused position",
+            deck_rack::NAMES[deck]
+        );
+        Ok(())
+    }
     fn recue_deck(&mut self, deck: usize) {
         if let Some(mut track) = self.loaded_track(deck).cloned()
             && let Some(audio) = &mut self.audio
@@ -4028,6 +4078,91 @@ fn main() -> eframe::Result {
 #[cfg(test)]
 mod window_tests {
     use super::*;
+    #[test]
+    #[ignore = "requires a real local audio output and ffmpeg; no stem model"]
+    fn audio_mode_reload_preserves_paused_absolute_position_end_and_other_deck() {
+        use std::sync::atomic::Ordering::Relaxed;
+        use std::time::{Duration, Instant};
+        fn wait(mut condition: impl FnMut() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !condition() {
+                assert!(Instant::now() < deadline, "audio callback did not settle");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mode-reload.wav");
+        assert!(
+            amp_core::command("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=220:duration=5"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let track = amp_core::Track {
+            path: "mode-reload.wav".into(),
+            title: "Mode reload fixture".into(),
+            preparation: amp_core::Preparation {
+                cue_in: 1.,
+                cue_out: Some(4.),
+                ..Default::default()
+            },
+        };
+        let mut engine = mixer::Engine::new().unwrap();
+        engine.set_master(0.);
+        engine.load_original(0, dir.path(), &track, true).unwrap();
+        engine.load_original(1, dir.path(), &track, true).unwrap();
+        wait(|| engine.source_position(0) > 1.15);
+        engine.pause(0);
+        wait(|| !engine.playing(0));
+        let before = engine.source_position(0);
+        let other_generation = engine.controls.deck_generation[1].load(Relaxed);
+        let mut player = Player::default();
+        player.loaded_snapshot[0] = Some(track.clone());
+        player.loaded_origin[0] = Some(dir.path().to_path_buf());
+        player.audio = Some(engine);
+        player.reload_deck_audio_mode(0).unwrap();
+        wait(|| player.audio.as_ref().unwrap().load_current(0));
+        let audio = player.audio.as_ref().unwrap();
+        assert!((audio.source_position(0) - before).abs() < 0.025);
+        assert!((audio.source_position(0) + audio.remaining(0).unwrap() as f64 - 4.).abs() < 0.025);
+        assert!(!audio.playing(0));
+        assert!(audio.playing(1));
+        assert_eq!(
+            audio.controls.deck_generation[1].load(Relaxed),
+            other_generation
+        );
+        assert_eq!(
+            player.loaded_snapshot[0].as_ref().unwrap().preparation,
+            track.preparation
+        );
+        // A rejected mode request must restore intent without replacing either source.
+        let generation = audio.controls.deck_generation[0].load(Relaxed);
+        audio.controls.on_demand_stems[0].store(true, Relaxed);
+        player.run.auto = true;
+        assert!(player.reload_deck_audio_mode(0).is_err());
+        let audio = player.audio.as_ref().unwrap();
+        assert!(!audio.controls.on_demand_stems[0].load(Relaxed));
+        assert_eq!(audio.controls.deck_generation[0].load(Relaxed), generation);
+        assert_eq!(
+            audio.controls.deck_generation[1].load(Relaxed),
+            other_generation
+        );
+        player.run.auto = false;
+        // A manual new-song load retains its independent full-track policy.
+        player.safe_load_path(0, path, None).unwrap();
+        wait(|| player.audio.as_ref().unwrap().load_current(0));
+        assert!(player.audio.as_ref().unwrap().source_position(0) < 0.025);
+    }
+
     #[test]
     fn remote_start_prepares_catalog_before_serving_and_can_be_cancelled() {
         let ctx = egui::Context::default();
