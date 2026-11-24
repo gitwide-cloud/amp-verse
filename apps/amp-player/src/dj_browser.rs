@@ -1026,7 +1026,11 @@ mod tests {
 
         player.use_browser_smart_source();
 
-        assert!(player.status.contains("no matching songs"), "{}", player.status);
+        assert!(
+            player.status.contains("no matching songs"),
+            "{}",
+            player.status
+        );
         assert_eq!(player.run.choice, current.id);
         assert_eq!(player.run.playlist.as_deref(), Some(current.id.as_str()));
         assert_eq!(player.run.profile.as_ref().unwrap().id, current.id);
