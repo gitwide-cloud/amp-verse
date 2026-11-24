@@ -112,13 +112,47 @@ fn samples_with_levels(mixer: &Mixer, deck: usize, gain: [f32; 3]) -> (f64, f64)
     (energy, change)
 }
 
+// Test-only policies: keep ordinary CI short; sustained qualification is explicit.
+fn cpu_qualification_policy(profile: Option<&str>) -> Result<(u64, u64, u64), &'static str> {
+    match profile {
+        None | Some("short") => Ok((30, 6, 45)),
+        Some("sustained") => Ok((180, 15, 210)),
+        _ => Err("AMP_STEM_TEST_CPU_PROFILE must be short or sustained"),
+    }
+}
 #[test]
-#[ignore = "Requires native live module and AMP_STEM_TEST_SOURCE >=45sec; paced real two-deck model test, no audio device/files"]
+fn cpu_qualification_profiles_preserve_default_and_reject_unbounded_values() {
+    assert_eq!(cpu_qualification_policy(None), Ok((30, 6, 45)));
+    assert_eq!(cpu_qualification_policy(Some("short")), Ok((30, 6, 45)));
+    assert_eq!(
+        cpu_qualification_policy(Some("sustained")),
+        Ok((180, 15, 210))
+    );
+    for invalid in ["", "0", "-1", "999999", "forever"] {
+        assert!(cpu_qualification_policy(Some(invalid)).is_err());
+    }
+}
+
+#[test]
+#[ignore = "Requires native live module and AMP_STEM_TEST_SOURCE >=45sec (210sec sustained); paced real two-deck model test, no audio device/files"]
 fn two_native_live_stem_decks_play_filters_and_cancel_independently() {
+    let profile = match std::env::var("AMP_STEM_TEST_CPU_PROFILE") {
+        Ok(value) => Some(value),
+        Err(std::env::VarError::NotPresent) => None,
+        Err(error) => panic!("Invalid CPU qualification profile: {error}"),
+    };
+    let (together_seconds, survivor_seconds, source_seconds) =
+        cpu_qualification_policy(profile.as_deref()).expect("Choose a bounded CPU test profile");
     let path = std::path::PathBuf::from(
-        std::env::var_os("AMP_STEM_TEST_SOURCE").expect("Set read-only source >=45sec"),
+        std::env::var_os("AMP_STEM_TEST_SOURCE")
+            .expect("Set read-only source >=45sec (210sec for sustained)"),
     );
     let before = std::fs::metadata(&path).unwrap();
+    let digest_before = source_digest(&path);
+    let directory_before: std::collections::BTreeSet<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
     assert!(crate::onnx_stem_worker::configured());
     let controls = Arc::new(Controls::default());
     let (tx, rx) = mpsc::sync_channel(32);
@@ -128,7 +162,7 @@ fn two_native_live_stem_decks_play_filters_and_cancel_independently() {
         tasks: Vec::new(),
     };
     for deck in [0, 1] {
-        let source = stream_source(&path, deck, controls.clone(), &mut tasks, 45);
+        let source = stream_source(&path, deck, controls.clone(), &mut tasks, source_seconds);
         tx.send(Command::Load(deck, source, false, 1)).unwrap();
     }
     mixer.process_commands();
@@ -166,7 +200,7 @@ fn two_native_live_stem_decks_play_filters_and_cancel_independently() {
     let mut changed = [0f64; 2];
     let mut mix_energy = 0f64;
     let mut peak_seen = [0f32; 2];
-    while rendered < (RATE as usize * 30) {
+    while rendered < (RATE as usize * together_seconds as usize) {
         mixer.render(BLOCK, |_, frame| {
             assert!(frame.iter().all(|v| v.is_finite()));
             mix_energy += frame.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
@@ -201,8 +235,8 @@ fn two_native_live_stem_decks_play_filters_and_cancel_independently() {
     }
     for deck in [0, 1] {
         assert!(
-            controls.position[deck].load(Relaxed) >= RATE as u64 * 30 - 2,
-            "both deck clocks must advance30sec"
+            controls.position[deck].load(Relaxed) >= RATE as u64 * together_seconds - 2,
+            "both deck clocks must advance {together_seconds}sec"
         );
         assert_eq!(
             controls.underruns[deck].load(Relaxed),
@@ -223,7 +257,7 @@ fn two_native_live_stem_decks_play_filters_and_cancel_independently() {
     tx.send(Command::Stop(0)).unwrap();
     let b_before = controls.position[1].load(Relaxed);
     let mut remaining_energy = 0f64;
-    while rendered < RATE as usize * 36 {
+    while rendered < RATE as usize * (together_seconds + survivor_seconds) as usize {
         mixer.render(BLOCK, |_, frame| {
             assert!(frame.iter().all(|v| v.is_finite()));
             remaining_energy += frame.iter().map(|v| (*v as f64).powi(2)).sum::<f64>();
@@ -248,7 +282,7 @@ fn two_native_live_stem_decks_play_filters_and_cancel_independently() {
         }
     }
     assert!(!controls.play[0].load(Relaxed));
-    assert!(controls.position[1].load(Relaxed) >= b_before + RATE as u64 * 6 - 2);
+    assert!(controls.position[1].load(Relaxed) >= b_before + RATE as u64 * survivor_seconds - 2);
     assert_eq!(controls.underruns[1].load(Relaxed), 0);
     assert!(
         remaining_energy > 1e-7,
@@ -266,11 +300,17 @@ fn two_native_live_stem_decks_play_filters_and_cancel_independently() {
         "both decoder threads must acknowledge cancellation"
     );
     assert!(crate::onnx_stem_worker::shutdown());
+    assert_eq!(source_digest(&path), digest_before);
+    let directory_after: std::collections::BTreeSet<_> = std::fs::read_dir(path.parent().unwrap())
+        .unwrap()
+        .map(|e| e.unwrap().file_name())
+        .collect();
+    assert_eq!(directory_before, directory_after);
     let after = std::fs::metadata(&path).unwrap();
     assert_eq!(before.len(), after.len());
     assert_eq!(before.modified().unwrap(), after.modified().unwrap());
     eprintln!(
-        "Actual concurrent live decks:30sec together+6sec B-only; energies={energy:?}, filter_differences={changed:?}, deck_peaks={peak_seen:?}, B_after_cancel_energy={remaining_energy}; underruns0; source unchanged; saved stem audio files0"
+        "Actual concurrent live decks:{together_seconds}sec together+{survivor_seconds}sec B-only; energies={energy:?}, filter_differences={changed:?}, deck_peaks={peak_seen:?}, B_after_cancel_energy={remaining_energy}; underruns0; source unchanged; saved stem audio files0"
     );
 }
 
