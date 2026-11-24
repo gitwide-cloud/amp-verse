@@ -174,4 +174,71 @@ public final class PhoneLiveHttpTransportTest {
       client.connectionPool().evictAll();
     }
   }
+
+  @Test
+  public void retryAfterZeroCannotReplayASingleLiveStartClaim() throws Exception {
+    ServerSocket server = new ServerSocket(0, 2, InetAddress.getByName("127.0.0.1"));
+    server.setSoTimeout(700);
+    AtomicInteger requests = new AtomicInteger();
+    AtomicReference<Throwable> failure = new AtomicReference<>();
+    Thread host =
+        new Thread(
+            () -> {
+              try {
+                for (int attempt = 0; attempt < 2; attempt++) {
+                  try (Socket socket = server.accept()) {
+                    socket.setSoTimeout(2000);
+                    BufferedReader input =
+                        new BufferedReader(
+                            new InputStreamReader(
+                                socket.getInputStream(), StandardCharsets.US_ASCII));
+                    String request = input.readLine();
+                    if (!"POST /api/live/start HTTP/1.1".equals(request))
+                      throw new IOException("Unexpected fixture route");
+                    String line;
+                    while ((line = input.readLine()) != null && !line.isEmpty()) {}
+                    requests.incrementAndGet();
+                    String response =
+                        attempt == 0
+                            ? "HTTP/1.1 503 Service Unavailable\r\n"
+                                  + "Retry-After: 0\r\n"
+                                  + "Content-Length: 0\r\n"
+                                  + "Connection: close\r\n\r\n"
+                            : "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
+                    socket.getOutputStream().write(response.getBytes(StandardCharsets.US_ASCII));
+                    socket.getOutputStream().flush();
+                  } catch (SocketTimeoutException complete) {
+                    break;
+                  }
+                }
+              } catch (Throwable error) {
+                failure.set(error);
+              }
+            },
+            "owned-one-shot-fixture");
+    host.setDaemon(true);
+    host.start();
+    try {
+      PhoneLiveHttpTransport transport =
+          new PhoneLiveHttpTransport(
+              "http://127.0.0.1:" + server.getLocalPort(),
+              "",
+              new PhoneLiveSession.Identity("server", "station", "library"));
+      try {
+        transport.start(null);
+        fail("503 must be reported to the protocol owner");
+      } catch (IOException expected) {
+      }
+      host.join(3000);
+      assertFalse(host.isAlive());
+      assertNull(failure.get());
+      assertEquals(
+          "Only the session may retry a live claim, not OkHttp's Retry-After follow-up",
+          1,
+          requests.get());
+    } finally {
+      server.close();
+      host.join(1000);
+    }
+  }
 }

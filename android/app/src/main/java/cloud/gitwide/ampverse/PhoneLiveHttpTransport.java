@@ -140,7 +140,7 @@ final class PhoneLiveHttpTransport implements PhoneLiveSession.Transport {
       builder.header("x-amp-live-session", owner.token);
       if (owner.sequence >= 0) builder.header("x-amp-live-sequence", Long.toString(owner.sequence));
     }
-    if (post) builder.post(RequestBody.create(bytes == null ? new byte[0] : bytes, AUDIO));
+    if (post) builder.post(new LivePost(bytes));
     Call call = calls.newCall(builder.build());
     boolean rejected;
     synchronized (publication) {
@@ -190,6 +190,35 @@ final class PhoneLiveHttpTransport implements PhoneLiveSession.Transport {
           currentCleanup = false;
         }
       }
+    }
+  }
+
+  /** Retry policy belongs to PhoneLiveSession; even 503 + Retry-After:0 cannot replay a claim. */
+  private static final class LivePost extends RequestBody {
+    private final byte[] bytes;
+
+    LivePost(byte[] bytes) {
+      this.bytes = bytes == null ? new byte[0] : bytes;
+    }
+
+    @Override
+    public MediaType contentType() {
+      return AUDIO;
+    }
+
+    @Override
+    public long contentLength() {
+      return bytes.length;
+    }
+
+    @Override
+    public boolean isOneShot() {
+      return true;
+    }
+
+    @Override
+    public void writeTo(okio.BufferedSink output) throws IOException {
+      output.write(bytes);
     }
   }
 
