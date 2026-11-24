@@ -12,6 +12,11 @@ import java.nio.file.*;
 import org.json.*;
 @RunWith(AndroidJUnit4.class)
 public class RadioOfflineTest {
+ private static final class PlaybackSnapshot {
+  final String owner,mediaId;final boolean playWhenReady;final int count;
+  PlaybackSnapshot(){androidx.media3.common.Player player=PlaybackService.player();assertNotNull(player);owner=PlaybackService.owner();playWhenReady=player.getPlayWhenReady();count=player.getMediaItemCount();mediaId=player.getCurrentMediaItem()==null?null:player.getCurrentMediaItem().mediaId;}
+  void assertUnchanged(){androidx.media3.common.Player player=PlaybackService.player();assertNotNull(player);assertEquals("Offline browsing must not change playback ownership",owner,PlaybackService.owner());assertEquals("Offline browsing must not start or stop playback",playWhenReady,player.getPlayWhenReady());assertEquals("Offline browsing must not replace the queue",count,player.getMediaItemCount());assertEquals(mediaId,player.getCurrentMediaItem()==null?null:player.getCurrentMediaItem().mediaId);}
+ }
  @Test public void emptyOfflineListOffersRecoveryWithoutStartingPlayback()throws Exception {
   Context app=InstrumentationRegistry.getInstrumentation().getTargetContext();
   org.junit.Assume.assumeTrue(RadioOffline.albums(app).isEmpty());
@@ -19,12 +24,28 @@ public class RadioOfflineTest {
   device.wakeUp();device.executeShellCommand("wm dismiss-keyguard");
   Intent intent=new Intent(app,MainActivity.class).putExtra("module","AMP Cast").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
   try(androidx.test.core.app.ActivityScenario<MainActivity> scenario=androidx.test.core.app.ActivityScenario.launch(intent)) {
-   assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("Offline playlists")),5000));
-   device.findObject(androidx.test.uiautomator.By.text("Offline playlists")).click();
+   java.util.concurrent.atomic.AtomicReference<PlaybackSnapshot> before=new java.util.concurrent.atomic.AtomicReference<>();
+   for(int attempt=0;attempt<100&&before.get()==null;attempt++){
+    scenario.onActivity(activity->{if(PlaybackService.player()!=null)before.set(new PlaybackSnapshot());});
+    if(before.get()==null)android.os.SystemClock.sleep(50);
+   }
+   assertNotNull("Playback service must connect before checking ownership",before.get());
+   // The primary card is labelled Offline. The older Offline playlists button
+   // remains inside collapsed More; do not target that hidden legacy control.
+   scenario.onActivity(activity->{android.view.View card=activity.getWindow().getDecorView().findViewWithTag("cast-offline-playlists");assertNotNull("Primary offline card must exist",card);assertTrue(card.isShown());assertTrue(card.isEnabled());card.requestRectangleOnScreen(new android.graphics.Rect(0,0,card.getWidth(),card.getHeight()),true);});
+   androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+   androidx.test.uiautomator.UiObject2 offline=device.wait(androidx.test.uiautomator.Until.findObject(androidx.test.uiautomator.By.desc("Open offline playlists")),5000);
+   assertNotNull("Primary offline card must be visible and accessible",offline);assertFalse(offline.getVisibleBounds().isEmpty());
+   CardScreenshots.capture("card-offline-action.png");
+   offline.click();
    assertTrue(device.wait(androidx.test.uiautomator.Until.hasObject(androidx.test.uiautomator.By.text("No offline playlists yet")),3000));
    assertNotNull(device.findObject(androidx.test.uiautomator.By.text(java.util.regex.Pattern.compile("Find stations",java.util.regex.Pattern.CASE_INSENSITIVE))));
    assertNotNull(device.findObject(androidx.test.uiautomator.By.textContains("does not download its songs")));
+   scenario.onActivity(activity->before.get().assertUnchanged());
+   CardScreenshots.capture("card-offline-recovery.png");
    device.findObject(androidx.test.uiautomator.By.text(java.util.regex.Pattern.compile("Close",java.util.regex.Pattern.CASE_INSENSITIVE))).click();
+   androidx.test.platform.app.InstrumentationRegistry.getInstrumentation().waitForIdleSync();
+   scenario.onActivity(activity->before.get().assertUnchanged());
   }
  }
  @Test public void cancelDisconnectsAStalledAudioTransfer()throws Exception {
