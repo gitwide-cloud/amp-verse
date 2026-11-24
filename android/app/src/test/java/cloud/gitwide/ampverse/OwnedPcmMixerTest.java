@@ -336,6 +336,43 @@ public final class OwnedPcmMixerTest {
     assertFalse(mixer.hasOwnedPcm());
   }
 
+  @Test
+  public void consumedAudioCannotQualifyStartupButQueuedDecodedSilenceAndUnpresentedFramesCan() {
+    OwnedPcmMixer mixer = new OwnedPcmMixer();
+    OwnedPcmMixer.Voice player = mixer.voice(OwnedPcmMixer.Source.PLAYER);
+    player.play();
+    player.write(new short[4], 0, 2, player.generation());
+    assertTrue("Real decoded silence is valid audio provenance", mixer.hasOwnedPcm());
+    mixer.render(new short[4], 2);
+    assertFalse("Ever-decoded is not current PCM after consumption", mixer.hasOwnedPcm());
+    assertTrue(
+        "AudioTrack-queued source frames remain current before presentation", mixer.hasOwnedPcm(0));
+    assertTrue(mixer.hasOwnedPcm(1));
+    assertFalse("The final presented frame retires provenance", mixer.hasOwnedPcm(2));
+    mixer.render(new short[8], 4);
+    assertFalse("Underflow zeros cannot revive historical source PCM", mixer.hasOwnedPcm(6));
+    player.flush();
+    assertFalse("Seek flush cannot reuse the old hardware provenance", mixer.hasOwnedPcm(0));
+  }
+
+  @Test
+  public void anEmptyScratchReplacementCannotQualifyTheSuppressedNormalDeck() {
+    OwnedPcmMixer mixer = new OwnedPcmMixer();
+    mixer.owner(OwnedPcmMixer.Owner.DJ);
+    OwnedPcmMixer.Voice deck = mixer.voice(OwnedPcmMixer.Source.DECK_A);
+    fill(deck, 2, 0);
+    assertTrue(mixer.hasOwnedPcm());
+    OwnedPcmMixer.Voice scratch = mixer.voice(OwnedPcmMixer.Source.SCRATCH_A);
+    scratch.play();
+    assertFalse(mixer.hasOwnedPcm());
+    scratch.write(new short[4], 0, 2, scratch.generation());
+    assertTrue(mixer.hasOwnedPcm());
+    mixer.render(new short[4], 2);
+    assertFalse(mixer.hasOwnedPcm());
+    scratch.pause();
+    assertTrue(mixer.hasOwnedPcm());
+  }
+
   public static void main(String[] args) {
     org.junit.runner.JUnitCore.main(OwnedPcmMixerTest.class.getName());
   }

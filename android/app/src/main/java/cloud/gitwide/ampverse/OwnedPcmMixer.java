@@ -66,13 +66,25 @@ final class OwnedPcmMixer {
   }
 
   boolean hasOwnedPcm() {
+    return hasOwnedPcm(frame);
+  }
+
+  /** Queued decoded frames or source frames still awaiting the actual output presentation clock. */
+  boolean hasOwnedPcm(long presentedFrame) {
     Owner selected = owner;
-    for (Voice voice : voices)
-      if (voice != null
-          && !voice.closed
-          && voice.active
-          && permitted(voice.source, selected)
-          && voice.buffer.write > 0) return true;
+    Voice[] snapshot = voices;
+    boolean scratchA = active(snapshot, Source.SCRATCH_A, selected),
+        scratchB = active(snapshot, Source.SCRATCH_B, selected);
+    for (Voice voice : snapshot) {
+      if (voice == null || voice.closed || !voice.active || !permitted(voice.source, selected))
+        continue;
+      if ((voice.source == Source.DECK_A && scratchA)
+          || (voice.source == Source.DECK_B && scratchB)) continue;
+      Buffer data = voice.buffer;
+      long consumed = data.read;
+      if ((data.write > consumed || (consumed > 0 && data.lastOutputFrame > presentedFrame))
+          && voice.buffer == data) return true;
+    }
     return false;
   }
 

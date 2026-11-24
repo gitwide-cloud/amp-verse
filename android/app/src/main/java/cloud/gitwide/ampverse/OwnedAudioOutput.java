@@ -19,6 +19,10 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
     return track != null && !closed && !unsupported && failure == null;
   }
 
+  boolean hasOwnedPcm() {
+    return ready() && !suppressed && mixer.hasOwnedPcm(presentedFrames);
+  }
+
   void suppress(boolean value) {
     suppressed = value;
   }

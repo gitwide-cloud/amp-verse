@@ -178,6 +178,8 @@ final class DjEngine {
     boolean mixerSettingsBusy(){
         if(auto||mixing||(scratch!=null&&scratch.any()))return true;
         for(ExoPlayer deck:decks)if(deck.getPlayWhenReady()||deck.isPlaying())return true;
+        // Owned IDs remain useful for pad controls after one-shot completion; voices own liveness.
+        if(ownedSamples!=null)return ownedSamples.active();
         for(int[] side:streams)for(int stream:side)if(stream!=0)return true;
         return false;
     }

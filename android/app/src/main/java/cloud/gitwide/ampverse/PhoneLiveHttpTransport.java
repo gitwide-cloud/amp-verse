@@ -16,8 +16,17 @@ final class PhoneLiveHttpTransport implements PhoneLiveSession.Transport {
     private final String password;
     private final PhoneLiveSession.Identity selected;
     private volatile HttpURLConnection current;
+    private final Object publication=new Object();
+    private volatile boolean aborted;
+    private boolean currentCleanup;
+    interface Connections { HttpURLConnection open(URL url) throws IOException; }
+    private final Connections connections;
 
     PhoneLiveHttpTransport(String address,String password,PhoneLiveSession.Identity selected) throws IOException {
+        this(address,password,selected,url -> (HttpURLConnection)url.openConnection());
+    }
+    PhoneLiveHttpTransport(String address,String password,PhoneLiveSession.Identity selected,Connections connections) throws IOException {
+        this.connections=connections;
         try {
             URI uri=new URI(address);
             if(!("http".equalsIgnoreCase(uri.getScheme())||"https".equalsIgnoreCase(uri.getScheme()))
@@ -55,16 +64,32 @@ final class PhoneLiveHttpTransport implements PhoneLiveSession.Transport {
     @Override public void stop(String token) throws IOException {
         request("/api/live/stop",true,null,null,new Owner(token,-1));
     }
-    @Override public void abort(){HttpURLConnection connection=current;if(connection!=null)connection.disconnect();}
+    @Override public void abort(){
+        HttpURLConnection connection;
+        synchronized(publication){aborted=true;connection=currentCleanup?null:current;}
+        if(connection!=null)connection.disconnect();
+    }
+    private void checkActive(boolean cleanup)throws PhoneLiveSession.Rejected {
+        if(aborted&&!cleanup)throw new PhoneLiveSession.Rejected("Phone broadcast cancelled");
+    }
 
     private Response request(String route,boolean post,byte[] bytes,String previous,Owner owner) throws IOException {
-        HttpURLConnection connection=(HttpURLConnection)new URL(base.resolve(route).toString()).openConnection();
-        current=connection;connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(1500);connection.setReadTimeout(2000);
+        boolean cleanup=route.equals("/api/live/stop");
+        checkActive(cleanup);
+        HttpURLConnection connection=connections.open(new URL(base.resolve(route).toString()));
+        boolean rejected;
+        synchronized(publication){
+            rejected=aborted&&!cleanup;
+            if(!rejected){current=connection;currentCleanup=cleanup;}
+        }
+        if(rejected){connection.disconnect();throw new PhoneLiveSession.Rejected("Phone broadcast cancelled");}
+        try {
+        connection.setInstanceFollowRedirects(false);connection.setConnectTimeout(1500);connection.setReadTimeout(2000);
         connection.setRequestProperty("x-amp-server",selected.server);connection.setRequestProperty("x-amp-station",selected.station);connection.setRequestProperty("x-amp-library",selected.library);
         if(!password.isEmpty())connection.setRequestProperty("x-amp-password",password);
         if(previous!=null)connection.setRequestProperty("x-amp-previous-session",previous);
         if(owner!=null){connection.setRequestProperty("x-amp-live-session",owner.token);if(owner.sequence>=0)connection.setRequestProperty("x-amp-live-sequence",Long.toString(owner.sequence));}
-        try {
+            checkActive(cleanup);
             if(post){connection.setRequestMethod("POST");connection.setDoOutput(true);connection.setFixedLengthStreamingMode(bytes==null?0:bytes.length);connection.setRequestProperty("Content-Type","application/octet-stream");try(OutputStream out=connection.getOutputStream()){if(bytes!=null)out.write(bytes);}}
             int code=connection.getResponseCode();
             if(code<200||code>=300){
@@ -79,7 +104,10 @@ final class PhoneLiveHttpTransport implements PhoneLiveSession.Transport {
                 while((n=input.read(buffer))!=-1){if(out.size()+n>65536)throw new PhoneLiveSession.Rejected("Live host response exceeds limit");out.write(buffer,0,n);}
                 return new Response(new String(out.toByteArray(),StandardCharsets.UTF_8),next);
             }
-        }finally{if(current==connection)current=null;connection.disconnect();}
+        }finally{
+            synchronized(publication){if(current==connection){current=null;currentCleanup=false;}}
+            connection.disconnect();
+        }
     }
     private static final class Owner {
         final String token;final long sequence;

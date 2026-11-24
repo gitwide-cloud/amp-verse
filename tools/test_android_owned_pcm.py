@@ -30,7 +30,7 @@ def main():
     production = ["OwnedPcmMixer", "MasterPcmQueue", "OwnedPcmOutput", "OwnedAudioOutput",
                   "OwnedMediaAudioSink", "OwnedInputPcm", "AudioDsp", "PhoneLiveSession",
                   "PhoneLiveHttpTransport", "OwnedSamplerVoices", "OwnedSamplerAudio", "PhoneMasterBroadcast", "PhoneSourceIdentity", "PhoneMp3Warmup", "ReleaseCheck"]
-    tests = ["OwnedPcmMixerTest", "PhoneLiveSessionTest", "OwnedInputPcmTest", "OwnedMediaAudioSinkTest", "OwnedAudioOutputTest", "OwnedSamplerVoicesTest", "PhoneMasterBroadcastTest", "PhoneSourceIdentityTest", "PhoneMp3WarmupTest", "ReleaseChannelTest"]
+    tests = ["OwnedPcmMixerTest", "PhoneLiveSessionTest", "PhoneLiveHttpTransportTest", "OwnedInputPcmTest", "OwnedMediaAudioSinkTest", "OwnedAudioOutputTest", "OwnedSamplerVoicesTest", "PhoneMasterBroadcastTest", "PhoneSourceIdentityTest", "PhoneMp3WarmupTest", "ReleaseChannelTest"]
     files = [source / "main/java/cloud/gitwide/ampverse" / (name + ".java") for name in production]
     files += [source / "test/java/cloud/gitwide/ampverse" / (name + ".java") for name in tests]
     if args.full_cast:

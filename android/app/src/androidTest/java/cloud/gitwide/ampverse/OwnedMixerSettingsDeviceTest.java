@@ -155,6 +155,48 @@ public final class OwnedMixerSettingsDeviceTest {
             assertNotNull(
                 "Next service owns the opted-in master output", PlaybackService.ownedOutput());
           });
+      main(
+          () -> {
+            PlaybackService.player().pause();
+            DjEngine dj = PlaybackService.dj();
+            dj.pauseAll();
+            dj.assign(0, 0, source.getAbsolutePath(), "Generated one-shot", false);
+          });
+      await(
+          () -> {
+            main(
+                () -> {
+                  DjEngine dj = PlaybackService.existingDj();
+                  if (dj.streams[0][0] == 0) dj.trigger(0, 0);
+                  ready.set(dj.streams[0][0] != 0);
+                });
+            return ready.get();
+          });
+      main(
+          () ->
+              assertTrue(
+                  "A playing pad must block mixer changes", PlaybackService.mixerSettingsBusy()));
+      await(
+          () -> {
+            main(() -> ready.set(!PlaybackService.existingDj().samplesActive()));
+            return ready.get();
+          });
+      main(
+          () -> {
+            DjEngine dj = PlaybackService.existingDj();
+            assertTrue("Completed pad retains its historical control ID", dj.streams[0][0] != 0);
+            assertFalse(
+                "A naturally completed one-shot must release the mixer gate",
+                PlaybackService.mixerSettingsBusy());
+            Player cue = dj.decks[2];
+            cue.setMediaItem(MediaItem.fromUri(Uri.fromFile(source)));
+            cue.prepare();
+            cue.play();
+            assertTrue(
+                "Private cue playback still blocks changing the output",
+                PlaybackService.mixerSettingsBusy());
+            cue.pause();
+          });
     } finally {
       main(
           () -> {
