@@ -217,6 +217,19 @@ fn playlist_indices(
         .collect()
 }
 impl Player {
+    fn use_browser_smart_source(&mut self) {
+        // The control action validates the saved source before committing choice.
+        // A rejected draft or empty source must leave the current session intact.
+        if let Err(error) = self.execute_control(control::Action::LoadSmartPlaylist {
+            playlist: self.dj_browser.smart.clone(),
+            execution: control::Execution::LoadOnly,
+            style: None,
+            energy: None,
+        }) {
+            self.status = error;
+        }
+    }
+
     pub(super) fn dj_library_ui(&mut self, ui: &mut egui::Ui) {
         ui.spacing_mut().interact_size.y = 26.;
         ui.spacing_mut().item_spacing.y = 3.;
@@ -578,7 +591,10 @@ impl Player {
                                     )
                                     .truncate(),
                                 );
-                                load_smart = ui.button("Load for Auto DJ").clicked();
+                                load_smart = ui
+                                    .button("Use for Auto Mix")
+                                    .on_hover_text("Select this source for Auto Mix. Turn Auto Mix ON to load and play songs; current decks keep their songs.")
+                                    .clicked();
                                 edit_smart = ui.button("Edit sources / rules in Library").clicked();
                                 refresh |= ui
                                     .button("Refresh")
@@ -960,15 +976,7 @@ impl Player {
             self.smart_playlist_action(ui, &id, action);
         }
         if load_smart {
-            self.run.choice = self.dj_browser.smart.clone();
-            if let Err(e) = self.execute_control(control::Action::LoadSmartPlaylist {
-                playlist: self.dj_browser.smart.clone(),
-                execution: control::Execution::LoadOnly,
-                style: None,
-                energy: None,
-            }) {
-                self.status = e;
-            }
+            self.use_browser_smart_source();
         }
         if let Some((song, within)) = request
             && let Err(error) = self.execute_control(control::Action::RequestSong { song, within })
@@ -993,6 +1001,75 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn rejected_browser_smart_source_keeps_the_active_choice() {
+        let mut player = Player {
+            library: Some(Library {
+                tracks: Vec::new(),
+                tree: Folder {
+                    name: "music".into(),
+                    folders: Vec::new(),
+                    tracks: Vec::new(),
+                },
+            }),
+            ..Default::default()
+        };
+        let current = player.run.settings.playlists[0].clone();
+        player.run.choice = current.id.clone();
+        player.run.playlist = Some(current.id.clone());
+        player.run.profile = Some(current.clone());
+        player.run.auto = true;
+        let mut rejected = current.clone();
+        rejected.id = "empty-source".into();
+        rejected.name = "Empty source".into();
+        player.dj_browser.smart = rejected.id.clone();
+        player.run.settings.playlists.push(rejected);
+
+        player.use_browser_smart_source();
+
+        assert!(
+            player.status.contains("no matching songs"),
+            "{}",
+            player.status
+        );
+        assert_eq!(player.run.choice, current.id);
+        assert_eq!(player.run.playlist.as_deref(), Some(current.id.as_str()));
+        assert_eq!(player.run.profile.as_ref().unwrap().id, current.id);
+        assert!(player.run.auto);
+        assert!(player.audio.is_none());
+    }
+
+    #[test]
+    fn browser_smart_source_reports_matches_without_starting_manual_decks() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("song.mp3"), b"fixture").unwrap();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            ..Default::default()
+        };
+        let mut profile = player.run.settings.playlists[0].clone();
+        profile.id = "edm".into();
+        profile.name = "EDM".into();
+        player.run.settings.playlists = vec![profile];
+        player.dj_browser.smart = "edm".into();
+        player.run.choice = "previous-source".into();
+        let previous_pair = player.rack.live;
+
+        player.use_browser_smart_source();
+
+        assert_eq!(player.run.choice, "edm");
+        assert_eq!(player.run.playlist.as_deref(), Some("edm"));
+        assert_eq!(player.run.profile.as_ref().unwrap().name, "EDM");
+        assert!(!player.run.auto);
+        assert!(player.audio.is_none());
+        assert_eq!(player.rack.live, previous_pair);
+        assert_eq!(
+            player.status,
+            "EDM selected for Auto Mix (1 matching track). Turn Auto Mix ON to load and play its songs."
+        );
+    }
+
     #[test]
     fn smart_membership_reuses_matches_and_invalidates_rules_and_analysis() {
         let mut profile = amp_core::show::Settings::default().playlists.remove(0);

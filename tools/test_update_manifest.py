@@ -1,7 +1,12 @@
 import hashlib
+import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
+from package_android_modules import release_identity
+from package_downloads import desktop_version, write_desktop_manifest
 from update_manifest import generate
 
 
@@ -17,6 +22,55 @@ class UpdateManifestTests(unittest.TestCase):
             self.assertEqual(len(result['packages']), 3)
             self.assertEqual(result['packages']['android-arm64']['version_code'], 42)
             self.assertEqual(result['packages']['linux-x86_64']['sha256'], hashlib.sha256(b'package').hexdigest())
+
+    def test_release_candidate_uses_product_identity_without_updater_asset(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "android").mkdir()
+            (root / "Cargo.toml").write_text('[workspace.package]\nversion = "1.1.0-rc.1"\n')
+            properties = root / "android/release.properties"
+            properties.write_text("versionName=1.1.0-rc.1\nversionCode=43\n")
+            with patch.dict(os.environ, {"GITHUB_REF": "refs/heads/release", "GITHUB_SHA": "1234567890"}):
+                output = root / "build.json"
+                write_desktop_manifest(root, output)
+                self.assertEqual(json.loads(output.read_text()), {
+                    "source_sha": "1234567890",
+                    "version": "1.1.0-rc.1",
+                    "release_channel": "rc",
+                    "package_version": "1.1.0-rc.1+git.12345678",
+                })
+                with self.assertRaises(ValueError):
+                    generate(root, "1.1.0-rc.1")
+                properties.write_text("versionName=1.0.22\nversionCode=42\n")
+                with self.assertRaisesRegex(ValueError, "product versions disagree"):
+                    desktop_version(root)
+
+    def test_android_package_accepts_rc_and_preserves_other_channels(self):
+        self.assertEqual(release_identity("1.1.0-rc.1"), {"release_channel": "rc", "rc": 1})
+        self.assertEqual(release_identity("0.3.2-beta.6"), {"release_channel": "beta", "beta": 6})
+        self.assertEqual(release_identity("1.1.0"), {"release_channel": "stable"})
+        with self.assertRaises(ValueError):
+            release_identity("1.1.0-rc.0")
+
+    def test_stable_tag_names_match_assets_selected_by_updater(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "android").mkdir()
+            (root / "Cargo.toml").write_text('[workspace.package]\nversion = "1.1.0"\n')
+            (root / "android/release.properties").write_text("versionName=1.1.0\nversionCode=44\n")
+            with patch.dict(os.environ, {"GITHUB_REF": "refs/tags/v1.1.0", "GITHUB_SHA": "1234567890"}):
+                version = desktop_version(root)
+                for platform in ("windows", "linux"):
+                    (root / f"amp-verse-{platform}-v{version}.zip").write_bytes(b"package")
+                result = generate(root, version)
+                self.assertEqual(result["packages"]["windows-x86_64"]["name"], "amp-verse-windows-v1.1.0.zip")
+                self.assertEqual(result["packages"]["linux-x86_64"]["name"], "amp-verse-linux-v1.1.0.zip")
+                output = root / "build.json"
+                write_desktop_manifest(root, output)
+                self.assertEqual(json.loads(output.read_text())["release_channel"], "stable")
+            with patch.dict(os.environ, {"GITHUB_REF": "refs/tags/v1.1.1"}):
+                with self.assertRaisesRegex(ValueError, "tag does not match"):
+                    desktop_version(root)
 
     def test_missing_platform_does_not_publish_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

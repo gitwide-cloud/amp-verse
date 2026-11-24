@@ -89,8 +89,7 @@ fn stage(cancel: &AtomicBool, tx: &mpsc::Sender<Event>) -> Result<Option<PathBuf
         return Err("No stable update is published".into());
     }
     let tag = info["tag_name"].as_str().ok_or("Release version missing")?;
-    let current = crate::update_package::version(env!("CARGO_PKG_VERSION"))?;
-    if crate::update_package::version(tag)? <= current {
+    if !crate::update_package::is_newer_stable(tag, env!("CARGO_PKG_VERSION"))? {
         return Ok(None);
     }
     let data = read(&release_url(tag, "amp-update.json")?, 1048576, cancel, tx)?;

@@ -36,6 +36,14 @@ pub fn version(s: &str) -> Result<[u32; 3], String> {
         .try_into()
         .map_err(|_| "Expected a three-part version".into())
 }
+pub fn is_newer_stable(candidate: &str, installed: &str) -> Result<bool, String> {
+    let candidate = version(candidate)?;
+    let (installed, prerelease) = installed
+        .split_once("-rc.")
+        .map_or((installed, false), |(base, _)| (base, true));
+    let installed = version(installed)?;
+    Ok(candidate > installed || (candidate == installed && prerelease))
+}
 pub fn valid_package(p: &Package) -> bool {
     !p.name.is_empty()
         && p.name.len() < 180
@@ -241,6 +249,10 @@ mod tests {
         assert!(verify(&file, &package).is_err());
         assert!(version("v1.2.3").unwrap() > version("1.2.2").unwrap());
         assert!(version("1.2.3-dev").is_err());
+        assert!(is_newer_stable("v1.1.0", "1.0.22").unwrap());
+        assert!(is_newer_stable("v1.1.0", "1.1.0-rc.1").unwrap());
+        assert!(!is_newer_stable("v1.1.0", "1.1.0").unwrap());
+        assert!(is_newer_stable("v1.1.0-rc.1", "1.0.22").is_err());
     }
     #[test]
     fn failed_install_restores_old_files() {

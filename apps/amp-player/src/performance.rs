@@ -1792,9 +1792,14 @@ impl Player {
                 if self.show_editor.playlist_unsaved(&p.id) {
                     return Err("This Smart Playlist has unsaved Library changes. Open it in Library and Save Playlist first.".into());
                 }
-                if !self.library.as_ref().is_some_and(|library| {
-                    library.tracks.iter().any(|track| show::eligible(&p, track))
-                }) {
+                let matching_tracks = self.library.as_ref().map_or(0, |library| {
+                    library
+                        .tracks
+                        .iter()
+                        .filter(|track| show::eligible(&p, track))
+                        .count()
+                });
+                if matching_tracks == 0 {
                     return Err("This saved Smart Playlist has no matching songs. Choose its Music Source in Library, then Save Playlist.".into());
                 }
                 self.run.failed_songs.clear();
@@ -1811,6 +1816,23 @@ impl Player {
                 self.run.target = energy.or(p.target_energy);
                 self.run.preloaded = None;
                 self.run.pending = None;
+                if execution == Execution::LoadOnly {
+                    self.status = if self.run.auto {
+                        format!(
+                            "{} selected for Auto Mix ({} matching track{}). Upcoming songs use this source; current decks keep their songs.",
+                            p.name,
+                            matching_tracks,
+                            if matching_tracks == 1 { "" } else { "s" }
+                        )
+                    } else {
+                        format!(
+                            "{} selected for Auto Mix ({} matching track{}). Turn Auto Mix ON to load and play its songs.",
+                            p.name,
+                            matching_tracks,
+                            if matching_tracks == 1 { "" } else { "s" }
+                        )
+                    };
+                }
                 if execution != Execution::LoadOnly {
                     self.run.failure = None;
                     self.run.crossfade = true;
@@ -4069,6 +4091,10 @@ mod tests {
         );
         assert!(!player.run.auto);
         assert!(player.audio.is_none());
+        assert_eq!(
+            player.status,
+            "Intended playlist selected for Auto Mix (1 matching track). Turn Auto Mix ON to load and play its songs."
+        );
     }
     #[test]
     fn loading_empty_smart_source_preserves_the_current_session() {

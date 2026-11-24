@@ -15,14 +15,40 @@ def safe(value):
     return value
 
 
-def desktop_version(root):
-    ref = os.environ.get("GITHUB_REF", "")
-    if ref.startswith("refs/tags/v"):
-        return safe(ref.removeprefix("refs/tags/v"))
+def product_release(root):
     with (root / "Cargo.toml").open("rb") as source:
         version = tomllib.load(source)["workspace"]["package"]["version"]
+    match = re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+(?:-rc\.[1-9][0-9]*)?", version)
+    if not match:
+        raise ValueError("Expected a stable or release candidate product version")
+    properties = (root / "android/release.properties").read_text(encoding="utf-8")
+    android = dict(line.split("=", 1) for line in properties.splitlines() if line)
+    if android.get("versionName") != version:
+        raise ValueError("Desktop and Android product versions disagree")
+    channel = "rc" if "-rc." in version else "stable"
+    return version, channel
+
+
+def desktop_version(root):
+    version, _ = product_release(root)
+    ref = os.environ.get("GITHUB_REF", "")
+    if ref.startswith("refs/tags/v"):
+        if ref.removeprefix("refs/tags/v") != version:
+            raise ValueError("Release tag does not match product version")
+        return version
     build = os.environ.get("GITHUB_SHA", "local")[:8]
-    return safe(f"{version}-beta.9.git{safe(build)}")
+    return safe(f"{version}+git.{safe(build)}")
+
+
+def write_desktop_manifest(root, output):
+    version, channel = product_release(root)
+    manifest = {
+        "source_sha": os.environ["GITHUB_SHA"],
+        "version": version,
+        "release_channel": channel,
+        "package_version": desktop_version(root),
+    }
+    output.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
 
 
 def package_android(source, destination, build):
@@ -57,6 +83,9 @@ if __name__ == "__main__":
     commands = parser.add_subparsers(dest="command", required=True)
     desktop = commands.add_parser("desktop-version")
     desktop.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    manifest = commands.add_parser("desktop-manifest")
+    manifest.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[1])
+    manifest.add_argument("--output", type=Path, required=True)
     android = commands.add_parser("android")
     android.add_argument("--source", type=Path, required=True)
     android.add_argument("--destination", type=Path, required=True)
@@ -64,5 +93,7 @@ if __name__ == "__main__":
     args = parser.parse_args()
     if args.command == "desktop-version":
         print(desktop_version(args.root))
+    elif args.command == "desktop-manifest":
+        write_desktop_manifest(args.root, args.output)
     else:
         print("version=" + package_android(args.source, args.destination, args.build))

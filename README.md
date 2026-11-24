@@ -10,27 +10,17 @@ It takes inspiration from the music players many of us grew up with: **a classic
 
 > **Play your music. Mix your music. Take it with you.**
 
-## Beta 3 release candidate
+## 1.1.0 release candidate
 
-Desktop and server keep numeric base version **1.0.22** and report **Beta 3**.
-Android Full, Lite and the five companion modules use **0.3.2-beta.3 (code 39)**.
+This candidate aligns desktop, server, and Android at 1.1.0-rc.1. Test
+packages are installed manually into existing installations. The in-app
+updater offers stable releases. Android uses the existing app IDs and signing
+identity.
 
-- Desktop manual vinyl aligns to the audible cursor on touch, holds silently, follows hand direction and resumes without replaying queued scratch audio. Automated scratch-in and tape-brake timing are retained.
-- Android **Full** adds real forward/reverse PCM scratching for local or downloaded tracks, with bounded eight-second windows, shared EQ/gains and playback-thread ownership handoffs. Release uses the heard cursor and preserves pause and tempo changes.
-- Android Lite and the standalone companion DJ do not gain a real vinyl platter in this update. Unsupported sources and missing Full decoding produce explicit guidance instead of pretending repeated seeks are scratching.
-- Beta 2 playlist sync, server Library editing and radio reconnect fixes remain included. Existing installations, profiles and signing identity are retained.
-
-Targeted regressions cover actual desktop Key Lock delay, gesture/release races,
-EOF/underrun handling, bidirectional PCM, geometry and cancellation gates. A final
-combined source still requires successful platform CI and verified GitHub packages
-before release. Physical touch/audio latency acceptance follows installation;
-generated tests do not establish real-device audibility. Updates use GitHub release
-assets and the existing installation; USB installation is not the release workflow.
-
-**Phone-to-server live audio broadcasting is still not implemented.** Android
-station listening and reconnect improvements do not add that feature. Existing
-profiles, app IDs, signing identities and internal `V1Preview` paths stay
-compatible; release branding does not migrate user data.
+Selecting a Smart Playlist for Auto Mix leaves current deck audio in place.
+Turn Auto Mix on to load and play from the selected source. Phone-to-server
+live audio sending and sustained stem tiers above two decks are still pending
+release acceptance.
 
 ## What can you do with it?
 
