@@ -89,3 +89,11 @@ Safe isolated Pixel checks: `CastAddressDeviceTest` uses no network; `CastFailur
 ### Friendly-label review follow-up
 
 Removed the restored raw stream URL from the Google Cast source summary and removed the literal loopback address from the default disconnected status. The source summary now uses only the selected station's friendly title (with a fallback for a missing title). Actual stream URLs remain transport data. Manual address fields and explicit connection validation retain their relevant technical detail behind Advanced. The disconnected-path regression also rejects URLs and loopback addresses in visible default labels. No receiver load or playback command was added.
+
+## Owned Android master core (first-release candidate)
+
+The pure-Java `OwnedPcmMixer` is the proposed common output seam for Player, DJ A/B, scratch and sampler voices. Cue is explicitly rejected. It renders one bounded 48 kHz stereo PCM clock before local output and the optional encoder fanout. Decoder generations reject old media after seek/flush; presented-frame markers distinguish actual media from pauses and generated silence. Export congestion disconnects export without blocking local rendering. The owned voice and PCM queue bounds do not scale with the music library.
+
+Ten targeted JUnit tests currently pass on a checksum-verified Temurin 17 toolchain with a 128 MiB Java heap. They cover ownership/cue exclusion, crossfade and scratch precedence, identical local/encoder frames, network backpressure failure, stale decoder generations, pause/seek/EOS, underflow, capacity bounds, discontinuity rejection and stale presentation clocks.
+
+This core is not yet wired into Media3, SoundPool replacement or the existing scratch output, and does not by itself enable phone broadcasting. Full-master acceptance still requires those sources to share the owned render clock, the real MP3/HTTP ingestion path, Android build checks and device playback/latency evidence. No phone or physical speaker pass is claimed.
