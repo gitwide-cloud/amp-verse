@@ -193,6 +193,23 @@ class InternalExportTests(unittest.TestCase):
             cargo.assert_not_called()
             git.assert_not_called()
 
+    def test_export_records_optional_ci_run_and_explicit_local_nulls(self):
+        pin = {"commit": "a" * 40}
+        self.assertEqual(verify.export_ci_identity({}, pin),
+                         {"run_id": None, "run_attempt": None, "github_sha": None})
+        self.assertEqual(verify.export_ci_identity({
+            "GITHUB_RUN_ID": "45334184554", "GITHUB_RUN_ATTEMPT": "2", "GITHUB_SHA": pin["commit"]}, pin),
+            {"run_id": "45334184554", "run_attempt": "2", "github_sha": pin["commit"]})
+
+    def test_ci_source_mismatch_prevents_cargo_export(self):
+        pin = {"commit": "a" * 40}
+        with patch.object(verify, "tracked_checkout", return_value=pin), \
+                patch.object(verify.subprocess, "run") as cargo, \
+                self.assertRaisesRegex(RuntimeError, "GITHUB_SHA"):
+            verify.export_test_binary(SimpleNamespace(export_test_binary=True), None,
+                                      pin, {"GITHUB_SHA": "b" * 40}, Path("unused"))
+        cargo.assert_not_called()
+
     def test_windows_export_pins_matching_dll_and_source_without_running_it(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
@@ -214,6 +231,9 @@ class InternalExportTests(unittest.TestCase):
             self.assertIn("--release", cargo.call_args.args[0])
             self.assertIn("--no-run", cargo.call_args.args[0])
             self.assertEqual(export["source"], pin)
+            self.assertIsNone(export["run_id"])
+            self.assertIsNone(export["run_attempt"])
+            self.assertIsNone(export["github_sha"])
             destination = logs / "internal-test-binary"
             self.assertEqual((destination / "amp-player-acceptance.exe").read_bytes(), executable.read_bytes())
             self.assertEqual((destination / "amp-keylock.dll").read_bytes(), b"synthetic keylock")

@@ -106,11 +106,22 @@ def cargo_test_artifact(records, root):
     return artifact, path
 
 
+
+def export_ci_identity(env, source_pin):
+    identity = {'run_id': env.get('GITHUB_RUN_ID'),
+                'run_attempt': env.get('GITHUB_RUN_ATTEMPT'),
+                'github_sha': env.get('GITHUB_SHA')}
+    if identity['github_sha'] is not None and identity['github_sha'] != source_pin['commit']:
+        raise RuntimeError('CI GITHUB_SHA does not match the tracked source commit')
+    return identity
+
+
 def export_test_binary(args, logs, source_pin, env, root):
     if not args.export_test_binary:
         return None
     if tracked_checkout(root) != source_pin:
         raise RuntimeError('Tracked source changed during qualification')
+    ci_identity = export_ci_identity(env, source_pin)
     command = ['cargo', 'test', '-p', 'amp-player', '--bin', 'amp-player',
                '--release', '--locked', '--no-run', '--message-format=json']
     result = subprocess.run(command, cwd=root, env=env, text=True,
@@ -139,6 +150,7 @@ def export_test_binary(args, logs, source_pin, env, root):
         raise RuntimeError('Internal export destination already exists')
     exported = {
         'source': source_pin,
+        **ci_identity,
         'cargo_command': command,
         'cargo_profile': artifact['profile'],
         'cargo_package_id': artifact.get('package_id'),
