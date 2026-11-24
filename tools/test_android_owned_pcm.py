@@ -19,6 +19,7 @@ def main():
     parser.add_argument("--api-jars", type=Path, required=True)
     parser.add_argument("--test-jars", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--full-cast", action="store_true", help="Also compile Full encoder against its supplied pinned FFmpegKit API jar")
     args = parser.parse_args()
     root = Path(__file__).resolve().parents[1]
     source = root / "android/app/src"
@@ -28,10 +29,12 @@ def main():
     classpath = os.pathsep.join([str(classes)] + [str(path) for path in jars])
     production = ["OwnedPcmMixer", "MasterPcmQueue", "OwnedPcmOutput", "OwnedAudioOutput",
                   "OwnedMediaAudioSink", "OwnedInputPcm", "AudioDsp", "PhoneLiveSession",
-                  "PhoneLiveHttpTransport", "OwnedSamplerVoices", "OwnedSamplerAudio"]
-    tests = ["OwnedPcmMixerTest", "PhoneLiveSessionTest", "OwnedInputPcmTest", "OwnedMediaAudioSinkTest", "OwnedAudioOutputTest", "OwnedSamplerVoicesTest"]
+                  "PhoneLiveHttpTransport", "OwnedSamplerVoices", "OwnedSamplerAudio", "PhoneMasterBroadcast", "PhoneSourceIdentity"]
+    tests = ["OwnedPcmMixerTest", "PhoneLiveSessionTest", "OwnedInputPcmTest", "OwnedMediaAudioSinkTest", "OwnedAudioOutputTest", "OwnedSamplerVoicesTest", "PhoneMasterBroadcastTest", "PhoneSourceIdentityTest"]
     files = [source / "main/java/cloud/gitwide/ampverse" / (name + ".java") for name in production]
     files += [source / "test/java/cloud/gitwide/ampverse" / (name + ".java") for name in tests]
+    if args.full_cast:
+        files.append(root / "android/features/cast/java/cloud/gitwide/ampverse/FullPhoneMp3Encoder.java")
     compile_result = subprocess.run([str(args.java_home / "bin/javac"), "-J-Xmx128m", "--release", "17",
                                      "-cp", classpath, "-d", str(classes), *map(str, files)],
                                     capture_output=True, text=True, timeout=60)

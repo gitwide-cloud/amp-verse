@@ -104,6 +104,11 @@ final class PhoneLiveSession {
         }
     }
 
+    /** A bounded PCM/codec interruption requires a fresh current-time stream, never stale replay. */
+    synchronized void restartEncoder() throws IOException {
+        checkCancelled();if(state!=State.LIVE)throw new Rejected("Live sender cannot restart this owner");state=State.RECONNECTING;
+    }
+
     /** Caller restarts its encoder from current master PCM after a guarded resume. */
     synchronized void resume() throws IOException {
         checkCancelled();if(state!=State.RECONNECTING||token==null)throw new Rejected("No live owner can be resumed");

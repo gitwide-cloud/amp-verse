@@ -20,6 +20,8 @@ final class CastClient {
     static final class HostUnavailableException extends IOException {
         HostUnavailableException(String message,Throwable cause){super(message,cause);}
     }
+    interface LiveAuthorization {void accept(String base,String password,String server,String station,String library);}
+    void withLiveAuthorization(LiveAuthorization action){action.accept(base,password,serverId,stationId,libraryId);}
     interface PlaylistAuthorization {void accept(String base,String password,String server,String library);}
     void withPrivateAuthorization(PlaylistAuthorization action){action.accept(base,password,serverId,libraryId);}
     boolean hasPassword(){return !password.isEmpty();}
@@ -61,7 +63,7 @@ final class CastClient {
     void playPlaylist(String id)throws Exception { if(id==null||id.isEmpty()||id.length()>512)throw new IOException("Invalid playlist"); request("/api/smart/playlists/"+android.net.Uri.encode(id)+"/play",true); }
     String protection(){String active=ProtectedCastSource.status(serverId,stationId);String adaptive=StationAudioStatus.get(serverId,stationId);if(adaptiveAudio)return adaptive.isEmpty()?"Adaptive AAC · automatic quality":adaptive;return protectedAudio?(active.isEmpty()?"Phone recovery buffer ready":active):"Legacy stream · update server for recovery protection";}
     String stream(){return base+"/listen.mp3";}
-    String phoneStream(){if(adaptiveAudio)return base+"/api/audio/hls/master.m3u8?server="+android.net.Uri.encode(serverId)+"&station="+android.net.Uri.encode(stationId);return protectedAudio?base+"/amp-protected.mp3?server="+android.net.Uri.encode(serverId)+"&station="+android.net.Uri.encode(stationId):stream();}
+    String phoneStream(){if(adaptiveAudio)return base+"/api/audio/hls/master.m3u8?server="+android.net.Uri.encode(serverId)+"&station="+android.net.Uri.encode(stationId);return protectedAudio?base+"/amp-protected.mp3?server="+android.net.Uri.encode(serverId)+"&station="+android.net.Uri.encode(stationId):stream()+"?amp_receiver=1&server="+android.net.Uri.encode(serverId)+"&station="+android.net.Uri.encode(stationId);}
     void download(int id,java.io.File file,long expected,String checksum)throws Exception {
         download(id,file,expected,checksum,()->false);
     }

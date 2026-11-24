@@ -9,7 +9,15 @@ final class OwnedAudioOutput implements AutoCloseable, OwnedPcmOutput {
   final OwnedPcmMixer mixer = new OwnedPcmMixer();
   private volatile long presentedFrames;
   private volatile IOException failure;
-  private volatile boolean closed, suppressed;
+  private volatile boolean closed, suppressed, unsupported;
+
+  void disqualify() {
+    unsupported = true;
+  }
+
+  boolean ready() {
+    return track != null && !closed && !unsupported && failure == null;
+  }
 
   void suppress(boolean value) {
     suppressed = value;

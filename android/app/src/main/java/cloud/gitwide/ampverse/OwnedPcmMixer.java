@@ -37,6 +37,7 @@ final class OwnedPcmMixer {
   long clippedSamples(){return clippedSamples;}
   void masterGain(float value){if(!Float.isFinite(value)||value<0||value>1)throw new IllegalArgumentException("Master gain must be zero to one");masterGain=value;}
   void fanout(MasterPcmQueue next){observedFanout=next;fanout=next;}
+  void detachFanout(MasterPcmQueue owned){if(fanout==owned)fanout=null;owned.close();}
   long rejectedFanoutFrames(){MasterPcmQueue queue=observedFanout;return queue==null?0:queue.rejectedFrames();}
   private synchronized void remove(Voice voice){
     voice.closed=true;voice.active=false;
