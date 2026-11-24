@@ -131,12 +131,10 @@ impl Player {
         let compact_wave_captions = native_height < 760.;
         let wave_id = egui::Id::unique("dj-wave-height");
         let mut wave_height = if self.rack.six {
-            if compact {
+            if compact || !self.rack.expanded {
                 24.
-            } else if self.rack.expanded {
-                38.
             } else {
-                30.
+                38.
             }
         } else {
             ui.ctx()
@@ -351,7 +349,7 @@ impl Player {
         };
         let library_id = egui::Id::unique("dj-library-height");
         let minimum_library = if self.rack.six {
-            180.
+            220.
         } else if compact {
             112.
         } else {
@@ -374,7 +372,7 @@ impl Player {
             - if self.dj_library_hidden {
                 40.
             } else {
-                library_height + if self.rack.six { 60. } else { 52. }
+                library_height + if self.rack.six { 64. } else { 52. }
             })
         .max(minimum_rack)
         .min(if self.rack.six {
@@ -559,7 +557,16 @@ impl Player {
                 ui.ctx()
                     .data_mut(|data| data.insert_temp(egui::Id::unique("rack-library-top"), top.y));
             }
-            self.dj_library_ui(ui);
+            if self.rack.six {
+                ui.push_id("six-deck-compact-browser", |ui| {
+                    ui.spacing_mut().button_padding.y = 2.;
+                    ui.spacing_mut().interact_size.y = 24.;
+                    ui.spacing_mut().item_spacing.y = 3.;
+                    self.dj_library_ui(ui);
+                });
+            } else {
+                self.dj_library_ui(ui);
+            }
             #[cfg(test)]
             ui.ctx().data_mut(|data| {
                 data.insert_temp(

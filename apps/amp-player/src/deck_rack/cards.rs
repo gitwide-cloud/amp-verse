@@ -172,7 +172,8 @@ impl Player {
         let width = (ui.available_width() - 24.).max(640.);
         let center = 94.;
         let main = (width - center - gap * 2.) / 2.;
-        let row = ((height - gap * 2.) / 3.).max(210.);
+        let row_gap = 4.;
+        let row = ((height - row_gap * 2.) / 3.).max(190.);
         ui.spacing_mut().item_spacing.x = gap;
         ui.horizontal_top(|ui| {
             // Stable identities: A1/A2/A3 left; B1/B2/B3 right. No deck is
@@ -190,7 +191,7 @@ impl Player {
                             .max_height(height)
                             .auto_shrink([false, false])
                             .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = gap;
+                                ui.spacing_mut().item_spacing.y = row_gap;
                                 for deck in (side..6).step_by(2) {
                                     ui.push_id(("six-full-deck", deck), |ui| {
                                         self.card_main_deck(ui, deck, main - 10., row)
@@ -658,12 +659,12 @@ impl Player {
             egui::Layout::top_down(egui::Align::Min),
             |ui| {
                 panel(ui, Some(accent(d)))
-                    .inner_margin(egui::Margin::symmetric(8, 4))
+                    .inner_margin(egui::Margin::symmetric(8, 2))
                     .show(ui, |ui| {
                         let content = (width - 19.).max(240.);
                         ui.set_width(content);
                         ui.set_min_height((height - 11.).max(0.));
-                        ui.spacing_mut().item_spacing = egui::vec2(3., 3.);
+                        ui.spacing_mut().item_spacing = egui::vec2(3., 1.);
                         ui.spacing_mut().button_padding = egui::vec2(4., 2.);
                         ui.spacing_mut().interact_size.y = 20.;
                         ui.horizontal(|ui| {
@@ -1436,9 +1437,177 @@ mod tests {
         ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
     }
     #[test]
+    fn six_wide_manual_load_has_visible_selectable_browser_and_all_direct_decks() {
+        for appearance in [theme::Theme::Classic, theme::Theme::ModernDark] {
+            for workspace in [false, true] {
+                let root = tempfile::tempdir().unwrap();
+                let mut library = amp_core::scan(root.path()).unwrap();
+                let path = std::path::PathBuf::from("missing-browser-fixture.wav");
+                library.tracks.push(amp_core::Track {
+                    path: path.clone(),
+                    title: "QA Selectable Browser Song".into(),
+                    preparation: Default::default(),
+                });
+                let ctx = egui::Context::default();
+                crate::skin::configure(&ctx);
+                theme::apply(&ctx, appearance);
+                let mut player = Player {
+                    root: root.path().into(),
+                    library: Some(library),
+                    rack: Rack {
+                        six: true,
+                        ..Default::default()
+                    },
+                    workspace: crate::workspace::Workspace {
+                        enabled: workspace,
+                        pane: 2,
+                        rendering: false,
+                    },
+                    ..Default::default()
+                };
+                let settings = amp_core::show::Settings::default();
+                player.show_editor.new_playlist(&player.root, &settings);
+                let drafts = serde_json::to_value(player.show_editor.playlists(&settings)).unwrap();
+                let loaded = player.loaded;
+                let live = player.rack.live;
+                let gains = player.channel_gain;
+                let ratios = player.rack.strip_ratios;
+                let mut point = egui::Pos2::ZERO;
+                let mut row_bounds = egui::Rect::NOTHING;
+                let window = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 1100.));
+                for frame in 0..6 {
+                    let events = match frame {
+                        2 => vec![
+                            egui::Event::PointerMoved(point),
+                            egui::Event::PointerButton {
+                                pos: point,
+                                button: egui::PointerButton::Primary,
+                                pressed: true,
+                                modifiers: Default::default(),
+                            },
+                        ],
+                        3 => vec![egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed: false,
+                            modifiers: Default::default(),
+                        }],
+                        _ => vec![],
+                    };
+                    let mut output = ctx.run_ui(
+                        egui::RawInput {
+                            screen_rect: Some(window),
+                            events,
+                            time: Some(frame as f64 / 30.),
+                            ..Default::default()
+                        },
+                        |ui| {
+                            if workspace {
+                                player.workspace_ui(ui);
+                            } else {
+                                player.group_ui(ui, 2);
+                            }
+                        },
+                    );
+                    output.textures_delta.clear();
+                    let (row, layer) = ctx
+                        .data(|d| {
+                            d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique(
+                                "dj-browser-first-track",
+                            ))
+                        })
+                        .expect("One fixture track must render in the actual browser");
+                    let row = ctx.layer_transform_to_global(layer).unwrap_or_default() * row;
+                    point = row.center();
+                    row_bounds = row;
+                    assert!(
+                        row.height() >= 27. && window.expand(1.).contains_rect(row),
+                        "First selectable browser row must be complete without scrolling workspace={workspace}: {row:?}, viewport{window:?}, bankA{:?}, bankB{:?}",
+                        screen_rect(&ctx, "six-bank-viewport", 0),
+                        screen_rect(&ctx, "six-bank-viewport", 1)
+                    );
+                }
+                for deck in 0..6 {
+                    let bank = screen_rect(&ctx, "six-bank-viewport", deck % 2);
+                    let card = screen_rect(&ctx, "rack-main-extent", deck);
+                    assert!(
+                        bank.expand(1.).contains_rect(card),
+                        "All six full cards must fit with selectable music workspace={workspace} deck{deck}: {card:?} bank{bank:?}, firstrow{row_bounds:?}, viewport{window:?}"
+                    );
+                    for name in ["deck-live-button", "deck-load-button"] {
+                        assert!(
+                            bank.expand(1.).contains_rect(screen_rect(&ctx, name, deck)),
+                            "{name}/{deck} must be initially visible"
+                        );
+                    }
+                    let play = ctx
+                        .data(|d| {
+                            d.get_temp::<egui::Rect>(egui::Id::unique(("rack-main-play", deck)))
+                        })
+                        .unwrap();
+                    assert!(
+                        play.height() >= 37. && bank.expand(1.).contains_rect(play),
+                        "Full-size PLAY{deck} must remain visible"
+                    );
+                    let (_, layer) = ctx
+                        .data(|d| {
+                            d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
+                                "rack-main-extent",
+                                deck,
+                            )))
+                        })
+                        .unwrap();
+                    let transform = ctx.layer_transform_to_global(layer).unwrap_or_default();
+                    for stem in 0usize..3 {
+                        let target = ctx
+                            .data(|d| {
+                                d.get_temp::<egui::Rect>(egui::Id::unique((
+                                    "card-stem-knob",
+                                    deck,
+                                    stem,
+                                )))
+                            })
+                            .unwrap();
+                        let target = transform * target;
+                        assert!(
+                            target.width() >= 32.
+                                && target.height() >= 32.
+                                && bank.expand(1.).contains_rect(target),
+                            "Real32pxstem{stem}/{deck} must fit with browser row: {target:?} bank{bank:?}"
+                        );
+                    }
+                }
+                assert_eq!(player.library.as_ref().unwrap().tracks.len(), 1);
+                assert_eq!(
+                    player
+                        .selected
+                        .and_then(|index| player.library.as_ref()?.tracks.get(index))
+                        .map(|track| &track.path),
+                    Some(&path),
+                    "Visible row click must select the actual song"
+                );
+                assert_eq!(player.selected, Some(0));
+                assert_eq!(player.loaded, loaded);
+                assert_eq!(player.rack.live, live);
+                assert_eq!(player.channel_gain, gains);
+                assert_eq!(player.rack.strip_ratios, ratios);
+                assert!(player.audio.is_none());
+                assert!(player.show_editor.has_unsaved());
+                assert_eq!(
+                    serde_json::to_value(player.show_editor.playlists(&settings)).unwrap(),
+                    drafts
+                );
+            }
+        }
+    }
+    #[test]
     fn all_six_live_load_play_targets_are_initially_visible_in_wide_workspace() {
         for appearance in [theme::Theme::Classic, theme::Theme::ModernDark] {
-            for size in [egui::vec2(1280., 1100.), egui::vec2(1570., 1000.)] {
+            for (size, workspace) in [
+                (egui::vec2(1280., 1100.), false),
+                (egui::vec2(1570., 1000.), false),
+                (egui::vec2(1570., 1000.), true),
+            ] {
                 let ctx = egui::Context::default();
                 crate::skin::configure(&ctx);
                 theme::apply(&ctx, appearance);
@@ -1448,6 +1617,11 @@ mod tests {
                     rack: Rack {
                         six: true,
                         ..Default::default()
+                    },
+                    workspace: crate::workspace::Workspace {
+                        enabled: workspace,
+                        pane: 2,
+                        rendering: false,
                     },
                     ..Default::default()
                 };
@@ -1471,7 +1645,13 @@ mod tests {
                             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                             ..Default::default()
                         },
-                        |ui| player.group_ui(ui, 2),
+                        |ui| {
+                            if workspace {
+                                player.workspace_ui(ui);
+                            } else {
+                                player.group_ui(ui, 2);
+                            }
+                        },
                     );
                     output.textures_delta.clear();
                 }
