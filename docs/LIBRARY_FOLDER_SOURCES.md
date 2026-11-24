@@ -26,7 +26,7 @@ This cache is for the visible DJ song table. Auto DJ still performs its existing
 
 ## All music as a Smart Playlist source
 
-New Smart Playlists start with all indexed music as their source. Genre and analysis filters then narrow that pool. The source editor has a visible **Use all indexed music** button, which preserves those filters and existing song exclusions. Selecting folders or importing playlists still creates a narrower source explicitly. Existing saved source restrictions are retained on upgrade.
+New Smart Playlists start with all indexed music as their source. Genre and analysis filters then narrow that pool. Choose **Add Music Source → Use entire library** to select all indexed music while preserving those filters and existing song exclusions. Folder browsing and imported/existing playlists are available from the same Add Music Source menu. Selecting folders or importing playlists still creates a narrower source explicitly. Existing saved source restrictions are retained on upgrade.
 
 An empty selected-folder source deliberately matches no songs. The editor now explains this beside the source controls and offers the all-music choice; it does not treat the indexed-library count as a selected source. Save Playlist publishes the chosen source and filters to DJ. Refresh playlists reads the saved rules without reanalyzing audio.
 

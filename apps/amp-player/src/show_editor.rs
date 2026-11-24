@@ -321,23 +321,26 @@ impl Editor {
                 let source = source_summary(p);
                 ui.add(egui::Label::new(format!("{} — {}", source, count.map_or("waiting for library scan".into(), |count|format!("{count} songs")))).wrap());
                 ui.add_enabled_ui(!p.source_unavailable, |ui| {
-                if ui.button("Use all indexed music").on_hover_text("Use all connected music sources; keep genre and analysis filters").clicked() && confirm_source_change(p) {
-                    set_source_mode(p,SourceMode::All);
-                    self.status="All indexed music selected. Genre and analysis filters kept. Save Playlist to apply.".into();
-                }
                 if p.restrict_folders && p.folders.is_empty() && p.playlist_sources.is_empty() {
-                    ui.colored_label(crate::ORANGE,"Choose all indexed music or add a folder below. Genre filters cannot match without a source.");
+                    ui.colored_label(crate::ORANGE,"Choose the entire library or a folder through Add Music Source. Genre filters cannot match without a source.");
                 }
                 if let Some(lib)=library {
                     ui.label(format!("Indexed library: {} · {} songs",root.display(),lib.tracks.len()));
-                    if let Some(relative)=library_folder_picker(ui,&lib.tree,p.folders.first()){
+                }
+                ui.menu_button("Add Music Source", |ui| {
+                    if ui.button("Use entire library").on_hover_text("Use all connected music sources; keep genre and analysis filters").clicked() && confirm_source_change(p) {
+                        set_source_mode(p,SourceMode::All);
+                        self.source_labels.remove(&p.id);
+                        self.refresh_sources=true;
+                        self.status="Entire library selected. Genre and analysis filters kept. Save Playlist to apply.".into();
+                        ui.close();
+                    }
+                    if let Some(lib)=library && let Some(relative)=library_folder_picker(ui,&lib.tree,p.folders.first()){
                         add_indexed_folder(p,relative.clone());
                         self.refresh_sources=true;
                         self.source_labels.insert(p.id.clone(),format!("Folder: {}",amp_core::music_sources::audio_path(root,&relative).display()));
                         self.status="Folder added with all subfolders. Existing sources kept. Save Playlist to apply.".into();
                     }
-                }
-                ui.menu_button("Add Music Source", |ui| {
                     if ui.button("Select Folder...").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().set_directory(root).pick_folder() {
                             let mut selected=p.clone();
@@ -374,8 +377,6 @@ impl Editor {
                             }
                         }
                     });
-                    ui.separator();
-                    if ui.button("Use entire library").clicked() && confirm_source_change(p) { set_source_mode(p,SourceMode::All); self.source_labels.remove(&p.id); ui.close(); }
                 });
                 });
                 let mut remove_folder=None;
