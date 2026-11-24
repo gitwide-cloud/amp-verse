@@ -1018,7 +1018,11 @@ mod tests {
         player.run.playlist = Some(current.id.clone());
         player.run.profile = Some(current.clone());
         player.run.auto = true;
-        player.dj_browser.smart = player.run.settings.playlists[1].id.clone();
+        let mut rejected = current.clone();
+        rejected.id = "empty-source".into();
+        rejected.name = "Empty source".into();
+        player.dj_browser.smart = rejected.id.clone();
+        player.run.settings.playlists.push(rejected);
 
         player.use_browser_smart_source();
 
