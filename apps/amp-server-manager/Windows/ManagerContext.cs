@@ -59,7 +59,7 @@ internal sealed class ManagerContext : ApplicationContext
     private async void OpenWindow()
     {
         if (window is not null) { window.Show(); window.Activate(); return; }
-        var form = new Form { Text = "AMP Verse Server — close window to keep playback running", Width = 1150, Height = 800, MinimumSize = new Size(640, 480) };
+        var form = new Form { Text = "AMP Verse Server — server playback continues after closing", Width = 1150, Height = 800, MinimumSize = new Size(640, 480) };
         var browser = new WebView2 { Dock = DockStyle.Fill };
         form.Controls.Add(browser);
         window = form;
@@ -80,7 +80,11 @@ internal sealed class ManagerContext : ApplicationContext
             };
             browser.CoreWebView2.NewWindowRequested += (_, e) => e.Handled = true;
             browser.CoreWebView2.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
-            browser.CoreWebView2.Navigate(profile.WebUrl);
+            var studio = new UriBuilder(origin) {
+                Query = string.Join("&", new[] { "amp_output=server", origin.Query.TrimStart('?') }
+                    .Where(value => value.Length != 0))
+            };
+            browser.CoreWebView2.Navigate(studio.Uri.AbsoluteUri);
         } catch (Exception e) {
             if (!form.IsDisposed) {
                 browser.Dispose();

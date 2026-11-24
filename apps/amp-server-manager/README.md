@@ -5,6 +5,10 @@ server remains headless and works without this app, .NET or WebView2. Closing a
 window or exiting the tray never stops amp-cast or its receiver sessions.
 
 The GUI is a WinForms tray plus the existing server web UI in Microsoft WebView2.
+On a compatible server, the embedded window defaults to **Server speakers**.
+Playback through the server or a server-owned Cast receiver continues after
+closing the window. Choose **This device** for browser audio, which ends when
+the window closes.
 Publish self-contained .NET files for Windows x64; Microsoft Edge WebView2 Runtime
 must be installed separately. Missing WebView2 shows an error without touching the
 server. No runtime download, firewall mutation or service registration is implicit.
