@@ -97,3 +97,9 @@ The pure-Java `OwnedPcmMixer` is the proposed common output seam for Player, DJ 
 Ten targeted JUnit tests currently pass on a checksum-verified Temurin 17 toolchain with a 128 MiB Java heap. They cover ownership/cue exclusion, crossfade and scratch precedence, identical local/encoder frames, network backpressure failure, stale decoder generations, pause/seek/EOS, underflow, capacity bounds, discontinuity rejection and stale presentation clocks.
 
 This core is not yet wired into Media3, SoundPool replacement or the existing scratch output, and does not by itself enable phone broadcasting. Full-master acceptance still requires those sources to share the owned render clock, the real MP3/HTTP ingestion path, Android build checks and device playback/latency evidence. No phone or physical speaker pass is claimed.
+
+### Owned master and sender core evidence (2026-11-23)
+
+The pure Java master now uses bounded SPSC rings; render never takes the control, decoder or encoder monitor and calls no external callback. A stalled consumer regression holds all three monitors while local render completes. The render output and exported encoder-input frames are identical after ownership, gain, crossfade, scratch substitution and sampler summing. Hard saturation is explicitly observable with a clipping counter; applications must provide headroom, rather than claiming a transparent limiter.
+
+The identity-bound live sender and HTTP adapter use the existing sequenced MP3 contract: bounded packets, exact lost-ack retries, guarded resume, cancellation and owner-conflict rejection. The 23 pure Java tests passed with a 128 MiB heap. These components are not yet wired into Media3, SoundPool or the scratch output; this is not Android playback or real-device broadcast acceptance.

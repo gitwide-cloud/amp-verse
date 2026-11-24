@@ -71,8 +71,8 @@ public final class OwnedPcmMixerTest {
         short[] out=new short[4];mixer.render(out,2);
         assertArrayEquals(tone(2,700),out);assertEquals(2,mixer.rejectedFanoutFrames());
         mixer.render(out,2);assertArrayEquals(tone(2,700),out);assertEquals(0,queue.frames());
-        mixer.fanout((pcm,frames,at)->{throw new IllegalStateException("Disconnected export");});
-        mixer.render(out,2);assertArrayEquals(tone(2,700),out);assertEquals(2,mixer.rejectedFanoutFrames());
+        queue.close(); mixer.fanout(queue);
+        mixer.render(out,2);assertArrayEquals(tone(2,700),out);assertEquals(4,mixer.rejectedFanoutFrames());
     }
 
     @Test public void queueBackpressureAndSeekGenerationCannotReuseOldDecoderWork() {
@@ -124,6 +124,37 @@ public final class OwnedPcmMixerTest {
         OwnedPcmMixer mixer=new OwnedPcmMixer();OwnedPcmMixer.Voice voice=mixer.voice(OwnedPcmMixer.Source.PLAYER);
         fill(voice,140,100);short[] out=new short[2];for(int i=0;i<140;i++)mixer.render(out,1);
         assertEquals(-1,voice.positionFrames(1));assertEquals(140,voice.positionFrames(140));
+    }
+
+
+    @Test public void stalledConsumerMonitorCannotBlockRender() throws Exception {
+        OwnedPcmMixer mixer=new OwnedPcmMixer();
+        OwnedPcmMixer.Voice voice=mixer.voice(OwnedPcmMixer.Source.PLAYER);
+        fill(voice,8,400); MasterPcmQueue queue=new MasterPcmQueue(8);mixer.fanout(queue);
+        java.util.concurrent.CountDownLatch locked=new java.util.concurrent.CountDownLatch(1),release=new java.util.concurrent.CountDownLatch(1);
+        Thread stalled=new Thread(()->{synchronized(queue){synchronized(mixer){synchronized(voice){locked.countDown();try{release.await();}catch(InterruptedException e){Thread.currentThread().interrupt();}}}}});
+        stalled.start();assertTrue(locked.await(2,java.util.concurrent.TimeUnit.SECONDS));
+        java.util.concurrent.FutureTask<short[]> render=new java.util.concurrent.FutureTask<>(()->{short[] out=new short[8];mixer.render(out,4);return out;});
+        Thread thread=new Thread(render);thread.start();
+        try{assertArrayEquals(tone(4,400),render.get(1,java.util.concurrent.TimeUnit.SECONDS));}finally{release.countDown();stalled.join(2000);thread.join(2000);}
+    }
+    @Test public void headroomPolicyMakesSaturationObservable() {
+        OwnedPcmMixer mixer=new OwnedPcmMixer();mixer.owner(OwnedPcmMixer.Owner.DJ);
+        fill(mixer.voice(OwnedPcmMixer.Source.DECK_A),4,25000);
+        fill(mixer.voice(OwnedPcmMixer.Source.DECK_B),4,25000);
+        short[] out=new short[4];mixer.render(out,2);
+        assertArrayEquals(tone(2,32767),out);assertEquals(4,mixer.clippedSamples());
+        mixer.masterGain(.5f);MasterPcmQueue queue=new MasterPcmQueue(4);mixer.fanout(queue);mixer.render(out,2);
+        assertArrayEquals(tone(2,25000),out);assertEquals(4,mixer.clippedSamples());
+        short[] network=new short[4];assertEquals(2,queue.read(network,2));assertArrayEquals(out,network);
+    }
+    @Test public void spscRingPreservesSamplesUnderConcurrentPressure() throws Exception {
+        MasterPcmQueue queue=new MasterPcmQueue(31);
+        java.util.concurrent.atomic.AtomicReference<Throwable> error=new java.util.concurrent.atomic.AtomicReference<>();
+        Thread producer=new Thread(()->{try{for(int i=0;i<10000;i++){short[] sample={(short)i,(short)-i};while(!queue.offer(sample,1,i))Thread.yield();}}catch(Throwable t){error.set(t);}});
+        producer.start();short[] sample=new short[2];long deadline=System.nanoTime()+java.util.concurrent.TimeUnit.SECONDS.toNanos(3);
+        for(int i=0;i<10000;i++){while(queue.read(sample,1)==0){if(System.nanoTime()>deadline)fail("Ring stopped progressing");Thread.yield();}assertEquals((short)i,sample[0]);assertEquals((short)-i,sample[1]);}
+        producer.join(2000);assertFalse(producer.isAlive());assertNull(error.get());assertEquals(0,queue.frames());
     }
 
     public static void main(String[] args) { org.junit.runner.JUnitCore.main(OwnedPcmMixerTest.class.getName()); }

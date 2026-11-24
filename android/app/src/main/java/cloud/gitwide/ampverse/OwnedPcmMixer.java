@@ -1,239 +1,127 @@
 package cloud.gitwide.ampverse;
 
 import java.util.Arrays;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * The phone's owned master, before both local output and broadcast encoding.
- *
- * All input is interleaved, signed 16-bit, stereo PCM at 48 kHz. Decoder adapters
- * resample before admission. Cue outputs are deliberately not master sources.
- * No decoder, encoder, network operation or disk access runs in render().
+ * Owned 48 kHz stereo master. One render thread consumes SPSC voice rings;
+ * render never acquires a UI/decoder/encoder monitor or invokes external code.
+ * Final hard saturation is a safety guard, not a transparent limiter: callers
+ * supply headroom and clippedSamples exposes overload.
  */
 final class OwnedPcmMixer {
-    static final int RATE = 48000;
-    static final int CHANNELS = 2;
-    static final int MAX_VOICES = 24;
-    static final int MAX_RENDER_FRAMES = 1920;
-    static final int DEFAULT_QUEUE_FRAMES = RATE / 2;
-    private static final int MARKERS = 128;
+  static final int RATE=48000, CHANNELS=2, MAX_VOICES=24;
+  static final int MAX_RENDER_FRAMES=1920, DEFAULT_QUEUE_FRAMES=RATE/2;
+  private static final int MARKERS=128;
+  enum Owner { PLAYER,DJ }
+  enum Source { PLAYER,DECK_A,DECK_B,SCRATCH_A,SCRATCH_B,SAMPLER,PRIVATE_CUE }
+  private final Voice[] registered=new Voice[MAX_VOICES];
+  private volatile Voice[] voices=registered.clone();
+  private final float[] sum=new float[MAX_RENDER_FRAMES*CHANNELS];
+  private volatile Owner owner=Owner.PLAYER;
+  private volatile MasterPcmQueue fanout,observedFanout;
+  private volatile long frame,clippedSamples;
+  private volatile float masterGain=1f;
 
-    enum Owner { PLAYER, DJ }
-    enum Source { PLAYER, DECK_A, DECK_B, SCRATCH_A, SCRATCH_B, SAMPLER, PRIVATE_CUE }
-    interface Fanout {
-        /** Non-blocking; copies the samples it retains before returning. */
-        boolean offer(short[] pcm, int frames, long masterFrame);
+  Voice voice(Source source){return voice(source,DEFAULT_QUEUE_FRAMES);}
+  /** Registration runs on a control thread, never the render callback. */
+  synchronized Voice voice(Source source,int capacity){
+    if(source==null||source==Source.PRIVATE_CUE)throw new IllegalArgumentException("Private cue never enters master");
+    if(capacity<1||capacity>RATE)throw new IllegalArgumentException("PCM queue bounded to one second");
+    for(int i=0;i<registered.length;i++)if(registered[i]==null){Voice result=new Voice(this,source,capacity);registered[i]=result;voices=registered.clone();return result;}
+    throw new IllegalStateException("Master voice limit reached");
+  }
+  void owner(Owner next){if(next==null)throw new IllegalArgumentException("Owner required");owner=next;}
+  Owner owner(){return owner;}
+  long frames(){return frame;}
+  long clippedSamples(){return clippedSamples;}
+  void masterGain(float value){if(!Float.isFinite(value)||value<0||value>1)throw new IllegalArgumentException("Master gain must be zero to one");masterGain=value;}
+  void fanout(MasterPcmQueue next){observedFanout=next;fanout=next;}
+  long rejectedFanoutFrames(){MasterPcmQueue queue=observedFanout;return queue==null?0:queue.rejectedFrames();}
+  private synchronized void remove(Voice voice){
+    voice.closed=true;voice.active=false;
+    for(int i=0;i<registered.length;i++)if(registered[i]==voice){registered[i]=null;voices=registered.clone();return;}
+  }
+
+  /** Bounded copies/arithmetic only. Exactly one caller owns the render clock. */
+  void render(short[] output,int frames){
+    if(frames<0||frames>MAX_RENDER_FRAMES||output.length<frames*CHANNELS)throw new IllegalArgumentException("Invalid master block");
+    Arrays.fill(sum,0,frames*CHANNELS,0f);
+    Voice[] snapshot=voices;Owner selected=owner;long start=frame;
+    boolean scratchA=active(snapshot,Source.SCRATCH_A,selected),scratchB=active(snapshot,Source.SCRATCH_B,selected);
+    for(Voice voice:snapshot){
+      if(voice==null||voice.closed||!voice.active||!permitted(voice.source,selected))continue;
+      if((voice.source==Source.DECK_A&&scratchA)||(voice.source==Source.DECK_B&&scratchB))continue;
+      Buffer b=voice.buffer;long read=b.read,write=b.write;int count=(int)Math.min(frames,write-read);float gain=voice.gain;long mediaStart=b.consumed;
+      for(int i=0;i<count;i++){int at=(int)((read+i)%b.capacity)*2;sum[i*2]+=b.pcm[at]*gain;sum[i*2+1]+=b.pcm[at+1]*gain;}
+      b.consumed+=count;if(count>0)b.marker(start,mediaStart,count);b.read=read+count;
     }
+    float gain=masterGain;long clipped=clippedSamples;
+    for(int i=0;i<frames*2;i++){float value=sum[i]*gain;if(value>Short.MAX_VALUE||value<Short.MIN_VALUE)clipped++;output[i]=(short)Math.max(Short.MIN_VALUE,Math.min(Short.MAX_VALUE,Math.round(value)));}
+    clippedSamples=clipped;
+    MasterPcmQueue queue=fanout;
+    if(queue!=null&&frames>0&&!queue.offer(output,frames,start)){queue.reject(frames);if(fanout==queue)fanout=null;}
+    frame=start+frames;
+  }
+  private static boolean active(Voice[] voices,Source source,Owner owner){
+    if(owner!=Owner.DJ)return false;
+    for(Voice v:voices)if(v!=null&&!v.closed&&v.source==source&&v.active)return true;
+    return false;
+  }
+  private static boolean permitted(Source source,Owner owner){return owner==Owner.PLAYER?source==Source.PLAYER:source!=Source.PLAYER;}
 
-    private final Voice[] voices = new Voice[MAX_VOICES];
-    private final float[] sum = new float[MAX_RENDER_FRAMES * CHANNELS];
-    private Owner owner = Owner.PLAYER;
-    private Fanout fanout;
-    private long frame;
-    private long rejectedFanoutFrames;
+  static final class Voice {
+    private final OwnedPcmMixer mixer;
+    final Source source;
+    private final int capacity;
+    private final AtomicLong epoch=new AtomicLong(1);
+    private volatile Buffer buffer;
+    private volatile float gain=1;
+    private volatile boolean active,closed;
+    private Voice(OwnedPcmMixer mixer,Source source,int capacity){this.mixer=mixer;this.source=source;this.capacity=capacity;buffer=new Buffer(capacity,1,mixer.frame);}
+    long generation(){return buffer.generation;}
+    int queuedFrames(){Buffer b=buffer;long read=b.read;return (int)Math.max(0,Math.min(capacity,b.write-read));}
+    int writableFrames(){return closed?0:capacity-queuedFrames();}
+    void gain(float value){if(!Float.isFinite(value)||value<0||value>2)throw new IllegalArgumentException("Voice gain must be zero to two");gain=value;}
+    void play(){if(!closed)active=true;}
+    void pause(){active=false;}
+    void end(){buffer.ended=true;}
 
-    synchronized Voice voice(Source source) {
-        return voice(source, DEFAULT_QUEUE_FRAMES);
+    /** One producer per voice; partial writes provide decoder backpressure. */
+    int write(short[] input,int offsetFrames,int frames,long generation){
+      if(offsetFrames<0||frames<0||((long)offsetFrames+frames)*2>input.length)throw new IllegalArgumentException("Invalid PCM range");
+      Buffer b=buffer;if(closed||generation!=b.generation||b.ended)return 0;
+      long write=b.write,read=b.read;int accepted=(int)Math.min(frames,capacity-(write-read));
+      for(int i=0;i<accepted;i++){int at=(int)((write+i)%capacity)*2;b.pcm[at]=input[(offsetFrames+i)*2];b.pcm[at+1]=input[(offsetFrames+i)*2+1];}
+      if(closed||buffer!=b)return 0;b.write=write+accepted;return accepted;
     }
+    /** Control/decoder operation: a retired decoder cannot publish into the new ring. */
+    synchronized long flush(){long next=epoch.incrementAndGet();if(next<0)throw new IllegalStateException("PCM generation exhausted");buffer=new Buffer(capacity,next,mixer.frame);return next;}
+    void close(){mixer.remove(this);}
 
-    synchronized Voice voice(Source source, int capacityFrames) {
-        if (source == null || source == Source.PRIVATE_CUE) {
-            throw new IllegalArgumentException("Private cue never enters the master");
-        }
-        if (capacityFrames < 1 || capacityFrames > RATE) {
-            throw new IllegalArgumentException("PCM queue must be bounded to one second");
-        }
-        for (int i = 0; i < voices.length; i++) {
-            if (voices[i] == null) {
-                Voice voice = new Voice(this, source, capacityFrames);
-                voices[i] = voice;
-                return voice;
-            }
-        }
-        throw new IllegalStateException("Master voice limit reached");
+    /** -1 means no stable position snapshot is retained; never invent a seek to zero. */
+    long positionFrames(long presentedFrame){
+      Buffer b=buffer;long version=b.version.get();if((version&1)!=0)return -1;
+      int count=b.markerCount,next=b.markerNext,oldest=(next-count+MARKERS)%MARKERS;
+      if(count>0&&b.mediaStart[oldest]>0&&presentedFrame<b.outputStart[oldest])return -1;
+      long position=0;
+      for(int i=0;i<count;i++){int at=(oldest+i)%MARKERS;if(presentedFrame<b.outputStart[at])break;int elapsed=(int)Math.min(b.markerFrames[at],presentedFrame-b.outputStart[at]);position=b.mediaStart[at]+elapsed;if(elapsed<b.markerFrames[at])break;}
+      return buffer==b&&b.version.get()==version?position:-1;
     }
-
-    synchronized void owner(Owner next) {
-        if (next == null) throw new IllegalArgumentException("Owner required");
-        owner = next;
-    }
-
-    synchronized Owner owner() { return owner; }
-    synchronized long frames() { return frame; }
-    synchronized long rejectedFanoutFrames() { return rejectedFanoutFrames; }
-
-    /** One receiver/sender subscription; replacing it never changes local audio. */
-    synchronized void fanout(Fanout next) {
-        fanout = next;
-        rejectedFanoutFrames = 0;
-    }
-
-    synchronized void remove(Voice voice) {
-        for (int i = 0; i < voices.length; i++) {
-            if (voices[i] == voice) {
-                voice.closed = true;
-                voice.resetLocked();
-                voices[i] = null;
-                return;
-            }
-        }
-    }
-
-    /**
-     * Produces one master block. The very same samples go to local AudioTrack
-     * and the optional encoder subscription; rejection only disconnects export.
-     */
-    synchronized void render(short[] output, int frames) {
-        if (frames < 0 || frames > MAX_RENDER_FRAMES || output.length < frames * CHANNELS) {
-            throw new IllegalArgumentException("Invalid master block");
-        }
-        Arrays.fill(sum, 0, frames * CHANNELS, 0f);
-        boolean scratchA = active(Source.SCRATCH_A);
-        boolean scratchB = active(Source.SCRATCH_B);
-        for (Voice voice : voices) {
-            if (voice == null || !voice.active || !permitted(voice.source)) continue;
-            if ((voice.source == Source.DECK_A && scratchA)
-                    || (voice.source == Source.DECK_B && scratchB)) continue;
-            int count = Math.min(frames, voice.size);
-            long mediaStart = voice.consumed;
-            for (int i = 0; i < count; i++) {
-                int source = voice.read * CHANNELS;
-                sum[i * CHANNELS] += voice.pcm[source] * voice.gain;
-                sum[i * CHANNELS + 1] += voice.pcm[source + 1] * voice.gain;
-                voice.read = (voice.read + 1) % voice.capacity;
-            }
-            voice.size -= count;
-            voice.consumed += count;
-            if (count > 0) voice.marker(frame, mediaStart, count);
-        }
-        for (int i = 0; i < frames * CHANNELS; i++) {
-            output[i] = (short) Math.max(Short.MIN_VALUE, Math.min(Short.MAX_VALUE,
-                    Math.round(sum[i])));
-        }
-        if (fanout != null && frames > 0) {
-            boolean accepted;
-            try { accepted = fanout.offer(output, frames, frame); }
-            catch (RuntimeException error) { accepted = false; }
-            if (!accepted) {
-                rejectedFanoutFrames += frames;
-                // A congested network must never block or corrupt the local master.
-                fanout = null;
-            }
-        }
-        frame += frames;
-    }
-
-    private boolean active(Source source) {
-        if (owner != Owner.DJ) return false;
-        for (Voice voice : voices) {
-            if (voice != null && voice.source == source && voice.active) return true;
-        }
-        return false;
-    }
-
-    private boolean permitted(Source source) {
-        return owner == Owner.PLAYER ? source == Source.PLAYER : source != Source.PLAYER;
-    }
-
-    /** One generation per media load/seek; stale decoder work cannot enter it. */
-    static final class Voice {
-        private final OwnedPcmMixer mixer;
-        final Source source;
-        private final int capacity;
-        private final short[] pcm;
-        private final long[] outputStart = new long[MARKERS];
-        private final long[] mediaStart = new long[MARKERS];
-        private final int[] markerFrames = new int[MARKERS];
-        private int read, size, markerCount, markerNext;
-        private long generation = 1, consumed, lastOutputFrame;
-        private float gain = 1f;
-        private boolean active, ended, closed;
-
-        private Voice(OwnedPcmMixer mixer, Source source, int capacity) {
-            this.mixer = mixer;
-            this.source = source;
-            this.capacity = capacity;
-            pcm = new short[capacity * CHANNELS];
-        }
-
-        long generation() { synchronized (mixer) { return generation; } }
-        int queuedFrames() { synchronized (mixer) { return size; } }
-        int writableFrames() { synchronized (mixer) { return closed ? 0 : capacity - size; } }
-
-        void gain(float value) {
-            if (!Float.isFinite(value) || value < 0 || value > 2f) {
-                throw new IllegalArgumentException("Voice gain must be between zero and two");
-            }
-            synchronized (mixer) { gain = value; }
-        }
-
-        void play() { synchronized (mixer) { if (!closed) active = true; } }
-        void pause() { synchronized (mixer) { active = false; } }
-        void end() { synchronized (mixer) { ended = true; } }
-
-        /** Does not consume a partial frame or wait for the rendering thread. */
-        int write(short[] input, int offsetFrames, int frames, long epoch) {
-            if (offsetFrames < 0 || frames < 0
-                    || ((long) offsetFrames + frames) * CHANNELS > input.length) {
-                throw new IllegalArgumentException("Invalid PCM range");
-            }
-            synchronized (mixer) {
-                if (closed || epoch != generation || ended) return 0;
-                int accepted = Math.min(frames, capacity - size);
-                for (int i = 0; i < accepted; i++) {
-                    int at = ((read + size + i) % capacity) * CHANNELS;
-                    pcm[at] = input[(offsetFrames + i) * CHANNELS];
-                    pcm[at + 1] = input[(offsetFrames + i) * CHANNELS + 1];
-                }
-                size += accepted;
-                return accepted;
-            }
-        }
-
-        long flush() { synchronized (mixer) { return resetLocked(); } }
-        void close() { mixer.remove(this); }
-
-        private long resetLocked() {
-            if (generation == Long.MAX_VALUE) throw new IllegalStateException("PCM generation exhausted");
-            generation++;
-            read = size = markerCount = markerNext = 0;
-            consumed = 0;
-            lastOutputFrame = mixer.frame;
-            ended = false;
-            return generation;
-        }
-
-        private void marker(long output, long media, int count) {
-            outputStart[markerNext] = output;
-            mediaStart[markerNext] = media;
-            markerFrames[markerNext] = count;
-            markerNext = (markerNext + 1) % MARKERS;
-            markerCount = Math.min(MARKERS, markerCount + 1);
-            lastOutputFrame = output + count;
-        }
-
-        /** Media frames actually presented, including pauses and other voices. */
-        long positionFrames(long presentedMasterFrame) {
-            synchronized (mixer) {
-                long position = 0;
-                int oldest = (markerNext - markerCount + MARKERS) % MARKERS;
-                if (markerCount > 0 && mediaStart[oldest] > 0
-                        && presentedMasterFrame < outputStart[oldest]) return -1;
-                for (int i = 0; i < markerCount; i++) {
-                    int at = (oldest + i) % MARKERS;
-                    if (presentedMasterFrame < outputStart[at]) return position;
-                    int elapsed = (int) Math.min(markerFrames[at],
-                            presentedMasterFrame - outputStart[at]);
-                    position = mediaStart[at] + elapsed;
-                    if (elapsed < markerFrames[at]) return position;
-                }
-                return position;
-            }
-        }
-
-        boolean drained(long presentedMasterFrame) {
-            synchronized (mixer) {
-                return ended && size == 0 && presentedMasterFrame >= lastOutputFrame;
-            }
-        }
-    }
+    boolean drained(long presentedFrame){Buffer b=buffer;return b.ended&&b.read==b.write&&presentedFrame>=b.lastOutputFrame;}
+  }
+  private static final class Buffer {
+    final int capacity;
+    final long generation;
+    final short[] pcm;
+    volatile long read,write,lastOutputFrame;
+    volatile boolean ended;
+    long consumed;
+    int markerCount,markerNext;
+    final AtomicLong version=new AtomicLong();
+    final long[] outputStart=new long[MARKERS],mediaStart=new long[MARKERS];
+    final int[] markerFrames=new int[MARKERS];
+    Buffer(int capacity,long generation,long frame){this.capacity=capacity;this.generation=generation;lastOutputFrame=frame;pcm=new short[capacity*2];}
+    void marker(long output,long media,int count){version.incrementAndGet();outputStart[markerNext]=output;mediaStart[markerNext]=media;markerFrames[markerNext]=count;markerNext=(markerNext+1)%MARKERS;markerCount=Math.min(MARKERS,markerCount+1);lastOutputFrame=output+count;version.incrementAndGet();}
+  }
 }
