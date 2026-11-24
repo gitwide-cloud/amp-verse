@@ -838,12 +838,20 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
         egui::vec2(160., 26.),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
+            let caption = |ui: &mut egui::Ui| {
+                let response = ui.add(
+                    egui::Label::new(label)
+                        .selectable(false)
+                        .sense(egui::Sense::click()),
+                );
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::unique(("switch-caption", label)), response.rect)
+                });
+                response.clicked()
+            };
             let label_first = label == "Auto Mix";
-            if label_first
-                && ui
-                    .add(egui::Label::new(label).sense(egui::Sense::click()))
-                    .clicked()
-            {
+            if label_first && caption(ui) {
                 *value = !*value;
             }
             let (rect, response) =
@@ -874,11 +882,7 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
                 9.,
                 C::WHITE,
             );
-            if !label_first
-                && ui
-                    .add(egui::Label::new(label).sense(egui::Sense::click()))
-                    .clicked()
-            {
+            if !label_first && caption(ui) {
                 *value = !*value;
             }
         },
