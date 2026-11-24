@@ -1066,7 +1066,7 @@ mod tests {
         assert_eq!(player.rack.live, previous_pair);
         assert_eq!(
             player.status,
-            "EDM selected for Auto Mix (1 matching tracks). Turn Auto Mix ON to load and play its songs."
+            "EDM selected for Auto Mix (1 matching track). Turn Auto Mix ON to load and play its songs."
         );
     }
 

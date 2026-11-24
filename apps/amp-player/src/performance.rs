@@ -1819,13 +1819,17 @@ impl Player {
                 if execution == Execution::LoadOnly {
                     self.status = if self.run.auto {
                         format!(
-                            "{} selected for Auto Mix ({} matching tracks). Upcoming songs use this source; current decks keep their songs.",
-                            p.name, matching_tracks
+                            "{} selected for Auto Mix ({} matching track{}). Upcoming songs use this source; current decks keep their songs.",
+                            p.name,
+                            matching_tracks,
+                            if matching_tracks == 1 { "" } else { "s" }
                         )
                     } else {
                         format!(
-                            "{} selected for Auto Mix ({} matching tracks). Turn Auto Mix ON to load and play its songs.",
-                            p.name, matching_tracks
+                            "{} selected for Auto Mix ({} matching track{}). Turn Auto Mix ON to load and play its songs.",
+                            p.name,
+                            matching_tracks,
+                            if matching_tracks == 1 { "" } else { "s" }
                         )
                     };
                 }
@@ -4089,7 +4093,7 @@ mod tests {
         assert!(player.audio.is_none());
         assert_eq!(
             player.status,
-            "Intended playlist selected for Auto Mix (1 matching tracks). Turn Auto Mix ON to load and play its songs."
+            "Intended playlist selected for Auto Mix (1 matching track). Turn Auto Mix ON to load and play its songs."
         );
     }
     #[test]
