@@ -69,7 +69,7 @@ jobs:
           adb shell am force-stop com.google.android.apps.nexuslauncher
           sleep 10
           set +e
-          gradle -p android :app:connectedFullDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=cloud.gitwide.ampverse.CardUiDeviceTest,cloud.gitwide.ampverse.CleanUiDeviceTest
+          gradle -p android :app:connectedFullDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=cloud.gitwide.ampverse.CardUiDeviceTest,cloud.gitwide.ampverse.CleanUiDeviceTest,cloud.gitwide.ampverse.RadioOfflineTest,cloud.gitwide.ampverse.IncrementalSyncDeviceTest
           result=$?
           mkdir -p test-output/android-card-ui
           adb logcat -d > test-output/android-card-ui/logcat.txt

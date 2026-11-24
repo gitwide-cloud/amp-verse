@@ -10,6 +10,8 @@ pub fn routes() -> Router<Arc<Cast>> {
         .route("/api/smart/enable", post(enable))
         .route("/api/smart/manifest", get(manifest))
         .route("/api/smart/tracks/{id}/metadata", get(metadata))
+        .route("/api/smart/tracks/{id}/basic", get(basic_metadata))
+        .route("/api/smart/tracks/{id}/preparation", get(metadata))
         .route("/api/smart/tracks/{id}/audio", get(audio))
         .route("/api/smart/playlists/{id}/play", post(play))
 }
@@ -236,6 +238,50 @@ async fn manifest(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response
         _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
+// Basic playback has no dependency on a preparation record, its revision or schema.
+// Tags come from the already-loaded catalog snapshot; only non-DJ fields cross this API.
+async fn basic_metadata(
+    State(cast): State<Arc<Cast>>,
+    Path(id): Path<usize>,
+    headers: HeaderMap,
+) -> Response {
+    if !allowed(&cast, &headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let work = tokio::task::spawn_blocking(move || -> Result<Value, StatusCode> {
+        let track = shared_track(&cast, id)?;
+        let path = amp_core::resolve(&cast.root, &track.path).map_err(|_| StatusCode::NOT_FOUND)?;
+        let before = std::fs::metadata(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+        let mut file = std::fs::File::open(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 65536];
+        let mut size = 0u64;
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buffer).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            if n == 0 { break; }
+            size += n as u64;
+            hasher.update(&buffer[..n]);
+        }
+        let after = std::fs::metadata(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+        if before.len() != size || before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+            return Err(StatusCode::CONFLICT);
+        }
+        let mut tags = serde_json::Map::new();
+        for key in ["title", "artist", "album", "album_artist", "genre", "genres", "year", "date", "track", "disc", "comment", "content_advisory", "media_kind"] {
+            if let Some(value) = track.preparation.extensions.get(key) {
+                tags.insert(key.to_string(), value.clone());
+            }
+        }
+        tags.entry("title").or_insert_with(|| json!(track.title));
+        Ok(json!({"version":1,"id":id,"title":track.title,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"bytes":size,"sha256":format!("{:x}",hasher.finalize()),"track_key":amp_core::show::song_id(track),"tags":tags}))
+    }).await;
+    match work {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(code)) => code.into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
 async fn metadata(
     State(cast): State<Arc<Cast>>,
     Path(id): Path<usize>,
@@ -453,6 +499,75 @@ mod tests {
         assert_eq!(byte_range("bytes=-0", 10), Err(()));
     }
     #[tokio::test]
+    async fn basic_metadata_does_not_require_or_expose_dj_preparation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("song.mp3"), b"original audio bytes").unwrap();
+        amp_core::show::Settings::default()
+            .save(dir.path())
+            .unwrap();
+        let library = amp_core::scan(dir.path()).unwrap();
+        let cast = Cast::new(dir.path().into(), library, Some("access".into()));
+        cast.sharing.store(true, Relaxed);
+        // Broken optional preparation must not prevent basic playback metadata.
+        std::fs::write(amp_core::sidecar(&dir.path().join("song.mp3")), b"invalid").unwrap();
+        let app = router(cast);
+        let request = |path| {
+            Request::get(path)
+                .header("x-amp-password", "access")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/smart/tracks/0/basic")
+                        .header("x-amp-password", "wrong")
+                        .body(Body::empty())
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = app
+            .clone()
+            .oneshot(request("/api/smart/tracks/0/basic"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let basic: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            basic["sha256"],
+            format!("{:x}", Sha256::digest(b"original audio bytes"))
+        );
+        assert_eq!(basic["bytes"], 20);
+        assert!(basic["track_key"].as_str().unwrap().starts_with("song_"));
+        for field in [
+            "preparation",
+            "preparation_current",
+            "revision",
+            "stems",
+            "bpm",
+            "cues",
+        ] {
+            assert!(basic.get(field).is_none(), "DJ field leaked: {field}");
+        }
+        assert_eq!(
+            app.oneshot(request("/api/smart/tracks/0/preparation"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
+    #[tokio::test]
     async fn sharing_is_opt_in_authenticated_and_copies_originals_with_cues() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("song.mp3"), b"original audio bytes").unwrap();
@@ -548,6 +663,45 @@ mod tests {
         assert_eq!(metadata["preparation"]["manual_cues"][0]["id"], "my-drop");
         assert!(metadata["track_key"].as_str().unwrap().starts_with("song_"));
         assert!(metadata["revision"].is_object());
+        let response = app
+            .clone()
+            .oneshot(request("/api/smart/tracks/0/preparation", "access"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let explicit: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            metadata, explicit,
+            "legacy and explicit DJ preparation contracts retain the same identities/revisions"
+        );
+        let response = app
+            .clone()
+            .oneshot(request("/api/smart/tracks/0/basic", "access"))
+            .await
+            .unwrap();
+        let basic: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        for key in [
+            "track_key",
+            "sha256",
+            "bytes",
+            "server_id",
+            "station_id",
+            "library_id",
+        ] {
+            assert_eq!(basic[key], metadata[key], "identity mismatch: {key}");
+        }
+        assert_eq!(basic["tags"]["title"], "song");
+
         std::fs::write(dir.path().join("song.mp3"), b"changed audio bytes").unwrap();
         let changed = app
             .clone()
