@@ -2034,6 +2034,11 @@ impl Player {
                 if !paused {
                     self.claim_playback(crate::playback_owner::Owner::Dj, active, false);
                 }
+                self.status = if paused {
+                    "Auto Mix paused; resume to continue the loaded playlist".into()
+                } else {
+                    "Auto Mix ON; continuing the loaded playlist".into()
+                };
             }
             Action::AutoDj { enabled } => {
                 self.commit_regular_audible_start();
@@ -2090,6 +2095,14 @@ impl Player {
                     }
                     self.run.cancel_automation();
                 }
+                self.status = if enabled {
+                    format!(
+                        "Auto Mix ON · {}",
+                        self.run.playlist.as_deref().unwrap_or("loaded playlist")
+                    )
+                } else {
+                    "Auto Mix OFF; manual deck playback is retained".into()
+                };
             }
             Action::ManualLock { enabled } => {
                 if enabled {
@@ -2943,6 +2956,24 @@ mod tests {
         p.manual_cues.push(p.cues[0].clone());
         assert_eq!(automatic_energy_entry(&p, 0.9, 8.), None);
     }
+    #[test]
+    fn auto_mix_off_replaces_stale_start_instructions_without_an_audio_device() {
+        let root = tempfile::tempdir().unwrap();
+        let mut player = normal_test_player(root.path());
+        player.run.auto = true;
+        player.run.playlist = Some("edm".into());
+        player.status = "edm selected for Auto Mix (497 matching tracks). Turn Auto Mix ON to load and play its songs.".into();
+        player
+            .execute_control(Action::AutoDj { enabled: false })
+            .unwrap();
+        assert!(!player.run.auto);
+        assert!(
+            player.status.starts_with("Auto Mix OFF"),
+            "stale status: {}",
+            player.status
+        );
+        assert!(!player.status.contains("Turn Auto Mix ON"));
+    }
     fn normal_test_player(root: &std::path::Path) -> Player {
         Player {
             root: root.into(),
@@ -3354,6 +3385,11 @@ mod tests {
         wait(&mut player, |p| {
             p.queue.len() == 3 && p.run.preloaded.is_some()
         });
+        assert!(
+            player.status.starts_with("Auto Mix ON"),
+            "{}",
+            player.status
+        );
         assert_eq!(player.loaded[player.active_deck()], Some(1));
         assert_eq!(player.queue, [0, 2, 1]);
         assert_eq!(
@@ -3364,10 +3400,12 @@ mod tests {
         player
             .execute_control(Action::AutoDjPause { paused: true })
             .unwrap();
+        assert!(player.status.starts_with("Auto Mix paused"));
         assert_eq!(player.queue, [0, 2, 1]);
         player
             .execute_control(Action::AutoDjPause { paused: false })
             .unwrap();
+        assert!(player.status.starts_with("Auto Mix ON"));
         player.execute_control(Action::SmartShuffle).unwrap();
         let selected = player.run.preloaded.unwrap().1;
         assert_eq!(
