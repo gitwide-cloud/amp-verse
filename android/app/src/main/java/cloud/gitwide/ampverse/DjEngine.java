@@ -178,11 +178,16 @@ final class DjEngine {
     boolean mixerSettingsBusy(){
         if(auto||mixing||(scratch!=null&&scratch.any()))return true;
         for(ExoPlayer deck:decks)if(deck.getPlayWhenReady()||deck.isPlaying())return true;
-        // Owned IDs remain useful for pad controls after one-shot completion; voices own liveness.
+        return samplerPadsBusy();
+    }
+    boolean samplerPadsBusy(){
+        // Owned IDs remain useful after completion. SoundPool has no completion callback;
+        // its conservative IDs can be explicitly cleared by the pads-only settings action.
         if(ownedSamples!=null)return ownedSamples.active();
         for(int[] side:streams)for(int stream:side)if(stream!=0)return true;
         return false;
     }
+    void stopSamplerPads(){for(int side=0;side<2;side++)for(int pad=0;pad<9;pad++)stopPad(side,pad);}
     boolean samplesActive(){return ownedSamples!=null&&ownedSamples.active();}
     private int loadSample(String path){return ownedSamples!=null?ownedSamples.load(path):pool.load(path,1);}
     private void unloadSample(int id){if(ownedSamples!=null)ownedSamples.unload(id);else pool.unload(id);}

@@ -16,6 +16,7 @@ public final class SettingsActivity extends Activity {
     private LinearLayout page;
     private CheckBox mixerToggle;
     private TextView mixerHint;
+    private Button samplerStop;
     @Override public void onCreate(Bundle state) { super.onCreate(state); prefs=getSharedPreferences("settings",MODE_PRIVATE); draw(); }
     private int dp(int n) { return (int)(n*getResources().getDisplayMetrics().density); }
     private void label(String text, int size, int color) { TextView view=new TextView(this);view.setText(text);view.setTextSize(size);view.setTextColor(color);view.setPadding(0,dp(12),0,dp(8));page.addView(view); }
@@ -39,7 +40,10 @@ public final class SettingsActivity extends Activity {
                 if(!prefs.edit().putBoolean("owned-pcm-master-candidate",checked).commit()){Toast.makeText(this,"Could not save the mixer setting.",Toast.LENGTH_LONG).show();draw();return;}
                 Toast.makeText(this,"Saved. Close AMP Verse from Recents, then reopen it to apply the mixer change.",Toast.LENGTH_LONG).show();refreshMixerOption();
             });page.addView(mixerToggle);
-            mixerHint=new TextView(this);mixerHint.setTextSize(14);mixerHint.setTextColor(colors.muted);page.addView(mixerHint);refreshMixerOption();
+            mixerHint=new TextView(this);mixerHint.setTextSize(14);mixerHint.setTextColor(colors.muted);page.addView(mixerHint);
+            samplerStop=new Button(this);samplerStop.setText("Stop sampler pads");samplerStop.setAllCaps(false);samplerStop.setTag("mixer-stop-pads");samplerStop.setTextColor(colors.text);samplerStop.setBackgroundTintList(android.content.res.ColorStateList.valueOf(colors.surface));
+            samplerStop.setOnClickListener(view->{PlaybackService.stopSamplerPads();Toast.makeText(this,"Sampler pads stopped.",Toast.LENGTH_SHORT).show();refreshMixerOption();});
+            page.addView(samplerStop);refreshMixerOption();
         }
         label("Playback",20,colors.text);
         CheckBox repeat=new CheckBox(this);repeat.setText("Repeat queue");repeat.setTag("repeat");repeat.setTextColor(colors.text);repeat.setButtonTintList(new android.content.res.ColorStateList(new int[][]{new int[]{android.R.attr.state_checked},new int[]{}},new int[]{colors.accent,colors.muted}));repeat.setChecked(prefs.getBoolean("repeat",false));repeat.setOnCheckedChangeListener((v,checked)->prefs.edit().putBoolean("repeat",checked).apply());page.addView(repeat);
@@ -57,6 +61,7 @@ public final class SettingsActivity extends Activity {
     }
     private void refreshMixerOption(){
         if(mixerToggle==null)return;boolean busy=PlaybackService.mixerSettingsBusy();mixerToggle.setEnabled(!busy);mixerToggle.setAlpha(busy?.5f:1f);
+        if(samplerStop!=null){boolean pads=PlaybackService.samplerPadsBusy();samplerStop.setEnabled(pads);samplerStop.setAlpha(pads?1f:.5f);}
         mixerHint.setText(busy?"Stop all playback, pads and phone broadcasting to change the mixer.":"Enables phone Player/DJ broadcasting on compatible outputs. Applies next time AMP Verse starts: close it from Recents while stopped, then reopen. Your saved music and playlists stay in place.");
     }
     private final android.os.Handler updateHandler=new android.os.Handler(android.os.Looper.getMainLooper());

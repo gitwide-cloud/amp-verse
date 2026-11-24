@@ -213,4 +213,108 @@ public final class OwnedMixerSettingsDeviceTest {
       if (source.exists()) assertTrue("Generated input must be removed", source.delete());
     }
   }
+
+  @Test(timeout = 30000)
+  public void legacyPadRecoveryStopsOnlyLoopedPadsAndKeepsDeckAndPrivateCueGates()
+      throws Exception {
+    String endpoint = InstrumentationRegistry.getArguments().getString("amp_server", "");
+    org.junit.Assume.assumeTrue("Isolated fixture argument required", !endpoint.isEmpty());
+    assertEquals("http://10.0.2.2:28987", endpoint);
+    Context context = InstrumentationRegistry.getInstrumentation().getTargetContext();
+    context.stopService(new Intent(context, PlaybackService.class));
+    AtomicBoolean retired = new AtomicBoolean();
+    await(
+        () -> {
+          main(() -> retired.set(PlaybackService.player() == null));
+          return retired.get();
+        });
+    SharedPreferences prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE);
+    boolean previous = prefs.getBoolean("owned-pcm-master-candidate", false);
+    prefs.edit().putBoolean("owned-pcm-master-candidate", false).commit();
+    File source = input(context);
+    ActivityScenario<MainActivity> home = null;
+    ActivityScenario<SettingsActivity> settings = null;
+    AtomicBoolean ready = new AtomicBoolean();
+    try {
+      home = ActivityScenario.launch(MainActivity.class);
+      await(
+          () -> {
+            main(() -> ready.set(PlaybackService.player() != null));
+            return ready.get();
+          });
+      main(
+          () -> {
+            assertNull("Fixture exercises legacy SoundPool output", PlaybackService.ownedOutput());
+            PlaybackService.player().pause();
+            DjEngine dj = PlaybackService.dj();
+            dj.pauseAll();
+            dj.assign(0, 0, source.getAbsolutePath(), "Generated loop", true);
+          });
+      await(
+          () -> {
+            main(
+                () -> {
+                  DjEngine dj = PlaybackService.existingDj();
+                  if (dj.streams[0][0] == 0) dj.trigger(0, 0);
+                  ready.set(dj.streams[0][0] != 0);
+                });
+            return ready.get();
+          });
+      main(
+          () -> {
+            DjEngine dj = PlaybackService.existingDj();
+            for (int deck : new int[] {0, 2}) {
+              dj.decks[deck].setMediaItem(
+                  new MediaItem.Builder()
+                      .setMediaId("qa-preserved-" + deck)
+                      .setUri(Uri.fromFile(source))
+                      .build());
+              dj.decks[deck].prepare();
+              dj.decks[deck].play();
+            }
+            assertTrue(PlaybackService.samplerPadsBusy());
+            assertTrue(PlaybackService.mixerSettingsBusy());
+          });
+      settings = ActivityScenario.launch(SettingsActivity.class);
+      settings.onActivity(
+          activity -> {
+            android.widget.Button stop =
+                activity.findViewById(android.R.id.content).findViewWithTag("mixer-stop-pads");
+            assertNotNull("Recovery stays accessible beside the disabled setting", stop);
+            assertTrue(stop.isEnabled());
+            assertTrue(stop.performClick());
+            DjEngine dj = PlaybackService.existingDj();
+            for (int[] side : dj.streams) for (int id : side) assertEquals(0, id);
+            assertFalse(PlaybackService.samplerPadsBusy());
+            assertTrue("Playing deck is unchanged", dj.decks[0].getPlayWhenReady());
+            assertTrue("Private cue is unchanged", dj.decks[2].getPlayWhenReady());
+            assertEquals("qa-preserved-0", dj.decks[0].getCurrentMediaItem().mediaId);
+            assertEquals("qa-preserved-2", dj.decks[2].getCurrentMediaItem().mediaId);
+            assertEquals("dj", PlaybackService.owner());
+            assertFalse(PlaybackService.phoneSending());
+            assertTrue(
+                "Pads-only recovery must not clear other active gates",
+                PlaybackService.mixerSettingsBusy());
+            CheckBox toggle =
+                activity.findViewById(android.R.id.content).findViewWithTag("new-mixer-beta");
+            assertFalse(toggle.isEnabled());
+          });
+    } finally {
+      main(
+          () -> {
+            DjEngine dj = PlaybackService.existingDj();
+            if (dj != null) dj.pauseAll();
+            Player player = PlaybackService.player();
+            if (player != null) {
+              player.pause();
+              player.stop();
+            }
+          });
+      if (settings != null) settings.close();
+      if (home != null) home.close();
+      context.stopService(new Intent(context, PlaybackService.class));
+      prefs.edit().putBoolean("owned-pcm-master-candidate", previous).commit();
+      if (source.exists()) assertTrue(source.delete());
+    }
+  }
 }
