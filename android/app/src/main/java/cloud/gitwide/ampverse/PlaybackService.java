@@ -22,9 +22,9 @@ public final class PlaybackService extends MediaSessionService {
     private volatile String phoneTargetBase="";
     static OwnedAudioOutput ownedOutput(){return instance==null?null:instance.ownedOutput;}
     static boolean phoneSending(){return instance!=null&&instance.phoneBroadcast!=null&&instance.phoneBroadcast.active();}
-    static String phoneBroadcastStatus(){return instance==null||instance.phoneBroadcast==null?"Phone master sending is not enabled in this build":instance.phoneBroadcast.status();}
+    static String phoneBroadcastStatus(){if(android.os.Build.VERSION.SDK_INT<30)return "Phone master sending requires Android 11 or newer; station listening stays available.";return instance==null||instance.phoneBroadcast==null?"Phone master sending is not enabled in this build":instance.phoneBroadcast.status();}
     static boolean phoneSenderAvailable(){return instance!=null&&instance.phoneBroadcast!=null&&instance.ownedOutput.ready()&&phoneEncoderAvailable();}
-    private static boolean phoneEncoderAvailable(){try{Class.forName("cloud.gitwide.ampverse.FullPhoneMp3Encoder",false,PlaybackService.class.getClassLoader());return true;}catch(ClassNotFoundException unavailable){return false;}}
+    private static boolean phoneEncoderAvailable(){if(android.os.Build.VERSION.SDK_INT<30)return false;try{Class.forName("cloud.gitwide.ampverse.FullPhoneMp3Encoder",false,PlaybackService.class.getClassLoader());return true;}catch(ClassNotFoundException unavailable){return false;}}
     static void stopPhoneBroadcast(){if(instance!=null&&instance.phoneBroadcast!=null)instance.phoneBroadcast.stop();}
     static void phoneSourceChanged(){if(instance!=null)instance.notePhoneSource();}
     private static boolean ampReceiver(androidx.media3.common.MediaItem item){

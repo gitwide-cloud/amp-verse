@@ -18,6 +18,8 @@ final class FullPhoneMp3Encoder implements PhoneMasterBroadcast.Encoder {
   private volatile boolean released;
 
   FullPhoneMp3Encoder(Context context) throws IOException {
+    if (android.os.Build.VERSION.SDK_INT < 30)
+      throw new IOException("Bounded phone broadcasting requires Android 11 or newer");
     if (!LEASE.compareAndSet(null, ticket))
       throw new IOException("Previous phone encoder is still stopping");
     String first = null, second = null;
@@ -187,6 +189,8 @@ final class FullPhoneMp3Encoder implements PhoneMasterBroadcast.Encoder {
   }
 
   private static void bound(FileDescriptor pipe) throws ErrnoException, IOException {
+    if (android.os.Build.VERSION.SDK_INT < 30)
+      throw new IOException("Bounded pipe control is unavailable on this Android version");
     // Linux F_SETPIPE_SZ: Android kernels round to 4/16 KiB pages. Reject larger buffering.
     int capacity = Os.fcntlInt(pipe, 1031, 4096);
     if (capacity > 16384 || capacity < 4096)
