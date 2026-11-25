@@ -43,15 +43,17 @@ Focused tests cover URL validation and playlist stripping, progress parsing, saf
 
 Live verification on Windows also succeeded against the public Big Buck Bunny test video (`aqz-KE-bpKQ`) using the official pinned yt-dlp/Deno and installed FFmpeg. The older upstream test ID `BaW_jenozKc` was unavailable and correctly reported as such; its fixtures remain deterministic local tests. Live YouTube access is intentionally excluded from routine CI, where it could fail due to video/network availability. Linux CI runs the local pipeline with real codecs and packages the official runtime bundle.
 
-## Suno
-There is no built-in Suno URL downloader. Suno's official export flow supports
-individual song downloads and multi-select Download All ZIP exports, subject to
-the account's available download options. Extract the audio from the official ZIP
-and open the files in AMP Lab or add their folder in AMP Library. Suno mobile
-offline playlists remain inside Suno and are not portable MP3 exports.
-Sources checked 2026-11-13:
-- https://help.suno.com/en/articles/2409921
-- https://help.suno.com/en/articles/14467265
+## Hidden Suno URL support
+
+Paste a Suno song (`https://suno.com/song/<uuid>`), short share (`/s/...`), or an explicit Suno CDN audio-download link into the existing YouTube URL field. The label changes to **Suno URL** only while a Suno link is present; no extra tab, catalog add-on or always-visible provider selector is added. The YouTube Playlist choice stays available for YouTube and is ignored/hidden for single-song Suno imports.
+
+Suno imports read publicly exposed downloadable audio for the exact song, reject placeholder/silence and unrelated song URLs, and retain the title and canonical source link in the MP3 metadata. They use the same 256 kbps MP3 conversion, progress, Cancel, collision-safe publication and protected editor-open flow. Conversion does not increase the source quality. Suno only requires the existing FFmpeg/ffprobe tools; it does not use yt-dlp or Deno.
+
+Public song pages and audio redirects are bounded and restricted to Suno's known hosts and matching song identity. Audio downloads are capped at 256 MB, page reads at 4 MB, and temporary files are removed on cancellation/failure. No login cookies, credential extraction, guessed CDN URLs or fallback from a forbidden download to another playback stream are used. If Suno does not expose a downloadable file, use its official export menu and open the exported file in Lab. Short links without a resolvable public song identity require the full song link. Suno playlists, profiles and account-only exports are not implemented.
+
+Verification includes Suno song/share/CDN validation, tracking removal, Next.js public metadata extraction, HTML title decoding, placeholder rejection, cancellation/size bounds, and real FFmpeg conversion/tagging and final Lab decoding on Windows and Linux. Live availability depends on Suno; fixture tests do not establish that a particular restricted link can be downloaded.
+
+Official export help: https://help.suno.com/en/articles/2409921
 
 1.0.8 verification: local playlist fixture with a successful item and a private
 item, real FFmpeg conversion, retained successful audio/M3U8 membership, result

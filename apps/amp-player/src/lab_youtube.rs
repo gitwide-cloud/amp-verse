@@ -1,4 +1,6 @@
 //! AMP Lab-only URL import. No shell, cookies, user yt-dlp config, or hidden playlist expansion.
+#[path = "lab_suno.rs"]
+mod suno;
 use eframe::egui;
 use process_wrap::std::*;
 use std::{
@@ -289,6 +291,14 @@ impl Tools {
             probe: locate("ffprobe")?,
         })
     }
+    fn audio_only() -> Result<Self, String> {
+        Ok(Self {
+            yt: PathBuf::new(),
+            deno: PathBuf::new(),
+            ffmpeg: locate("ffmpeg")?,
+            probe: locate("ffprobe")?,
+        })
+    }
     fn yt_command(&self) -> Command {
         let mut cmd = Command::new(&self.yt);
         cmd.args([
@@ -340,8 +350,11 @@ pub struct Panel {
 }
 impl Panel {
     fn start(&mut self) {
-        let playlist = self.playlist;
-        let url = match if playlist {
+        let is_suno = suno::recognizes(&self.url);
+        let playlist = self.playlist && !is_suno;
+        let url = match if is_suno {
+            suno::canonical_url(&self.url)
+        } else if playlist {
             playlist_url(&self.url)
         } else {
             video_url(&self.url)
@@ -370,9 +383,15 @@ impl Panel {
                 let _ = tx.send(Event::Batch(result));
                 return;
             }
-            let result = Tools::discover().and_then(|tools| {
-                downloads().and_then(|dir| download(&url, &dir, &tools, &cancel, &tx))
-            });
+            let result = if is_suno {
+                Tools::audio_only().and_then(|tools| {
+                    downloads().and_then(|dir| suno::download(&url, &dir, &tools, &cancel, &tx))
+                })
+            } else {
+                Tools::discover().and_then(|tools| {
+                    downloads().and_then(|dir| download(&url, &dir, &tools, &cancel, &tx))
+                })
+            };
             let _ = tx.send(Event::Finished(result));
         });
     }
@@ -453,11 +472,14 @@ impl Panel {
     pub fn show(&mut self, ui: &mut egui::Ui) {
         crate::skin::panel(ui, false, |ui| {
             ui.horizontal_wrapped(|ui| {
-                ui.strong("YouTube URL");
-                ui.add_enabled(
-                    self.job.is_none(),
-                    egui::Checkbox::new(&mut self.playlist, "Playlist"),
-                );
+                let is_suno = suno::recognizes(&self.url);
+                ui.strong(if is_suno { "Suno URL" } else { "YouTube URL" });
+                if !is_suno {
+                    ui.add_enabled(
+                        self.job.is_none(),
+                        egui::Checkbox::new(&mut self.playlist, "Playlist"),
+                    );
+                }
                 ui.add_enabled(
                     self.job.is_none(),
                     egui::TextEdit::singleline(&mut self.url)
@@ -512,6 +534,12 @@ impl Panel {
             }
             if !self.status.is_empty() {
                 ui.label(&self.status);
+                if self.failed && suno::recognizes(&self.url) {
+                    ui.hyperlink_to(
+                        "Suno download options",
+                        "https://help.suno.com/en/articles/2409921",
+                    );
+                }
             }
             if self.job.is_some() {
                 if let Some(p) = self.progress {
@@ -812,6 +840,41 @@ fn download(
     {
         return Err("Downloader returned an unexpected file location.".into());
     }
+    convert_publish(
+        &source,
+        dir,
+        tools,
+        cancel,
+        tx,
+        ImportLabel {
+            name: &name,
+            id,
+            suno_source: None,
+        },
+    )
+}
+struct ImportLabel<'a> {
+    name: &'a str,
+    id: &'a str,
+    suno_source: Option<&'a str>,
+}
+fn convert_publish(
+    source: &Path,
+    dir: &Path,
+    tools: &Tools,
+    cancel: &AtomicBool,
+    tx: &mpsc::SyncSender<Event>,
+    label: ImportLabel<'_>,
+) -> Result<PathBuf, String> {
+    let ImportLabel {
+        name,
+        id,
+        suno_source,
+    } = label;
+    let work = tempfile::Builder::new()
+        .prefix(".amp-lab-convert-")
+        .tempdir_in(dir)
+        .map_err(|e| e.to_string())?;
     cancelled(cancel)?;
     progress(tx, "Converting to MP3 · 256 kbps…", None);
     let converted = work.path().join("converted.mp3");
@@ -825,9 +888,11 @@ fn download(
         "-progress",
         "pipe:1",
         "-nostats",
+        "-protocol_whitelist",
+        "file,pipe",
         "-i",
     ])
-    .arg(&source)
+    .arg(source)
     .args([
         "-map",
         "0:a:0",
@@ -840,8 +905,16 @@ fn download(
         "256k",
         "-id3v2_version",
         "3",
-    ])
-    .arg(&converted);
+    ]);
+    if let Some(source_url) = suno_source {
+        cmd.args([
+            "-metadata",
+            &format!("title={name}"),
+            "-metadata",
+            &format!("comment=Suno source: {source_url}"),
+        ]);
+    }
+    cmd.arg(&converted);
     run(cmd, cancel, tx, Duration::from_secs(6 * 60 * 60))?;
     let mut cmd = Command::new(&tools.probe);
     cmd.args([
@@ -853,7 +926,7 @@ fn download(
         "default=noprint_wrappers=1:nokey=1",
     ])
     .arg(&converted);
-    let duration = run(cmd, cancel, tx, short)?
+    let duration = run(cmd, cancel, tx, Duration::from_secs(45))?
         .trim()
         .parse::<f64>()
         .unwrap_or(0.);
