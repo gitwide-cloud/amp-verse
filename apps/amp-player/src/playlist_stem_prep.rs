@@ -14,6 +14,12 @@ impl Player {
                 .enumerate()
                 .any(|(d, v)| {
                     v.load(std::sync::atomic::Ordering::Relaxed)
+                        && amp_core::stem_mix::changed(std::array::from_fn(|i| {
+                            f32::from_bits(
+                                audio.controls.stem_knobs[d][i]
+                                    .load(std::sync::atomic::Ordering::Relaxed),
+                            )
+                        }))
                         && !audio.controls.prepared_stems[d]
                             .load(std::sync::atomic::Ordering::Relaxed)
                 });

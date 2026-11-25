@@ -36,7 +36,7 @@ pub(crate) fn decode(
     source: &Path,
     prep: &amp_core::Preparation,
     rate: u32,
-    producer: &mut rtrb::Producer<[f32; 6]>,
+    producer: &mut rtrb::Producer<[f32; 8]>,
     context: crate::onnx_stem_stream::Context,
 ) -> Result<(), String> {
     decode_at(
@@ -53,7 +53,7 @@ pub(crate) fn decode_at(
     source: &Path,
     prep: &amp_core::Preparation,
     rate: u32,
-    producer: &mut rtrb::Producer<[f32; 6]>,
+    producer: &mut rtrb::Producer<[f32; 8]>,
     context: crate::onnx_stem_stream::Context,
 ) -> Result<(), String> {
     let prepared = crate::prepared_stem_cache::ready(cache_root, source, &context.stop)
@@ -159,7 +159,7 @@ pub(crate) fn decode_at(
             return Err("Incomplete prepared PCM frame".into());
         }
         for frame in bytes[..n].chunks_exact(frame_bytes) {
-            let mut value = [0.; 6];
+            let mut value = [0.; 8];
             for (ch, sample) in frame.as_chunks::<4>().0.iter().enumerate() {
                 value[ch] = f32::from_le_bytes(*sample);
             }
@@ -286,7 +286,7 @@ pub(crate) mod tests {
             entry,
         }
     }
-    pub(crate) fn frames(fixture: &Fixture, prep: amp_core::Preparation) -> (Vec<[f32; 6]>, bool) {
+    pub(crate) fn frames(fixture: &Fixture, prep: amp_core::Preparation) -> (Vec<[f32; 8]>, bool) {
         let (mut producer, mut consumer) = rtrb::RingBuffer::new(132301);
         let degraded = Arc::new(AtomicBool::new(false));
         let context = crate::onnx_stem_stream::Context {

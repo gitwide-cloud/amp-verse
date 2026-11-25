@@ -248,6 +248,7 @@ def main(argv=None):
         tests = [
             ('dj_engine::live_stem_acceptance::six_separated_frame_controls_route_filters_and_cancel_without_model', False, env),
             ('onnx_stem_stream::live_acceptance::real_model_source_pipeline_preserves_mix_across_windows', True, env),
+            ('onnx_stem_stream::lazy::live_acceptance::real_model_lazy_stems_start_filter_and_stop_at_neutral', True, env),
             ('dj_engine::live_stem_acceptance::two_native_live_stem_decks_play_filters_and_cancel_independently', True, env),
             ('prepared_stem_cache::tests::native_selected_playlist_preparation_roundtrips_compressed_stems', True, preparation_env),
         ]

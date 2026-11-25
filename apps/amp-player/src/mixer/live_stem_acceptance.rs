@@ -100,7 +100,7 @@ fn samples_with_levels(mixer: &Mixer, deck: usize, gain: [f32; 3]) -> (f64, f64)
         .source
         .as_ref()
         .expect("deck source retained");
-    let frame = source.history.back().copied().unwrap_or([0.; 6]);
+    let frame = source.history.back().copied().unwrap_or([0.; 8]);
     let dry = stereo_frame(frame, true, [1.; 3], false);
     let filtered = stereo_frame(frame, true, gain, false);
     let energy = filtered.iter().map(|v| (*v as f64).powi(2)).sum();
@@ -634,6 +634,8 @@ fn six_separated_frame_controls_route_filters_and_cancel_without_model() {
                     part[1] * 0.5,
                     part[2],
                     part[2] * 0.5,
+                    0.,
+                    0.,
                 ])
                 .unwrap();
         }

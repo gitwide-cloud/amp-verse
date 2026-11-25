@@ -128,7 +128,9 @@ mod codec_acceptance {
         for d in 0..6 {
             let (mut producer, consumer) = RingBuffer::new(pcm.len() / 2 + 1);
             for pair in pcm.as_chunks::<2>().0 {
-                producer.push([pair[0], pair[1], 0., 0., 0., 0.]).unwrap();
+                producer
+                    .push([pair[0], pair[1], 0., 0., 0., 0., 0., 0.])
+                    .unwrap();
             }
             let source = Source {
                 key_lock: None,

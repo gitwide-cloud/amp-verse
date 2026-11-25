@@ -742,7 +742,11 @@ impl Panel {
         audio: Option<&crate::mixer::Engine>,
         vertical: bool,
     ) -> Option<[f32; 3]> {
-        let active = audio.is_some_and(|a| a.controls.stems_loaded[deck].load(Relaxed));
+        let active = audio.is_some_and(|a| {
+            a.loaded(deck)
+                && (a.controls.on_demand_stems[deck].load(Relaxed)
+                    || a.controls.stems_loaded[deck].load(Relaxed))
+        });
         if let Some(a) = audio {
             for i in 0..3 {
                 self.level[deck][i] = f32::from_bits(a.controls.stem_knobs[deck][i].load(Relaxed));
@@ -776,6 +780,15 @@ impl Panel {
                 },
             );
         });
+        if active && !vertical {
+            ui.small(if !amp_core::stem_mix::changed(self.level[deck]) {
+                "Stems idle · move a knob to start"
+            } else if audio.is_some_and(|a| a.controls.stems_loaded[deck].load(Relaxed)) {
+                "Stems active · right-click to reset"
+            } else {
+                "Preparing stems · original audio continues"
+            });
+        }
         if !active && !vertical {
             ui.small(if crate::onnx_stem_worker::configured() {
                 "Stems are preparing or unavailable. Check the deck stem status."
@@ -842,7 +855,7 @@ impl Panel {
                     let reserved = std::array::from_fn(|d| audio.controls.on_demand_stems[d].load(Relaxed) && !audio.controls.prepared_stems[d].load(Relaxed));
                     let admitted = cached || (!playlist_preparing() && policy.allows(&reserved,deck));
                     if enabled {
-                        ui.label("Stems armed · 0 = no filtering · right-click a knob to reset");
+                        ui.label("Stems ready · turn a knob to start · all 0 stops separation");
                     } else if live_mode_action(ui, enabled, cached, can_reload, has_source, admitted).clicked() {
                         // Compatibility for a song loaded before automatic arming.
                         audio.controls.on_demand_stems[deck].store(true, Relaxed);
@@ -866,7 +879,7 @@ impl Panel {
                 if cached {ui.weak("Prepared playback uses no live separation slot. Cached audio is fully verified before playback.");}
                 ui.label(format!("Live stem limit: {} decks · {}", policy.limit, policy.reason));
                 ui.weak("Normal six-deck playback stays available. Live stem audio remains in memory; initial processing can take several seconds.");
-                let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().enumerate().filter(|(d,v)| v.load(Relaxed) && !a.controls.prepared_stems[*d].load(Relaxed)).count());
+                let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().enumerate().filter(|(d,v)| v.load(Relaxed) && !a.controls.prepared_stems[*d].load(Relaxed) && amp_core::stem_mix::changed(std::array::from_fn(|i| f32::from_bits(a.controls.stem_knobs[*d][i].load(Relaxed))))).count());
                 let previous = crate::stem_capability::maximum();
                 let mut maximum = previous;
                 ui.horizontal_wrapped(|ui| {
@@ -923,7 +936,7 @@ impl Panel {
                     .clicked();
                 ui.weak("Active playback is kept unchanged until the deck is reloaded.");
             }
-            ui.add_enabled_ui(active, |ui| {
+            ui.add_enabled_ui(active || audio.is_some_and(|a| a.loaded(deck) && a.controls.on_demand_stems[deck].load(Relaxed)), |ui| {
                 for (stem, name) in [(0, "Vocals"), (1, "Instruments"), (2, "Beat")] {
                     ui.horizontal(|ui| {
                         crate::dj_mixer::dial(

@@ -18,13 +18,14 @@ use std::{
     time::Duration,
 };
 type Frame = [f32; 2];
-type DeckFrame = [f32; 6];
+// Six separated channels plus an untouched stereo bypass during warm-up.
+type DeckFrame = [f32; 8];
 fn stereo_frame(frame: DeckFrame, separated: bool, gain: [f32; 3], drums_only: bool) -> Frame {
     if separated && drums_only {
-        [frame[4] * gain[2], frame[5] * gain[2]]
+        [frame[4] * gain[2] + frame[6], frame[5] * gain[2] + frame[7]]
     } else if separated {
         std::array::from_fn(|ch| {
-            frame[ch] * gain[0] + frame[ch + 2] * gain[1] + frame[ch + 4] * gain[2]
+            frame[ch] * gain[0] + frame[ch + 2] * gain[1] + frame[ch + 4] * gain[2] + frame[ch + 6]
         })
     } else {
         [frame[0], frame[1]]
@@ -115,6 +116,8 @@ pub struct Controls {
     pub stem_knobs: [[AtomicU32; 3]; 6],
     pub stems_loaded: [AtomicBool; 6],
     pub on_demand_stems: [AtomicBool; 6],
+    pub lazy_stems: [AtomicBool; 6],
+    pub stem_processing_ready: [AtomicBool; 6],
     pub prepared_stems: [AtomicBool; 6],
     pub eq_kill: [[AtomicBool; 3]; 6],
     pub sweep: [AtomicU32; 6],
@@ -229,6 +232,8 @@ impl Default for Controls {
             stem_knobs: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             stems_loaded: std::array::from_fn(|_| AtomicBool::new(false)),
             on_demand_stems: std::array::from_fn(|_| AtomicBool::new(false)),
+            lazy_stems: std::array::from_fn(|_| AtomicBool::new(false)),
+            stem_processing_ready: std::array::from_fn(|_| AtomicBool::new(false)),
             prepared_stems: std::array::from_fn(|_| AtomicBool::new(false)),
             eq_kill: std::array::from_fn(|_| std::array::from_fn(|_| AtomicBool::new(false))),
             sweep: std::array::from_fn(|_| atom(0.)),
@@ -277,7 +282,7 @@ impl Source {
     }
     fn next(&mut self, rate: f32) -> Option<DeckFrame> {
         if rate.abs() < 0.0001 {
-            return Some([0.; 6]);
+            return Some([0.; 8]);
         }
         self.position = self.position.max(self.history_start as f64);
         let index = self.position.floor() as u64;
@@ -737,8 +742,12 @@ impl Mixer {
                     self.levels[d] = None;
                     self.controls.scratching[d].store(false, Relaxed);
                     self.controls.play[d].store(play, Relaxed);
-                    self.controls.stems_loaded[d]
-                        .store(s.separated && !s.stem_degraded.load(Relaxed), Relaxed);
+                    self.controls.stems_loaded[d].store(
+                        s.separated
+                            && !s.stem_degraded.load(Relaxed)
+                            && !self.controls.lazy_stems[d].load(Relaxed),
+                        Relaxed,
+                    );
                     self.controls.key_lock_available[d].store(s.key_lock.is_some(), Relaxed);
                     let gains = amp_core::stem_mix::gains(s.stem_knobs);
                     for (i, gain) in gains.iter().enumerate() {
@@ -1381,6 +1390,12 @@ impl Mixer {
                         (get(&c.stem_level[d][stem]).clamp(0., 1.) - v.stem_mix[stem]) * 0.004;
                 }
                 let degraded = source.stem_degraded.load(Relaxed);
+                if c.lazy_stems[d].load(Relaxed) {
+                    c.stems_loaded[d].store(
+                        c.stem_processing_ready[d].load(Relaxed) && !degraded,
+                        Relaxed,
+                    );
+                }
                 if degraded {
                     c.stems_loaded[d].store(false, Relaxed);
                 }
@@ -1466,7 +1481,7 @@ impl Mixer {
                         .is_some_and(|processor| v.tail_frames < processor.latency)
                 {
                     v.tail_frames += 1;
-                    frame = Some([0.; 6]);
+                    frame = Some([0.; 8]);
                 }
                 let Some(mut frame) = frame else {
                     if source.done.load(std::sync::atomic::Ordering::Acquire) {
@@ -1483,7 +1498,7 @@ impl Mixer {
                 {
                     if let Some(previous) = old.next(rates[d]) {
                         let t = (pending.elapsed as f32 / pending.total.max(1) as f32).min(1.);
-                        for ch in 0..6 {
+                        for ch in 0..8 {
                             frame[ch] = previous[ch] * (1. - t) + frame[ch] * t;
                         }
                     }
@@ -1642,7 +1657,9 @@ mod vinyl_tests {
         let (mut producer, consumer) = RingBuffer::new(frames + 1);
         for i in 0..frames {
             let value = 0.1 + (i % 2000) as f32 / 20000.;
-            producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+            producer
+                .push([value, value, 0., 0., 0., 0., 0., 0.])
+                .unwrap();
         }
         Source {
             key_lock: Some(Box::new(crate::key_lock::Processor::new(48000).unwrap())),
@@ -1784,7 +1801,7 @@ mod vinyl_tests {
         let mut m = Mixer::new(48000, rx, c.clone());
         let (mut producer, consumer) = RingBuffer::new(14001);
         for _ in 0..14000 {
-            producer.push([0.2, 0.2, 0., 0., 0., 0.]).unwrap();
+            producer.push([0.2, 0.2, 0., 0., 0., 0., 0., 0.]).unwrap();
         }
         let done = Arc::new(AtomicBool::new(false));
         let source = Source {
@@ -1820,7 +1837,7 @@ mod vinyl_tests {
         assert_eq!(c.position[1].load(Relaxed), other + 128);
         assert!(c.play[0].load(Relaxed));
         for _ in 0..10000 {
-            producer.push([0.2, 0.2, 0., 0., 0., 0.]).unwrap();
+            producer.push([0.2, 0.2, 0., 0., 0., 0., 0., 0.]).unwrap();
         }
         done.store(true, Relaxed);
         m.render(1, |_, _| {});
@@ -1931,27 +1948,6 @@ fn reset_library_stem_modes(loaded: &mut [bool; 6], controls: &Controls) {
     {
         intent.store(false, Relaxed);
         prepared.store(false, Relaxed);
-    }
-}
-fn check_live_stem_admission(
-    loaded: &[bool; 6],
-    controls: &Controls,
-    deck: usize,
-    policy: crate::stem_capability::Policy,
-) -> Result<(), String> {
-    let mut existing = std::array::from_fn(|d| {
-        (loaded[d] || controls.on_demand_stems[d].load(Relaxed))
-            && !controls.prepared_stems[d].load(Relaxed)
-    });
-    // The current intent is not a second reservation; existing loads may be replaced.
-    if deck >= existing.len() {
-        return Err("Unknown deck".into());
-    }
-    existing[deck] = loaded[deck] && !controls.prepared_stems[deck].load(Relaxed);
-    if policy.allows(&existing, deck) {
-        Ok(())
-    } else {
-        Err(policy.error())
     }
 }
 impl Engine {
@@ -2308,15 +2304,8 @@ impl Engine {
         let cached = stem_mode && crate::prepared_stem_playback::candidate(&path);
         let onnx = stem_mode && !cached;
         if onnx {
-            if crate::stems::playlist_preparing() {
-                return Err("Cancel or finish playlist preparation before loading live stems. Prepared and original audio remain available.".into());
-            }
-            check_live_stem_admission(
-                &self.loaded_on_demand,
-                &self.controls,
-                deck,
-                crate::stem_capability::current(),
-            )?;
+            // Neutral decks do not reserve separation slots. The lazy stream
+            // acquires the hardware-limited slot only for a non-neutral request.
             if !crate::onnx_stem_worker::configured() {
                 return Err("On-demand stem worker/model is not configured".into());
             }
@@ -2422,7 +2411,7 @@ impl Engine {
                     );
                 }
                 if onnx {
-                    return crate::onnx_stem_stream::decode(
+                    return crate::onnx_stem_stream::decode_lazy(
                         &path,
                         &prep,
                         rate,
@@ -2641,6 +2630,8 @@ impl Engine {
             return Ok(());
         }
         self.cancel[deck] = Some(cancel);
+        self.controls.lazy_stems[deck].store(onnx, Relaxed);
+        self.controls.stem_processing_ready[deck].store(false, Relaxed);
         self.send(if hold_stem_filters {
             Command::LoadHoldingStemFilters(deck, source, play, generation)
         } else {
@@ -3339,7 +3330,7 @@ mod tests {
             let mut s = source(0., data.len());
             let (mut producer, consumer) = RingBuffer::new(data.len() + 1);
             for f in data {
-                producer.push([f[0], f[1], 0., 0., 0., 0.]).unwrap();
+                producer.push([f[0], f[1], 0., 0., 0., 0., 0., 0.]).unwrap();
             }
             s.ring = consumer;
             s
@@ -3424,7 +3415,7 @@ mod tests {
     fn source(value: f32, frames: usize) -> Source {
         let (mut p, c) = RingBuffer::new(frames + 1);
         for _ in 0..frames {
-            p.push([value, value, 0., 0., 0., 0.]).unwrap();
+            p.push([value, value, 0., 0., 0., 0., 0., 0.]).unwrap();
         }
         Source {
             key_lock: None,
@@ -3447,7 +3438,7 @@ mod tests {
         for _ in 0..frames {
             producer
                 .push([
-                    values[0], values[0], values[1], values[1], values[2], values[2],
+                    values[0], values[0], values[1], values[1], values[2], values[2], 0., 0.,
                 ])
                 .unwrap();
         }
@@ -3913,14 +3904,18 @@ mod tests {
         for frame in 0..10000 {
             let value = if frame < 3000 { 0.02 } else { 0.2 };
             let value = value * (frame as f32 * std::f32::consts::TAU / 10.).sin();
-            producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+            producer
+                .push([value, value, 0., 0., 0., 0., 0., 0.])
+                .unwrap();
         }
         incoming.ring = consumer;
         let mut outgoing = source(0.2, 12000);
         let (mut producer, consumer) = RingBuffer::new(12001);
         for frame in 0..12000 {
             let value = 0.2 * (frame as f32 * std::f32::consts::TAU / 10.).sin();
-            producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+            producer
+                .push([value, value, 0., 0., 0., 0., 0., 0.])
+                .unwrap();
         }
         outgoing.ring = consumer;
         tx.send(Command::Load(0, outgoing, true, 1)).unwrap();
@@ -4093,7 +4088,7 @@ mod tests {
         let (mut producer, consumer) = RingBuffer::new(65);
         for frame in 0..64 {
             producer
-                .push([frame as f32, -(frame as f32), 0., 0., 0., 0.])
+                .push([frame as f32, -(frame as f32), 0., 0., 0., 0., 0., 0.])
                 .unwrap();
         }
         let mut source = Source {
@@ -4113,10 +4108,19 @@ mod tests {
         for expected in 0..12 {
             assert_eq!(source.next(1.).unwrap()[0], expected as f32);
         }
-        assert_eq!(source.next(-1.).unwrap(), [12., -12., 0., 0., 0., 0.]);
-        assert_eq!(source.next(-1.).unwrap(), [11., -11., 0., 0., 0., 0.]);
-        assert_eq!(source.next(-1.).unwrap(), [10., -10., 0., 0., 0., 0.]);
-        assert_eq!(source.next(0.), Some([0.; 6]));
+        assert_eq!(
+            source.next(-1.).unwrap(),
+            [12., -12., 0., 0., 0., 0., 0., 0.]
+        );
+        assert_eq!(
+            source.next(-1.).unwrap(),
+            [11., -11., 0., 0., 0., 0., 0., 0.]
+        );
+        assert_eq!(
+            source.next(-1.).unwrap(),
+            [10., -10., 0., 0., 0., 0., 0., 0.]
+        );
+        assert_eq!(source.next(0.), Some([0.; 8]));
         assert_eq!(source.position, 9.);
         assert_eq!(source.next(0.5).unwrap()[0], 9.);
         assert_eq!(source.next(0.5).unwrap()[0], 9.5);
@@ -4428,7 +4432,9 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(8);
         let (mut producer, consumer) = RingBuffer::new(3000);
         for _ in 0..2500 {
-            producer.push([0.2, 0.2, 0.1, 0.1, 0.05, 0.05]).unwrap();
+            producer
+                .push([0.2, 0.2, 0.1, 0.1, 0.05, 0.05, 0., 0.])
+                .unwrap();
         }
         let mut separated = source(0., 2);
         separated.ring = consumer;
@@ -4454,7 +4460,9 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(8);
         let (mut producer, consumer) = RingBuffer::new(12000);
         for _ in 0..11000 {
-            producer.push([0.2, 0.1, -0.05, 0.1, 0.03, -0.02]).unwrap();
+            producer
+                .push([0.2, 0.1, -0.05, 0.1, 0.03, -0.02, 0., 0.])
+                .unwrap();
         }
         let mut voice = source(0., 2);
         voice.ring = consumer;
@@ -4669,7 +4677,9 @@ mod tests {
             let (mut producer, consumer) = RingBuffer::new(10000);
             for i in 0..8000 {
                 let value = (std::f32::consts::TAU * frequency * i as f32 / 48000.).sin() * 0.2;
-                producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+                producer
+                    .push([value, value, 0., 0., 0., 0., 0., 0.])
+                    .unwrap();
             }
             let mut voice = source(0., 2);
             voice.ring = consumer;
@@ -4697,7 +4707,9 @@ mod tests {
             let (mut producer, consumer) = RingBuffer::new(10000);
             for i in 0..8000 {
                 let value = (std::f32::consts::TAU * 8000. * i as f32 / 48000.).sin() * 0.2;
-                producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+                producer
+                    .push([value, value, 0., 0., 0., 0., 0., 0.])
+                    .unwrap();
             }
             let mut voice = source(0., 2);
             voice.ring = consumer;
@@ -4842,7 +4854,7 @@ mod tests {
         m.render(1000, |_, _| {});
         assert!(c.play.iter().all(|p| p.load(Relaxed)));
         assert!(c.position.iter().all(|p| p.load(Relaxed) == 1000));
-        tx.send(Command::Loop(4, Some(vec![[0.03; 6]; 100])))
+        tx.send(Command::Loop(4, Some(vec![[0.03; 8]; 100])))
             .unwrap();
         tx.send(Command::Fade {
             to: 1.,
@@ -5373,9 +5385,11 @@ mod tests {
                             tone * 0.003,
                             tone * 0.002,
                             tone * 0.002,
+                            0.,
+                            0.,
                         ]
                     } else {
-                        [tone * 0.01, tone * 0.01, 0., 0., 0., 0.]
+                        [tone * 0.01, tone * 0.01, 0., 0., 0., 0., 0., 0.]
                     })
                     .unwrap();
                 }
@@ -5541,30 +5555,6 @@ mod live_admission_tests {
         assert!(controls.on_demand_stems.iter().all(|v| !v.load(Relaxed)));
         assert!(controls.prepared_stems.iter().all(|v| !v.load(Relaxed)));
         assert!((get(&controls.gain[0]) - 0.7).abs() < 1e-6);
-    }
-
-    #[test]
-    fn mixer_rejects_extra_intent_before_load_and_keeps_existing_decks() {
-        let controls = Controls::default();
-        for flag in controls.on_demand_stems.iter().take(3) {
-            flag.store(true, Relaxed);
-        }
-        let loaded = [true, true, false, false, false, false];
-        let cpu = crate::stem_capability::Policy::new(4, 2);
-        assert!(check_live_stem_admission(&loaded, &controls, 2, cpu).is_err());
-        assert!(check_live_stem_admission(&loaded, &controls, 0, cpu).is_ok());
-        assert!(controls.on_demand_stems[0].load(Relaxed));
-        assert!(controls.on_demand_stems[1].load(Relaxed));
-        assert!(
-            check_live_stem_admission(
-                &loaded,
-                &controls,
-                2,
-                crate::stem_capability::Policy::new(4, 6)
-            )
-            .is_ok()
-        );
-        assert_eq!(loaded, [true, true, false, false, false, false]);
     }
 }
 

@@ -1,4 +1,6 @@
 //! Read-only source decoding into bounded, overlapping in-memory stem windows.
+#[path = "onnx_stem_stream/lazy.rs"]
+mod lazy;
 use rtrb::{Producer, PushError};
 use std::{
     io::Read,
@@ -207,7 +209,7 @@ impl Output {
         &mut self,
         parts: &Parts,
         frames: usize,
-        producer: &mut Producer<[f32; 6]>,
+        producer: &mut Producer<[f32; 8]>,
         stop: &AtomicBool,
     ) -> Result<(), String> {
         let end = self.input_frame + frames as u64;
@@ -222,6 +224,9 @@ impl Output {
             let b = (a + 1).min(frames.saturating_sub(1));
             let fraction = local.fract() as f32;
             let mut value = std::array::from_fn(|ch| {
+                if ch >= 6 {
+                    return 0.;
+                }
                 let part = ch / 2;
                 let channel = ch % 2;
                 parts[part][a * 2 + channel]
@@ -254,12 +259,32 @@ pub(crate) struct Context {
     pub degraded_flag: Arc<AtomicBool>,
     pub generation: u64,
 }
+#[cfg(test)]
 pub(crate) fn decode(
     path: &Path,
     prep: &amp_core::Preparation,
     rate: u32,
-    producer: &mut Producer<[f32; 6]>,
+    producer: &mut Producer<[f32; 8]>,
     context: Context,
+) -> Result<(), String> {
+    decode_policy(path, prep, rate, producer, context, false)
+}
+pub(crate) fn decode_lazy(
+    path: &Path,
+    prep: &amp_core::Preparation,
+    rate: u32,
+    producer: &mut Producer<[f32; 8]>,
+    context: Context,
+) -> Result<(), String> {
+    decode_policy(path, prep, rate, producer, context, true)
+}
+fn decode_policy(
+    path: &Path,
+    prep: &amp_core::Preparation,
+    rate: u32,
+    producer: &mut Producer<[f32; 8]>,
+    context: Context,
+    lazy: bool,
 ) -> Result<(), String> {
     let Context {
         stop,
@@ -305,6 +330,26 @@ pub(crate) fn decode(
         watcher: Some(watcher),
     };
     let mut input = std::io::BufReader::new(stdout);
+    if lazy {
+        let context = Context {
+            stop,
+            controls,
+            deck,
+            degraded_flag,
+            generation,
+        };
+        lazy::stream(&mut input, rate, producer, context, Arc::new(lazy::infer))?;
+        let status = child
+            .lock()
+            .map_err(|_| "Stem decoder lock unavailable")?
+            .wait()
+            .map_err(|e| e.to_string())?;
+        return if status.success() {
+            Ok(())
+        } else {
+            Err("Original audio decoder failed".into())
+        };
+    }
     let mut carry = Vec::new();
     let mut tail: Option<Parts> = None;
     let mut output = Output {
