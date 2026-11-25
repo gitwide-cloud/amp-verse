@@ -496,6 +496,8 @@ impl Manager {
                                 egui::vec2(text_width, 54.),
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
+                                    ui.set_min_width(text_width);
+                                    ui.set_max_width(text_width);
                                     ui.spacing_mut().item_spacing.y = 2.;
                                     ui.add(
                                         egui::Label::new(
@@ -525,7 +527,7 @@ impl Manager {
                                                         }
                                                     }),
                                             )
-                                            .small(),
+                                            .size(12.),
                                         )
                                         .selectable(false),
                                     );
