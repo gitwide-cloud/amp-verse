@@ -518,15 +518,11 @@ impl Manager {
                     });
                     let response = ui.interact(
                         row.response.rect,
-                        ui.id().with(("addon-row", i)),
+                        ui.scope_id().with(("addon-row", i)),
                         egui::Sense::click(),
                     );
                     response.widget_info(|| {
-                        egui::WidgetInfo::labeled(
-                            egui::WidgetType::Button,
-                            ui.is_enabled(),
-                            entry.name,
-                        )
+                        egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), entry.name)
                     });
                     if response.clicked() {
                         self.selected = i;
