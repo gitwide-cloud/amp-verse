@@ -1310,3 +1310,350 @@ mod tests {
         assert_eq!(library.tracks[0].title, "A");
     }
 }
+
+impl Player {
+    /// Explicit Player queue operations never pass through the DJ request queue.
+    fn queue_player_source(&mut self, indices: Vec<usize>, replace: bool) -> Result<(), String> {
+        if indices.is_empty() {
+            return Err("No matching songs in this source; your queue is unchanged".into());
+        }
+        let library = self
+            .library
+            .as_ref()
+            .ok_or("Connect your music library first")?;
+        if indices.iter().any(|i| *i >= library.tracks.len()) {
+            return Err("Library changed; refresh this source before queueing".into());
+        }
+        let count = indices.len();
+        if replace {
+            self.queue = indices;
+        } else {
+            self.queue.extend(indices);
+        }
+        self.queue_selected = None;
+        self.player_sequence.smart = None;
+        self.player_sequence.explicit_regular = true;
+        self.status = format!("Added {count} songs to Player queue; current playback unchanged");
+        Ok(())
+    }
+    pub(super) fn player_library_ui(&mut self, ui: &mut egui::Ui) {
+        let height = ui.available_height().max(160.);
+        let mut refresh = false;
+        let mut add = Vec::new();
+        let mut replace = false;
+        let mut play = false;
+        let mut play_one = None;
+        let mut smart = None;
+        let Some(library) = &self.library else {
+            ui.label("Connect your music library in Library first.");
+            return;
+        };
+        let browser = &mut self.workspace.player_browser;
+        if browser.snapshot.is_none()
+            || browser.snapshot_root != self.root
+            || browser
+                .snapshot
+                .as_ref()
+                .is_some_and(|l| l.tracks.len() != library.tracks.len())
+        {
+            browser.capture(&self.root, library, &self.run.settings, &self.queue);
+        }
+        let library = browser.snapshot.clone().unwrap();
+        skin::panel(ui, false, |ui| {
+            ui.set_width(ui.available_width() - 16.);
+            ui.set_min_height(height - 24.);
+            ui.horizontal(|ui| {
+                ui.heading("Library");
+                refresh = ui.button("Refresh").clicked();
+            });
+            ui.horizontal_wrapped(|ui| {
+                for (source, label) in [
+                    (Source::Folders, "Folders"),
+                    (Source::Playlists, "Playlists"),
+                    (Source::Smart, "Smart Playlists"),
+                ] {
+                    if ui
+                        .selectable_value(&mut browser.source, source, label)
+                        .clicked()
+                    {
+                        browser.selected_path = None;
+                    }
+                }
+            });
+            ui.add(
+                egui::TextEdit::singleline(&mut browser.search)
+                    .hint_text("Filter title, artist, album or genre")
+                    .desired_width(ui.available_width()),
+            );
+            let list_height = (height - 150.).max(90.);
+            ui.horizontal_top(|ui| {
+                ui.allocate_ui_with_layout(
+                    egui::vec2(160., list_height),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(160.);
+                        egui::ScrollArea::vertical()
+                            .id_salt("player-sources")
+                            .max_height(list_height)
+                            .show(ui, |ui| match browser.source {
+                                Source::Folders => {
+                                    if ui
+                                        .selectable_label(
+                                            browser.folder.as_os_str().is_empty(),
+                                            "All music",
+                                        )
+                                        .clicked()
+                                    {
+                                        browser.folder.clear();
+                                    }
+                                    Self::folder_tree(
+                                        ui,
+                                        &library.tree,
+                                        Path::new(""),
+                                        &mut browser.folder,
+                                    );
+                                }
+                                Source::Playlists => {
+                                    if self.dj_browser.playlists.is_empty() {
+                                        ui.weak("No saved playlists yet.");
+                                    }
+                                    for (i, (_, playlist)) in
+                                        self.dj_browser.playlists.iter().enumerate()
+                                    {
+                                        ui.selectable_value(
+                                            &mut browser.playlist,
+                                            Some(i),
+                                            &playlist.name,
+                                        );
+                                    }
+                                }
+                                Source::Smart => {
+                                    for profile in &self.run.settings.playlists {
+                                        ui.selectable_value(
+                                            &mut browser.smart,
+                                            profile.id.clone(),
+                                            smart_playlist_name(profile, &self.run.settings),
+                                        );
+                                    }
+                                }
+                            });
+                    },
+                );
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    let mut pending = false;
+                    let indices = match browser.source {
+                        Source::Folders => library
+                            .tracks
+                            .iter()
+                            .enumerate()
+                            .filter(|(_, t)| t.path.starts_with(&browser.folder))
+                            .map(|(i, _)| i)
+                            .collect(),
+                        Source::Playlists => browser
+                            .playlist
+                            .and_then(|i| self.dj_browser.playlists.get(i))
+                            .map(|(_, p)| playlist_indices(&browser.path_index, p))
+                            .unwrap_or_default(),
+                        Source::Smart => {
+                            smart = self
+                                .run
+                                .settings
+                                .playlists
+                                .iter()
+                                .find(|p| p.id == browser.smart)
+                                .cloned();
+                            smart
+                                .as_ref()
+                                .and_then(|p| {
+                                    browser.membership.indices(
+                                        p,
+                                        &library,
+                                        browser.refresh_generation,
+                                    )
+                                })
+                                .unwrap_or_else(|| {
+                                    pending = smart.is_some();
+                                    Vec::new()
+                                })
+                        }
+                    };
+                    let indices = browser.search_cache.filter(
+                        indices,
+                        &browser.search.to_lowercase(),
+                        &library,
+                    );
+                    ui.horizontal_wrapped(|ui| {
+                        ui.label(format!("{} songs", indices.len()));
+                        if ui
+                            .add_enabled(!indices.is_empty(), egui::Button::new("Queue Source"))
+                            .on_hover_text(
+                                "Append all matching songs without interrupting playback",
+                            )
+                            .clicked()
+                        {
+                            add = indices.clone();
+                        }
+                        if ui
+                            .add_enabled(!indices.is_empty(), egui::Button::new("Play Source"))
+                            .clicked()
+                        {
+                            add = indices.clone();
+                            replace = true;
+                            play = true;
+                        }
+                    });
+                    if pending {
+                        ui.spinner();
+                        ui.label("Matching saved Smart Playlist rules…");
+                        ui.ctx().request_repaint_after(Duration::from_millis(30));
+                    }
+                    egui::ScrollArea::vertical()
+                        .id_salt("player-source-tracks")
+                        .max_height((list_height - 45.).max(60.))
+                        .show_rows(ui, 30., indices.len(), |ui, range| {
+                            for row in range {
+                                let index = indices[row];
+                                let track = &library.tracks[index];
+                                ui.horizontal(|ui| {
+                                    if ui.small_button("+").on_hover_text("Add to Queue").clicked()
+                                    {
+                                        add = vec![index];
+                                    }
+                                    let response = ui.add_sized(
+                                        [ui.available_width(), 28.],
+                                        egui::Button::new(&track.title).truncate().selected(
+                                            browser.selected_path.as_ref() == Some(&track.path),
+                                        ),
+                                    );
+                                    if response.clicked() {
+                                        browser.selected_path = Some(track.path.clone());
+                                    }
+                                    if response.double_clicked() {
+                                        play_one = Some(index);
+                                    }
+                                    response.context_menu(|ui| {
+                                        if ui.button("Play").clicked() {
+                                            play_one = Some(index);
+                                            ui.close();
+                                        }
+                                        if ui.button("Add to Queue").clicked() {
+                                            add = vec![index];
+                                            ui.close();
+                                        }
+                                    });
+                                });
+                            }
+                        });
+                    if !pending && indices.is_empty() {
+                        ui.weak("Choose a source, or clear the search to find music.");
+                    }
+                });
+            });
+        });
+        if refresh && let Some(library) = &self.library {
+            self.workspace.player_browser.capture(
+                &self.root,
+                library,
+                &self.run.settings,
+                &self.queue,
+            );
+        }
+        if !self.workspace.player_browser.search.trim().is_empty() {
+            smart = None;
+        }
+        if add.is_empty() && play_one.is_none() {
+            return;
+        }
+        // A scan can replace or reorder the active index while this browser is open.
+        let current = self
+            .library
+            .as_ref()
+            .map(track_positions)
+            .unwrap_or_default();
+        if !add.is_empty() {
+            let resolved: Option<Vec<usize>> = add
+                .iter()
+                .map(|i| {
+                    library
+                        .tracks
+                        .get(*i)
+                        .and_then(|track| current.get(&track.path).copied())
+                })
+                .collect();
+            let Some(add) = resolved else {
+                self.status = "Library changed; click Refresh before queueing this source".into();
+                return;
+            };
+            if let Err(error) = self.queue_player_source(add, replace) {
+                self.status = error;
+            } else if play {
+                let index = self.queue.remove(0);
+                self.play(0, index);
+                self.player_sequence.smart = smart;
+                self.player_sequence.recent.clear();
+                self.player_sequence.failed.clear();
+                if let Some(track) = self.loaded_track(0) {
+                    self.player_sequence
+                        .recent
+                        .push(amp_core::show::song_id(track));
+                }
+                self.auto = true;
+            }
+        }
+        if let Some(index) = play_one
+            .and_then(|i| library.tracks.get(i))
+            .and_then(|track| current.get(&track.path).copied())
+        {
+            self.play(0, index);
+        }
+    }
+}
+
+#[cfg(test)]
+mod player_queue_tests {
+    use super::*;
+    fn player() -> Player {
+        let mut library = Library {
+            tracks: Vec::new(),
+            tree: Folder {
+                name: "Music".into(),
+                folders: Vec::new(),
+                tracks: Vec::new(),
+            },
+        };
+        for name in ["one", "two", "three"] {
+            library.tracks.push(amp_core::Track {
+                path: format!("{name}.mp3").into(),
+                title: name.into(),
+                preparation: Default::default(),
+            });
+        }
+        Player {
+            library: Some(library),
+            queue: vec![2],
+            loaded: [Some(1), None, None, None, None, None],
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn append_and_replace_queue_preserve_playback_and_source_order() {
+        let mut p = player();
+        let owner = p.playback_owner;
+        p.queue_player_source(vec![0, 1], false).unwrap();
+        assert_eq!(p.queue, vec![2, 0, 1]);
+        p.queue_player_source(vec![1, 0], true).unwrap();
+        assert_eq!(p.queue, vec![1, 0]);
+        assert_eq!(p.loaded[0], Some(1));
+        assert_eq!(p.playback_owner, owner);
+        assert!(p.audio.is_none());
+    }
+    #[test]
+    fn empty_or_stale_source_never_clears_existing_queue() {
+        let mut p = player();
+        assert!(p.queue_player_source(Vec::new(), true).is_err());
+        assert_eq!(p.queue, vec![2]);
+        assert!(p.queue_player_source(vec![0, 99], true).is_err());
+        assert_eq!(p.queue, vec![2]);
+    }
+}

@@ -4,6 +4,8 @@ pub struct Workspace {
     pub enabled: bool,
     pub pane: usize,
     pub rendering: bool,
+    pub player_library_open: bool,
+    pub player_browser: dj_browser::Browser,
 }
 impl Default for Workspace {
     fn default() -> Self {
@@ -26,6 +28,8 @@ impl Default for Workspace {
             enabled,
             pane,
             rendering: false,
+            player_library_open: true,
+            player_browser: Default::default(),
         }
     }
 }
@@ -121,6 +125,42 @@ impl Player {
             }
         });
         ui.add_space(card_gap);
+        if self.workspace.player_library_open {
+            if ui.available_width() >= 1050. {
+                let width = ui.available_width();
+                let height = ui.available_height();
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width * 0.63 - 8., height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            self.player_library_ui(ui);
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            self.workspace_player_queue(ui);
+                        },
+                    );
+                });
+            } else {
+                let height = ui.available_height();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), (height * 0.6).max(180.)),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.player_library_ui(ui);
+                    },
+                );
+                self.workspace_player_queue(ui);
+            }
+        } else {
+            self.workspace_player_queue(ui);
+        }
+    }
+    fn workspace_player_queue(&mut self, ui: &mut egui::Ui) {
         let mut play = None;
         let queue_card_height = ui.available_height();
         skin::panel(ui, false, |ui| {
@@ -129,8 +169,15 @@ impl Player {
             ui.horizontal(|ui| {
                 ui.heading("Play queue");
                 ui.weak(format!("{} songs", self.queue.len()));
-                if ui.button("Browse music").clicked() {
-                    self.workspace.pane = 1;
+                if !self.workspace.player_library_open && ui.button("Browse music").clicked() {
+                    self.workspace.player_library_open = true;
+                }
+                if ui
+                    .add_enabled(!self.queue.is_empty(), egui::Button::new("Clear"))
+                    .clicked()
+                {
+                    self.queue.clear();
+                    self.queue_selected = None;
                 }
             });
             let queue_height = ui.available_height().max(0.);
@@ -141,23 +188,23 @@ impl Player {
                 .auto_shrink([false, false])
                 .show(ui, |ui| {
                     if self.queue.is_empty() {
-                        ui.weak("Choose songs or a playlist in Library to build your queue.");
-                        ui.vertical_centered(|ui| {
-                            ui.add_space(((queue_height - 220.) * 0.5).max(8.));
-                            let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(60., 60.), egui::Sense::hover());
-                            icons::draw(
-                                ui,
-                                rect,
-                                icons::Icon::List,
-                                theme::current(ui.ctx()).palette().muted,
-                            );
-                            ui.heading("Your queue is empty");
-                            ui.label("Add songs from your Library to get started.");
-                            if ui.button("Go to Library").clicked() {
-                                self.workspace.pane = 1;
-                            }
-                        });
+                        ui.weak("Use + to add a song, or Queue Source to add the selected list.");
+                        if queue_height >= 260. {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(((queue_height - 200.) * 0.5).max(8.));
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(60., 60.),
+                                    egui::Sense::hover(),
+                                );
+                                icons::draw(
+                                    ui,
+                                    rect,
+                                    icons::Icon::List,
+                                    theme::current(ui.ctx()).palette().muted,
+                                );
+                                ui.heading("Your queue is empty");
+                            });
+                        }
                     }
                     if let Some(library) = &self.library {
                         for (order, index) in self.queue.iter().enumerate() {
@@ -174,13 +221,14 @@ impl Player {
                                     )
                                     .clicked()
                             {
-                                play = Some(*index);
+                                play = Some(order);
                             }
                         }
                     }
                 });
         });
-        if let Some(index) = play {
+        if let Some(order) = play {
+            let index = self.queue.remove(order);
             self.play(0, index);
         }
     }
@@ -416,6 +464,8 @@ mod tests {
                     enabled: true,
                     pane: 0,
                     rendering: !shell,
+                    player_library_open: false,
+                    ..Default::default()
                 },
                 playback_owner: playback_owner::Owner::Dj,
                 ..Default::default()
@@ -500,6 +550,8 @@ mod tests {
                     enabled: true,
                     pane: 1,
                     rendering: false,
+                    player_library_open: true,
+                    player_browser: Default::default(),
                 },
                 playback_owner: playback_owner::Owner::Dj,
                 ..Default::default()
@@ -544,6 +596,8 @@ mod tests {
                 enabled: true,
                 pane: 1,
                 rendering: false,
+                player_library_open: true,
+                player_browser: Default::default(),
             },
             ..Default::default()
         };
@@ -621,6 +675,8 @@ mod tests {
                     enabled: true,
                     pane: 2,
                     rendering: false,
+                    player_library_open: true,
+                    player_browser: Default::default(),
                 },
                 ..Default::default()
             };
@@ -711,5 +767,63 @@ mod tests {
                 "Drag must not replace the active automation reservation"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod player_library_tests {
+    use super::*;
+    #[test]
+    fn player_contains_sources_and_queue_actions_without_leaving_player() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            library: Some(Library {
+                tracks: Vec::new(),
+                tree: Folder {
+                    name: "Music".into(),
+                    folders: Vec::new(),
+                    tracks: Vec::new(),
+                },
+            }),
+            ..Default::default()
+        };
+        let mut text = Vec::new();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600., 1100.),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                player.workspace_player(ui);
+            },
+        );
+        fn collect(shape: &egui::Shape, text: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => text.push(t.galley.text().into()),
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        collect(s, text)
+                    }
+                }
+                _ => {}
+            }
+        }
+        for s in &out.shapes {
+            collect(&s.shape, &mut text);
+        }
+        out.textures_delta.clear();
+        for label in ["Folders", "Playlists", "Smart Playlists", "Queue Source"] {
+            assert!(
+                text.iter().any(|t| t == label),
+                "Player is missing {label}: {text:?}"
+            );
+        }
+        assert_eq!(
+            player.workspace.pane, 1,
+            "Rendering Player browsing must not switch destinations"
+        );
     }
 }

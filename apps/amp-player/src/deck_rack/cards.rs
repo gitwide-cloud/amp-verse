@@ -1257,6 +1257,7 @@ mod tests {
                         enabled: workspace,
                         pane: 2,
                         rendering: false,
+                        ..Default::default()
                     },
                     ..Default::default()
                 };

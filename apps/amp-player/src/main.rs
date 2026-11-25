@@ -1204,6 +1204,9 @@ impl Player {
         }
         if self.player_sequence.smart.is_some() {
             if let Some(index) = self.next_player_smart() {
+                if let Some(at) = self.queue.iter().position(|candidate| *candidate == index) {
+                    self.queue.remove(at);
+                }
                 self.play(0, index);
                 if self.loaded[0] != Some(index) {
                     if let Some(track) = self.library.as_ref().and_then(|l| l.tracks.get(index)) {
@@ -1864,15 +1867,21 @@ impl Player {
         let controls = |ui: &mut egui::Ui| {
             self.player_view_menu(ui);
             if ui
-                .button(if self.library_open && (self.layout.parent[1] == Some(0)) {
-                    "Collapse Library"
-                } else {
-                    "Expand Library"
-                })
+                .button(
+                    if if workspace {
+                        self.workspace.player_library_open
+                    } else {
+                        self.library_open && self.layout.parent[1] == Some(0)
+                    } {
+                        "Collapse Library"
+                    } else {
+                        "Expand Library"
+                    },
+                )
                 .clicked()
             {
-                if self.workspace.enabled {
-                    self.workspace.pane = 1;
+                if workspace {
+                    self.workspace.player_library_open = !self.workspace.player_library_open;
                 } else if self.library_open && self.layout.parent[1] == Some(0) {
                     self.library_open = false;
                     self.resize_player(ui.ctx(), false);
@@ -2001,8 +2010,11 @@ impl Player {
                     1 => {
                         if self.podcasts.is_active() {
                             self.toggle_player();
-                        } else if let Some(index) =
-                            self.selected.filter(|index| Some(*index) != self.loaded[0])
+                        } else if self.loaded[0].is_none() && !self.queue.is_empty() {
+                            let index = self.queue.remove(0);
+                            self.play(0, index);
+                        } else if self.loaded[0].is_none()
+                            && let Some(index) = self.selected
                         {
                             self.play(0, index);
                         } else {
