@@ -53,6 +53,7 @@ mod stem_capability;
 use dj_engine as mixer;
 #[path = "performance.rs"]
 mod dj_logic;
+mod mini_player;
 mod module_runtime;
 mod monitor;
 mod music_scenes;
@@ -161,6 +162,7 @@ fn capture(ctx: &egui::Context, path: PathBuf) {
 struct Player {
     output_admission: std::sync::Arc<output_admission::Gate>,
     workspace: workspace::Workspace,
+    mini: mini_player::State,
     playback_owner: playback_owner::Owner,
     player_sequence: player_sequence::Sequence,
     rack: deck_rack::Rack,
@@ -275,6 +277,7 @@ impl Default for Player {
         Self {
             output_admission: Default::default(),
             workspace: Default::default(),
+            mini: Default::default(),
             playback_owner: Default::default(),
             player_sequence: Default::default(),
             rack: Default::default(),
@@ -3337,7 +3340,7 @@ impl Player {
         }
         for deck in 0..6 {
             if self.jog_resume[deck].is_some_and(|(_, viewport)| viewport != ctx.viewport_id())
-                && self.dj_open
+                && (self.dj_open || (self.mini.minimized && !self.mini.dismissed))
             {
                 continue;
             }
@@ -3634,8 +3637,18 @@ impl eframe::App for Player {
         self.audio.take();
         let _ = onnx_stem_worker::shutdown();
     }
+    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if mini_player::root_minimized(ctx) {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::RequestPaintWhileHidden,
+            );
+            ctx.request_repaint_after(Duration::from_millis(33));
+        }
+    }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
         let _output_scope = output_admission::scope(self.output_admission.clone());
+        self.minimized_controls(ui.ctx());
         if self.output_admission.leased() {
             self.run.auto = false;
         }

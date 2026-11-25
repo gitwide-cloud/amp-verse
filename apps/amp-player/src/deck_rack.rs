@@ -844,7 +844,7 @@ impl Player {
             }
         }
     }
-    fn rack_loop(&mut self, d: usize) {
+    pub(super) fn rack_loop(&mut self, d: usize) {
         let seconds = self
             .loaded_track(d)
             .and_then(|t| t.preparation.bpm)
@@ -855,7 +855,7 @@ impl Player {
             self.status = e;
         }
     }
-    fn rack_platter(&mut self, ui: &mut egui::Ui, d: usize, size: f32) {
+    pub(super) fn rack_platter(&mut self, ui: &mut egui::Ui, d: usize, size: f32) {
         let wheel = skin::vinyl_platter(
             ui,
             size,
