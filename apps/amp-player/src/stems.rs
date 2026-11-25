@@ -778,7 +778,7 @@ impl Panel {
         });
         if !active && !vertical {
             ui.small(if crate::onnx_stem_worker::configured() {
-                "Enable on-demand stems from this paused deck's stem reload control."
+                "Stems are preparing or unavailable. Check the deck stem status."
             } else {
                 "Stem processing disabled pending storage-safe replacement"
             });
@@ -841,8 +841,11 @@ impl Panel {
                     let has_source = source.is_some_and(|path| path.is_file());
                     let reserved = std::array::from_fn(|d| audio.controls.on_demand_stems[d].load(Relaxed) && !audio.controls.prepared_stems[d].load(Relaxed));
                     let admitted = cached || (!playlist_preparing() && policy.allows(&reserved,deck));
-                    if live_mode_action(ui, enabled, cached, can_reload, has_source, admitted).clicked() {
-                        audio.controls.on_demand_stems[deck].store(!enabled, Relaxed);
+                    if enabled {
+                        ui.label("Stems armed · 0 = no filtering · right-click a knob to reset");
+                    } else if live_mode_action(ui, enabled, cached, can_reload, has_source, admitted).clicked() {
+                        // Compatibility for a song loaded before automatic arming.
+                        audio.controls.on_demand_stems[deck].store(true, Relaxed);
                         reload = true;
                     }
                     if !cached && playlist_preparing() {ui.weak("Cancel or finish playlist preparation before enabling live stems.");}

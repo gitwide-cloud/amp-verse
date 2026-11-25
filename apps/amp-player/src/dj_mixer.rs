@@ -124,7 +124,8 @@ pub(super) fn dial(
             *value -= extent / 100.;
         }
     }
-    if response.double_clicked()
+    if response.secondary_clicked()
+        || response.double_clicked()
         || (response.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Home)))
     {
         *value = 0.;
@@ -325,5 +326,49 @@ impl Player {
                 self.mixer_panel.status = error;
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod right_click_reset_tests {
+    use super::*;
+    #[test]
+    fn right_click_resets_a_stem_dial_to_neutral() {
+        let ctx = egui::Context::default();
+        let mut value = -0.7;
+        let mut point = egui::Pos2::ZERO;
+        for frame in 0..4 {
+            let events = if frame == 1 || frame == 2 {
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Secondary,
+                        pressed: frame == 1,
+                        modifiers: Default::default(),
+                    },
+                ]
+            } else {
+                vec![]
+            };
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(400., 300.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    point = dial(ui, "VOC", &mut value, -1. ..=1., egui::Color32::YELLOW)
+                        .rect
+                        .center();
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(value, 0.);
+        assert_eq!(amp_core::stem_mix::gains([value, 0., 0.]), [1.; 3]);
     }
 }

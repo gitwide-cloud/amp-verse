@@ -2196,6 +2196,11 @@ impl Engine {
         if deck >= DECKS {
             return Err("Unknown deck".into());
         }
+        // DJ stems are armed whenever the installed worker is available. Player
+        // playback still calls load_original and stays independent of separation.
+        if crate::onnx_stem_worker::configured() {
+            self.controls.on_demand_stems[deck].store(true, Relaxed);
+        }
         if !self.controls.on_demand_stems[deck].load(Relaxed)
             || track
                 .preparation
