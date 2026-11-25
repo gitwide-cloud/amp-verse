@@ -72,7 +72,7 @@ pub fn exit(p: &Preparation, style: Style, pace: Pace, duration: f64, fade: f64)
         return cue.seconds;
     }
     if style == Style::Hype
-        && let Some(lull) = crate::hype_sections::exit(p, fade)
+        && let Some(lull) = crate::hype_sections::exit(p, fade).filter(|at| *at <= end)
     {
         return lull;
     }

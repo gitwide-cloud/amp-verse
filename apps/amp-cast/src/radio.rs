@@ -34,10 +34,8 @@ fn entry(p: &Preparation, profile: Option<&SmartPlaylist>, target: Option<f64>) 
     {
         return seconds;
     }
-    if profile.is_some_and(|r| r.style == Style::Hype)
-        && let Some(drop) = amp_core::hype_sections::entry(p)
-    {
-        return drop;
+    if profile.is_some_and(|r| r.style == Style::Hype) {
+        return amp_core::hype_sections::entry(p).unwrap_or(p.cue_in);
     }
     if profile.is_some() {
         return amp_core::energy_profile::automatic_entry(
@@ -909,6 +907,16 @@ mod automatic_entry_tests {
             reviewed: true,
         });
         assert_eq!(entry(&p, Some(&profile), Some(9.1)), 0.);
+    }
+    #[test]
+    fn hype_without_a_sustained_drop_does_not_fall_back_to_a_mood_section() {
+        let mut p = prepared();
+        p.cue_in = 7.;
+        let mut profile = show::Settings::default().playlists.remove(0);
+        profile.style = Style::Hype;
+        let saved = p.clone();
+        assert_eq!(entry(&p, Some(&profile), Some(9.1)), 7.);
+        assert_eq!(p, saved);
     }
     #[test]
     fn finite_queue_default_entry_keeps_its_existing_behavior() {

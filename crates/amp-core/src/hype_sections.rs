@@ -11,6 +11,11 @@ fn activity(p: &Preparation) -> Option<crate::energy_profile::Profile> {
         return None;
     }
     let profile = crate::energy_profile::read(p)?;
+    if p.analysis.as_ref().is_some_and(|a| {
+        !a.duration.is_finite() || (a.duration - profile.duration).abs() > profile.step
+    }) {
+        return None;
+    }
     (profile.curve.len() >= 12).then_some(profile)
 }
 fn mean(curve: &[f64], first: usize, count: usize) -> Option<f64> {
@@ -299,5 +304,18 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(marked_entry(&p), None);
+    }
+    #[test]
+    fn stale_activity_duration_cannot_supply_a_drop_or_lull() {
+        let mut p = song([vec![0.2; 20], vec![0.9; 20], vec![0.2; 20]].concat());
+        p.analysis = Some(crate::preparation::AnalysisInfo {
+            engine: "fixture".into(),
+            duration: 20.,
+            tempo_confidence: 0.,
+            key_confidence: 0.,
+            reviewed: false,
+        });
+        assert_eq!(entry(&p), None);
+        assert_eq!(exit(&p, 5.), None);
     }
 }

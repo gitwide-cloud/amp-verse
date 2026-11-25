@@ -642,6 +642,7 @@ impl Player {
             track.preparation.cue_in = seconds;
             automatic_section = true;
         } else if paired
+            && self.run.style != Style::Hype
             && self.run.profile.is_some()
             && let Some(target) = self
                 .run
