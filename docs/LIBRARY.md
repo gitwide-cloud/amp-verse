@@ -25,3 +25,11 @@ Select a song and open Edit cues / BPM / key / rating / energy. Review and save 
 New analysis estimates energy from aggregate RMS level using a bounded -48 to -6 dBFS mapping. This is a rough relative level proxy, not an assessment of genre, arrangement, perceived intensity or musical taste. Existing energy values are preserved, including manual corrections. Older analysis sidecars may have no energy until reviewed or reanalyzed. The current background analyzer process is not replaced during a Player-only installation.
 
 No audio is beat-matched or rendered by Smart List creation itself. Prepared BPM/key estimates and chosen transitions still need review and listening.
+
+## Normal playlist builder
+
+New Playlist creates a blank saved playlist without capturing or replacing the playback queue. Use Add music to browse the indexed folders, including their descendants, or search by partial title, artist, album, genre, filename, or other displayed metadata. The general search and track search intersect; the folder search filters the folder navigation. Clear returns to all music.
+
+Checkboxes select songs independently of playback. Add checked to queue and Add checked to playlist are explicit destinations; adding a folder includes its descendants. Repeated additions keep existing membership once, preserve order and save through the normal playlist store/sync path. The Library page also offers a saved-playlist destination menu. Originals stay in place.
+
+Find Similar produces up to twenty review-only candidates using prepared mixing neighbors, then artist/genre matches where needed. Preview auditions a short excerpt without adding it; Add is required for membership. Preview is blocked while decks are playing so it cannot interrupt a live mix. Missing sources are reported explicitly and saving is blocked until reconnected; their saved paths are preserved.
