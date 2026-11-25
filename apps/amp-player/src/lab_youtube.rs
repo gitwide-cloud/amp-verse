@@ -535,10 +535,26 @@ impl Panel {
             if !self.status.is_empty() {
                 ui.label(&self.status);
                 if self.failed && suno::recognizes(&self.url) {
-                    ui.hyperlink_to(
-                        "Suno download options",
-                        "https://help.suno.com/en/articles/2409921",
-                    );
+                    ui.horizontal_wrapped(|ui| {
+                        if let Some(link) = suno::song_page(&self.url) {
+                            ui.hyperlink_to("Open in Suno", link);
+                        }
+                        ui.hyperlink_to(
+                            "Suno download options",
+                            "https://help.suno.com/en/articles/2409921",
+                        );
+                        if ui.button("Open exported MP3...").clicked()
+                            && let Some(path) = rfd::FileDialog::new()
+                                .set_title("Open a Suno-exported MP3")
+                                .add_filter("MP3 audio", &["mp3"])
+                                .pick_file()
+                        {
+                            self.ready = Some(path);
+                            self.open_pending = true;
+                            self.failed = false;
+                            self.status = "Opening exported MP3 in Lab...".into();
+                        }
+                    });
                 }
             }
             if self.job.is_some() {

@@ -62,6 +62,15 @@ pub(super) fn canonical_url(input: &str) -> Result<String, String> {
         format!("https://suno.com{path}")
     })
 }
+pub(super) fn song_page(input: &str) -> Option<String> {
+    let canonical = canonical_url(input).ok()?;
+    let parsed = url::Url::parse(&canonical).ok()?;
+    Some(if let Some(id) = audio_id(&parsed) {
+        format!("https://suno.com/song/{id}")
+    } else {
+        canonical
+    })
+}
 fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_connect(Some(Duration::from_secs(10)))
@@ -129,9 +138,64 @@ fn audio_url(input: &str, id: &str) -> Result<String, String> {
     }
     Ok(u.into())
 }
+fn song_record<'a>(value: &'a serde_json::Value, id: &str) -> Option<&'a serde_json::Value> {
+    match value {
+        serde_json::Value::Object(fields) => {
+            if fields.get("id").and_then(|v| v.as_str()) == Some(id)
+                && (fields.contains_key("audio_url") || fields.contains_key("media_urls"))
+            {
+                return Some(value);
+            }
+            fields.values().find_map(|v| song_record(v, id))
+        }
+        serde_json::Value::Array(values) => values.iter().find_map(|v| song_record(v, id)),
+        _ => None,
+    }
+}
+fn record_audio(record: &serde_json::Value, id: &str) -> Result<String, String> {
+    if record["drm"] == true || record["is_encrypted"] == true {
+        return Err(UNAVAILABLE.into());
+    }
+    if record["status"].as_str().is_some_and(|s| s != "complete") {
+        return Err("This Suno song is not ready to download yet.".into());
+    }
+    if record["action_config"]["actions"]
+        .as_array()
+        .is_some_and(|actions| {
+            actions.iter().any(|action| {
+                matches!(
+                    action["action_type"].as_str(),
+                    Some("download" | "download_audio" | "download_song")
+                ) && (action["disabled"] == true || action["visible"] == false)
+            })
+        })
+    {
+        return Err(UNAVAILABLE.into());
+    }
+    if let Some(url) = record["audio_url"]
+        .as_str()
+        .and_then(|s| audio_url(s, id).ok())
+    {
+        return Ok(url);
+    }
+    // Modern public pages publish progressive audio here; never guess a URL from the song ID.
+    record["media_urls"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .filter(|media| {
+            media["delivery"] == "progressive"
+                && media["encoding"]
+                    .as_str()
+                    .is_none_or(|encoding| matches!(encoding, "identity" | "none" | "plain"))
+                && media["drm"] != true
+                && media["is_encrypted"] != true
+        })
+        .find_map(|media| media["url"].as_str().and_then(|s| audio_url(s, id).ok()))
+        .ok_or_else(|| UNAVAILABLE.into())
+}
 fn resolve(html: &str, id: &str) -> Result<(String, String), String> {
     let mut chunks = vec![html.to_owned()];
-    // Next.js exposes the public song record as JSON strings in flight script chunks.
     for fragment in html.split("self.__next_f.push(").skip(1) {
         if let Some(Ok(serde_json::Value::Array(values))) =
             serde_json::Deserializer::from_str(fragment)
@@ -143,6 +207,24 @@ fn resolve(html: &str, id: &str) -> Result<(String, String), String> {
                     .into_iter()
                     .filter_map(|v| v.as_str().map(str::to_owned)),
             );
+        }
+    }
+    for text in &chunks {
+        for line in text.lines() {
+            let payload = line.split_once(':').map_or(line, |(_, body)| body);
+            for candidate in [line, payload] {
+                if let Ok(value) = serde_json::from_str(candidate)
+                    && let Some(record) = song_record(&value, id)
+                {
+                    let audio = record_audio(record, id)?;
+                    let title = record["title"]
+                        .as_str()
+                        .map(str::to_owned)
+                        .or_else(|| meta(html, "og:title"))
+                        .unwrap_or_else(|| format!("Suno {id}"));
+                    return Ok((audio, safe_name(&title)));
+                }
+            }
         }
     }
     let mut urls: Vec<String> = chunks
@@ -158,9 +240,7 @@ fn resolve(html: &str, id: &str) -> Result<(String, String), String> {
         .iter()
         .find_map(|s| audio_url(s, id).ok())
         .ok_or(UNAVAILABLE)?;
-    let title = meta(html, "og:title")
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| format!("Suno {id}"));
+    let title = meta(html, "og:title").unwrap_or_else(|| format!("Suno {id}"));
     Ok((audio, safe_name(&title)))
 }
 fn read_page(
@@ -276,6 +356,14 @@ fn audio_response(
     }
     Err("Suno audio redirected too many times.".into())
 }
+fn plain_audio_header(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"ID3")
+        || bytes.starts_with(b"OggS")
+        || bytes.starts_with(b"fLaC")
+        || (bytes.len() >= 2 && bytes[0] == 0xff && bytes[1] & 0xe0 == 0xe0)
+        || (bytes.len() >= 12 && bytes.starts_with(b"RIFF") && &bytes[8..12] == b"WAVE")
+        || (bytes.len() >= 8 && &bytes[4..8] == b"ftyp")
+}
 pub(super) fn download(
     input: &str,
     dir: &Path,
@@ -333,6 +421,14 @@ pub(super) fn download(
         tx,
         total,
     )?;
+    let mut header = [0u8; 12];
+    let read = fs::File::open(&source)
+        .map_err(|e| e.to_string())?
+        .read(&mut header)
+        .map_err(|e| e.to_string())?;
+    if !plain_audio_header(&header[..read]) {
+        return Err("Suno returned encoded playback data rather than a standard audio file. Use Suno's export menu and open the exported audio in Lab.".into());
+    }
     convert_publish(
         &source,
         dir,
@@ -350,6 +446,20 @@ pub(super) fn download(
 mod tests {
     use super::*;
     const ID: &str = "ab39a04d-b2e6-463b-9b8e-ddea725422f5";
+    #[test]
+    #[ignore = "live Suno availability; requires AMP_SUNO_TEST_URL and real FFmpeg"]
+    fn live_public_suno_import() {
+        let input = std::env::var("AMP_SUNO_TEST_URL").expect("Set an accessible Suno song URL");
+        let dir = tempfile::tempdir().unwrap();
+        let tools = Tools::audio_only().unwrap();
+        let (tx, _rx) = mpsc::sync_channel(64);
+        let result = download(&input, dir.path(), &tools, &AtomicBool::new(false), &tx).unwrap();
+        let duration = crate::lab_editor::duration(&result).unwrap();
+        assert!(duration > 30., "Downloaded only a placeholder: {duration}");
+        let mut editor = crate::lab_editor::Editor::default();
+        assert!(editor.load_path(result));
+        println!("Suno public audio downloaded, converted and decoded: {duration:.1} seconds");
+    }
     #[test]
     #[ignore = "requires real FFmpeg/ffprobe; no Suno account or network"]
     fn local_codec_import_opens_in_lab_and_preserves_source() {
@@ -454,6 +564,34 @@ mod tests {
         ] {
             assert!(audio_url(&u, ID).is_err());
         }
+    }
+    #[test]
+    fn current_public_progressive_media_is_selected_with_matching_identity() {
+        let record = serde_json::json!({"id":ID,"status":"complete","title":"Current public song","audio_url":"https://studio-api.prod.suno.com/api/forbidden","media_urls":[{"url":format!("https://d2lwuy8qc234o3.cloudfront.net/1/clip/{ID}.m4a"),"delivery":"progressive","content_type":"m4a-opus"}]});
+        let flight =
+            serde_json::json!([1, format!("7:{}", serde_json::json!(["$",{"clip":record}]))]);
+        let html = format!("<script>self.__next_f.push({flight})</script>");
+        let (url, title) = resolve(&html, ID).unwrap();
+        assert!(url.ends_with(&format!("{ID}.m4a")));
+        assert_eq!(title, "Current public song");
+        let mut denied = record.clone();
+        denied["action_config"] =
+            serde_json::json!({"actions":[{"action_type":"download","disabled":true}]});
+        assert!(record_audio(&denied, ID).is_err());
+        let mut encoded = record.clone();
+        encoded["media_urls"][0]["encoding"] = serde_json::json!("1.0.0");
+        assert!(record_audio(&encoded, ID).is_err());
+        assert!(!plain_audio_header(&[
+            0xaa, 0xd7, 0xc8, 0xa6, 0x97, 0xc9, 0xff, 0xe8, 0x57, 0xbb, 0xab, 0x5e
+        ]));
+        assert!(plain_audio_header(b"RIFF0000WAVE"));
+        let mut encrypted = record.clone();
+        encrypted["media_urls"][0]["drm"] = serde_json::json!(true);
+        assert!(record_audio(&encrypted, ID).is_err());
+        let mut wrong = record;
+        wrong["media_urls"][0]["url"] =
+            serde_json::json!("https://cdn1.suno.ai/00000000-0000-0000-0000-000000000000.mp3");
+        assert!(record_audio(&wrong, ID).is_err());
     }
     #[test]
     fn bounded_copy_cancels_without_publishing() {
