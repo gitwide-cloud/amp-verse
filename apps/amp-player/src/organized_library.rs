@@ -1656,7 +1656,11 @@ mod tests {
     fn global_search_escapes_folder_scope_and_track_search_refines_it() {
         let (_dir, mut player) = card_fixture();
         player.folder = "No matching folder".into();
-        player.search = "Artist 1".into();
+        player.library.as_mut().unwrap().tracks[0]
+            .preparation
+            .extensions
+            .insert("artist".into(), serde_json::json!("Scope Sentinel"));
+        player.search = "sentinel".into();
         assert_eq!(player.library_browser_results(), vec![0]);
         player.library_builder.tracks = "no such title".into();
         assert!(player.library_browser_results().is_empty());
