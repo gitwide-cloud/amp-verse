@@ -1598,6 +1598,61 @@ mod tests {
         (dir, player)
     }
     #[test]
+    fn actual_checkbox_and_queue_button_keep_selection_separate_from_playback() {
+        let (_dir, mut player) = card_fixture();
+        let ctx = egui::Context::default();
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 800.));
+        let draw = |player: &mut Player, events: Vec<egui::Event>| {
+            let _ = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(screen),
+                    events,
+                    ..Default::default()
+                },
+                |ui| player.music_browser(ui, 650., false),
+            );
+        };
+        draw(&mut player, vec![]);
+        let checkbox = ctx
+            .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("library-first-checkbox")))
+            .unwrap();
+        for pressed in [true, false] {
+            draw(
+                &mut player,
+                vec![
+                    egui::Event::PointerMoved(checkbox.center()),
+                    egui::Event::PointerButton {
+                        pos: checkbox.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+        }
+        assert_eq!(player.checked_library_indices(), vec![0]);
+        assert!(player.queue.is_empty());
+        let add = ctx
+            .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("library-add-checked-queue")))
+            .unwrap();
+        for pressed in [true, false] {
+            draw(
+                &mut player,
+                vec![
+                    egui::Event::PointerMoved(add.center()),
+                    egui::Event::PointerButton {
+                        pos: add.center(),
+                        button: egui::PointerButton::Primary,
+                        pressed,
+                        modifiers: Default::default(),
+                    },
+                ],
+            );
+        }
+        assert_eq!(player.queue, vec![0]);
+        assert!(player.audio.is_none());
+    }
+    #[test]
     fn global_search_escapes_folder_scope_and_track_search_refines_it() {
         let (_dir, mut player) = card_fixture();
         player.folder = "No matching folder".into();

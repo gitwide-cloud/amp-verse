@@ -17,12 +17,7 @@ impl Player {
                         .iter()
                         .enumerate()
                         .filter(|(_, t)| {
-                            (self
-                                .search
-                                .trim()
-                                .is_empty()
-                                .then(|| t.path.starts_with(&self.folder))
-                                .unwrap_or(true))
+                            (!self.search.trim().is_empty() || t.path.starts_with(&self.folder))
                                 && matches_track(t, &self.search)
                                 && matches_track(t, &self.library_builder.tracks)
                         })
@@ -177,10 +172,16 @@ impl Player {
             if ui.button("Clear checks").clicked() {
                 self.library_builder.checked.clear();
             }
-            if ui
-                .add_enabled(checked > 0, egui::Button::new("Add checked to queue"))
-                .clicked()
-            {
+            let queue_action =
+                ui.add_enabled(checked > 0, egui::Button::new("Add checked to queue"));
+            #[cfg(test)]
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::unique("library-add-checked-queue"),
+                    queue_action.rect,
+                )
+            });
+            if queue_action.clicked() {
                 self.add_checked_to_queue();
             }
             if editing {
@@ -274,7 +275,9 @@ impl Player {
                             let index=filtered[position]; let track=&lib.tracks[index];
                             ui.horizontal(|ui| {
                                 let mut marked=self.library_builder.checked.contains(&track.path);
-                                if ui.checkbox(&mut marked, "").on_hover_text("Select song; does not change playback or playlist").changed() {
+                                let selection = ui.checkbox(&mut marked, "").on_hover_text("Select song; does not change playback or playlist");
+                                #[cfg(test)] if position==0 { ui.ctx().data_mut(|d|d.insert_temp(egui::Id::unique("library-first-checkbox"),selection.rect)); }
+                                if selection.changed() {
                                     if marked { self.library_builder.checked.insert(track.path.clone()); } else { self.library_builder.checked.remove(&track.path); }
                                 }
                                 let row=ui.add_sized([title_width,44.],egui::Button::selectable(self.selected==Some(index),track_columns::cell(track,"title")).truncate().sense(egui::Sense::click_and_drag()));
@@ -351,35 +354,44 @@ impl Player {
             self.status = "Add a song before requesting similar songs.".into();
             return;
         }
+        let seed_set: std::collections::HashSet<_> = seeds.iter().copied().collect();
+        let seed_artists: std::collections::HashSet<_> = seeds
+            .iter()
+            .filter_map(|i| lib.tracks.get(*i))
+            .take(100)
+            .map(|t| track_columns::cell(t, "artist").to_lowercase())
+            .filter(|a| !a.is_empty())
+            .collect();
+        let seed_genres: std::collections::HashSet<_> = seeds
+            .iter()
+            .filter_map(|i| lib.tracks.get(*i))
+            .take(100)
+            .flat_map(|t| amp_core::genres::values(&t.preparation))
+            .map(|g| g.to_lowercase())
+            .collect();
         let preparations: Vec<_> = lib.tracks.iter().map(|t| &t.preparation).collect();
-        let prepared =
-            amp_core::smart::curate(&preparations, seeds, seeds.len().saturating_add(20))
-                .unwrap_or_default();
+        let prepared = amp_core::smart::curate(
+            &preparations,
+            &seeds[..seeds.len().min(100)],
+            seeds.len().min(100).saturating_add(20),
+        )
+        .unwrap_or_default();
         let mut candidates: Vec<_> = prepared
             .into_iter()
-            .filter(|i| !seeds.contains(i))
+            .filter(|i| !seed_set.contains(i))
             .map(|i| (i, 100usize))
             .collect();
         for (i, track) in lib.tracks.iter().enumerate() {
-            if seeds.contains(&i) || candidates.iter().any(|(index, _)| *index == i) {
+            if seed_set.contains(&i) || candidates.iter().any(|(index, _)| *index == i) {
                 continue;
             }
             let artist = track_columns::cell(track, "artist").to_lowercase();
             let genres = amp_core::genres::values(&track.preparation);
-            let score = seeds
+            let same_artist = !artist.is_empty() && seed_artists.contains(&artist);
+            let same_genre = genres
                 .iter()
-                .filter_map(|seed| lib.tracks.get(*seed))
-                .take(100)
-                .map(|seed| {
-                    let same_artist = !artist.is_empty()
-                        && artist == track_columns::cell(seed, "artist").to_lowercase();
-                    let same_genre = amp_core::genres::values(&seed.preparation)
-                        .iter()
-                        .any(|g| genres.iter().any(|c| g.eq_ignore_ascii_case(c)));
-                    usize::from(same_artist) * 30 + usize::from(same_genre) * 10
-                })
-                .max()
-                .unwrap_or(0);
+                .any(|g| seed_genres.contains(&g.to_lowercase()));
+            let score = usize::from(same_artist) * 30 + usize::from(same_genre) * 10;
             if score > 0 {
                 candidates.push((i, score));
             }
