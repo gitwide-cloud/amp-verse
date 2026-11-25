@@ -245,6 +245,7 @@ impl Manager {
         let mut action = None;
         let counts = self.counts();
         skin::panel(ui, false, |ui| {
+            ui.set_min_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
                 let (rect, _) = ui.allocate_exact_size(egui::vec2(46., 46.), egui::Sense::hover());
                 crate::icons::draw(ui, rect, crate::icons::Icon::Puzzle, skin::accent(ui));
@@ -488,33 +489,52 @@ impl Manager {
                         ui.set_width(ui.available_width() - 20.);
                         ui.horizontal(|ui| {
                             let (rect, _) =
-                                ui.allocate_exact_size(egui::vec2(43., 43.), egui::Sense::hover());
+                                ui.allocate_exact_size(egui::vec2(40., 48.), egui::Sense::hover());
                             crate::icons::draw(ui, rect, entry_icon(i), color);
-                            ui.vertical(|ui| {
-                                ui.add(
-                                    egui::Label::new(RichText::new(entry.name).strong().size(18.))
+                            let text_width = (ui.available_width() - 112.).max(100.);
+                            ui.allocate_ui_with_layout(
+                                egui::vec2(text_width, 54.),
+                                egui::Layout::top_down(egui::Align::Min),
+                                |ui| {
+                                    ui.spacing_mut().item_spacing.y = 2.;
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(entry.name).strong().size(17.),
+                                        )
+                                        .truncate()
                                         .selectable(false),
-                                );
+                                    );
+                                    ui.add(
+                                        egui::Label::new(entry.summary)
+                                            .truncate()
+                                            .selectable(false),
+                                    )
+                                    .on_hover_text(entry.summary);
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new(
+                                                self.local[i]
+                                                    .version
+                                                    .as_deref()
+                                                    .map(|v| format!("v{v} · {}", entry.kind))
+                                                    .unwrap_or_else(|| {
+                                                        if self.local[i].installed {
+                                                            "Version not recorded".into()
+                                                        } else {
+                                                            entry.kind.into()
+                                                        }
+                                                    }),
+                                            )
+                                            .small(),
+                                        )
+                                        .selectable(false),
+                                    );
+                                },
+                            );
+                            ui.vertical(|ui| {
                                 self.badges(ui, i);
                             });
                         });
-                        ui.add(egui::Label::new(entry.summary).wrap().selectable(false));
-                        ui.add(
-                            egui::Label::new(
-                                self.local[i]
-                                    .version
-                                    .as_deref()
-                                    .map(|v| format!("v{v}"))
-                                    .unwrap_or_else(|| {
-                                        if self.local[i].installed {
-                                            "Installed version unavailable".into()
-                                        } else {
-                                            entry.kind.into()
-                                        }
-                                    }),
-                            )
-                            .selectable(false),
-                        );
                     });
                     let response = ui.interact(
                         row.response.rect,
@@ -549,7 +569,7 @@ impl Manager {
             badge(
                 ui,
                 if self.local[i].installed {
-                    "✓ Installed"
+                    "Installed"
                 } else {
                     "+ Available"
                 },
@@ -560,10 +580,10 @@ impl Manager {
                 },
             );
             if self.is_update(i) {
-                badge(ui, "↑ Update", status_color(1, ui));
+                badge(ui, "Update", status_color(1, ui));
             }
             if self.is_new(i) {
-                badge(ui, "★ New", status_color(2, ui));
+                badge(ui, "New", status_color(2, ui));
             }
         });
     }
@@ -601,7 +621,7 @@ impl Manager {
         match self.detail_tab {
             0 => {
                 for feature in entry.features {
-                    ui.label(format!("✓ {feature}"));
+                    ui.label(format!("- {feature}"));
                 }
             }
             1 => {
@@ -648,7 +668,7 @@ impl Manager {
         }
         if self.is_update(self.selected) {
             ui.label(
-                RichText::new("↑ Update available")
+                RichText::new("Update available")
                     .strong()
                     .color(status_color(1, ui)),
             );
@@ -930,7 +950,49 @@ fn badge(ui: &mut egui::Ui, text: &str, color: egui::Color32) {
         .corner_radius(6.)
         .inner_margin(egui::Margin::symmetric(7, 3))
         .show(ui, |ui| {
-            ui.add(egui::Label::new(RichText::new(text).color(color).strong()).selectable(false));
+            ui.horizontal(|ui| {
+                let (r, _) = ui.allocate_exact_size(egui::vec2(12., 14.), egui::Sense::hover());
+                let p = ui.painter();
+                let stroke = egui::Stroke::new(2., color);
+                match text {
+                    "Installed" => {
+                        p.line_segment(
+                            [
+                                r.left_center(),
+                                egui::pos2(r.center().x - 1., r.bottom() - 2.),
+                            ],
+                            stroke,
+                        );
+                        p.line_segment(
+                            [
+                                egui::pos2(r.center().x - 1., r.bottom() - 2.),
+                                r.right_top() + egui::vec2(0., 2.),
+                            ],
+                            stroke,
+                        );
+                    }
+                    "Update" => {
+                        p.line_segment([r.center_bottom(), r.center_top()], stroke);
+                        p.line_segment([r.left_center(), r.center_top()], stroke);
+                        p.line_segment([r.right_center(), r.center_top()], stroke);
+                    }
+                    "New" => {
+                        p.circle_filled(r.center(), 4., color);
+                    }
+                    _ => {
+                        p.line_segment([r.left_center(), r.right_center()], stroke);
+                        p.line_segment([r.center_top(), r.center_bottom()], stroke);
+                    }
+                }
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(text.trim_start_matches("+ "))
+                            .color(color)
+                            .strong(),
+                    )
+                    .selectable(false),
+                );
+            });
         });
 }
 
