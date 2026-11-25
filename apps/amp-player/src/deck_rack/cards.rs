@@ -856,7 +856,7 @@ impl Player {
                             #[cfg(not(test))]
                             let _ = knobs;
                             ui.separator();
-                            {
+                            if self.rack.six {
                                 ui.horizontal(|ui| {
                                     ui.small("Volume");
                                     ui.spacing_mut().slider_width = (width - 115.).max(90.);
