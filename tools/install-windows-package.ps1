@@ -123,7 +123,7 @@ if($CreateShortcuts){
  $shell=New-Object -ComObject WScript.Shell
  $shortcut=$shell.CreateShortcut((Join-Path ([Environment]::GetFolderPath('Programs')) ('AMP Verse'+$(if($m.role -eq 'Server'){' Server'}else{''})+'.lnk')))
  $shortcut.TargetPath=Join-Path $env:WINDIR 'System32\WindowsPowerShell\v1.0\powershell.exe'
- $shortcut.Arguments='-NoProfile -File "'+(Join-Path $dest 'launch-windows-installed.ps1')+'"'
+ $shortcut.Arguments='-NoProfile -ExecutionPolicy Bypass -File "'+(Join-Path $dest 'launch-windows-installed.ps1')+'"'
  $shortcut.WorkingDirectory=$dest;$shortcut.Save()
 }
 Write-Output "Installed $($m.role) at $dest. Private state: $stateRoot. No startup task, service or firewall rule was created."
