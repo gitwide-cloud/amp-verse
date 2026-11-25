@@ -28,10 +28,10 @@ pub(super) fn root_minimized(ctx: &egui::Context) -> bool {
 }
 impl Player {
     pub(super) fn minimized_controls(&mut self, ctx: &egui::Context) {
-        let dj = if self.workspace.enabled {
-            self.workspace.pane == 2
-        } else {
-            self.playback_owner == playback_owner::Owner::Dj
+        let dj = match (self.workspace.enabled, self.workspace.pane) {
+            (true, 0) => false,
+            (true, 2) => true,
+            _ => self.playback_owner == playback_owner::Owner::Dj,
         };
         if !self.mini.visible(root_minimized(ctx), dj) {
             return;
@@ -118,7 +118,10 @@ impl Player {
             } else {
                 egui::Color32::from_rgb(0, 205, 230)
             };
-            ui.colored_label(color, RichText::new(self.title(d)).size(19.).strong());
+            ui.add(
+                egui::Label::new(RichText::new(self.title(d)).color(color).size(19.).strong())
+                    .truncate(),
+            );
             let pos = self.audio.as_ref().map_or(0., |a| a.source_position(d));
             ui.label(format!("{:02}:{:02}", pos as u64 / 60, pos as u64 % 60));
             ui.horizontal(|ui| {
