@@ -1258,16 +1258,14 @@ while True:
         assert_eq!(broker.metrics.peak.load(Ordering::Acquire), 3);
         let directory = tempfile::tempdir().unwrap();
         let marker = directory.path().join("hang");
+        // Interpreter discovery may spawn version probes on Windows. Complete
+        // that setup before measuring the worker's request/cancellation phase.
+        let hanging_config = config(marker);
         let b = broker.clone();
         let cancel = token();
         let flag = cancel.clone();
         let hanging = thread::spawn(move || {
-            b.submit(
-                vec![0.; 4],
-                flag,
-                config(marker.clone()),
-                Duration::from_secs(5),
-            )
+            b.submit(vec![0.; 4], flag, hanging_config, Duration::from_secs(5))
         });
         let deadline = Instant::now() + Duration::from_secs(3);
         while !directory.path().join("hang").exists() {
