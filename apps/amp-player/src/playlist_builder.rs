@@ -347,7 +347,7 @@ impl Player {
         }
         self.find_suggestions(self.playlist_preview.queue.clone(), false);
     }
-    fn find_suggestions(&mut self, seeds: Vec<usize>, to_queue: bool) {
+    pub(super) fn find_suggestions(&mut self, seeds: Vec<usize>, to_queue: bool) {
         self.library_builder.suggest_to_queue = to_queue;
         self.library_builder.suggestions.clear();
         let Some(lib) = &self.library else {

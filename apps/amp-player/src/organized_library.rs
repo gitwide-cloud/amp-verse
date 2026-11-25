@@ -1635,6 +1635,8 @@ mod tests {
         }
         assert_eq!(player.checked_library_indices(), vec![0]);
         assert!(player.queue.is_empty());
+        // Repaint the newly enabled action before pressing it, as the native event loop does.
+        draw(&mut player, vec![]);
         let add = ctx
             .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique("library-add-checked-queue")))
             .unwrap();
