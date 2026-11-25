@@ -197,17 +197,6 @@ fn restore_cached(cache: &Path, source: &Path) -> Result<bool, String> {
     Ok(true)
 }
 type Process = Arc<Mutex<Option<Box<dyn process_wrap::std::ChildWrapper>>>>;
-pub(crate) fn separate_clip(cache: &Path, source: &Path) -> Result<[PathBuf; 3], String> {
-    let python = runtime().ok_or("Install the stem separator add-on first")?;
-    prepare(
-        cache,
-        source,
-        &python,
-        &AtomicBool::new(false),
-        &Arc::new(Mutex::new(None)),
-    )?;
-    ready_in(cache, source).ok_or("Separated clip is incomplete".into())
-}
 pub(crate) fn for_transcription(
     source: &Path,
     cancel: &AtomicBool,

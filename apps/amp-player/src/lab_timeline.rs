@@ -22,6 +22,7 @@ pub(super) struct Timeline {
     drag: Option<(usize, Clip, u8)>,
     player: Option<Child>,
     preview: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     preview_file: Option<PathBuf>,
     #[cfg(test)]
     area: Option<egui::Rect>,
@@ -37,6 +38,9 @@ impl Timeline {
         self.drag = None;
     }
     pub fn stop(&mut self) {
+        if let Some(c) = self.cancel.take() {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(mut p) = self.player.take() {
             let _ = p.kill();
             let _ = p.wait();
@@ -569,6 +573,9 @@ impl Arrangement {
                     remove = Some(i);
                 }
             });
+            ui.push_id(("timeline-processing", i), |ui| {
+                crate::lab_audio::controls(ui, &mut self.clips[i].processing);
+            });
             if serde_json::to_vec(&before).ok() != serde_json::to_vec(&self.clips).ok() {
                 self.timeline.remember(&before);
             }
@@ -628,6 +635,8 @@ impl Arrangement {
         let root = root.to_path_buf();
         let (tx, rx) = mpsc::channel();
         self.timeline.preview = Some(rx);
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.timeline.cancel = Some(cancel.clone());
         std::thread::spawn(move || {
             let path = std::env::temp_dir().join(format!(
                 "amp-mix-preview-{}.mp3",
@@ -636,7 +645,8 @@ impl Arrangement {
                     .unwrap_or_default()
                     .as_nanos()
             ));
-            let result = render(&root, &clips, &path).map(|_| path);
+            let result =
+                crate::lab_audio::timeline_cancellable(&root, &clips, &path, cancel).map(|_| path);
             if let Err(e) = tx.send(result)
                 && let Ok(path) = e.0
             {
@@ -727,6 +737,7 @@ mod tests {
             .take(2)
             .enumerate()
             .map(|(i, t)| Clip {
+                processing: Default::default(),
                 path: amp_core::music_sources::audio_path(&root, &t.path),
                 start: i as f64 * 3.,
                 lane: i,
@@ -745,7 +756,7 @@ mod tests {
         std::fs::write(&project, serde_json::to_vec(&clips).unwrap()).unwrap();
         let loaded: Vec<Clip> = serde_json::from_slice(&std::fs::read(project).unwrap()).unwrap();
         let output = dir.path().join("layered.mp3");
-        render(&root, &loaded, &output).unwrap();
+        crate::lab_audio::timeline(&root, &loaded, &output).unwrap();
         let duration = crate::lab_editor::duration(&output).unwrap();
         assert!((duration - 9.).abs() < 0.1, "duration {duration}");
         assert!(

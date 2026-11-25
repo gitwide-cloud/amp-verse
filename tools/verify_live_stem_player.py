@@ -246,6 +246,8 @@ def main(argv=None):
         env['AMP_STEM_TEST_SOURCE'] = str(source)
         # Separate test processes: each exact acceptance owns a fresh shared model broker.
         tests = [
+            ('lab_audio::render_tests::lab_processing_render_eq_changes_audio_and_cancel_preserves_source_and_destination', True, env),
+            ('lab_audio::render_tests::lab_live_stem_renderer_exports_selection_without_per_stem_audio_files', True, env),
             ('dj_engine::live_stem_acceptance::six_separated_frame_controls_route_filters_and_cancel_without_model', False, env),
             ('onnx_stem_stream::live_acceptance::real_model_source_pipeline_preserves_mix_across_windows', True, env),
             ('onnx_stem_stream::lazy::live_acceptance::real_model_lazy_stems_start_filter_and_stop_at_neutral', True, env),

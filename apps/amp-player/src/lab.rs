@@ -2,10 +2,7 @@
 mod recorder;
 #[path = "lab_timeline.rs"]
 mod timeline;
-use amp_core::{
-    Library,
-    arrangement::{Clip, render},
-};
+use amp_core::{Library, arrangement::Clip};
 use eframe::egui;
 use std::{
     path::{Path, PathBuf},
@@ -243,10 +240,14 @@ impl Arrangement {
                     for (i, c) in clips.iter().enumerate() {
                         let mut c = c.clone();
                         c.start = 0.;
-                        render(&root, &[c], &output.join(format!("track-{:02}.mp3", i + 1)))?;
+                        crate::lab_audio::timeline(
+                            &root,
+                            &[c],
+                            &output.join(format!("track-{:02}.mp3", i + 1)),
+                        )?;
                     }
                 } else {
-                    render(&root, &clips, &output)?;
+                    crate::lab_audio::timeline(&root, &clips, &output)?;
                 }
                 Ok("Export complete".into())
             })();

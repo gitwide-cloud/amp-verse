@@ -17,6 +17,7 @@ struct EditState {
     fade_out: f64,
     gain: f64,
     normalize: bool,
+    processing: amp_core::lab_processing::Processing,
 }
 #[derive(Default)]
 pub(super) struct Editor {
@@ -31,6 +32,7 @@ pub(super) struct Editor {
     fade_out: f64,
     gain: f64,
     normalize: bool,
+    processing: amp_core::lab_processing::Processing,
     player: Option<Child>,
     exporting: Option<Receiver<Result<PathBuf, String>>>,
     status: String,
@@ -38,6 +40,7 @@ pub(super) struct Editor {
     wave_job: Option<Receiver<Result<Vec<[f32; 2]>, String>>>,
     peak_db: Option<f64>,
     preview_job: Option<Receiver<Result<PathBuf, String>>>,
+    preview_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     preview_path: Option<PathBuf>,
     started: Option<std::time::Instant>,
     offset: f64,
@@ -60,6 +63,9 @@ impl Editor {
     }
     pub(super) fn stop(&mut self) {
         self.sample.stop();
+        if let Some(cancel) = self.preview_cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.kill_player();
         self.preview_job = None;
         self.started = None;
@@ -167,6 +173,7 @@ impl Editor {
             fade_out: self.fade_out,
             gain: self.gain,
             normalize: self.normalize,
+            processing: self.processing,
         }
     }
     fn unsaved(&self) -> bool {
@@ -200,6 +207,7 @@ impl Editor {
                 self.fade_out = 0.0;
                 self.gain = 0.0;
                 self.normalize = false;
+                self.processing = Default::default();
                 self.input = Some(p.clone());
                 self.saved_edit = Some(self.edit_state());
                 self.status = "Reading waveform…".into();
@@ -224,6 +232,7 @@ impl Editor {
     }
     fn filter(&self) -> String {
         let mut f = vec!["asetpts=PTS-STARTPTS".to_string()];
+        f.extend(self.processing.filters().unwrap_or_default());
         if self.normalize {
             f.push("loudnorm=I=-16:TP=-3:LRA=11".into())
         }
@@ -265,6 +274,13 @@ impl Editor {
         } else {
             "Preparing original preview…".into()
         };
+        let processing = if edited {
+            self.processing
+        } else {
+            Default::default()
+        };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.preview_cancel = Some(cancel.clone());
         thread::spawn(move || {
             let output = std::env::temp_dir().join(format!(
                 "mp3-lab-preview-{}-{}.wav",
@@ -274,30 +290,9 @@ impl Editor {
                     .unwrap()
                     .as_nanos()
             ));
-            let result = command("ffmpeg")
-                .args([
-                    "-hide_banner",
-                    "-nostdin",
-                    "-n",
-                    "-loglevel",
-                    "error",
-                    "-ss",
-                ])
-                .arg(format!("{start:.5}"))
-                .arg("-i")
-                .arg(p)
-                .arg("-t")
-                .arg(format!("{length:.5}"))
-                .args(["-vn", "-af"])
-                .arg(filter)
-                .args(["-c:a", "pcm_s16le", "-ar", "48000"])
-                .arg(&output)
-                .output();
-            let result = match result {
-                Ok(r) if r.status.success() => Ok(output.clone()),
-                Ok(r) => Err(String::from_utf8_lossy(&r.stderr).into_owned()),
-                Err(e) => Err(e.to_string()),
-            };
+            let result =
+                crate::lab_audio::render(&p, start, length, processing, &filter, &output, cancel)
+                    .map(|_| output.clone());
             let failed = result.is_err();
             if tx.send(result).is_err() || failed {
                 let _ = std::fs::remove_file(output);
@@ -340,39 +335,19 @@ impl Editor {
         let start = self.start;
         let length = self.length();
         let filters = self.filter();
+        let processing = self.processing;
         self.status = "Exporting 256 kbps MP3".into();
         thread::spawn(move || {
-            let result = command("ffmpeg")
-                .args([
-                    "-hide_banner",
-                    "-nostdin",
-                    "-n",
-                    "-loglevel",
-                    "error",
-                    "-ss",
-                ])
-                .arg(format!("{start:.5}"))
-                .arg("-i")
-                .arg(&input)
-                .arg("-t")
-                .arg(format!("{length:.5}"))
-                .args(["-vn", "-af"])
-                .arg(filters)
-                .args([
-                    "-codec:a",
-                    "libmp3lame",
-                    "-b:a",
-                    "256k",
-                    "-id3v2_version",
-                    "3",
-                ])
-                .arg(&output)
-                .output();
-            let outcome = match result {
-                Ok(r) if r.status.success() => Ok(output),
-                Ok(r) => Err(String::from_utf8_lossy(&r.stderr).to_string()),
-                Err(e) => Err(e.to_string()),
-            };
+            let outcome = crate::lab_audio::render(
+                &input,
+                start,
+                length,
+                processing,
+                &filters,
+                &output,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .map(|_| output);
             let _ = tx.send(outcome);
         });
     }
@@ -749,6 +724,7 @@ impl Editor {
             });
         });
         self.clamp();
+        crate::lab_audio::controls(ui, &mut self.processing);
         ui.separator();
         self.sample.show(
             ui,
@@ -757,6 +733,7 @@ impl Editor {
             self.start,
             self.end,
             self.filter(),
+            self.processing,
         );
         ui.separator();
         ui.label(&self.status);

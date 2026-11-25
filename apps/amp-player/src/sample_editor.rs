@@ -18,9 +18,9 @@ pub struct Editor {
     pad: usize,
     right: bool,
     looping: bool,
-    isolated: bool,
-    parts: [bool; 3],
+
     job: Option<mpsc::Receiver<Result<PathBuf, String>>>,
+    cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     target: Option<Delivery>,
     delivery: Option<Delivery>,
     preview: Option<Child>,
@@ -34,6 +34,9 @@ impl Drop for Editor {
 }
 impl Editor {
     pub fn stop(&mut self) {
+        if let Some(c) = self.cancel.take() {
+            c.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         if let Some(mut child) = self.preview.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -103,6 +106,7 @@ impl Editor {
         start: f64,
         end: f64,
         filter: String,
+        processing: amp_core::lab_processing::Processing,
     ) {
         ui.heading("Quick sample editor");
         ui.label("Use the waveform IN / OUT selection above, then preview or send to a pad.");
@@ -120,21 +124,12 @@ impl Editor {
                 });
             ui.checkbox(&mut self.looping, "Loop");
         });
-        ui.checkbox(&mut self.isolated, "Isolate stems");
-        if self.isolated {
-            ui.horizontal(|ui| {
-                for (i, name) in ["Vocals", "Instruments", "Beat"].iter().enumerate() {
-                    ui.checkbox(&mut self.parts[i], *name);
-                }
-            });
-            ui.weak("First preview separates this clip locally using the optional stem add-on.");
-        }
+        ui.weak("Uses the waveform editor’s stem, EQ and filter settings above.");
         let length = end - start;
         let valid = input.is_some()
             && length > 0.
             && length <= 30.
-            && (!self.isolated
-                || (self.parts.iter().any(|p| *p) && crate::stems::runtime().is_some()));
+            && (!processing.stems_changed() || crate::onnx_stem_worker::configured());
         if length > 30. {
             ui.weak("Select up to 30 seconds for a sampler pad.");
         }
@@ -183,12 +178,20 @@ impl Editor {
             });
             let source = input.unwrap().to_path_buf();
             let root = root.to_path_buf();
-            let parts = self.isolated.then_some(self.parts);
+
             let (tx, rx) = mpsc::channel();
             self.job = Some(rx);
             self.status = "Rendering sample…".into();
+            let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+            self.cancel = Some(cancel.clone());
             std::thread::spawn(move || {
-                let _ = tx.send(render(&root, &source, start, length, parts, &filter));
+                let result =
+                    render_with_cancel(&root, &source, start, length, processing, &filter, cancel);
+                if let Err(e) = tx.send(result)
+                    && let Ok(path) = e.0
+                {
+                    let _ = std::fs::remove_file(path);
+                }
             });
         }
         if self.job.is_some() {
@@ -199,54 +202,53 @@ impl Editor {
         ui.label(&self.status);
     }
 }
+
+#[cfg(test)]
 fn run(command: &mut std::process::Command) -> Result<(), String> {
-    let result = command.output().map_err(|e| e.to_string())?;
-    if result.status.success() {
+    let p = command.output().map_err(|e| e.to_string())?;
+    if p.status.success() {
         Ok(())
     } else {
-        Err(String::from_utf8_lossy(&result.stderr)
-            .chars()
-            .take(2000)
-            .collect())
+        Err(String::from_utf8_lossy(&p.stderr).into_owned())
     }
 }
+#[cfg(test)]
 fn render(
     root: &Path,
     source: &Path,
     start: f64,
     length: f64,
-    parts: Option<[bool; 3]>,
+    p: amp_core::lab_processing::Processing,
     filter: &str,
+) -> Result<PathBuf, String> {
+    render_with_cancel(
+        root,
+        source,
+        start,
+        length,
+        p,
+        filter,
+        std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    )
+}
+fn render_with_cancel(
+    root: &Path,
+    source: &Path,
+    start: f64,
+    length: f64,
+    processing: amp_core::lab_processing::Processing,
+    filter: &str,
+    cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
 ) -> Result<PathBuf, String> {
     if !start.is_finite()
         || start < 0.
         || !length.is_finite()
         || length <= 0.
         || length > 30.
-        || parts.is_some_and(|p| !p.iter().any(|v| *v))
+        || processing.validate().is_err()
     {
         return Err("Choose a valid selection up to 30 seconds and at least one stem".into());
     }
-    let stage = tempfile::tempdir().map_err(|e| e.to_string())?;
-    let clip = stage.path().join("clip.wav");
-    run(amp_core::command("ffmpeg")
-        .args(["-nostdin", "-v", "error", "-ss"])
-        .arg(start.to_string())
-        .arg("-i")
-        .arg(source)
-        .arg("-t")
-        .arg(length.to_string())
-        .args(["-vn", "-ar", "48000", "-ac", "2", "-c:a", "pcm_s16le"])
-        .arg(&clip))?;
-    let inputs = if let Some(parts) = parts {
-        crate::stems::separate_clip(&stage.path().join("stems"), &clip)?
-            .into_iter()
-            .zip(parts)
-            .filter_map(|(p, on)| on.then_some(p))
-            .collect::<Vec<_>>()
-    } else {
-        vec![clip]
-    };
     let directory = if root.as_os_str().is_empty() {
         std::env::var_os("AMP_DOCUMENTS_DIR")
             .map(PathBuf::from)
@@ -261,40 +263,9 @@ fn render(
         root.join("ampdj/samples")
     };
     std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
-    let pending = tempfile::Builder::new()
-        .suffix(".wav")
-        .tempfile_in(&directory)
-        .map_err(|e| e.to_string())?;
-    let mut command = amp_core::command("ffmpeg");
-    command.args(["-nostdin", "-v", "error", "-y"]);
-    for input in &inputs {
-        command.arg("-i").arg(input);
-    }
-    let mix = (0..inputs.len())
-        .map(|i| format!("[{i}:a]"))
-        .collect::<String>();
-    command
-        .arg("-filter_complex")
-        .arg(format!(
-            "{mix}amix=inputs={}:normalize=0,{filter}[out]",
-            inputs.len()
-        ))
-        .args([
-            "-map",
-            "[out]",
-            "-ar",
-            "48000",
-            "-ac",
-            "2",
-            "-c:a",
-            "pcm_s16le",
-        ])
-        .arg(pending.path());
-    run(&mut command)?;
     let output = directory.join(format!("sample-{}.wav", amp_core::coordination::token()));
-    pending
-        .persist_noclobber(&output)
-        .map_err(|e| e.to_string())?;
+    crate::lab_audio::render(source, start, length, processing, filter, &output, cancel)?;
+
     Ok(output)
 }
 
@@ -342,12 +313,25 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let source = fixture(root.path());
         let original = std::fs::read(&source).unwrap();
-        let output = render(root.path(), &source, 0.5, 0.75, None, "anull").unwrap();
+        let output = render(root.path(), &source, 0.5, 0.75, Default::default(), "anull").unwrap();
         assert!(output.starts_with(root.path().join("ampdj/samples")));
         assert!((audio_duration(&output) - 0.75).abs() < 0.001);
         assert_eq!(std::fs::read(&source).unwrap(), original);
-        assert!(render(root.path(), &source, 0., 31., None, "anull").is_err());
-        assert!(render(root.path(), &source, 0., 1., Some([false; 3]), "anull").is_err());
+        assert!(render(root.path(), &source, 0., 31., Default::default(), "anull").is_err());
+        assert!(
+            render(
+                root.path(),
+                &source,
+                0.,
+                1.,
+                amp_core::lab_processing::Processing {
+                    filter: f32::NAN,
+                    ..Default::default()
+                },
+                "anull"
+            )
+            .is_err()
+        );
     }
     #[test]
     #[ignore = "requires installed stem runtime and model"]
@@ -359,7 +343,10 @@ mod tests {
             &source,
             0.25,
             1.,
-            Some([true, false, false]),
+            amp_core::lab_processing::Processing {
+                stems: [0., -1., -1.],
+                ..Default::default()
+            },
             "anull",
         )
         .unwrap();

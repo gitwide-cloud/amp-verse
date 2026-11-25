@@ -11,6 +11,7 @@ pub use library_engine::analysis;
 pub mod arrangement;
 pub mod background;
 pub mod batch;
+pub mod lab_processing;
 pub(crate) use library_engine::catalog_shards;
 pub mod content_advisory;
 pub mod coordination;

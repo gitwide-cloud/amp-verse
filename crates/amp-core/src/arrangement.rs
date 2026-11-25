@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Clip {
+    #[serde(default)]
+    pub processing: crate::lab_processing::Processing,
     pub path: PathBuf,
     pub start: f64,
     pub preparation: Preparation,
@@ -18,6 +20,7 @@ pub struct Clip {
 impl Clip {
     pub fn duration(&self) -> Result<f64, String> {
         self.preparation.validate()?;
+        self.processing.validate()?;
         if !self.start.is_finite()
             || self.start < 0.
             || !self.gain_db.is_finite()
@@ -45,6 +48,15 @@ pub fn filter(clips: &[Clip], combined: bool) -> Result<String, String> {
     let mut graph = Vec::new();
     for (i, clip) in clips.iter().enumerate() {
         let duration = clip.duration()?;
+        if clip.processing.stems_changed() {
+            return Err("Stem-edited clips require the desktop Lab renderer".into());
+        }
+        let processing = clip.processing.filters()?;
+        let processing = if processing.is_empty() {
+            String::new()
+        } else {
+            format!(",{}", processing.join(","))
+        };
         let delay = if combined { clip.start } else { 0. };
         let fades = format!(
             ",afade=t=in:d={},afade=t=out:st={}:d={}",
@@ -52,7 +64,7 @@ pub fn filter(clips: &[Clip], combined: bool) -> Result<String, String> {
             (duration - clip.fade_out).max(0.),
             clip.fade_out.min(duration)
         );
-        graph.push(format!("[{i}:a]atrim=start={}:duration={duration},asetpts=PTS-STARTPTS,aresample=44100,aformat=channel_layouts=stereo,volume={}dB{fades},adelay={}:all=1[c{i}]", clip.preparation.cue_in, clip.gain_db, (delay*1000.).round()));
+        graph.push(format!("[{i}:a]atrim=start={}:duration={duration},asetpts=PTS-STARTPTS,aresample=44100,aformat=channel_layouts=stereo,volume={}dB{processing}{fades},adelay={}:all=1[c{i}]", clip.preparation.cue_in, clip.gain_db, (delay*1000.).round()));
     }
     let inputs = (0..clips.len())
         .map(|i| format!("[c{i}]"))
@@ -118,6 +130,27 @@ pub fn render(root: &Path, clips: &[Clip], output: &Path) -> Result<(), String> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lab_clip_processing_roundtrips_and_old_projects_are_neutral() {
+        let mut c = clip();
+        c.processing.eq_db = [-6., 2., 3.];
+        c.processing.stems = [-1., 0., 0.];
+        c.processing.filter = 0.4;
+        let value = serde_json::to_value(&c).unwrap();
+        let restored: Clip = serde_json::from_value(value.clone()).unwrap();
+        assert_eq!(restored.processing, c.processing);
+        let mut old = value;
+        old.as_object_mut().unwrap().remove("processing");
+        let old: Clip = serde_json::from_value(old).unwrap();
+        assert_eq!(old.processing, Default::default());
+        assert!(
+            filter(&[c], true).is_err(),
+            "core renderer must not silently ignore requested stems"
+        );
+        let mut c = old;
+        c.processing.eq_db = [0., -12., 0.];
+        assert!(filter(&[c], true).unwrap().contains("equalizer=f=1000"));
+    }
     fn clip() -> Clip {
         Clip {
             path: "song.mp3".into(),

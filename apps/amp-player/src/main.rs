@@ -29,6 +29,7 @@ mod hot_cues;
 mod icons;
 mod key_lock;
 mod lab;
+mod lab_audio;
 mod lab_editor;
 mod lab_youtube;
 mod library_cache;
