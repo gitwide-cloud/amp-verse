@@ -20,6 +20,11 @@ final class ExternalAudio {
     static MediaItem prepare(Context context,Intent request)throws IOException {
         if(!accepts(request))throw new IOException("Unsupported audio request");
         Uri uri=request.getData();
+        if("file".equals(uri.getScheme())){
+            java.io.File file=new java.io.File(uri.getPath());
+            String root=android.os.Environment.getExternalStorageDirectory().getCanonicalPath()+java.io.File.separator;
+            if(!file.getCanonicalPath().startsWith(root))throw new IOException("Choose shared audio from Files");
+        }
         try(android.content.res.AssetFileDescriptor file=context.getContentResolver().openAssetFileDescriptor(uri,"r")){
             if(file==null)throw new IOException("Audio file unavailable");
         }

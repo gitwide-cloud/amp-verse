@@ -19,7 +19,7 @@ public class ExternalAudioDeviceTest {
         PackageManager pm=context.getPackageManager();
         assertNotNull(pm.resolveActivity(audio(Uri.parse("content://media/external/audio/media/1")).setPackage(context.getPackageName()),PackageManager.MATCH_DEFAULT_ONLY));
         assertNotNull(pm.resolveActivity(new Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_APP_MUSIC).setPackage(context.getPackageName()),PackageManager.MATCH_DEFAULT_ONLY));
-        assertNull(pm.resolveActivity(new Intent(Intent.ACTION_VIEW,Uri.parse("https://example.org/song.mp3")).setType("audio/mpeg").setPackage(context.getPackageName()),PackageManager.MATCH_DEFAULT_ONLY));
+        assertNull(pm.resolveActivity(new Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse("https://example.org/song.mp3"),"audio/mpeg").setPackage(context.getPackageName()),PackageManager.MATCH_DEFAULT_ONLY));
         assertFalse(ExternalAudio.accepts(new Intent(Intent.ACTION_VIEW).setDataAndType(Uri.parse("content://media/a"),"text/plain")));
     }
     @Test public void openWithPlaysAcrossBackgroundAndKeepsLibrary()throws Exception{
