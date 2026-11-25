@@ -65,9 +65,14 @@ struct Process {
 }
 impl Process {
     fn spawn(c: &mut Command, cancel: Arc<AtomicBool>) -> Result<Self, String> {
-        let child = Arc::new(Mutex::new(
-            c.stderr(Stdio::null()).spawn().map_err(|e| e.to_string())?,
-        ));
+        let child = Arc::new(Mutex::new(c.stderr(Stdio::null()).spawn().map_err(
+            |e| {
+                format!(
+                    "Could not launch {}: {e}",
+                    c.get_program().to_string_lossy()
+                )
+            },
+        )?));
         let done = Arc::new(AtomicBool::new(false));
         let w = child.clone();
         let d = done.clone();
