@@ -60,6 +60,20 @@ impl Player {
                     self.mini.dismissed = true;
                     return;
                 }
+                self.mini_surface(ui, dj);
+                self.release_jog_wheels(ui.ctx());
+                ui.ctx().request_repaint_after(Duration::from_millis(33));
+            },
+        );
+    }
+    fn mini_surface(&mut self, ui: &mut egui::Ui, dj: bool) -> egui::Rect {
+        egui::Frame::new()
+            .fill(ui.visuals().panel_fill)
+            .stroke(ui.visuals().widgets.noninteractive.bg_stroke)
+            .corner_radius(8.)
+            .inner_margin(12.)
+            .show(ui, |ui| {
+                ui.set_min_size(ui.available_size());
                 ui.horizontal(|ui| {
                     let header = ui.add(
                         egui::Label::new(
@@ -99,10 +113,9 @@ impl Player {
                         ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Volume"));
                     });
                 }
-                self.release_jog_wheels(ui.ctx());
-                ui.ctx().request_repaint_after(Duration::from_millis(33));
-            },
-        );
+            })
+            .response
+            .rect
     }
     fn mini_dj_ui(&mut self, ui: &mut egui::Ui) {
         egui::ScrollArea::vertical().show(ui, |ui| {
@@ -217,5 +230,40 @@ mod viewport_tests {
             .minimized = Some(false);
         let mut output = ctx.run_ui(raw, |ui| assert!(!root_minimized(ui.ctx())));
         output.textures_delta.clear();
+    }
+}
+
+#[cfg(test)]
+mod layout_tests {
+    use super::*;
+    #[test]
+    fn compact_surfaces_fit_their_windows_with_inset_controls() {
+        for (dj, size) in [
+            (false, egui::vec2(580., 230.)),
+            (true, egui::vec2(400., 600.)),
+            (true, egui::vec2(360., 480.)),
+        ] {
+            let ctx = egui::Context::default();
+            skin::configure(&ctx);
+            theme::apply(&ctx, theme::Theme::ModernDark);
+            let mut player = Player::default();
+            let mut surface = egui::Rect::NOTHING;
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| {
+                    surface = player.mini_surface(ui, dj);
+                },
+            );
+            output.textures_delta.clear();
+            assert!(
+                surface.width() <= size.x + 1. && surface.height() <= size.y + 1.,
+                "{dj}: {surface:?} exceeds {size:?}"
+            );
+            assert!(!player.playing.iter().any(|playing| *playing));
+            assert!(player.queue.is_empty());
+        }
     }
 }
