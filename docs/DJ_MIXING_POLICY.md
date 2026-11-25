@@ -127,3 +127,33 @@ intro preparation, multiple fade durations, late marked hooks, short songs,
 manual exits and unchanged preparation. Fixture data contains timing/energy
 metadata only, no audio or source location. Mathematical tests establish timing
 bounds; they do not establish subjective musical quality or semantic detection.
+
+
+## Hype: drop entry and lull handoff
+
+Hype now first looks for a sustained rise into a strong section, independently
+of the playlist's lower-energy progression target. An appropriate drop may be
+after the first minute; an isolated peak or short loud outro cannot qualify.
+Nearby saved drop markers refine the coarse activity-bin timing only after the
+surrounding rise passes the check. Manual drop/hook/chorus marks take precedence
+over build labels. Manual/reviewed cue-in and explicit source boundaries remain
+protected.
+
+After entry, the planner looks for a sustained activity fall after a complete
+energetic passage, leaving room for the entire planned transition. The handoff
+horizon is the lull onset: the blend is planned to land there, so the next track
+can take over the energy fall. A brief fill is not a lull; a transition too long
+to leave a real passage is rejected. Manual/reviewed breakdown/lull markers can
+supply this boundary even without an activity curve. Full Track and explicit
+manual mix-out/cue-out remain authoritative.
+
+Desktop Auto DJ and headless Smart radio consume the same pure planner. Headless
+radio bounds only its runtime decode snapshot; it does not save a shortened song.
+No structure decisions write preparation, rules, media, or stem audio. If the
+activity data does not support a strong rise or sustained lull, the conservative
+Hype passage policy remains the fallback. These are relative activity estimates,
+not semantic chorus recognition or guaranteed identification of an iconic hook.
+
+Tests cover a drop after 90 seconds, a whole strong passage before its lull,
+one-bin spikes/fills, a late loud outro, overly long transitions, explicit markers,
+unchanged preparation and the reported Calabria/Dirty Talk preparation records.

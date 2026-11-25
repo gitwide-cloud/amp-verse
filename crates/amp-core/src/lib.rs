@@ -27,7 +27,7 @@ pub mod smart_cycle;
 pub mod smart_filters;
 // Compatibility names keep existing integrations on the same implementation.
 pub use dj_engine::{stem_archive, stem_mix};
-pub use dj_logic::{dj_phrasing, mix_schedule, transition_plan};
+pub use dj_logic::{dj_phrasing, hype_sections, mix_schedule, transition_plan};
 pub use library_engine::{
     analysis_queue, artwork, catalog_db, consolidate, genres, media_kind, music_sources, offline,
     preparation, review, storage,

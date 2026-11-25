@@ -30,13 +30,14 @@ fn fade_seconds() -> f64 {
 }
 fn entry(p: &Preparation, profile: Option<&SmartPlaylist>, target: Option<f64>) -> f64 {
     if profile.is_some_and(|r| r.style == Style::Hype && r.use_manual_cues)
-        && let Some(c) = p.manual_cues.iter().find(|c| {
-            let name = c.label.to_lowercase();
-            (name.contains("drop") || name.contains("build"))
-                && p.cue_out.is_none_or(|out| c.seconds < out)
-        })
+        && let Some(seconds) = amp_core::hype_sections::marked_entry(p)
     {
-        return c.seconds;
+        return seconds;
+    }
+    if profile.is_some_and(|r| r.style == Style::Hype)
+        && let Some(drop) = amp_core::hype_sections::entry(p)
+    {
+        return drop;
     }
     if profile.is_some() {
         return amp_core::energy_profile::automatic_entry(
@@ -89,6 +90,11 @@ async fn decode(
         )
     {
         preparation.cue_in = plan.entry;
+    }
+    if profile.as_ref().is_some_and(|r| r.style == Style::Hype)
+        && let Some(lull) = amp_core::hype_sections::exit(&preparation, fade_seconds() * rate)
+    {
+        preparation.cue_out = Some(lull);
     }
     let temp = tempfile::NamedTempFile::new()
         .map_err(|e| e.to_string())?

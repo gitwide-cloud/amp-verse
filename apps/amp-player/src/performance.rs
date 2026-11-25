@@ -631,14 +631,16 @@ impl Player {
             && self.run.style == Style::Hype
             && let Some(p) = self.run.profile.as_ref()
             && p.use_manual_cues
-            && let Some(c) = track.preparation.manual_cues.iter().find(|c| {
-                (c.label.to_lowercase().contains("drop")
-                    || c.label.to_lowercase().contains("build")
-                    || matches!(c.kind.as_str(), "chorus" | "chorus_start" | "drop"))
-                    && track.preparation.cue_out.is_none_or(|out| c.seconds < out)
-            })
+            && let Some(seconds) = amp_core::hype_sections::marked_entry(&track.preparation)
         {
-            track.preparation.cue_in = c.seconds;
+            track.preparation.cue_in = seconds;
+        } else if paired
+            && self.run.style == Style::Hype
+            && self.run.profile.is_some()
+            && let Some(seconds) = amp_core::hype_sections::entry(&track.preparation)
+        {
+            track.preparation.cue_in = seconds;
+            automatic_section = true;
         } else if paired
             && self.run.profile.is_some()
             && let Some(target) = self

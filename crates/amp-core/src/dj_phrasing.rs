@@ -71,6 +71,11 @@ pub fn exit(p: &Preparation, style: Style, pace: Pace, duration: f64, fade: f64)
     {
         return cue.seconds;
     }
+    if style == Style::Hype
+        && let Some(lull) = crate::hype_sections::exit(p, fade)
+    {
+        return lull;
+    }
     let phrase = p
         .bpm
         .filter(|b| b.is_finite() && (40. ..=250.).contains(b))
@@ -234,12 +239,14 @@ mod tests {
         }
     }
     #[test]
-    fn reported_edm_decks_retain_a_substantial_passage_before_handoff() {
+    fn reported_edm_decks_without_structure_keep_the_conservative_fallback() {
         let examples: serde_json::Value =
             serde_json::from_str(include_str!("../tests/fixtures/reported-edm-passages.json"))
                 .unwrap();
         for example in examples.as_array().unwrap() {
-            let p: Preparation = serde_json::from_value(example["preparation"].clone()).unwrap();
+            let mut p: Preparation =
+                serde_json::from_value(example["preparation"].clone()).unwrap();
+            p.extensions.remove(crate::energy_profile::FIELD);
             let original = p.clone();
             let duration = p.analysis.as_ref().unwrap().duration;
             for fade in [3., 5., 8., 15., 45., 90.] {
