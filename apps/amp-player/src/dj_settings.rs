@@ -54,7 +54,7 @@ impl Player {
             ui.separator();ui.heading("Layout");
             skin::switch(ui,&mut self.rack.expanded,"Expanded controls");
             self.card_view_tools(ui);
-            ui.weak("Use LIVE on any deck to assign its crossfader side directly while mixing. Other decks keep playing.");
+            ui.weak("Use To Deck on a quick track to bring it onto its main jog and mixer side. Other tracks keep playing.");
             ui.separator();ui.weak(&self.status);
         });
         ctx.data_mut(|d| {

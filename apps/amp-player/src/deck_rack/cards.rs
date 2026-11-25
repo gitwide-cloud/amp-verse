@@ -124,16 +124,16 @@ impl Player {
     }
     fn card_live_button(&mut self, ui: &mut egui::Ui, deck: usize) {
         let live = self.pair()[deck % 2] == deck;
-        let response = ui.add_sized([48., 26.], egui::Button::new(
-            egui::RichText::new("LIVE").strong().color(if live { egui::Color32::BLACK } else { accent(deck) }))
+        let response = ui.add_sized([68., 26.], egui::Button::new(
+            egui::RichText::new(if live { "On Deck" } else { "To Deck" }).strong().color(if live { egui::Color32::BLACK } else { accent(deck) }))
             .fill(if live { accent(deck) } else { ui.visuals().widgets.inactive.bg_fill }))
-            .on_hover_text("Assign this deck to its crossfader side. Takes over Auto Mix without pausing, seeking or starting a deck.");
+            .on_hover_text("Show this quick track on its main jog wheel and mixer side. Keeps its position and transport; other tracks keep playing.");
         response.widget_info(|| {
             egui::WidgetInfo::labeled(
                 egui::Role::Button,
                 true,
                 format!(
-                    "{} Live{}",
+                    "{} Load to main deck{}",
                     NAMES[deck],
                     if live { " · assigned" } else { "" }
                 ),
@@ -146,75 +146,19 @@ impl Player {
                 (response.rect, ui.layer_id()),
             )
         });
-        if response.clicked() {
+        if response.clicked() && !live {
             self.make_deck_live(deck);
         }
     }
-    fn card_six_decks(&mut self, ui: &mut egui::Ui, height: f32) {
-        if ui.available_width() < 660. {
+    pub(super) fn card_rack(&mut self, ui: &mut egui::Ui, height: f32) {
+        if self.rack.six && ui.available_width() < 900. {
             egui::ScrollArea::horizontal()
-                .id_salt("six-full-bank-overflow")
-                .max_height(height + 12.)
+                .id_salt("quick-slots-rack-overflow")
                 .auto_shrink([false, true])
                 .show(ui, |ui| {
-                    ui.set_min_width(660.);
-                    self.card_six_banks(ui, height);
+                    ui.set_min_width(900.);
+                    self.card_narrow_rack(ui, height);
                 });
-        } else {
-            self.card_six_banks(ui, height);
-        }
-    }
-    fn card_six_banks(&mut self, ui: &mut egui::Ui, height: f32) {
-        #[cfg(test)]
-        ui.ctx()
-            .data_mut(|data| data.insert_temp(egui::Id::unique("native-dj-card-layout"), true));
-        let gap = 8.;
-        let width = (ui.available_width() - 24.).max(640.);
-        let center = 94.;
-        let main = (width - center - gap * 2.) / 2.;
-        let row_gap = 4.;
-        let row = ((height - row_gap * 2.) / 3.).max(190.);
-        ui.spacing_mut().item_spacing.x = gap;
-        ui.horizontal_top(|ui| {
-            // Stable identities: A1/A2/A3 left; B1/B2/B3 right. No deck is
-            // replaced by a tiny selector when a different one becomes LIVE.
-            for side in 0..2 {
-                if side == 1 {
-                    self.card_crossfader(ui, center, height);
-                }
-                ui.allocate_ui_with_layout(
-                    egui::vec2(main, height),
-                    egui::Layout::top_down(egui::Align::Min),
-                    |ui| {
-                        let bank = egui::ScrollArea::vertical()
-                            .id_salt(("six-full-decks", side))
-                            .max_height(height)
-                            .auto_shrink([false, false])
-                            .show(ui, |ui| {
-                                ui.spacing_mut().item_spacing.y = row_gap;
-                                for deck in (side..6).step_by(2) {
-                                    ui.push_id(("six-full-deck", deck), |ui| {
-                                        self.card_main_deck(ui, deck, main - 10., row)
-                                    });
-                                }
-                            });
-                        #[cfg(test)]
-                        ui.ctx().data_mut(|data| {
-                            data.insert_temp(
-                                egui::Id::unique(("six-bank-viewport", side)),
-                                (bank.inner_rect, ui.layer_id()),
-                            )
-                        });
-                        #[cfg(not(test))]
-                        let _ = bank;
-                    },
-                );
-            }
-        });
-    }
-    pub(super) fn card_rack(&mut self, ui: &mut egui::Ui, height: f32) {
-        if self.rack.six {
-            self.card_six_decks(ui, height);
             return;
         }
         if ui.available_width() < if self.rack.six { 1100. } else { 950. } {
@@ -307,11 +251,7 @@ impl Player {
             * ui.clip_rect())
         .height()
             < 760.;
-        let auxiliary_height = if self.rack.six {
-            if short_native { 42. } else { 64. }
-        } else {
-            0.
-        };
+        let auxiliary_height = if self.rack.six { 130. } else { 0. };
         let main_height = (height - 56. - auxiliary_height - if self.rack.six { 12. } else { 6. })
             .max(if short_native { 224. } else { 244. });
         ui.spacing_mut().item_spacing.x = gap;
@@ -334,57 +274,18 @@ impl Player {
         self.card_narrow_crossfader(ui, width);
     }
     fn card_auxiliary_row(&mut self, ui: &mut egui::Ui, width: f32, side: usize) {
-        let decks: Vec<_> = (0..6)
-            .filter(|d| d % 2 == side && !self.rack.live.contains(d))
-            .collect();
-        let short_native = (ui
-            .ctx()
-            .layer_transform_to_global(ui.layer_id())
-            .unwrap_or_default()
-            * ui.clip_rect())
-        .height()
-            < 760.;
-        let mini_width = (width - 8.) / 2.;
-        ui.allocate_ui_with_layout(egui::vec2(width, if short_native {0.} else {64.}), egui::Layout::left_to_right(egui::Align::Min), |ui| {
-            for d in decks {
-                ui.push_id(("strip", d), |ui| {
-                    let frame = panel(ui, None).inner_margin(egui::Margin::symmetric(10,6)).show(ui, |ui| {
-                        ui.set_width(mini_width - 24.);
-                        ui.spacing_mut().interact_size.x = 26.;
-                        ui.spacing_mut().button_padding.x = 2.;
-                        ui.spacing_mut().item_spacing.x = 3.;
-                        ui.spacing_mut().item_spacing.y = 3.;
-                        ui.horizontal(|ui| {
-                            let select = ui.selectable_label(false, egui::RichText::new(NAMES[d]).strong().color(accent(d)))
-                                .on_hover_text("Show this deck's vinyl and controls; audio routing stays unchanged");
-                            #[cfg(test)] ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique(("rack-aux-select", d)), (select.rect, ui.layer_id())));
-                            select.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button,true,format!("{}: {}. Show deck controls",NAMES[d],self.title(d))));
-                            let select = select.on_hover_text(self.title(d));
-                            if select.clicked() { self.rack.live[side] = d; }
-                            let play = transport_button(ui, d, self.playing[d], egui::vec2(26., 26.));
-                            if play.clicked() { self.toggle_deck(d); }
-                            let load = ui.add_enabled(self.selected.is_some(), egui::Button::new("").min_size(egui::vec2(26.,26.))).on_hover_text("Load the selected song on this deck without starting it");
-                            load.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button,self.selected.is_some(),"Load selected song"));
-                            icons::draw(ui,egui::Rect::from_center_size(load.rect.center(),egui::vec2(22.,22.)),icons::Icon::Folder,skin::foreground(ui).gamma_multiply(if self.selected.is_some(){1.}else{0.4}));
-                            if load.clicked() && let Some(index) = self.selected { self.load_deck(d, index, false); }
-                            let tools = ui.small_button("···").on_hover_text("Deck controls, stems and sampler");
-                            if tools.clicked() { self.card_open_tools(ui.ctx(), d, 0); }
-                            #[cfg(test)] ui.ctx().data_mut(|data| {
-                                for (name, rect) in [("rack-aux-play",play.rect),("rack-aux-load",load.rect),("rack-aux-tools",tools.rect)] {
-                                    data.insert_temp(egui::Id::unique((name, d)), (rect, ui.layer_id()));
-                                }
-                            });
-                        });
-                        if !short_native {ui.add(egui::Label::new(egui::RichText::new(self.title(d)).size(15.)).truncate());}
+        let slot_width = (width - 12.) / 3.;
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, 130.),
+            egui::Layout::left_to_right(egui::Align::Min),
+            |ui| {
+                for deck in (side..6).step_by(2) {
+                    ui.push_id(("quick-slot", deck), |ui| {
+                        self.card_quick_track(ui, deck, slot_width, 130.)
                     });
-                    #[cfg(test)] ui.ctx().data_mut(|data| {
-                        data.insert_temp(egui::Id::unique(("rack-strip-drop", d)), (frame.response.interact_rect, frame.response.layer_id));
-                        data.insert_temp(egui::Id::unique(("rack-aux-extent", d)), (frame.response.rect, frame.response.layer_id));
-                    });
-                    if let Some(path) = dragdrop::target(&frame.response, accent(d)) && let Err(error) = self.safe_load_path(d, path, None) { self.status = error; }
-                });
-            }
-        });
+                }
+            },
+        );
     }
     fn card_narrow_crossfader(&mut self, ui: &mut egui::Ui, width: f32) {
         let pair = self.pair();
@@ -481,7 +382,7 @@ impl Player {
     pub(crate) fn card_view_tools(&mut self, ui: &mut egui::Ui) {
         ui.horizontal_wrapped(|ui| {
             ui.selectable_value(&mut self.rack.six, false, "A / B main");
-            ui.selectable_value(&mut self.rack.six, true, "6 decks");
+            ui.selectable_value(&mut self.rack.six, true, "6 quick tracks");
             ui.separator();
             for (label, tab) in [
                 ("Effects", 0),
@@ -502,30 +403,112 @@ impl Player {
         });
     }
     fn card_auxiliary(&mut self, ui: &mut egui::Ui, width: f32, height: f32, side: usize) {
-        ui.allocate_ui_with_layout(egui::vec2(width,height),egui::Layout::top_down(egui::Align::Min),|ui|{
-            ui.vertical(|ui|{
-            ui.spacing_mut().item_spacing.y=8.;let live=self.rack.live;let mut decks:Vec<_>=(0..6).filter(|d|d%2==side&&!live.contains(d)).collect();decks.sort_by_key(|d|(d%2,d/2));
-            for d in decks {ui.push_id(("strip",d),|ui|{
-                let frame=panel(ui,None).show(ui,|ui|{
-                    ui.set_width((width-24.).max(100.));ui.spacing_mut().item_spacing.y=3.;ui.spacing_mut().interact_size.y=22.;ui.set_min_height(((height-8.)/2.-24.).clamp(100.,160.));
-                    ui.horizontal(|ui|{if ui.selectable_label(false,egui::RichText::new(NAMES[d]).strong().color(accent(d))).on_hover_text("Show this deck on its main vinyl control; audio routing stays unchanged").clicked(){self.rack.live[d%2]=d;}
-                        if transport_button(ui,d,self.playing[d],egui::vec2(22.,22.)).clicked(){self.toggle_deck(d);}
-                        if ui.small_button("···").on_hover_text("Open this deck's controls").clicked(){self.card_open_tools(ui.ctx(),d,0);}
+        ui.allocate_ui_with_layout(
+            egui::vec2(width, height),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.spacing_mut().item_spacing.y = 8.;
+                let slot_height = ((height - 16.) / 3.).max(126.);
+                for deck in (side..6).step_by(2) {
+                    ui.push_id(("quick-slot", deck), |ui| {
+                        self.card_quick_track(ui, deck, width, slot_height)
                     });
-                    ui.add(egui::Label::new(egui::RichText::new(self.title(d)).size(15.)).truncate());
-                    let track=self.loaded_snapshot[d].as_ref().or_else(||self.loaded[d].and_then(|i|self.library.as_ref()?.tracks.get(i)));
-                    if let Some(at)=self.waveforms[d].thumbnail(ui,self.loaded_origin[d].as_deref().unwrap_or(&self.root),track,self.audio.as_ref().map_or(0.,|a|a.source_position(d)),accent(d),16.){self.select_deck_section(d,at);}
-                    if let Some(delta)=self.waveforms[d].scrub.take(){self.seek_deck_relative(d,delta);}
-                    ui.columns(3,|cols|{for (column,stem,label) in [(0,0,"VOC"),(1,2,"BEAT"),(2,1,"INST")] {cols[column].vertical_centered(|ui|self.card_stem_dial(ui,d,stem,label));}});
+                }
+            },
+        );
+    }
+    fn card_quick_track(&mut self, ui: &mut egui::Ui, deck: usize, width: f32, height: f32) {
+        let selected = self.rack.live[deck % 2] == deck;
+        let frame = panel(ui, selected.then(|| accent(deck)))
+            .inner_margin(6)
+            .show(ui, |ui| {
+                ui.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                    ui.set_width((width - 14.).max(112.));
+                    ui.set_min_height(height - 14.);
+                    ui.spacing_mut().item_spacing = egui::vec2(3., 3.);
+                    ui.spacing_mut().button_padding = egui::vec2(3., 2.);
+                    ui.spacing_mut().interact_size.y = 26.;
+                    ui.horizontal(|ui| {
+                        ui.strong(egui::RichText::new(NAMES[deck]).color(accent(deck)));
+                        self.card_live_button(ui, deck);
+                        ui.menu_button("···", |ui| {
+                            if ui
+                                .add_enabled(
+                                    self.selected.is_some(),
+                                    egui::Button::new("Load selected song into slot"),
+                                )
+                                .clicked()
+                                && let Some(index) = self.selected
+                            {
+                                self.load_deck(deck, index, false);
+                                ui.close();
+                            }
+                        });
+                    });
+                    ui.add(egui::Label::new(self.title(deck)).truncate())
+                        .on_hover_text(self.title(deck));
+                    let position = self
+                        .audio
+                        .as_ref()
+                        .map_or(0., |audio| audio.source_position(deck));
+                    ui.small(format!(
+                        "{:02}:{:02}",
+                        (position / 60.) as u64,
+                        position as u64 % 60
+                    ));
+                    let control_width = ((width - 20.) / 3.).max(30.);
+                    ui.horizontal(|ui| {
+                        let play = transport_button(
+                            ui,
+                            deck,
+                            self.playing[deck],
+                            egui::vec2(control_width, 32.),
+                        );
+                        if play.clicked() {
+                            self.toggle_deck(deck);
+                        }
+                        let sync = ui.add_sized([control_width, 32.], egui::Button::new("Sync"));
+                        if sync.clicked() {
+                            self.sync_deck(deck);
+                        }
+                        let loop_button =
+                            ui.add_sized([control_width, 32.], egui::Button::new("Loop"));
+                        if loop_button.clicked() {
+                            self.rack_loop(deck);
+                        }
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|data| {
+                            for (name, rect) in [
+                                ("rack-aux-play", play.rect),
+                                ("rack-aux-sync", sync.rect),
+                                ("rack-aux-loop", loop_button.rect),
+                            ] {
+                                data.insert_temp(
+                                    egui::Id::unique((name, deck)),
+                                    (rect, ui.layer_id()),
+                                );
+                            }
+                        });
+                    });
+                    ui.small("Drop a song here to load");
                 });
-                #[cfg(test)]ui.ctx().data_mut(|data|{
-                    data.insert_temp(egui::Id::unique(("rack-strip-drop",d)),(frame.response.interact_rect,frame.response.layer_id));
-                    data.insert_temp(egui::Id::unique(("rack-aux-extent",d)),(frame.response.rect,frame.response.layer_id));
-                });
-                if let Some(path)=dragdrop::target(&frame.response,accent(d))&&let Err(error)=self.safe_load_path(d,path,None){self.status=error;}
-            });}
             });
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(
+                egui::Id::unique(("rack-strip-drop", deck)),
+                (frame.response.interact_rect, frame.response.layer_id),
+            );
+            data.insert_temp(
+                egui::Id::unique(("rack-aux-extent", deck)),
+                (frame.response.rect, frame.response.layer_id),
+            );
         });
+        if let Some(path) = dragdrop::target(&frame.response, accent(deck))
+            && let Err(error) = self.safe_load_path(deck, path, None)
+        {
+            self.status = error;
+        }
     }
     fn card_stem_dial(&mut self, ui: &mut egui::Ui, d: usize, stem: usize, label: &str) {
         let active = self
@@ -653,260 +636,7 @@ impl Player {
             }
         }
     }
-    fn card_compact_six_deck(&mut self, ui: &mut egui::Ui, d: usize, width: f32, height: f32) {
-        let area = ui.allocate_ui_with_layout(
-            egui::vec2(width, height),
-            egui::Layout::top_down(egui::Align::Min),
-            |ui| {
-                panel(ui, Some(accent(d)))
-                    .inner_margin(egui::Margin::symmetric(8, 2))
-                    .show(ui, |ui| {
-                        let content = (width - 19.).max(240.);
-                        ui.set_width(content);
-                        ui.set_min_height((height - 11.).max(0.));
-                        ui.spacing_mut().item_spacing = egui::vec2(3., 1.);
-                        ui.spacing_mut().button_padding = egui::vec2(4., 2.);
-                        ui.spacing_mut().interact_size.y = 20.;
-                        ui.horizontal(|ui| {
-                            ui.label(
-                                egui::RichText::new(NAMES[d])
-                                    .size(17.)
-                                    .strong()
-                                    .color(accent(d)),
-                            );
-                            self.card_live_button(ui, d);
-                            let load = ui
-                                .add_enabled(
-                                    self.selected.is_some(),
-                                    egui::Button::new("Load").min_size(egui::vec2(48., 26.)),
-                                )
-                                .on_hover_text(
-                                    "Load the selected library song without starting playback",
-                                )
-                                .on_disabled_hover_text("Select a song in the DJ Library first");
-                            #[cfg(test)]
-                            ui.ctx().data_mut(|data| {
-                                data.insert_temp(
-                                    egui::Id::unique(("deck-load-button", d)),
-                                    (load.rect, ui.layer_id()),
-                                )
-                            });
-                            if load.clicked()
-                                && let Some(index) = self.selected
-                            {
-                                self.load_deck(d, index, false);
-                            }
-                            if ui
-                                .add_sized([24., 26.], egui::Button::new("···"))
-                                .on_hover_text("Deck settings, pitch, cues, effects and sampler")
-                                .clicked()
-                            {
-                                self.card_open_tools(ui.ctx(), d, 0);
-                            }
-                            ui.add_sized(
-                                [ui.available_width().max(1.), 22.],
-                                egui::Label::new(egui::RichText::new(self.title(d)).strong())
-                                    .truncate(),
-                            )
-                            .on_hover_text(self.title(d));
-                        });
-                        ui.horizontal_top(|ui| {
-                            self.rack_platter(ui, d, 74.);
-                            let right = (content - 77.).max(163.);
-                            ui.allocate_ui_with_layout(
-                                egui::vec2(right, 84.),
-                                egui::Layout::top_down(egui::Align::Min),
-                                |ui| {
-                                    ui.set_width(right);
-                                    let track = self.loaded_track(d);
-                                    let position =
-                                        self.audio.as_ref().map_or(0., |a| a.source_position(d));
-                                    let duration = self
-                                        .audio
-                                        .as_ref()
-                                        .and_then(|a| a.remaining(d))
-                                        .map(|r| position + r as f64)
-                                        .or_else(|| {
-                                            track.and_then(|t| {
-                                                t.preparation.analysis.as_ref().map(|a| a.duration)
-                                            })
-                                        });
-                                    let bpm = track
-                                        .and_then(|t| t.preparation.bpm)
-                                        .map(|b| b * self.deck_rate(d));
-                                    let key = track
-                                        .and_then(|t| t.preparation.harmonic_key.as_deref())
-                                        .unwrap_or("—");
-                                    let time = |s: f64| {
-                                        format!(
-                                            "{}:{:02}",
-                                            (s.max(0.) / 60.) as u64,
-                                            (s.max(0.) as u64) % 60
-                                        )
-                                    };
-                                    ui.add(
-                                        egui::Label::new(format!(
-                                            "{} BPM · {key} · {} / {}",
-                                            bpm.map_or("—".into(), |v| format!("{v:.1}")),
-                                            time(position),
-                                            duration.map_or("—:—".into(), time)
-                                        ))
-                                        .truncate(),
-                                    );
-                                    ui.columns(2, |columns| {
-                                        let seek_width = columns[0].available_width();
-                                        columns[0].spacing_mut().slider_width = seek_width;
-                                        let mut seek = position as f32;
-                                        let response = columns[0]
-                                            .add_enabled(
-                                                duration.is_some(),
-                                                egui::Slider::new(
-                                                    &mut seek,
-                                                    0. ..=duration.unwrap_or(1.).max(0.01) as f32,
-                                                )
-                                                .show_value(false),
-                                            )
-                                            .on_hover_text("Seek within this source");
-                                        if response.drag_stopped()
-                                            || response.changed() && !response.dragged()
-                                        {
-                                            self.mix_to_waveform_section(
-                                                columns[0].ctx(),
-                                                d,
-                                                seek as f64,
-                                            );
-                                        }
-                                        columns[1].horizontal(|ui| {
-                                            ui.small("VOL");
-                                            ui.spacing_mut().slider_width =
-                                                (ui.available_width() - 3.).max(40.);
-                                            let gain = ui
-                                                .add(
-                                                    egui::Slider::new(
-                                                        &mut self.channel_gain[d],
-                                                        0. ..=1.,
-                                                    )
-                                                    .show_value(false),
-                                                )
-                                                .on_hover_text("Deck volume");
-                                            #[cfg(test)]
-                                            ui.ctx().data_mut(|data| {
-                                                data.insert_temp(
-                                                    egui::Id::unique(("deck-volume-control", d)),
-                                                    (gain.rect, ui.layer_id()),
-                                                )
-                                            });
-                                            if gain.changed()
-                                                && let Some(audio) = &self.audio
-                                            {
-                                                audio.set_gain(d, self.channel_gain[d]);
-                                            }
-                                        });
-                                    });
-                                    ui.spacing_mut().button_padding.x = 2.;
-                                    self.card_transport(ui, d, right, false);
-                                },
-                            );
-                        });
-                        self.card_restore_samples(d);
-                        let mode_key = egui::Id::unique(("card-knob-mode-stems", d));
-                        let mut stems = ui
-                            .ctx()
-                            .data(|data| data.get_temp::<bool>(mode_key))
-                            .unwrap_or(true);
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().button_padding.y = 1.;
-                            ui.selectable_value(&mut stems, false, "EQ");
-                            ui.selectable_value(&mut stems, true, "Stems");
-                            if stems && ui.small_button("Enable / reload").clicked() {
-                                self.card_open_tools(ui.ctx(), d, 1);
-                            }
-                        });
-                        ui.ctx().data_mut(|data| data.insert_temp(mode_key, stems));
-                        let knobs = ui.scope(|ui| {
-                            ui.columns(5, |columns| {
-                                for (band, column) in columns.iter_mut().enumerate().take(3) {
-                                    column.vertical_centered(|ui| {
-                                        ui.spacing_mut().interact_size.y = 32.;
-                                        if stems {
-                                            let (stem, label) =
-                                                [(0, "VOC"), (2, "BEAT"), (1, "INST")][band];
-                                            self.card_stem_dial(ui, d, stem, label);
-                                        } else {
-                                            let label = ["LOW", "MID", "HIGH"][band];
-                                            if dj_mixer::dial(
-                                                ui,
-                                                label,
-                                                &mut self.eq[d][band],
-                                                -24. ..=12.,
-                                                accent(d),
-                                            )
-                                            .changed()
-                                                && let Some(audio) = &self.audio
-                                            {
-                                                if self.pair().contains(&d) {
-                                                    self.run.cancel_effects(audio);
-                                                }
-                                                audio.set_eq(d, band, self.eq[d][band]);
-                                            }
-                                            ui.small(label);
-                                        }
-                                    });
-                                }
-                                columns[3].vertical_centered(|ui| {
-                                    ui.spacing_mut().interact_size.y = 32.;
-                                    if self.mixer_panel.filter_knob(ui, d, accent(d))
-                                        && let Some(audio) = &self.audio
-                                    {
-                                        if self.pair().contains(&d) {
-                                            self.run.cancel_effects(audio);
-                                        }
-                                        self.mixer_panel.apply(audio);
-                                    }
-                                    ui.small("FILTER");
-                                });
-                                columns[4]
-                                    .vertical_centered(|ui| self.deck_headphones_button(ui, d));
-                            });
-                        });
-                        #[cfg(test)]
-                        ui.ctx().data_mut(|data| {
-                            data.insert_temp(
-                                egui::Id::unique(("rack-knobs", d)),
-                                knobs.response.rect,
-                            );
-                            data.insert_temp(
-                                egui::Id::unique(("rack-knobs", d)).with("screen"),
-                                (knobs.response.rect, ui.layer_id()),
-                            );
-                        });
-                        #[cfg(not(test))]
-                        let _ = knobs;
-                    });
-            },
-        );
-        #[cfg(test)]
-        ui.ctx().data_mut(|data| {
-            data.insert_temp(
-                egui::Id::unique(("rack-jog-drop", d)),
-                (area.response.interact_rect, area.response.layer_id),
-            );
-            data.insert_temp(
-                egui::Id::unique(("rack-main-extent", d)),
-                (area.response.rect, area.response.layer_id),
-            );
-        });
-        if let Some(path) = dragdrop::target(&area.response, accent(d))
-            && let Err(error) = self.safe_load_path(d, path, None)
-        {
-            self.status = error;
-        }
-    }
     fn card_main_deck(&mut self, ui: &mut egui::Ui, d: usize, width: f32, height: f32) {
-        if self.rack.six {
-            self.card_compact_six_deck(ui, d, width, height);
-            return;
-        }
         let area = ui.allocate_ui_with_layout(
             egui::vec2(width, height),
             egui::Layout::top_down(egui::Align::Min),
@@ -921,26 +651,12 @@ impl Player {
                         ui.set_width(width - 24.);
                         ui.set_min_height(height - 24.);
                         ui.spacing_mut().item_spacing.y = 3.;
-                        let six_card = self.rack.six;
                         let compact_card = width < 1000.;
                         let short_controls = height < 280.;
-                        let minimum_wheel = if six_card {
-                            86.
-                        } else if short_controls {
-                            140.
-                        } else {
-                            160.
-                        };
-                        let wheel = (height
-                            - if six_card {
-                                150.
-                            } else if compact_card {
-                                222.
-                            } else {
-                                180.
-                            })
-                        .clamp(minimum_wheel, 218.)
-                        .min((width * 0.43).max(minimum_wheel));
+                        let minimum_wheel = if short_controls { 140. } else { 160. };
+                        let wheel = (height - if compact_card { 222. } else { 180. })
+                            .clamp(minimum_wheel, 218.)
+                            .min((width * 0.43).max(minimum_wheel));
                         let info = (width
                             - 20.
                             - wheel
@@ -960,12 +676,10 @@ impl Player {
                                                 .strong()
                                                 .color(accent(d)),
                                         );
-                                        self.card_live_button(ui, d);
-                                        if six_card {
-                                            let load = ui.add_enabled(self.selected.is_some(), egui::Button::new("Load").min_size(egui::vec2(48., 26.))).on_hover_text("Load the selected library song on this deck without starting it").on_disabled_hover_text("Select a song in the DJ Library first");
-                                            #[cfg(test)] ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique(("deck-load-button", d)), (load.rect, ui.layer_id())));
-                                            if load.clicked() && let Some(index) = self.selected { self.load_deck(d, index, false); }
-                                        }
+                                        ui.colored_label(
+                                            accent(d),
+                                            if d % 2 == 0 { "DECK A" } else { "DECK B" },
+                                        );
                                         if info >= 160.
                                             && ui
                                                 .small_button("···")
@@ -986,7 +700,7 @@ impl Player {
                                         .and_then(|t| t.preparation.extensions.get("artist"))
                                         .and_then(|v| v.as_str())
                                         .unwrap_or("Artist unavailable");
-                                    if width >= 400. && !six_card {
+                                    if width >= 400. {
                                         ui.add(
                                             egui::Label::new(egui::RichText::new(artist).size(16.))
                                                 .truncate(),
@@ -1064,7 +778,7 @@ impl Player {
                             }
                         });
                         if compact_card {
-                            self.card_transport(ui, d, width - 24., short_controls && !six_card);
+                            self.card_transport(ui, d, width - 24., short_controls);
                         }
                         ui.separator();
                         // Sampling readiness is independent of the responsive presentation.
@@ -1078,14 +792,6 @@ impl Player {
                             ui.horizontal_wrapped(|ui| {
                                 ui.selectable_value(&mut stems, false, "EQ");
                                 ui.selectable_value(&mut stems, true, "Stems");
-                                if six_card
-                                    && ui
-                                        .small_button("···")
-                                        .on_hover_text("Load, cues, sampler and deck tools")
-                                        .clicked()
-                                {
-                                    self.card_open_tools(ui.ctx(), d, 0);
-                                }
                                 if stems && ui.small_button("Enable / reload").clicked() {
                                     self.card_open_tools(ui.ctx(), d, 1);
                                 }
@@ -1150,7 +856,7 @@ impl Player {
                             #[cfg(not(test))]
                             let _ = knobs;
                             ui.separator();
-                            if six_card {
+                            {
                                 ui.horizontal(|ui| {
                                     ui.small("Volume");
                                     ui.spacing_mut().slider_width = (width - 115.).max(90.);
@@ -1165,7 +871,6 @@ impl Player {
                                         audio.set_gain(d, self.channel_gain[d]);
                                     }
                                 });
-                                return;
                             }
                             if width < 400. {
                                 let cues = ui.scope(|ui| {
@@ -1252,7 +957,7 @@ impl Player {
                                 });
                             }
                         };
-                        if height < 370. && !six_card {
+                        if height < 370. {
                             // A short performance card keeps the vinyl and transport pinned.
                             // Real, named control panels replace a clipped fragment of knobs.
                             let tools = ui.horizontal_wrapped(|ui| {
@@ -1437,7 +1142,7 @@ mod tests {
         ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
     }
     #[test]
-    fn six_wide_manual_load_has_visible_selectable_browser_and_all_direct_decks() {
+    fn two_main_jogs_and_six_quick_tracks_keep_a_visible_selectable_browser() {
         for appearance in [theme::Theme::Classic, theme::Theme::ModernDark] {
             for workspace in [false, true] {
                 let root = tempfile::tempdir().unwrap();
@@ -1523,57 +1228,51 @@ mod tests {
                     assert!(
                         row.height() >= 27. && window.expand(1.).contains_rect(row),
                         "First selectable browser row must be complete without scrolling workspace={workspace}: {row:?}, viewport{window:?}, bankA{:?}, bankB{:?}",
-                        screen_rect(&ctx, "six-bank-viewport", 0),
-                        screen_rect(&ctx, "six-bank-viewport", 1)
+                        screen_rect(&ctx, "rack-aux-extent", 0),
+                        screen_rect(&ctx, "rack-aux-extent", 1)
                     );
                 }
+                let left = screen_rect(&ctx, "rack-main-extent", 0);
+                let right = screen_rect(&ctx, "rack-main-extent", 1);
+                assert!(left.right() <= right.left());
                 for deck in 0..6 {
-                    let bank = screen_rect(&ctx, "six-bank-viewport", deck % 2);
-                    let card = screen_rect(&ctx, "rack-main-extent", deck);
+                    let slot = screen_rect(&ctx, "rack-aux-extent", deck);
                     assert!(
-                        bank.expand(1.).contains_rect(card),
-                        "All six full cards must fit with selectable music workspace={workspace} deck{deck}: {card:?} bank{bank:?}, firstrow{row_bounds:?}, viewport{window:?}"
+                        window.expand(1.).contains_rect(slot),
+                        "Quick slot{deck}: {slot:?} viewport{window:?} firstrow{row_bounds:?}"
                     );
-                    for name in ["deck-live-button", "deck-load-button"] {
+                    assert!(if deck.is_multiple_of(2) {
+                        slot.center().x < left.center().x
+                    } else {
+                        slot.center().x > right.center().x
+                    });
+                    for name in [
+                        "deck-live-button",
+                        "rack-aux-play",
+                        "rack-aux-sync",
+                        "rack-aux-loop",
+                    ] {
                         assert!(
-                            bank.expand(1.).contains_rect(screen_rect(&ctx, name, deck)),
-                            "{name}/{deck} must be initially visible"
+                            slot.expand(1.).contains_rect(screen_rect(&ctx, name, deck)),
+                            "Complete {name}/{deck}"
                         );
                     }
-                    let play = ctx
-                        .data(|d| {
-                            d.get_temp::<egui::Rect>(egui::Id::unique(("rack-main-play", deck)))
-                        })
-                        .unwrap();
-                    assert!(
-                        play.height() >= 37. && bank.expand(1.).contains_rect(play),
-                        "Full-size PLAY{deck} must remain visible"
-                    );
-                    let (_, layer) = ctx
-                        .data(|d| {
-                            d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
-                                "rack-main-extent",
-                                deck,
-                            )))
-                        })
-                        .unwrap();
-                    let transform = ctx.layer_transform_to_global(layer).unwrap_or_default();
-                    for stem in 0usize..3 {
-                        let target = ctx
-                            .data(|d| {
-                                d.get_temp::<egui::Rect>(egui::Id::unique((
-                                    "card-stem-knob",
-                                    deck,
-                                    stem,
-                                )))
-                            })
-                            .unwrap();
-                        let target = transform * target;
+                    if deck >= 2 {
                         assert!(
-                            target.width() >= 32.
-                                && target.height() >= 32.
-                                && bank.expand(1.).contains_rect(target),
-                            "Real32pxstem{stem}/{deck} must fit with browser row: {target:?} bank{bank:?}"
+                            ctx.data(|d| d.get_temp::<(egui::Rect, egui::LayerId)>(
+                                egui::Id::unique(("rack-jog-drop", deck))
+                            ))
+                            .is_none(),
+                            "Only selected two tracks have jog surfaces"
+                        );
+                        assert!(
+                            ctx.data(|d| d.get_temp::<egui::Rect>(egui::Id::unique((
+                                "card-stem-knob",
+                                deck,
+                                0usize
+                            ))))
+                            .is_none(),
+                            "No mini stem knobs"
                         );
                     }
                 }
@@ -1597,122 +1296,6 @@ mod tests {
                     serde_json::to_value(player.show_editor.playlists(&settings)).unwrap(),
                     drafts
                 );
-            }
-        }
-    }
-    #[test]
-    fn all_six_live_load_play_targets_are_initially_visible_in_wide_workspace() {
-        for appearance in [theme::Theme::Classic, theme::Theme::ModernDark] {
-            for (size, workspace) in [
-                (egui::vec2(1280., 1100.), false),
-                (egui::vec2(1570., 1000.), false),
-                (egui::vec2(1570., 1000.), true),
-            ] {
-                let ctx = egui::Context::default();
-                crate::skin::configure(&ctx);
-                theme::apply(&ctx, appearance);
-                let root = tempfile::tempdir().unwrap();
-                let mut player = Player {
-                    root: root.path().into(),
-                    rack: Rack {
-                        six: true,
-                        ..Default::default()
-                    },
-                    workspace: crate::workspace::Workspace {
-                        enabled: workspace,
-                        pane: 2,
-                        rendering: false,
-                    },
-                    ..Default::default()
-                };
-                player.loaded_snapshot = std::array::from_fn(|deck| {
-                    Some(amp_core::Track {
-                        path: format!("missing-{deck}.wav").into(),
-                        title: "A long imported title with remix and artist details ".repeat(4),
-                        preparation: amp_core::Preparation {
-                            bpm: Some(128.),
-                            harmonic_key: Some("8A".into()),
-                            ..Default::default()
-                        },
-                    })
-                });
-                let live = player.rack.live;
-                let gains = player.channel_gain;
-                let ratios = player.rack.strip_ratios;
-                for _ in 0..3 {
-                    let mut output = ctx.run_ui(
-                        egui::RawInput {
-                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                            ..Default::default()
-                        },
-                        |ui| {
-                            if workspace {
-                                player.workspace_ui(ui);
-                            } else {
-                                player.group_ui(ui, 2);
-                            }
-                        },
-                    );
-                    output.textures_delta.clear();
-                }
-                for deck in 0..6 {
-                    let bank = screen_rect(&ctx, "six-bank-viewport", deck % 2);
-                    let card = screen_rect(&ctx, "rack-main-extent", deck);
-                    for name in ["deck-live-button", "deck-load-button"] {
-                        let target = screen_rect(&ctx, name, deck);
-                        assert!(
-                            bank.expand(1.).contains_rect(target)
-                                && card.expand(1.).contains_rect(target),
-                            "All six {name} targets must be visible without scrolling at{size:?}, deck{deck}: {target:?}, bank{bank:?}, card{card:?}"
-                        );
-                    }
-                    let play = ctx
-                        .data(|d| {
-                            d.get_temp::<egui::Rect>(egui::Id::unique(("rack-main-play", deck)))
-                        })
-                        .unwrap();
-                    assert!(
-                        play.height() >= 37. && bank.expand(1.).contains_rect(play),
-                        "All six full-size PLAY targets must be initially visible at{size:?}, deck{deck}: {play:?},bank{bank:?}"
-                    );
-                    if size.x == 1280. {
-                        assert!(
-                            bank.expand(1.).contains_rect(card),
-                            "All six full cards must fit initial1280x1100 view: {card:?} bank{bank:?}"
-                        );
-                        let (_, layer) = ctx
-                            .data(|d| {
-                                d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
-                                    "rack-main-extent",
-                                    deck,
-                                )))
-                            })
-                            .unwrap();
-                        let transform = ctx.layer_transform_to_global(layer).unwrap_or_default();
-                        for stem in 0usize..3 {
-                            let target = ctx
-                                .data(|d| {
-                                    d.get_temp::<egui::Rect>(egui::Id::unique((
-                                        "card-stem-knob",
-                                        deck,
-                                        stem,
-                                    )))
-                                })
-                                .unwrap();
-                            let target = transform * target;
-                            assert!(
-                                target.width() >= 32.
-                                    && target.height() >= 32.
-                                    && bank.expand(1.).contains_rect(target),
-                                "All six cards' real32px stems must be initially complete: deck{deck}stem{stem} target{target:?} bank{bank:?}"
-                            );
-                        }
-                    }
-                }
-                assert_eq!(player.rack.live, live);
-                assert_eq!(player.channel_gain, gains);
-                assert_eq!(player.rack.strip_ratios, ratios);
-                assert!(player.audio.is_none());
             }
         }
     }
@@ -1990,303 +1573,82 @@ mod tests {
     }
 
     #[test]
-    fn six_full_cards_keep_bank_parity_and_equal_direct_controls() {
-        for appearance in [theme::Theme::Classic, theme::Theme::ModernDark] {
-            for size in [
-                egui::vec2(1280., 1100.),
-                egui::vec2(1570., 1000.),
-                egui::vec2(1000., 700.),
-                egui::vec2(740., 480.),
-            ] {
+    fn quick_track_promotion_targets_reach_admission_without_mutating_manual_state() {
+        for size in [egui::vec2(1280., 1100.), egui::vec2(1570., 1000.)] {
+            for deck in 2..6 {
                 let ctx = egui::Context::default();
                 crate::skin::configure(&ctx);
-                theme::apply(&ctx, appearance);
-                let mut player = Player::default();
-                player.rack.six = true;
                 let root = tempfile::tempdir().unwrap();
-                player.root = root.path().into();
-                let saved = player.rack.strip_ratios;
-                let live = player.rack.live;
-                for _ in 0..3 {
-                    let mut output = ctx.run_ui(
-                        egui::RawInput {
-                            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                            ..Default::default()
-                        },
-                        |ui| player.card_rack(ui, size.y - 30.),
-                    );
-                    output.textures_delta.clear();
-                }
-                let main: Vec<_> = (0..6)
-                    .map(|d| screen_rect(&ctx, "rack-main-extent", d))
-                    .collect();
-                for row in 0..3 {
-                    let a = main[row * 2];
-                    let b = main[row * 2 + 1];
-                    assert!(
-                        a.right() < b.left(),
-                        "A/B bank parity lost at{size:?}: {a:?} {b:?}"
-                    );
-                    assert!(
-                        (a.width() - b.width()).abs() < 1. && (a.height() - b.height()).abs() < 1.,
-                        "Each side must expose equal full cards"
-                    );
-                    assert!(
-                        a.left() >= -1. && b.right() <= size.x + 1.,
-                        "Full cards clipped horizontally at{size:?}: {a:?} {b:?}"
-                    );
-                    if row > 0 {
-                        assert!(
-                            main[(row - 1) * 2].bottom() <= a.top()
-                                && main[(row - 1) * 2 + 1].bottom() <= b.top(),
-                            "Cards overlap vertically"
-                        );
-                    }
-                }
-                for (deck, card) in main.iter().enumerate() {
-                    for name in ["deck-live-button", "deck-load-button"] {
-                        let button = screen_rect(&ctx, name, deck);
-                        assert!(
-                            card.expand(1.).contains_rect(button),
-                            "{name}/{deck} escapes fullcard at{size:?}"
-                        );
-                        assert!(
-                            button.width() >= 47. && button.height() >= 25.,
-                            "LIVE target shrunk"
-                        );
-                    }
-                    for name in ["rack-main-play", "deck-cue-bounds"] {
-                        let button = ctx
-                            .data(|d| d.get_temp::<egui::Rect>(egui::Id::unique((name, deck))))
-                            .unwrap();
-                        assert!(
-                            card.expand(1.).contains_rect(button) && button.height() >= 37.,
-                            "{name}/{deck} must remain a full card transport"
-                        );
-                    }
-                    let (_, layer) = ctx
-                        .data(|d| {
-                            d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
-                                "rack-main-extent",
-                                deck,
-                            )))
-                        })
-                        .unwrap();
-                    let transform = ctx.layer_transform_to_global(layer).unwrap_or_default();
-                    for stem in 0usize..3 {
-                        let knob = ctx
-                            .data(|d| {
-                                d.get_temp::<egui::Rect>(egui::Id::unique((
-                                    "card-stem-knob",
-                                    deck,
-                                    stem,
-                                )))
-                            })
-                            .expect("All six cards require three direct stem knobs");
-                        let knob = transform * knob;
-                        assert!(
-                            card.expand(1.).contains_rect(knob)
-                                && knob.width() > 20.
-                                && knob.height() > 20.,
-                            "Stem{stem}/{deck} must be complete in its card at{size:?}: {knob:?} {card:?}"
-                        );
-                    }
-                }
-                assert_eq!(player.rack.strip_ratios, saved);
-                assert_eq!(player.rack.live, live);
-                assert!(player.audio.is_none());
-            }
-        }
-    }
-    #[test]
-    fn six_full_card_live_targets_are_reachable_without_starting_audio() {
-        for size in [
-            egui::vec2(1280., 1100.),
-            egui::vec2(1570., 1000.),
-            egui::vec2(740., 480.),
-        ] {
-            for deck in 0..6 {
-                let ctx = egui::Context::default();
-                crate::skin::configure(&ctx);
-                let mut player = Player::default();
+                let mut player = Player {
+                    root: root.path().into(),
+                    loaded: std::array::from_fn(Some),
+                    playing: [true, false, true, false, true, false],
+                    ..Default::default()
+                };
                 player.rack.six = true;
-                let root = tempfile::tempdir().unwrap();
-                player.root = root.path().into();
-                player.loaded = std::array::from_fn(Some);
-                player.playing = [true, false, true, false, true, false];
                 let settings = amp_core::show::Settings::default();
                 player.show_editor.new_playlist(&player.root, &settings);
                 let drafts = serde_json::to_value(player.show_editor.playlists(&settings)).unwrap();
-                let loaded = player.loaded;
-                let playing = player.playing;
-                let live = player.rack.live;
-                let ratios = player.rack.strip_ratios;
+                let state = (
+                    player.loaded,
+                    player.playing,
+                    player.rack.live,
+                    player.channel_gain,
+                    player.rack.strip_ratios,
+                );
                 let _lease = player
                     .output_admission
                     .acquire(&std::sync::atomic::AtomicBool::new(false))
                     .unwrap();
-                let mut target = egui::Rect::NOTHING;
-                let mut card = egui::Rect::NOTHING;
-                for frame in 0..64 {
-                    let mut events = vec![];
-                    // Give smooth wheel corrections 0.4s of simulated settling time.
-                    if (2..56).contains(&frame) && frame % 8 == 2 {
-                        let bank = screen_rect(&ctx, "six-bank-viewport", deck % 2);
-                        if !bank.expand(1.).contains_rect(card) {
-                            let delta = (bank.center().y - card.center().y).clamp(-150., 150.);
-                            events = vec![
-                                egui::Event::PointerMoved(bank.center()),
-                                egui::Event::MouseWheel {
-                                    unit: egui::MouseWheelUnit::Point,
-                                    phase: egui::TouchPhase::Move,
-                                    source: egui::MouseWheelSource::Unknown,
-                                    delta: egui::vec2(0., delta),
-                                    modifiers: Default::default(),
-                                },
-                            ];
-                        }
-                    }
-                    if frame == 60 || frame == 61 {
-                        events = vec![
-                            egui::Event::PointerMoved(target.center()),
+                let mut point = egui::Pos2::ZERO;
+                for frame in 0..5 {
+                    let events = if frame == 2 || frame == 3 {
+                        vec![
+                            egui::Event::PointerMoved(point),
                             egui::Event::PointerButton {
-                                pos: target.center(),
+                                pos: point,
                                 button: egui::PointerButton::Primary,
-                                pressed: frame == 60,
+                                pressed: frame == 2,
                                 modifiers: Default::default(),
                             },
-                        ];
-                    }
+                        ]
+                    } else {
+                        vec![]
+                    };
                     let mut output = ctx.run_ui(
                         egui::RawInput {
                             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                             events,
-                            time: Some(frame as f64 / 20.),
                             ..Default::default()
                         },
-                        |ui| player.card_rack(ui, size.y - 30.),
+                        |ui| player.card_rack(ui, 470.),
                     );
                     output.textures_delta.clear();
-                    target = screen_rect(&ctx, "deck-live-button", deck);
-                    card = screen_rect(&ctx, "rack-main-extent", deck);
-                    if frame == 58 {
-                        let bank = screen_rect(&ctx, "six-bank-viewport", deck % 2);
-                        assert!(
-                            bank.expand(1.).contains_rect(card),
-                            "Whole card{deck} must be reachable after bank scroll at{size:?}: {card:?} bank{bank:?}"
-                        );
-                        for stem in 0usize..3 {
-                            let knob = ctx
-                                .data(|d| {
-                                    d.get_temp::<egui::Rect>(egui::Id::unique((
-                                        "card-stem-knob",
-                                        deck,
-                                        stem,
-                                    )))
-                                })
-                                .unwrap();
-                            assert!(
-                                bank.expand(1.).contains_rect(knob),
-                                "Stem{stem}/{deck} must be fully visible when its full card is reached"
-                            );
-                        }
-                        assert!(
-                            bank.expand(1.).contains_rect(target),
-                            "LIVE{deck} must be fully reachable after its bank scroll at{size:?}: {target:?} bank{bank:?}"
-                        );
-                    }
+                    let target = screen_rect(&ctx, "deck-live-button", deck);
+                    let slot = screen_rect(&ctx, "rack-aux-extent", deck);
+                    assert!(slot.expand(1.).contains_rect(target));
+                    point = target.center();
                 }
                 assert!(
                     player.status.contains("Stop listening"),
-                    "Actual LIVE{deck} click must reach output-admission gate: {}",
+                    "Actual To Deck hit: {}",
                     player.status
                 );
-                assert_eq!(player.loaded, loaded);
-                assert_eq!(player.playing, playing);
-                assert_eq!(player.rack.live, live);
-                assert_eq!(player.rack.strip_ratios, ratios);
-                assert!(player.audio.is_none());
-                assert!(player.show_editor.has_unsaved());
+                assert_eq!(
+                    (
+                        player.loaded,
+                        player.playing,
+                        player.rack.live,
+                        player.channel_gain,
+                        player.rack.strip_ratios
+                    ),
+                    state
+                );
                 assert_eq!(
                     serde_json::to_value(player.show_editor.playlists(&settings)).unwrap(),
                     drafts
                 );
-            }
-        }
-    }
-    #[test]
-    fn six_full_banks_fit_the_actual_workspace_width() {
-        for size in [
-            egui::vec2(1280., 1100.),
-            egui::vec2(1570., 1000.),
-            egui::vec2(740., 480.),
-        ] {
-            let ctx = egui::Context::default();
-            crate::skin::configure(&ctx);
-            let mut player = Player::default();
-            player.rack.six = true;
-            player.workspace.enabled = true;
-            player.workspace.pane = 2;
-            for _ in 0..3 {
-                let mut output = ctx.run_ui(
-                    egui::RawInput {
-                        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                        ..Default::default()
-                    },
-                    |ui| player.workspace_ui(ui),
-                );
-                output.textures_delta.clear();
-            }
-            for deck in 0..6 {
-                let rect = screen_rect(&ctx, "rack-main-extent", deck);
-                assert!(
-                    rect.left() >= -1. && rect.right() <= size.x + 1.,
-                    "Full deck{deck} clipped in workspace at{size:?}: {rect:?}; bankA={:?}; bankB={:?}; cardA1={:?}; cardB1={:?}; rawBankA={:?}; rawBankB={:?}; bankTransforms={:?}; cardTransforms={:?}; content={:?}; viewport={:?}",
-                    screen_rect(&ctx, "six-bank-viewport", 0),
-                    screen_rect(&ctx, "six-bank-viewport", 1),
-                    screen_rect(&ctx, "rack-main-extent", 0),
-                    screen_rect(&ctx, "rack-main-extent", 1),
-                    ctx.data(
-                        |d| d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
-                            "six-bank-viewport",
-                            0usize
-                        )))
-                    ),
-                    ctx.data(
-                        |d| d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
-                            "six-bank-viewport",
-                            1usize
-                        )))
-                    ),
-                    (0usize..2)
-                        .map(|side| {
-                            let (_, layer) = ctx
-                                .data(|d| {
-                                    d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
-                                        "six-bank-viewport",
-                                        side,
-                                    )))
-                                })
-                                .unwrap();
-                            ctx.layer_transform_to_global(layer)
-                        })
-                        .collect::<Vec<_>>(),
-                    (0usize..2)
-                        .map(|side| {
-                            let (_, layer) = ctx
-                                .data(|d| {
-                                    d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
-                                        "rack-main-extent",
-                                        side,
-                                    )))
-                                })
-                                .unwrap();
-                            ctx.layer_transform_to_global(layer)
-                        })
-                        .collect::<Vec<_>>(),
-                    ctx.content_rect(),
-                    ctx.viewport_rect()
-                );
+                assert!(player.audio.is_none());
             }
         }
     }

@@ -623,7 +623,7 @@ mod tests {
                     time: Some(frame as f64 / 20.),
                     ..Default::default()
                 };
-                // Reach the real full B3 card before beginning the browser drag;
+                // Reach the real compact B3 slot before beginning the browser drag;
                 // wheel animation gets 0.4s to settle between bounded corrections.
                 if (2..56).contains(&frame)
                     && frame % 8 == 2
@@ -662,9 +662,9 @@ mod tests {
                         ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
                     };
                     source = screen(egui::Id::unique("dj-browser-first-track")).center();
-                    card = screen(egui::Id::unique(("rack-main-extent", 5usize)));
-                    bank = screen(egui::Id::unique(("six-bank-viewport", 1usize)));
-                    destination = screen(egui::Id::unique(("rack-jog-drop", 5usize))).center();
+                    card = screen(egui::Id::unique(("rack-aux-extent", 5usize)));
+                    bank = screen(egui::Id::unique(("rack-aux-extent", 5usize)));
+                    destination = screen(egui::Id::unique(("rack-strip-drop", 5usize))).center();
                 });
                 output.textures_delta.clear();
                 if frame == 58 {

@@ -335,7 +335,7 @@ impl Player {
         let card_breakpoint = if self.rack.six { 1100. } else { 950. };
         let narrow_cards = (640. ..card_breakpoint).contains(&rack_width);
         let minimum_rack = if self.rack.six {
-            220.
+            if narrow_cards { 568. } else { 400. }
         } else if narrow_cards {
             if self.rack.six {
                 if native_height < 760. { 314. } else { 380. }
@@ -356,7 +356,7 @@ impl Player {
             160.
         };
         let rack_reserve = if self.rack.six {
-            760.
+            minimum_rack + 64.
         } else if narrow_cards {
             minimum_rack + 52.
         } else {
@@ -376,7 +376,7 @@ impl Player {
             })
         .max(minimum_rack)
         .min(if self.rack.six {
-            900.
+            if narrow_cards { 600. } else { 470. }
         } else if narrow_cards {
             if self.rack.expanded { 470. } else { 430. }
         } else if self.rack.expanded {
@@ -423,7 +423,39 @@ impl Player {
             .ctx()
             .data_mut(|d| *d.get_temp_mut_or_insert_with(saved_id, || self.rack.strip_ratios));
         let rendered = if self.rack.six { strips } else { [0.; 2] };
-        if rack_width >= 640. || self.rack.six {
+        if self.rack.six {
+            // Keep full-size jog controls in a local vertical viewport when a
+            // short window cannot fit the rack and the selectable browser.
+            let viewport_height = (ui.available_height()
+                - if self.dj_library_hidden {
+                    40.
+                } else {
+                    minimum_library + 64.
+                })
+            .max(80.);
+            let rack = egui::ScrollArea::vertical()
+                .id_salt("two-jogs-six-quick-tracks")
+                .max_height(viewport_height)
+                .auto_shrink([false, true])
+                .show(ui, |ui| self.card_rack(ui, height));
+            #[cfg(test)]
+            ui.ctx().data_mut(|data| {
+                data.insert_temp(
+                    egui::Id::unique("quick-rack-viewport"),
+                    // With auto_shrink the nominal scroll clip can extend past
+                    // shorter content; verify the actual visible content area.
+                    (
+                        rack.inner_rect.intersect(egui::Rect::from_min_size(
+                            rack.inner_rect.min,
+                            rack.content_size,
+                        )),
+                        ui.layer_id(),
+                    ),
+                );
+            });
+            #[cfg(not(test))]
+            let _ = rack;
+        } else if rack_width >= 640. {
             self.card_rack(ui, height);
         } else {
             // Below the native DJ window minimum, retain a reachable overflow
@@ -1377,63 +1409,64 @@ mod tests {
         }
     }
     #[test]
-    fn six_full_deck_bank_scrolls_independently_without_changing_saved_widths() {
+    fn six_quick_tracks_keep_selected_pair_and_saved_widths() {
         let ctx = egui::Context::default();
         crate::skin::configure(&ctx);
         let mut player = Player::default();
         player.rack.six = true;
+        player.rack.live = [4, 3];
         let ratios = player.rack.strip_ratios;
-        let size = egui::vec2(1280., 500.);
-        let mut before = [egui::Rect::NOTHING; 2];
-        let mut point = egui::Pos2::ZERO;
-        for frame in 0..8 {
-            let events = if frame == 3 {
-                vec![
-                    egui::Event::PointerMoved(point),
-                    egui::Event::MouseWheel {
-                        unit: egui::MouseWheelUnit::Point,
-                        phase: egui::TouchPhase::Move,
-                        source: egui::MouseWheelSource::Unknown,
-                        delta: egui::vec2(0., -400.),
-                        modifiers: Default::default(),
-                    },
-                ]
-            } else {
-                vec![]
-            };
+        for _ in 0..3 {
             let mut output = ctx.run_ui(
                 egui::RawInput {
-                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
-                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(1280., 1100.),
+                    )),
                     ..Default::default()
                 },
-                |ui| player.card_rack(ui, 450.),
+                |ui| player.card_rack(ui, 470.),
             );
             output.textures_delta.clear();
-            let screen = |name: &str, deck: usize| {
-                let (rect, layer) = ctx
-                    .data(|d| {
-                        d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((name, deck)))
-                    })
-                    .unwrap();
-                ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
-            };
-            if frame == 2 {
-                before = [screen("rack-main-extent", 4), screen("rack-main-extent", 5)];
-                point = screen("six-bank-viewport", 0).center();
-            }
-            if frame == 7 {
-                let after = [screen("rack-main-extent", 4), screen("rack-main-extent", 5)];
-                assert!(
-                    after[0].top() < before[0].top() - 20.,
-                    "Left full bank must actually scroll"
-                );
-                assert!(
-                    (after[1].top() - before[1].top()).abs() < 1.,
-                    "Scrolling A must not move B bank"
-                );
-            }
         }
+        let bounds = |name, deck| {
+            let (r, l) = ctx
+                .data(|d| d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((name, deck))))
+                .unwrap();
+            ctx.layer_transform_to_global(l).unwrap_or_default() * r
+        };
+        let left = bounds("rack-main-extent", 4);
+        let right = bounds("rack-main-extent", 3);
+        assert!(left.right() <= right.left());
+        for deck in 0usize..6 {
+            let slot = bounds("rack-aux-extent", deck);
+            assert!(
+                if deck.is_multiple_of(2) {
+                    slot.right() <= left.left() + 1.
+                } else {
+                    slot.left() >= right.right() - 1.
+                },
+                "Quick track bank parity{deck} {slot:?}"
+            );
+            for name in [
+                "deck-live-button",
+                "rack-aux-play",
+                "rack-aux-sync",
+                "rack-aux-loop",
+            ] {
+                assert!(slot.expand(1.).contains_rect(bounds(name, deck)));
+            }
+            let has_jog = ctx
+                .data(|d| {
+                    d.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
+                        "rack-jog-drop",
+                        deck,
+                    )))
+                })
+                .is_some();
+            assert_eq!(has_jog, [4, 3].contains(&deck));
+        }
+        assert_eq!(player.rack.live, [4, 3]);
         assert_eq!(player.rack.strip_ratios, ratios);
         assert!(player.audio.is_none());
     }
@@ -1608,11 +1641,15 @@ mod tests {
                 };
                 let mut output = ctx.run_ui(raw, |ui| {
                     player.group_ui(ui, 2);
-                    for side in 0usize..2 {
-                        let (bank,layer)=ui.ctx().data(|d|d.get_temp::<(egui::Rect,egui::LayerId)>(egui::Id::unique(("six-bank-viewport",side)))).expect("Full-bank scroll viewport must exist");
-                        let bank=ui.ctx().layer_transform_to_global(layer).unwrap_or_default()*bank;
+                    for deck in 0usize..6 {
+                        let (slot,layer)=ui.ctx().data(|d|d.get_temp::<(egui::Rect,egui::LayerId)>(egui::Id::unique(("rack-aux-extent",deck)))).expect("All six compact quick tracks must exist");
+                        let slot=ui.ctx().layer_transform_to_global(layer).unwrap_or_default()*slot;
                         let library=ui.ctx().data(|d|d.get_temp::<f32>(egui::Id::unique("rack-library-top"))).unwrap();
-                        assert!(bank.left()>=-1. && bank.right()<=size.x+1. && bank.bottom()<=library && bank.top()>=-1.,"Full bank must remain bounded above library at{size:?}: {bank:?},library{library}");
+                        assert!(slot.left()>=-1. && slot.right()<=size.x+1.,"Quick track horizontal bounds at{size:?}: {deck} {slot:?}");
+                        let (viewport,layer)=ui.ctx().data(|d|d.get_temp::<(egui::Rect,egui::LayerId)>(egui::Id::unique("quick-rack-viewport"))).unwrap();
+                        let viewport=ui.ctx().layer_transform_to_global(layer).unwrap_or_default()*viewport;
+                        assert!(viewport.top()>=-1. && viewport.bottom()<=library && viewport.bottom()<=size.y,"Rack viewport must preserve browser{size:?}: {viewport:?},library{library}");
+                        if size.y>=1000. {assert!(viewport.expand(1.).contains_rect(slot),"Wide quick track must be initially visible {deck}: {slot:?} viewport{viewport:?}");}
                     }
                     assert!(
                         ui.min_rect().right() <= size.x + 1.
@@ -1710,10 +1747,10 @@ mod tests {
                     "Full-card transport must retain its physical target size at{size:?}: {play:?}"
                 );
                 assert!(
-                    phones.top() >= play.bottom() - 1.
-                        && phones.height() >= 37.
+                    phones.height() >= 37.
                         && main.expand(1.).contains_rect(phones)
-                        && knobs.expand(1.).contains_rect(phones),
+                        && (knobs.expand(1.).contains_rect(phones)
+                            || phones.left() >= play.right() - 1.),
                     "Six-card private monitoring stays full size in its lower knob row: phones={phones:?}, play={play:?}, card={main:?}, knobs={knobs:?}"
                 );
                 assert!(phones.right() <= size.x && phones.bottom() <= size.y);

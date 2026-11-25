@@ -1,29 +1,29 @@
-# Manual DJ decks and LIVE assignment
+# Two main jog decks and six quick tracks
 
-Six-deck mode displays six complete, independent cards: A1/A2/A3 on the left,
-B1/B2/B3 on the right, with the crossfader between the banks. Each card keeps
-its transport, vinyl, volume and EQ/stem controls. Short windows scroll each
-bank independently instead of replacing four decks with tiny selectors.
-Two-deck mode remains available in DJ Settings.
+Six-track mode has exactly two main jog wheels and six stable track slots.
+A1/A2/A3 belong to the left bank; B1/B2/B3 belong to the right. Each slot remains
+visible, including the one currently on its main deck. The main section holds
+the vinyl, EQ/stem/filter knobs, channel volume, cue/sampler tools and crossfader.
+Mini slots contain title/time, Play/Pause, Sync, Loop and a direct To Deck button.
 
-Press **LIVE** on a deck to assign that deck to its crossfader side directly.
-The highlighted LIVE buttons and center labels show the assigned pair.
-This is manual takeover: Auto Mix is turned off, including any queued handoff,
-but playing sources are not paused, restarted, reloaded or sought. The fader
-position and channel gains remain unchanged. Routing changes ramp over 10 ms.
-LIVE does not start a paused deck; use its Play button to start it.
+Drop a song onto a slot, or use its menu to load the selected library song.
+Loading a song does not start it. To Deck brings that same slot onto its side's
+main jog and crossfader; it does not create another audio source, copy the song,
+restart it or reset its position. On Deck identifies the selected slot. Main
+controls act on that slot's existing state, including gain and stem filters.
 
-Other playing decks retain their independent channel-volume controls, so three
-or more decks can play together. A deck leaving the crossfader pair returns to
-its independent full-level bus; set its channel volume deliberately before
-reassigning if you want it quiet. Headphone cue remains private.
+Promoting another slot takes over Auto Mix atomically. Playing sources are not
+paused, reloaded or sought; the fader and channel gains stay unchanged. Automated
+transition-owned effects are released while unrelated manual effects remain.
+Routing changes ramp over 10 ms. A paused slot remains paused until Play.
 
-The separate strict pair-assignment API retains its paused-deck checks for old
-session/control callers. The visible LIVE buttons use the live routing command,
-so manual performance does not require the old Settings/assign/pause sequence.
+Other playing slots retain their independent channel volume. A slot leaving the
+crossfader pair returns to its independent full-level bus, subject to that saved
+channel gain. Set its gain deliberately before switching if it should be quiet.
+Headphone cue stays private. Six slots represent six sources, not six sources
+plus two duplicate main-deck copies.
 
-Window resizing preserves loaded tracks, source positions, drafts, output and
-saved splitter preferences. Card layout and button-hit tests cover both themes;
-a clocked silent-output test exercises the actual A2 LIVE button with three
-real decoded sources. Synthetic routing tests separately cover six playing
-sources and a takeover during an automatic handoff, including same-pair takeover.
+Wide windows place three compact slots outside each main deck. Narrow windows
+reflow them below their respective jogs, retaining the A/B sides. Smaller widths
+have horizontal overflow rather than shrinking or dropping controls. Resizing
+preserves loaded sources, positions, drafts, playback and saved splitters.
