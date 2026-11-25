@@ -710,7 +710,7 @@ fn save_draft_bytes(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     file.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
-fn source_summary(p: &amp_core::show::SmartPlaylist) -> String {
+pub(super) fn source_summary(p: &amp_core::show::SmartPlaylist) -> String {
     if !p.playlist_sources.is_empty() || p.folders.len() > 1 {
         return format!(
             "{} folders + {} playlist sources",
@@ -1686,6 +1686,19 @@ mod tests {
         for playlist in &current.playlists {
             assert!(restored.playlists.iter().any(|p| p.id == playlist.id));
         }
+    }
+    #[test]
+    fn smart_card_source_summary_distinguishes_library_from_empty_selection() {
+        let mut p = test_settings().playlists.remove(0);
+        set_source_mode(&mut p, SourceMode::All);
+        assert_eq!(source_summary(&p), "Entire library");
+        set_source_mode(&mut p, SourceMode::Folders);
+        assert_eq!(source_summary(&p), "No music source selected");
+        p.folders.push("Dance".into());
+        assert_eq!(source_summary(&p), "Folder: Dance");
+        set_source_mode(&mut p, SourceMode::Songs);
+        p.allowed.push("track-id".into());
+        assert_eq!(source_summary(&p), "Playlist / selected songs");
     }
     #[test]
     fn empty_source_selection_never_expands_to_entire_library() {

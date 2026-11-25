@@ -307,10 +307,7 @@ impl Player {
                             let detail = if self.show_editor.playlist_unsaved(&list.id) {
                                 "Unsaved changes".into()
                             } else {
-                                format!(
-                                    "{} sources · smart rules",
-                                    list.folders.len() + list.playlist_sources.len()
-                                )
+                                format!("{} · smart rules", show_editor::source_summary(&list))
                             };
                             let row = cards::collection(
                                 ui,
