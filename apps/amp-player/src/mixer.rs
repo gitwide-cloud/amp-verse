@@ -380,6 +380,7 @@ enum Command {
     SampleTrigger(usize),
     SampleStop(Option<usize>),
     Load(usize, Source, bool, u64),
+    LoadHoldingStemFilters(usize, Source, bool, u64),
     Level(usize, f32, f32, bool),
     LevelSet(usize, f32),
     Stop(usize),
@@ -422,6 +423,7 @@ impl Command {
                 | Self::Launch(_)
                 | Self::SampleTrigger(_)
                 | Self::Load(_, _, true, _)
+                | Self::LoadHoldingStemFilters(_, _, true, _)
                 | Self::Fade { .. }
                 | Self::ScheduledFade { .. }
                 | Self::ScratchFade { .. }
@@ -501,7 +503,20 @@ impl Mixer {
                 }
                 command => command,
             };
+            // Sample the deck's latest knobs on the audio thread, not when decoding
+            // starts: edits made while the incoming track buffers must also survive.
+            let command = match command {
+                Command::LoadHoldingStemFilters(d, mut source, play, generation) => {
+                    source.stem_knobs =
+                        std::array::from_fn(|i| get(&self.controls.stem_knobs[d][i]));
+                    Command::Load(d, source, play, generation)
+                }
+                command => command,
+            };
             match command {
+                Command::LoadHoldingStemFilters(..) => {
+                    unreachable!("stem-filter load already normalized")
+                }
                 Command::Admitted(..) => unreachable!("command envelope already removed"),
                 Command::HandoffMode(mode) => self.pending_handoff = mode,
                 Command::RestoreSync(d, enabled) => {
@@ -1887,6 +1902,7 @@ mod vinyl_tests {
 
 #[derive(Default)]
 struct DecodeOptions {
+    hold_stem_filters: bool,
     section: Option<(Option<crate::mix_schedule::Grid>, f32)>,
     original: bool,
 }
@@ -2157,6 +2173,26 @@ impl Engine {
         track: &amp_core::Track,
         play: bool,
     ) -> Result<(), String> {
+        self.load_dj(deck, root, track, play, false)
+    }
+    /// Auto Mix changes songs while the physical deck's user filters stay put.
+    pub fn load_automix(
+        &mut self,
+        deck: usize,
+        root: &Path,
+        track: &amp_core::Track,
+        play: bool,
+    ) -> Result<(), String> {
+        self.load_dj(deck, root, track, play, true)
+    }
+    fn load_dj(
+        &mut self,
+        deck: usize,
+        root: &Path,
+        track: &amp_core::Track,
+        play: bool,
+        hold_stem_filters: bool,
+    ) -> Result<(), String> {
         if deck >= DECKS {
             return Err("Unknown deck".into());
         }
@@ -2168,7 +2204,17 @@ impl Engine {
         {
             return self.load_original(deck, root, track, play);
         }
-        let result = self.load_decoded(deck, root, track, play, None, DecodeOptions::default());
+        let result = self.load_decoded(
+            deck,
+            root,
+            track,
+            play,
+            None,
+            DecodeOptions {
+                hold_stem_filters,
+                ..Default::default()
+            },
+        );
         if result.is_err() {
             self.restore_stem_mode_request(deck);
         }
@@ -2228,7 +2274,11 @@ impl Engine {
         stems: Option<[std::path::PathBuf; 3]>,
         options: DecodeOptions,
     ) -> Result<(), String> {
-        let DecodeOptions { section, original } = options;
+        let DecodeOptions {
+            section,
+            original,
+            hold_stem_filters,
+        } = options;
         track.preparation.validate()?;
         let stem_knobs = runtime_stem_knobs(&track.preparation, original)?;
         let stem_mode = !original
@@ -2586,7 +2636,11 @@ impl Engine {
             return Ok(());
         }
         self.cancel[deck] = Some(cancel);
-        self.send(Command::Load(deck, source, play, generation))?;
+        self.send(if hold_stem_filters {
+            Command::LoadHoldingStemFilters(deck, source, play, generation)
+        } else {
+            Command::Load(deck, source, play, generation)
+        })?;
         self.requested_generation[deck] = generation;
         self.loaded_on_demand[deck] = stem_mode;
         self.controls.prepared_stems[deck].store(cached, Relaxed);
@@ -2901,6 +2955,7 @@ impl Engine {
             DecodeOptions {
                 section: Some((grid, seconds)),
                 original: !live && !self.controls.stems_loaded[deck].load(Relaxed),
+                ..Default::default()
             },
         )
     }
@@ -4321,6 +4376,45 @@ mod tests {
             -1.,
             "saved/runtime edit is not destructively reset on fallback"
         );
+    }
+    #[test]
+    fn automix_retains_each_decks_latest_stem_filters_across_track_loads() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        for deck in 0..6 {
+            let mut next = source(0.2, 4000);
+            next.separated = true;
+            next.stem_knobs = [1., 0., 0.]; // Incoming song disagrees with deck.
+            tx.send(Command::LoadHoldingStemFilters(deck, next, false, 1))
+                .unwrap();
+            // Simulate a knob edit after the replacement was queued.
+            let knobs = [-1., deck as f32 / 10., 0.];
+            for (i, knob) in knobs.into_iter().enumerate() {
+                set(&controls.stem_knobs[deck][i], knob);
+            }
+            mixer.process_commands();
+            assert_eq!(
+                std::array::from_fn::<_, 3, _>(|i| get(&controls.stem_knobs[deck][i])),
+                knobs
+            );
+            assert_eq!(
+                std::array::from_fn::<_, 3, _>(|i| get(&controls.stem_level[deck][i])),
+                amp_core::stem_mix::gains(knobs)
+            );
+            assert!(!controls.play[deck].load(Relaxed));
+            assert_eq!(
+                get(&controls.stem_knobs[0][0]),
+                -1.,
+                "Other decks keep their cuts"
+            );
+        }
+        // Manual loads retain their existing song-default behavior.
+        tx.send(Command::Load(0, source(0.2, 4000), false, 2))
+            .unwrap();
+        mixer.process_commands();
+        assert_eq!(get(&controls.stem_knobs[0][0]), 0.);
+        assert_eq!(get(&controls.stem_knobs[1][0]), -1.);
     }
     #[test]
     fn song_stem_defaults_apply_at_load_and_reset_for_the_next_song() {

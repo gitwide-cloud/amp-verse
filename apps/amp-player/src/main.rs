@@ -998,6 +998,8 @@ impl Player {
                 let audio = self.audio.as_mut().unwrap();
                 if owner == playback_owner::Owner::Player {
                     audio.load_original(deck, &self.root, &runtime, play)
+                } else if self.run.auto || self.auto {
+                    audio.load_automix(deck, &self.root, &runtime, play)
                 } else {
                     audio.load(deck, &self.root, &runtime, play)
                 }

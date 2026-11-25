@@ -748,7 +748,11 @@ impl Player {
             );
         }
         let engine = self.audio.as_mut().unwrap();
-        engine.load(d, &self.root, &track, execution == Execution::PlayNow)?;
+        if self.run.auto || self.auto {
+            engine.load_automix(d, &self.root, &track, execution == Execution::PlayNow)?;
+        } else {
+            engine.load(d, &self.root, &track, execution == Execution::PlayNow)?;
+        }
         self.run.regular_deck_replaced(d);
         self.audio.as_ref().unwrap().set_rate(d, rate);
         if execution != Execution::LoadOnly {
