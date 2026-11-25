@@ -215,7 +215,7 @@ impl Player {
             }
             self.waveforms[d].overlay = false;
             self.waveforms[d].ignore_seek = false;
-            self.waveforms[d].tint = (ui.available_width() >= 950.).then_some(accent(d));
+            self.waveforms[d].tint = Some(accent(d));
             let t = self.loaded_snapshot[d]
                 .as_ref()
                 .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
@@ -293,11 +293,13 @@ impl Player {
                     .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
                 self.waveforms[d].overlay = side == 1;
                 self.waveforms[d].ignore_seek = true;
-                self.waveforms[d].tint = Some(if side == 0 {
-                    egui::Color32::from_rgba_unmultiplied(60, 170, 255, 200)
-                } else {
-                    egui::Color32::from_rgba_unmultiplied(255, 75, 80, 170)
-                });
+                let color = accent(d);
+                self.waveforms[d].tint = Some(egui::Color32::from_rgba_unmultiplied(
+                    color.r(),
+                    color.g(),
+                    color.b(),
+                    if side == 0 { 200 } else { 170 },
+                ));
                 self.waveforms[d].overview = false;
                 self.waveforms[d].hide_caption = true;
                 self.waveforms[d].height = Some(height);
