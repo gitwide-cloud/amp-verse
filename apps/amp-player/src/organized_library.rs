@@ -1603,7 +1603,7 @@ mod tests {
         let ctx = egui::Context::default();
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280., 800.));
         let draw = |player: &mut Player, events: Vec<egui::Event>| {
-            let _ = ctx.run_ui(
+            let mut output = ctx.run_ui(
                 egui::RawInput {
                     screen_rect: Some(screen),
                     events,
@@ -1611,6 +1611,7 @@ mod tests {
                 },
                 |ui| player.music_browser(ui, 650., false),
             );
+            output.textures_delta.clear();
         };
         draw(&mut player, vec![]);
         let checkbox = ctx
