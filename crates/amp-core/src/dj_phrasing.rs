@@ -242,7 +242,7 @@ mod tests {
             let p: Preparation = serde_json::from_value(example["preparation"].clone()).unwrap();
             let original = p.clone();
             let duration = p.analysis.as_ref().unwrap().duration;
-            for fade in [3., 5., 8., 15.] {
+            for fade in [3., 5., 8., 15., 45., 90.] {
                 let end = p.cue_out.unwrap_or(duration);
                 let protected = p.cue_in + ((end - p.cue_in) * 0.65).min(120.);
                 let horizon = exit(&p, Style::Hype, Pace::Quick, duration, fade);

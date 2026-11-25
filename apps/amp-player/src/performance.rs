@@ -2194,12 +2194,31 @@ impl Player {
                         + audio.remaining(deck)? as f64 * self.deck_rate(deck),
                 )
             })?;
+        // Protect the whole planned transition, including a vocal hold or
+        // buildup, rather than reserving only its final crossfade ramp.
+        let incoming = self.other_deck(deck);
+        let transition = match self.run.transitions.pick(self.run.completed_handoffs) {
+            Some(crate::transition_styles::Style::Mashup) => self
+                .mashup_pair_plan(deck, incoming)
+                .map_or(self.fade_seconds, |(_, hold)| 2. * self.fade_seconds + hold),
+            Some(crate::transition_styles::Style::BassSwap) => self
+                .build_drop_pair_plan(deck, incoming)
+                .map_or(self.fade_seconds, |(_, seconds)| seconds),
+            Some(crate::transition_styles::Style::Scratch) => track
+                .preparation
+                .bpm
+                .map(|b| (60. / (b * self.deck_rate(deck))) as f32)
+                .map_or(self.fade_seconds, |beat| {
+                    4. * beat + self.fade_seconds.min(beat)
+                }),
+            _ => self.fade_seconds,
+        };
         Some(amp_core::dj_phrasing::exit(
             &track.preparation,
             self.run.style,
             self.run.transitions.pace,
             duration,
-            self.fade_seconds as f64 * self.deck_rate(deck),
+            transition as f64 * self.deck_rate(deck),
         ))
     }
     fn exit_energy(&self) -> Option<f64> {
