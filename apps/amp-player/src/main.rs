@@ -3285,7 +3285,10 @@ impl Player {
         viewport: egui::ViewportId,
         owner: playback_owner::Owner,
     ) {
-        if deck < 6 && self.audio.as_ref().is_some_and(|a| a.loaded(deck)) {
+        if deck < 6
+            && self.audio.as_ref().is_some_and(|a| a.loaded(deck))
+            && (owner == playback_owner::Owner::Dj || self.playback_owner != owner)
+        {
             self.claim_playback(owner, deck, false);
         }
         let Some(audio) = &self.audio else {
@@ -3305,7 +3308,7 @@ impl Player {
             self.run.cancel_automation();
             audio.set_fader(audio.fader());
         }
-        if deck == 0 {
+        if deck == 0 && owner == playback_owner::Owner::Dj {
             self.auto = false;
         }
         if audio.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed) {
