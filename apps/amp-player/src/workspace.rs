@@ -18,6 +18,7 @@ impl Default for Workspace {
                 "v1-library" | "v1-playlists" => Some(1),
                 "v1-cast" => Some(4),
                 "v1-lab" => Some(3),
+                "v1-addons" => Some(5),
                 _ => None,
             })
             .unwrap_or(1);
