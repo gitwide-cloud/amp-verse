@@ -12,46 +12,47 @@ use std::{
     time::Duration,
 };
 pub(super) fn controls(ui: &mut egui::Ui, p: &mut Processing) {
+    let installed = crate::onnx_stem_worker::configured();
     crate::skin::panel(ui, false, |ui| {
+        ui.set_width(ui.available_width());
         ui.strong("Stems / EQ / Filter");
-        ui.horizontal_wrapped(|ui| {
-            ui.add_enabled_ui(crate::onnx_stem_worker::configured(), |ui| {
-                for (i, label) in ["Vocals", "Instruments", "Beat"].iter().enumerate() {
-                    ui.vertical(|ui| {
-                        crate::dj_mixer::dial(
-                            ui,
-                            label,
-                            &mut p.stems[i],
-                            -1. ..=1.,
-                            egui::Color32::YELLOW,
-                        );
-                    });
-                }
-            });
-            for (i, label) in ["Low", "Mid", "High"].iter().enumerate() {
-                ui.vertical(|ui| {
+        ui.columns(4, |columns| {
+            for (i, label) in ["Vocals", "Instruments", "Beat"].iter().enumerate() {
+                columns[i].add_enabled_ui(installed, |ui| {
                     ui.label(*label);
-                    let r = ui.add(egui::Slider::new(&mut p.eq_db[i], -24. ..=12.).suffix(" dB"));
-                    if r.secondary_clicked() {
-                        p.eq_db[i] = 0.;
-                    }
+                    crate::dj_mixer::dial(
+                        ui,
+                        label,
+                        &mut p.stems[i],
+                        -1. ..=1.,
+                        egui::Color32::YELLOW,
+                    );
                 });
             }
-            ui.vertical(|ui| {
-                crate::dj_mixer::dial(
-                    ui,
-                    "Filter",
-                    &mut p.filter,
-                    -1. ..=1.,
-                    egui::Color32::YELLOW,
-                );
-            });
-            if ui.button("Reset processing").clicked() {
-                *p = Processing::default();
+            columns[3].label("Filter");
+            crate::dj_mixer::dial(
+                &mut columns[3],
+                "Filter",
+                &mut p.filter,
+                -1. ..=1.,
+                egui::Color32::YELLOW,
+            );
+        });
+        ui.columns(3, |columns| {
+            for (i, label) in ["Low", "Mid", "High"].iter().enumerate() {
+                columns[i].label(*label);
+                let response =
+                    columns[i].add(egui::Slider::new(&mut p.eq_db[i], -24. ..=12.).suffix(" dB"));
+                if response.secondary_clicked() {
+                    p.eq_db[i] = 0.;
+                }
             }
         });
+        if ui.button("Reset processing").clicked() {
+            *p = Processing::default();
+        }
         ui.weak("0 = unchanged · negative stem values cut, positive boost · filter left: low-pass / right: high-pass · right-click to reset.");
-        if !crate::onnx_stem_worker::configured() {
+        if !installed {
             ui.weak("Install the live stem module to adjust vocals, instruments and beat. EQ and filter remain available.");
         }
         ui.weak("Applied to processed previews and exports. Separated stem audio stays in memory.");
@@ -361,6 +362,53 @@ pub(super) fn timeline_cancellable(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn lab_controls_show_visible_names_at_narrow_and_wide_widths() {
+        for width in [600., 1200.] {
+            let ctx = egui::Context::default();
+            let mut p = Processing::default();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(width, 800.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| controls(ui, &mut p),
+            );
+            output.textures_delta.clear();
+            fn collect(shape: &egui::Shape, labels: &mut Vec<String>) {
+                match shape {
+                    egui::Shape::Text(t) => labels.push(t.galley.text().to_owned()),
+                    egui::Shape::Vec(children) => {
+                        for s in children {
+                            collect(s, labels);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            let mut labels = Vec::new();
+            for s in &output.shapes {
+                collect(&s.shape, &mut labels);
+            }
+            for label in [
+                "Vocals",
+                "Instruments",
+                "Beat",
+                "Low",
+                "Mid",
+                "High",
+                "Filter",
+            ] {
+                assert!(
+                    labels.iter().any(|s| s == label),
+                    "missing visible {label} label at {width}: {labels:?}"
+                );
+            }
+        }
+    }
     #[test]
     fn stem_levels_mix_real_parts_and_reject_mismatches() {
         let p = [vec![1., 2.], vec![3., 4.], vec![5., 6.]];
