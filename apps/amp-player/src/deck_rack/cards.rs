@@ -1990,9 +1990,11 @@ mod clear_deck_tests {
     #[test]
     fn clear_deck_removes_only_the_requested_track_and_pending_resume() {
         for deck in 0..6 {
-            let mut player = Player::default();
-            player.loaded = [Some(42); 6];
-            player.playing = [true; 6];
+            let mut player = Player {
+                loaded: [Some(42); 6],
+                playing: [true; 6],
+                ..Default::default()
+            };
             player.pending_load[deck] = Some((PathBuf::from("pending.mp3"), None));
             player.jog_resume[deck] = Some((true, egui::ViewportId::ROOT));
             let live = player.rack.live;

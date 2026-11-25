@@ -338,13 +338,14 @@ fn decode_policy(
             degraded_flag,
             generation,
         };
+        let cancelled = context.stop.clone();
         lazy::stream(&mut input, rate, producer, context, Arc::new(lazy::infer))?;
         let status = child
             .lock()
             .map_err(|_| "Stem decoder lock unavailable")?
             .wait()
             .map_err(|e| e.to_string())?;
-        return if status.success() {
+        return if status.success() || cancelled.load(Relaxed) {
             Ok(())
         } else {
             Err("Original audio decoder failed".into())
