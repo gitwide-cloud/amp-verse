@@ -64,9 +64,10 @@ final class DjPanel extends LinearLayout {
         Button settings=button(wide?"Mixer settings":"⋮",colors.text,this::mixerSettings);settings.setContentDescription("DJ mixer settings");center.addView(settings,new LayoutParams(wide?-1:dp(48),-2));
         if(wide){removeView(center);mains.addView(center,1,new LayoutParams(0,-2,.7f));}
         int auxiliaryStart=getChildCount();
-        LinearLayout aux=new LinearLayout(activity);aux.setOrientation(wide?HORIZONTAL:VERTICAL);addView(aux);
-        for(int side=0;side<2;side++){LinearLayout column=new LinearLayout(activity);column.setOrientation(VERTICAL);aux.addView(column,new LayoutParams(wide?0:-1,-2,wide?1:0));side(column,side);}
-        UiSections.fold(this,colors,"Sampler & Cue Decks",auxiliaryStart);
+        LinearLayout aux=new LinearLayout(activity);aux.setOrientation(VERTICAL);addView(aux);
+        hotCueBank(aux); samplerBank(aux);
+        for(int side=0;side<2;side++) side(aux,side);
+        UiSections.fold(this,colors,"Hot cues, sampler & Cue Decks",auxiliaryStart);
         LinearLayout library=card(this);library.addView(label("DJ Library",20));library.addView(button("Browse all music",colors.text,()->{engine.queue(new ArrayList<>());draw();}));
         EditText search=new EditText(activity);search.setSingleLine(true);search.setHint("Search phone music");search.setTextColor(colors.text);search.setHintTextColor(colors.muted);search.setContentDescription("Search DJ music");library.addView(search);
         LinearLayout songs=new LinearLayout(activity);songs.setOrientation(VERTICAL);library.addView(songs);
@@ -100,17 +101,37 @@ final class DjPanel extends LinearLayout {
     private void side(LinearLayout parent,int side){
         int color=side==0?DjEngine.AMBER:DjEngine.CYAN;LinearLayout card=card(parent);
         Button sideButton=button((engine.collapsed[side]?"▸ ":"▾ ")+(side==0?"Left":"Right")+" side deck",color,()->{engine.collapse(side);draw();});sideButton.setContentDescription(side==0?"Left side deck":"Right side deck");card.addView(sideButton);if(engine.collapsed[side])return;
-        row(card,button("Sampler",color,()->{engine.mode(side,false);draw();}),button("Cue Deck",color,()->{engine.mode(side,true);draw();}));
-        if(engine.cueMode[side]){
-            card.addView(label("Cue Deck · independent playback",17));transport(card,side+2,color);slider(card,100,(int)(engine.decks[side+2].getVolume()*100),p->engine.cueVolume(side,p/100f));
-            row(card,button("Send → A",DjEngine.AMBER,()->send(side,0)),button("Send → B",DjEngine.CYAN,()->send(side,1)),button("Hot cues",color,()->cues(side+2)));
-            card.addView(label("Uses this phone’s current audio output. No separate headphone monitoring on Android.",12));drop(card,side+2);
-        }else{
-            card.addView(label("Nine effect pads · max 5s · hold to configure",16));slider(card,100,(int)(engine.samplerVolume[side]*100),p->engine.sampleVolume(side,p/100f));
-            for(int r=0;r<3;r++){LinearLayout row=new LinearLayout(activity);card.addView(row);for(int c=0;c<3;c++){final int pad=r*3+c;Button b=decorate(new SquarePad(activity),engine.names[side][pad],color,()->{if(engine.samples[side][pad].isEmpty())host.effect(side,pad);else engine.trigger(side,pad);});b.setContentDescription((side==0?"Left":"Right")+" pad "+(pad+1));b.setOnLongClickListener(v->{padMenu(side,pad);return true;});LayoutParams p=new LayoutParams(0,dp(90),1);p.setMargins(dp(2),dp(2),dp(2),dp(2));row.addView(b,p);}}
-            card.addView(button("Stop all pads",color,()->{for(int pad=0;pad<9;pad++)engine.stopPad(side,pad);}));
-        }
+        card.addView(label("Cue Deck · independent playback",17));transport(card,side+2,color);
+        slider(card,100,(int)(engine.decks[side+2].getVolume()*100),p->engine.cueVolume(side,p/100f));
+        row(card,button("Send → A",DjEngine.AMBER,()->send(side,0)),button("Send → B",DjEngine.CYAN,()->send(side,1)));
+        card.addView(label("Uses this phone’s current audio output. No separate headphone monitoring on Android.",12));drop(card,side+2);
     }
+    private void hotCueBank(LinearLayout parent){
+        LinearLayout bank=card(parent); bank.setTag("dj-hot-cue-bank");
+        bank.addView(label("Hot Cues · Deck "+(visibleDeck==0?"A":"B"),18));
+        row(bank,button("Deck A cues",DjEngine.AMBER,()->{visibleDeck=0;engine.destination(0);draw();}),button("Deck B cues",DjEngine.CYAN,()->{visibleDeck=1;engine.destination(1);draw();}));
+        bank.addView(label("Tap an empty cue to set it; tap a saved cue to jump. Hold to replace it.",13));
+        final int deck=visibleDeck; MediaItem item=engine.decks[deck].getCurrentMediaItem();
+        for(int r=0;r<2;r++){LinearLayout pads=new LinearLayout(activity);bank.addView(pads);for(int c=0;c<4;c++){
+            final int slot=r*4+c;long position=item==null?-1:PhoneCues.seconds(activity,item,slot);
+            Button pad=button("Cue "+(slot+1)+"\n"+(position<0?"Set":MainActivity.time(position)),deck==0?DjEngine.AMBER:DjEngine.CYAN,()->{
+                MediaItem current=engine.decks[deck].getCurrentMediaItem();if(current==null){engine.message="Load a song on Deck "+(deck==0?"A":"B")+" before setting cues.";return;}
+                long saved=PhoneCues.seconds(activity,current,slot);if(saved>=0)engine.seek(deck,saved);else PhoneCues.save(activity,current,slot,engine.decks[deck].getCurrentPosition());draw();
+            });pad.setTag("dj-hot-cue-"+slot);pad.setContentDescription("Deck "+(deck==0?"A":"B")+" hot cue "+(slot+1));pad.setOnLongClickListener(v->{MediaItem current=engine.decks[deck].getCurrentMediaItem();if(current==null)return true;PhoneCues.save(activity,current,slot,engine.decks[deck].getCurrentPosition());draw();return true;});
+            pads.addView(pad,new LayoutParams(0,dp(64),1));
+        }}
+    }
+    private void samplerBank(LinearLayout parent){
+        LinearLayout bank=card(parent);bank.setTag("dj-sampler-bank");final int side=visibleDeck;
+        int color=side==0?DjEngine.AMBER:DjEngine.CYAN;bank.addView(label("Sampler · Bank "+(side==0?"A":"B"),18));
+        row(bank,button("Bank A",DjEngine.AMBER,()->{visibleDeck=0;draw();}),button("Bank B",DjEngine.CYAN,()->{visibleDeck=1;draw();}));
+        bank.addView(label("Effect pads · hold to configure",13));slider(bank,100,(int)(engine.samplerVolume[side]*100),p->engine.sampleVolume(side,p/100f));
+        for(int r=0;r<3;r++){LinearLayout pads=new LinearLayout(activity);bank.addView(pads);for(int c=0;c<3;c++){
+            final int slot=r*3+c;Button pad=decorate(new SquarePad(activity),engine.names[side][slot],color,()->{if(engine.samples[side][slot].isEmpty())host.effect(side,slot);else engine.trigger(side,slot);});
+            pad.setTag("dj-sample-"+slot);pad.setContentDescription("Sampler "+(side==0?"A":"B")+" pad "+(slot+1));pad.setOnLongClickListener(v->{padMenu(side,slot);return true;});pads.addView(pad,new LayoutParams(0,dp(80),1));
+        }}bank.addView(button("Stop all pads",color,()->{for(int s=0;s<2;s++)for(int slot=0;slot<9;slot++)engine.stopPad(s,slot);}));
+    }
+
     private void chooseAutoSource(){chooseAutoSource(false);}
     private void chooseAutoSource(boolean startAfterLoad){try{
         org.json.JSONArray lists=PhonePlaylists.read(activity);java.util.List<java.io.File> offline=RadioOffline.albums(activity);java.util.List<String> names=new java.util.ArrayList<>();
@@ -129,15 +150,11 @@ final class DjPanel extends LinearLayout {
     private void send(int side,int target){ExoPlayer cue=engine.decks[side+2];if(cue.getCurrentMediaItem()!=null)engine.load(target,cue.getCurrentMediaItem(),cue.getCurrentPosition());else engine.message="Load a cue track first.";}
     private void padMenu(int side,int pad){new AlertDialog.Builder(activity).setTitle(engine.names[side][pad]).setItems(new String[]{"Replace effect","Rename",engine.loops[side][pad]?"Loop: ON (turn off)":"Loop: OFF (turn on)","Stop","Clear"},(d,index)->{if(index==0)host.effect(side,pad);if(index==1){EditText name=new EditText(activity);name.setText(engine.names[side][pad]);new AlertDialog.Builder(activity).setTitle("Pad name").setView(name).setPositiveButton("Save",(a,b)->{String value=name.getText().toString().trim();if(!value.isEmpty()){engine.rename(side,pad,value);draw();}}).setNegativeButton("Cancel",null).show();}if(index==2)engine.loop(side,pad,!engine.loops[side][pad]);if(index==3)engine.stopPad(side,pad);if(index==4){engine.clearPad(side,pad);draw();}}).show();}
     private void choose(int target){
-        LinearLayout view=new LinearLayout(activity);view.setOrientation(VERTICAL);EditText query=new EditText(activity);query.setHint("Search songs");view.addView(query);ListView list=new ListView(activity);view.addView(list,new LayoutParams(-1,dp(320)));
-        List<MediaItem> matches=new ArrayList<>();ArrayAdapter<String> adapter=new ArrayAdapter<>(activity,android.R.layout.simple_list_item_1,new ArrayList<>());list.setAdapter(adapter);
-        Runnable filter=()->{matches.clear();adapter.clear();for(MediaItem item:stationAndPhoneSongs())if(String.valueOf(item.mediaMetadata.title).toLowerCase(Locale.ROOT).contains(query.getText().toString().toLowerCase(Locale.ROOT))){matches.add(item);adapter.add(String.valueOf(item.mediaMetadata.title));}adapter.notifyDataSetChanged();};
-        query.addTextChangedListener(new android.text.TextWatcher(){public void beforeTextChanged(CharSequence t,int s,int c,int a){}public void onTextChanged(CharSequence t,int s,int b,int c){filter.run();}public void afterTextChanged(android.text.Editable e){}});filter.run();
-        AlertDialog dialog=new AlertDialog.Builder(activity).setTitle("Load "+(target<2?(target==0?"A":"B"):"Cue Deck")).setView(view).setNegativeButton("Cancel",null).create();list.setOnItemClickListener((p,v,i,id)->{engine.load(target,matches.get(i),0);dialog.dismiss();refresh();});dialog.show();
+        new DjSongPicker(activity,colors,stationAndPhoneSongs(),item->{engine.load(target,item,0);refresh();}).show(target);
     }
     private void renderSongs(LinearLayout rows,String query){rows.removeAllViews();int shown=0;for(MediaItem item:(engine.autoQueue.isEmpty()?stationAndPhoneSongs():new ArrayList<>(engine.autoQueue))){if(!String.valueOf(item.mediaMetadata.title).toLowerCase(Locale.ROOT).contains(query.toLowerCase(Locale.ROOT)))continue;if(shown++>=100)break;LinearLayout row=new LinearLayout(activity);Button title=button(String.valueOf(item.mediaMetadata.title),colors.text,()->{engine.load(engine.destination,item,0);refresh();});title.setGravity(Gravity.START|Gravity.CENTER_VERTICAL);title.setOnLongClickListener(v->{v.startDragAndDrop(ClipData.newPlainText("AMP song",item.mediaId),new View.DragShadowBuilder(v),item,0);return true;});row.addView(title,new LayoutParams(0,dp(52),1));for(int d=0;d<2;d++){final int deck=d;row.addView(button(d==0?"A":"B",d==0?DjEngine.AMBER:DjEngine.CYAN,()->{engine.destination(deck);engine.load(deck,item,0);}),new LayoutParams(dp(50),dp(52)));}row.addView(button("⋮",colors.text,()->new AlertDialog.Builder(activity).setTitle("Play within how many songs?").setItems(new String[]{"1","2","3","4","5"},(dialog,n)->{engine.request(item,n+1);refresh();}).show()),new LayoutParams(dp(44),dp(52)));rows.addView(row);}if(shown==0)rows.addView(label("No matching songs. Add phone music in Library.",14));if(shown>100)rows.addView(label("First 100 matches. Refine your search.",12));}
     private void drop(View view,int deck){view.setOnDragListener((v,event)->{if(!(event.getLocalState() instanceof MediaItem))return false;switch(event.getAction()){case DragEvent.ACTION_DRAG_ENTERED:v.setAlpha(.65f);break;case DragEvent.ACTION_DRAG_EXITED:case DragEvent.ACTION_DRAG_ENDED:v.setAlpha(1);break;case DragEvent.ACTION_DROP:engine.load(deck,(MediaItem)event.getLocalState(),0);v.setAlpha(1);refresh();break;default:break;}return true;});}
-    private java.util.List<MediaItem> stationAndPhoneSongs(){java.util.List<MediaItem> items=new java.util.ArrayList<>(LibraryStore.read(activity));items.addAll(RadioOffline.all(activity));return items;}
+    private java.util.List<MediaItem> stationAndPhoneSongs(){java.util.LinkedHashMap<String,MediaItem> items=new java.util.LinkedHashMap<>();for(MediaItem item:LibraryStore.read(activity))items.put(item.mediaId,item);for(MediaItem item:RadioOffline.all(activity))items.putIfAbsent(item.mediaId,item);for(MediaItem item:engine.autoQueue)items.putIfAbsent(item.mediaId,item);return new java.util.ArrayList<>(items.values());}
     private void cues(int deck){MediaItem item=engine.decks[deck].getCurrentMediaItem();if(item==null)return;String[] options=new String[9];for(int n=0;n<8;n++){long value=PhoneCues.seconds(activity,item,n);options[n]="Cue "+(n+1)+" · "+(value>=0?MainActivity.time(value):"empty");}options[8]="Save current position to cue…";new AlertDialog.Builder(activity).setTitle("Hot cues · phone edits stay local").setItems(options,(d,n)->{if(n<8){long value=PhoneCues.seconds(activity,item,n);if(value>=0)engine.seek(deck,value);}else new AlertDialog.Builder(activity).setTitle("Save cue slot").setItems(new String[]{"1","2","3","4","5","6","7","8"},(a,slot)->PhoneCues.save(activity,item,slot,engine.decks[deck].getCurrentPosition())).show();}).setNegativeButton("Close",null).show();}
     private void sync(int deck){MediaItem own=engine.decks[deck].getCurrentMediaItem(),other=engine.decks[1-deck].getCurrentMediaItem();if(own==null||other==null){engine.message="Load both tracks first.";return;}double a=PhonePlaylists.bpm(activity,own),b=PhonePlaylists.bpm(activity,other);if(a<=0||b<=0){engine.message="Set BPM in Library track details before tempo sync.";return;}engine.decks[deck].setPlaybackSpeed((float)SharedDjLogic.tempoRate(b,engine.decks[1-deck].getPlaybackParameters().speed,a,.16));engine.message="Tempo matched within ±16%; beat phase is manual.";}
     void refresh(){

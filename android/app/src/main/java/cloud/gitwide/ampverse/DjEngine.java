@@ -57,7 +57,7 @@ final class DjEngine {
         manager=(AudioManager)service.getSystemService(Context.AUDIO_SERVICE);
         focus=new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN).setAudioAttributes(new android.media.AudioAttributes.Builder().setUsage(android.media.AudioAttributes.USAGE_MEDIA).build()).setOnAudioFocusChangeListener(change->{if(change<0){PlaybackService.suppressOwnedOutput(true);pauseAll();}},handler).build();
         for(int i=0;i<4;i++) {
-            decks[i]=new ExoPlayer.Builder(service,PlaybackService.renderers(service,false,i==0?OwnedPcmMixer.Source.DECK_A:i==1?OwnedPcmMixer.Source.DECK_B:OwnedPcmMixer.Source.PRIVATE_CUE)).build();
+            decks[i]=new ExoPlayer.Builder(service,PlaybackService.renderers(service,false,i==0?OwnedPcmMixer.Source.DECK_A:i==1?OwnedPcmMixer.Source.DECK_B:OwnedPcmMixer.Source.PRIVATE_CUE)).setMediaSourceFactory(new StationMediaSourceFactory(service)).build();
             decks[i].setAudioAttributes(new androidx.media3.common.AudioAttributes.Builder().setUsage(C.USAGE_MEDIA).setContentType(C.AUDIO_CONTENT_TYPE_MUSIC).build(),false);
             decks[i].setHandleAudioBecomingNoisy(true);decks[i].setWakeMode(C.WAKE_MODE_LOCAL);
             final int deck=i;
