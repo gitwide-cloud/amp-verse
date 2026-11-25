@@ -678,7 +678,11 @@ impl Player {
                                         );
                                         ui.colored_label(
                                             accent(d),
-                                            if d % 2 == 0 { "DECK A" } else { "DECK B" },
+                                            if d.is_multiple_of(2) {
+                                                "DECK A"
+                                            } else {
+                                                "DECK B"
+                                            },
                                         );
                                         if info >= 160.
                                             && ui
@@ -1853,10 +1857,13 @@ mod tests {
             );
             output.textures_delta.clear();
             let target = screen_rect(&ctx, "deck-live-button", 2);
-            let bank = screen_rect(&ctx, "six-bank-viewport", 0);
+            let card = screen_rect(&ctx, "rack-aux-extent", 2);
+            let viewport = egui::Rect::from_min_size(egui::Pos2::ZERO, size);
             assert!(
-                bank.expand(1.).contains_rect(target),
-                "A2 LIVE must be fully visible and clickable: {target:?} bank{bank:?}"
+                viewport.contains_rect(card)
+                    && viewport.contains_rect(target)
+                    && card.contains_rect(target),
+                "A2 To Deck and its complete mini card must be visible before clicking: {target:?} card{card:?} viewport{viewport:?}"
             );
             point = target.center();
         }
