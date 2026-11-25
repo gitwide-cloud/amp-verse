@@ -13,6 +13,26 @@ fn panel(ui: &egui::Ui, color: Option<egui::Color32>) -> egui::Frame {
 fn tool_key(deck: usize) -> egui::Id {
     egui::Id::unique(("card-deck-tools-open", deck))
 }
+fn card_stem_control(
+    ui: &mut egui::Ui,
+    controls: Option<&mixer::Controls>,
+    deck: usize,
+    stem: usize,
+    label: &str,
+) -> (egui::Response, f32) {
+    let enabled = controls.is_some_and(|c| c.stem_controls_available(deck));
+    let mut value = controls.map_or(0., |c| {
+        f32::from_bits(c.stem_knobs[deck][stem].load(Relaxed))
+    });
+    let response = ui
+        .add_enabled_ui(enabled, |ui| {
+            dj_mixer::dial(ui, label, &mut value, -1. ..=1., accent(deck))
+        })
+        .inner
+        .on_hover_text("Turn to filter; right-click to reset. All stem knobs at 0 stop separation.")
+        .on_disabled_hover_text("Load a song with the stem module installed.");
+    (response, value)
+}
 impl Player {
     pub(super) fn card_open_tools(&self, ctx: &egui::Context, deck: usize, tab: u8) {
         ctx.data_mut(|d| {
@@ -485,10 +505,13 @@ impl Player {
                         )
                         .on_hover_text(self.title(deck));
                     });
-                    let position = self
-                        .audio
-                        .as_ref()
-                        .map_or(0., |audio| audio.source_position(deck));
+                    let position = self.audio.as_ref().map_or(0., |audio| {
+                        if self.loaded_track(deck).is_some() {
+                            audio.source_position(deck)
+                        } else {
+                            0.
+                        }
+                    });
                     ui.small(format!(
                         "{:02}:{:02}",
                         (position / 60.) as u64,
@@ -549,18 +572,13 @@ impl Player {
         }
     }
     fn card_stem_dial(&mut self, ui: &mut egui::Ui, d: usize, stem: usize, label: &str) {
-        let active = self
-            .audio
-            .as_ref()
-            .is_some_and(|a| a.controls.stems_loaded[d].load(Relaxed));
-        let mut value = self.audio.as_ref().map_or(0., |a| {
-            f32::from_bits(a.controls.stem_knobs[d][stem].load(Relaxed))
-        });
-        let response = ui
-            .add_enabled_ui(active, |ui| {
-                dj_mixer::dial(ui, label, &mut value, -1. ..=1., accent(d))
-            })
-            .inner;
+        let (response, value) = card_stem_control(
+            ui,
+            self.audio.as_ref().map(|a| a.controls.as_ref()),
+            d,
+            stem,
+            label,
+        );
         #[cfg(test)]
         ui.ctx().data_mut(|data| {
             data.insert_temp(egui::Id::unique(("card-stem-knob", d, stem)), response.rect)
@@ -580,9 +598,7 @@ impl Player {
                 audio.controls.stem_level[d][i].store(gain.to_bits(), Relaxed);
             }
         }
-        response.on_disabled_hover_text(
-            "Enable live or prepared stems from this deck’s Stems controls.",
-        );
+
         ui.small(label);
     }
     fn card_transport(&mut self, ui: &mut egui::Ui, d: usize, width: f32, phones: bool) {
@@ -766,8 +782,13 @@ impl Player {
                                         "{} BPM   {key}",
                                         bpm.map_or("—".into(), |b| format!("{b:.1}"))
                                     ));
-                                    let position =
-                                        self.audio.as_ref().map_or(0., |a| a.source_position(d));
+                                    let position = self.audio.as_ref().map_or(0., |a| {
+                                        if self.loaded_track(d).is_some() {
+                                            a.source_position(d)
+                                        } else {
+                                            0.
+                                        }
+                                    });
                                     let duration = self
                                         .audio
                                         .as_ref()
@@ -842,8 +863,24 @@ impl Player {
                             ui.horizontal_wrapped(|ui| {
                                 ui.selectable_value(&mut stems, false, "EQ");
                                 ui.selectable_value(&mut stems, true, "Stems");
-                                if stems && ui.small_button("Enable / reload").clicked() {
-                                    self.card_open_tools(ui.ctx(), d, 1);
+                                if stems {
+                                    if ui.small_button("Stem settings").clicked() {
+                                        self.card_open_tools(ui.ctx(), d, 1);
+                                    }
+                                    if let Some(audio) = &self.audio {
+                                        let knobs = std::array::from_fn(|i| {
+                                            f32::from_bits(
+                                                audio.controls.stem_knobs[d][i].load(Relaxed),
+                                            )
+                                        });
+                                        ui.small(if !amp_core::stem_mix::changed(knobs) {
+                                            "Idle"
+                                        } else if audio.controls.stems_loaded[d].load(Relaxed) {
+                                            "Active"
+                                        } else {
+                                            "Preparing…"
+                                        });
+                                    }
                                 }
                             });
                             ui.ctx().data_mut(|data| data.insert_temp(mode_key, stems));
@@ -2010,5 +2047,111 @@ mod clear_deck_tests {
             assert!(player.jog_resume[deck].is_none());
             assert_eq!(player.rack.live, live);
         }
+    }
+}
+
+#[cfg(test)]
+mod armed_stem_card_tests {
+    use super::*;
+    #[test]
+    fn main_card_knobs_accept_drag_before_any_separation_result_is_ready() {
+        for armed in [false, true] {
+            let controls = mixer::Controls::default();
+            controls.loaded[0].store(true, Relaxed);
+            controls.on_demand_stems[0].store(armed, Relaxed);
+            let ctx = egui::Context::default();
+            let mut point = egui::Pos2::ZERO;
+            for frame in 0..5 {
+                let moved = point + egui::vec2(0., -16.);
+                let events = match frame {
+                    1 => vec![
+                        egui::Event::PointerMoved(point),
+                        egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed: true,
+                            modifiers: Default::default(),
+                        },
+                    ],
+                    2 => vec![egui::Event::PointerMoved(moved)],
+                    3 => vec![egui::Event::PointerButton {
+                        pos: moved,
+                        button: egui::PointerButton::Primary,
+                        pressed: false,
+                        modifiers: Default::default(),
+                    }],
+                    _ => vec![],
+                };
+                let mut output = ctx.run_ui(
+                    egui::RawInput {
+                        events,
+                        screen_rect: Some(egui::Rect::from_min_size(
+                            egui::Pos2::ZERO,
+                            egui::vec2(300., 180.),
+                        )),
+                        ..Default::default()
+                    },
+                    |ui| {
+                        let (response, value) = card_stem_control(ui, Some(&controls), 0, 0, "VOC");
+                        point = response.rect.center();
+                        assert_eq!(response.enabled(), armed);
+                        if response.changed() {
+                            controls.stem_knobs[0][0].store(value.to_bits(), Relaxed);
+                        }
+                    },
+                );
+                output.textures_delta.clear();
+            }
+            assert!(!controls.stems_loaded[0].load(Relaxed));
+            assert_eq!(
+                f32::from_bits(controls.stem_knobs[0][0].load(Relaxed)) > 0.1,
+                armed
+            );
+            assert_eq!(controls.stem_knobs[1][0].load(Relaxed), 0f32.to_bits());
+        }
+    }
+    #[test]
+    fn armed_main_card_right_click_resets_without_requiring_ready_stems() {
+        let controls = mixer::Controls::default();
+        controls.loaded[0].store(true, Relaxed);
+        controls.on_demand_stems[0].store(true, Relaxed);
+        controls.stem_knobs[0][0].store((-0.7f32).to_bits(), Relaxed);
+        let ctx = egui::Context::default();
+        let mut point = egui::Pos2::ZERO;
+        for frame in 0..4 {
+            let events = if frame == 1 || frame == 2 {
+                vec![
+                    egui::Event::PointerMoved(point),
+                    egui::Event::PointerButton {
+                        pos: point,
+                        button: egui::PointerButton::Secondary,
+                        pressed: frame == 1,
+                        modifiers: Default::default(),
+                    },
+                ]
+            } else {
+                vec![]
+            };
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(300., 180.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let (response, value) = card_stem_control(ui, Some(&controls), 0, 0, "VOC");
+                    point = response.rect.center();
+                    if response.changed() {
+                        controls.stem_knobs[0][0].store(value.to_bits(), Relaxed);
+                    }
+                },
+            );
+            output.textures_delta.clear();
+        }
+        assert_eq!(f32::from_bits(controls.stem_knobs[0][0].load(Relaxed)), 0.);
+        assert!(!controls.stems_loaded[0].load(Relaxed));
     }
 }

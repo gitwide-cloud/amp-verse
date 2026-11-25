@@ -144,6 +144,12 @@ pub struct Controls {
     pub stem_warnings: Mutex<Vec<(usize, u64, String)>>,
 }
 impl Controls {
+    /// Editing a loaded, armed deck must not require a first separation result.
+    pub(crate) fn stem_controls_available(&self, deck: usize) -> bool {
+        deck < DECKS
+            && self.loaded[deck].load(Relaxed)
+            && (self.on_demand_stems[deck].load(Relaxed) || self.stems_loaded[deck].load(Relaxed))
+    }
     pub(crate) fn pause_for_receiver(&self) {
         for play in &self.play {
             play.store(false, Relaxed);
@@ -799,6 +805,8 @@ impl Mixer {
                     self.controls.play[d].store(false, Relaxed);
                     self.controls.loaded[d].store(false, Relaxed);
                     self.controls.ready[d].store(false, Relaxed);
+                    self.controls.stems_loaded[d].store(false, Relaxed);
+                    self.controls.stem_processing_ready[d].store(false, Relaxed);
                     self.controls.looping[d].store(false, Relaxed);
                     if self.controls.pair_indices().contains(&d) {
                         self.fade = None;

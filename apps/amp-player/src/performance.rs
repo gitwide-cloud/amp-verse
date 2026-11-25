@@ -1413,8 +1413,8 @@ impl Player {
                 }
                 let d = self.requested_deck(deck, false);
                 let a = self.audio.as_ref().ok_or("Load prepared stems first")?;
-                if !a.controls.stems_loaded[d].load(Relaxed) {
-                    return Err("Prepared stems unavailable on this deck".into());
+                if !a.controls.stem_controls_available(d) {
+                    return Err("Stem controls unavailable on this deck".into());
                 }
                 if a.controls.pair_indices().contains(&d) {
                     self.run.cancel_effects(a);

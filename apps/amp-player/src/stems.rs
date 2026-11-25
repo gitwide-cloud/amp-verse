@@ -742,11 +742,7 @@ impl Panel {
         audio: Option<&crate::mixer::Engine>,
         vertical: bool,
     ) -> Option<[f32; 3]> {
-        let active = audio.is_some_and(|a| {
-            a.loaded(deck)
-                && (a.controls.on_demand_stems[deck].load(Relaxed)
-                    || a.controls.stems_loaded[deck].load(Relaxed))
-        });
+        let active = audio.is_some_and(|a| a.controls.stem_controls_available(deck));
         if let Some(a) = audio {
             for i in 0..3 {
                 self.level[deck][i] = f32::from_bits(a.controls.stem_knobs[deck][i].load(Relaxed));
@@ -879,7 +875,7 @@ impl Panel {
                 if cached {ui.weak("Prepared playback uses no live separation slot. Cached audio is fully verified before playback.");}
                 ui.label(format!("Live stem limit: {} decks · {}", policy.limit, policy.reason));
                 ui.weak("Normal six-deck playback stays available. Live stem audio remains in memory; initial processing can take several seconds.");
-                let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().enumerate().filter(|(d,v)| v.load(Relaxed) && !a.controls.prepared_stems[*d].load(Relaxed) && amp_core::stem_mix::changed(std::array::from_fn(|i| f32::from_bits(a.controls.stem_knobs[*d][i].load(Relaxed))))).count());
+                let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().enumerate().filter(|(d,v)| a.loaded(*d) && v.load(Relaxed) && !a.controls.prepared_stems[*d].load(Relaxed) && amp_core::stem_mix::changed(std::array::from_fn(|i| f32::from_bits(a.controls.stem_knobs[*d][i].load(Relaxed))))).count());
                 let previous = crate::stem_capability::maximum();
                 let mut maximum = previous;
                 ui.horizontal_wrapped(|ui| {
@@ -936,7 +932,7 @@ impl Panel {
                     .clicked();
                 ui.weak("Active playback is kept unchanged until the deck is reloaded.");
             }
-            ui.add_enabled_ui(active || audio.is_some_and(|a| a.loaded(deck) && a.controls.on_demand_stems[deck].load(Relaxed)), |ui| {
+            ui.add_enabled_ui(audio.is_some_and(|a| a.controls.stem_controls_available(deck)), |ui| {
                 for (stem, name) in [(0, "Vocals"), (1, "Instruments"), (2, "Beat")] {
                     ui.horizontal(|ui| {
                         crate::dj_mixer::dial(

@@ -6,14 +6,16 @@ impl Player {
                 .controls
                 .prepared_stems
                 .iter()
-                .any(|v| v.load(std::sync::atomic::Ordering::Relaxed));
+                .enumerate()
+                .any(|(d, v)| audio.loaded(d) && v.load(std::sync::atomic::Ordering::Relaxed));
             let live = audio
                 .controls
                 .on_demand_stems
                 .iter()
                 .enumerate()
                 .any(|(d, v)| {
-                    v.load(std::sync::atomic::Ordering::Relaxed)
+                    audio.loaded(d)
+                        && v.load(std::sync::atomic::Ordering::Relaxed)
                         && amp_core::stem_mix::changed(std::array::from_fn(|i| {
                             f32::from_bits(
                                 audio.controls.stem_knobs[d][i]

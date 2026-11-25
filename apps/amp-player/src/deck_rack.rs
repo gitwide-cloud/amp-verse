@@ -800,7 +800,7 @@ impl Player {
             if ui.button(name).clicked()
                 && let Some(a) = &self.audio
             {
-                if a.controls.stems_loaded[d].load(Relaxed) {
+                if a.controls.stem_controls_available(d) {
                     if a.controls.pair_indices().contains(&d) {
                         self.run.cancel_effects(a);
                     }
@@ -809,7 +809,9 @@ impl Player {
                         a.controls.stem_knobs[d][i].store(f32::to_bits(gain - 1.), Relaxed);
                     }
                 } else {
-                    self.status = "Prepare stems before recalling a preset".into();
+                    self.status =
+                        "Load a song with the stem module installed before recalling a preset"
+                            .into();
                 }
             }
         }
