@@ -9,6 +9,8 @@ pub struct Rack {
     pub six: bool,
     #[serde(default)]
     pub overlay_waveforms: bool,
+    #[serde(skip, default = "spectrum_palette")]
+    pub spectrum_palette: SpectrumPalette,
     #[serde(default = "strip_ratios")]
     pub strip_ratios: [f32; 2],
 }
@@ -19,6 +21,7 @@ impl Default for Rack {
             expanded: false,
             six: true,
             strip_ratios: strip_ratios(),
+            spectrum_palette: spectrum_palette(),
             overlay_waveforms: !cfg!(test)
                 && waveform_preference()
                     .is_some_and(|p| std::fs::read_to_string(p).is_ok_and(|v| v == "overlay")),
@@ -75,7 +78,57 @@ fn accent(deck: usize) -> egui::Color32 {
     if deck.is_multiple_of(2) { ORANGE } else { CYAN }
 }
 // Track identity follows its waveform; transport, jog rings and frames retain their accents.
-fn spectrum_color(deck: usize) -> egui::Color32 {
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum SpectrumPalette {
+    #[default]
+    RedBlue,
+    DeckAccents,
+}
+impl SpectrumPalette {
+    fn token(self) -> &'static str {
+        match self {
+            Self::RedBlue => "red-blue",
+            Self::DeckAccents => "yellow-neon",
+        }
+    }
+    fn read(path: &std::path::Path) -> Self {
+        match std::fs::read_to_string(path).ok().as_deref().map(str::trim) {
+            Some("yellow-neon") => Self::DeckAccents,
+            _ => Self::RedBlue,
+        }
+    }
+    fn write(self, path: &std::path::Path) -> std::io::Result<()> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(path, self.token())
+    }
+}
+fn spectrum_palette_path() -> Option<PathBuf> {
+    Some(
+        theme::settings_path()?
+            .parent()?
+            .join("dj-spectrum-colors.txt"),
+    )
+}
+fn spectrum_palette() -> SpectrumPalette {
+    if cfg!(test) {
+        return SpectrumPalette::default();
+    }
+    spectrum_palette_path().map_or(SpectrumPalette::default(), |p| SpectrumPalette::read(&p))
+}
+pub(super) fn save_spectrum_palette(palette: SpectrumPalette) -> Result<(), String> {
+    if cfg!(test) {
+        return Ok(());
+    }
+    palette
+        .write(&spectrum_palette_path().ok_or("Cannot find DJ color preferences")?)
+        .map_err(|e| e.to_string())
+}
+fn spectrum_color(deck: usize, palette: SpectrumPalette) -> egui::Color32 {
+    if palette == SpectrumPalette::DeckAccents {
+        return accent(deck);
+    }
     if deck.is_multiple_of(2) {
         egui::Color32::from_rgb(255, 75, 80)
     } else {
@@ -181,7 +234,7 @@ impl Player {
                         egui::RichText::new(NAMES[d])
                             .size(17.)
                             .strong()
-                            .color(spectrum_color(d)),
+                            .color(spectrum_color(d, self.rack.spectrum_palette)),
                     );
                     let title_width = (ui.available_width() - 190.).max(80.);
                     ui.allocate_ui_with_layout(
@@ -194,7 +247,7 @@ impl Player {
                                     egui::RichText::new(self.title(d))
                                         .size(15.)
                                         .strong()
-                                        .color(spectrum_color(d)),
+                                        .color(spectrum_color(d, self.rack.spectrum_palette)),
                                 )
                                 .truncate(),
                             );
@@ -223,7 +276,7 @@ impl Player {
             }
             self.waveforms[d].overlay = false;
             self.waveforms[d].ignore_seek = false;
-            self.waveforms[d].tint = Some(spectrum_color(d));
+            self.waveforms[d].tint = Some(spectrum_color(d, self.rack.spectrum_palette));
             let t = self.loaded_snapshot[d]
                 .as_ref()
                 .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
@@ -301,7 +354,7 @@ impl Player {
                     .or_else(|| self.loaded[d].and_then(|i| self.library.as_ref()?.tracks.get(i)));
                 self.waveforms[d].overlay = side == 1;
                 self.waveforms[d].ignore_seek = true;
-                let color = spectrum_color(d);
+                let color = spectrum_color(d, self.rack.spectrum_palette);
                 self.waveforms[d].tint = Some(egui::Color32::from_rgba_unmultiplied(
                     color.r(),
                     color.g(),
@@ -678,15 +731,15 @@ impl Player {
                         ui.set_width(width - 18.);
                         ui.set_min_height((height - 24.) / 3. - 18.);
                         ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(NAMES[d]).strong().color(spectrum_color(d)));
+                            ui.label(egui::RichText::new(NAMES[d]).strong().color(spectrum_color(d, self.rack.spectrum_palette)));
                             if ui.add(egui::Button::new(egui::RichText::new("LIVE").size(11.).color(if selected {egui::Color32::BLACK} else {accent(d)}))
                                 .fill(if selected {accent(d)} else {ui.visuals().widgets.inactive.bg_fill}))
                                 .on_hover_text("Make this deck live on its crossfader side without pausing other decks.").clicked() { self.make_deck_live(d); }
                         if transport_button(ui, d, self.playing[d], egui::vec2(24.,24.)).on_hover_text(if self.playing[d] {"Pause deck"} else {"Play deck"}).clicked() { self.toggle_deck(d); }
                         });
-                        ui.add(egui::Label::new(egui::RichText::new(self.title(d)).color(spectrum_color(d))).truncate());
+                        ui.add(egui::Label::new(egui::RichText::new(self.title(d)).color(spectrum_color(d, self.rack.spectrum_palette))).truncate());
                         let track=self.loaded_snapshot[d].as_ref().or_else(||self.loaded[d].and_then(|i|self.library.as_ref()?.tracks.get(i)));
-                        if let Some(at) = self.waveforms[d].thumbnail(ui,self.loaded_origin[d].as_deref().unwrap_or(&self.root),track,self.audio.as_ref().map_or(0.,|a|a.source_position(d)),spectrum_color(d), ((height - 16.) / 3. - if compact { 68. } else { 130. }).clamp(26., 140.)) {
+                        if let Some(at) = self.waveforms[d].thumbnail(ui,self.loaded_origin[d].as_deref().unwrap_or(&self.root),track,self.audio.as_ref().map_or(0.,|a|a.source_position(d)),spectrum_color(d, self.rack.spectrum_palette), ((height - 16.) / 3. - if compact { 68. } else { 130. }).clamp(26., 140.)) {
                             ui.ctx().data_mut(|data| data.insert_temp(egui::Id::unique(("section-target", d)), at));
                             self.select_deck_section(d,at);
                         }
@@ -1857,5 +1910,45 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod spectrum_palette_tests {
+    use super::*;
+    #[test]
+    fn spectrum_palette_survives_restart_and_missing_or_invalid_preferences_are_red_blue() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("settings/colors.txt");
+        assert_eq!(SpectrumPalette::read(&path), SpectrumPalette::RedBlue);
+        for palette in [SpectrumPalette::DeckAccents, SpectrumPalette::RedBlue] {
+            palette.write(&path).unwrap();
+            assert_eq!(SpectrumPalette::read(&path), palette);
+        }
+        std::fs::write(&path, "unknown old preference").unwrap();
+        assert_eq!(SpectrumPalette::read(&path), SpectrumPalette::RedBlue);
+    }
+    #[test]
+    fn spectrum_palette_keeps_six_slot_identity_and_does_not_change_control_accents() {
+        for deck in 0..6 {
+            assert_eq!(
+                spectrum_color(deck, SpectrumPalette::DeckAccents),
+                accent(deck)
+            );
+            assert_eq!(
+                spectrum_color(deck, SpectrumPalette::RedBlue),
+                spectrum_color(deck % 2, SpectrumPalette::RedBlue)
+            );
+            assert_ne!(spectrum_color(deck, SpectrumPalette::RedBlue), accent(deck));
+        }
+        let rack = Rack {
+            spectrum_palette: SpectrumPalette::DeckAccents,
+            ..Default::default()
+        };
+        let saved = serde_json::to_value(&rack).unwrap();
+        assert!(
+            saved.get("spectrum_palette").is_none(),
+            "Session recovery must not override the saved UI color preference"
+        );
     }
 }

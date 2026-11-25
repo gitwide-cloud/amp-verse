@@ -304,7 +304,10 @@ impl Player {
             .show(ui, |ui| {
                 ui.set_width(width - 24.);
                 ui.horizontal(|ui| {
-                    ui.colored_label(spectrum_color(pair[0]), NAMES[pair[0]]);
+                    ui.colored_label(
+                        spectrum_color(pair[0], self.rack.spectrum_palette),
+                        NAMES[pair[0]],
+                    );
                     ui.spacing_mut().slider_width = (width - 420.).max(140.);
                     if ui
                         .add(egui::Slider::new(&mut self.fader, 0. ..=1.).show_value(false))
@@ -314,7 +317,10 @@ impl Player {
                         self.run.cancel_automation();
                         audio.set_fader(self.fader);
                     }
-                    ui.colored_label(spectrum_color(pair[1]), NAMES[pair[1]]);
+                    ui.colored_label(
+                        spectrum_color(pair[1], self.rack.spectrum_palette),
+                        NAMES[pair[1]],
+                    );
                     let fade = ui.add_sized(
                         [62., 32.],
                         egui::Button::new(
@@ -429,7 +435,10 @@ impl Player {
                     ui.spacing_mut().button_padding = egui::vec2(3., 2.);
                     ui.spacing_mut().interact_size.y = 26.;
                     ui.horizontal(|ui| {
-                        ui.strong(egui::RichText::new(NAMES[deck]).color(spectrum_color(deck)));
+                        ui.strong(
+                            egui::RichText::new(NAMES[deck])
+                                .color(spectrum_color(deck, self.rack.spectrum_palette)),
+                        );
                         self.card_live_button(ui, deck);
                         ui.menu_button("···", |ui| {
                             if ui
@@ -447,7 +456,8 @@ impl Player {
                     });
                     ui.add(
                         egui::Label::new(
-                            egui::RichText::new(self.title(deck)).color(spectrum_color(deck)),
+                            egui::RichText::new(self.title(deck))
+                                .color(spectrum_color(deck, self.rack.spectrum_palette)),
                         )
                         .truncate(),
                     )
@@ -676,13 +686,12 @@ impl Player {
                                     ui.set_width(info);
                                     ui.horizontal_wrapped(|ui| {
                                         ui.label(
-                                            egui::RichText::new(NAMES[d])
-                                                .size(22.)
-                                                .strong()
-                                                .color(spectrum_color(d)),
+                                            egui::RichText::new(NAMES[d]).size(22.).strong().color(
+                                                spectrum_color(d, self.rack.spectrum_palette),
+                                            ),
                                         );
                                         ui.colored_label(
-                                            spectrum_color(d),
+                                            spectrum_color(d, self.rack.spectrum_palette),
                                             if d.is_multiple_of(2) {
                                                 "DECK A"
                                             } else {
@@ -703,7 +712,10 @@ impl Player {
                                             egui::RichText::new(self.title(d))
                                                 .size(18.)
                                                 .strong()
-                                                .color(spectrum_color(d)),
+                                                .color(spectrum_color(
+                                                    d,
+                                                    self.rack.spectrum_palette,
+                                                )),
                                         )
                                         .truncate(),
                                     );
@@ -1045,7 +1057,10 @@ impl Player {
                     ui.columns(2, |columns| {
                         for (side, d) in pair.into_iter().enumerate() {
                             columns[side].vertical_centered(|ui| {
-                                ui.colored_label(spectrum_color(d), NAMES[d]);
+                                ui.colored_label(
+                                    spectrum_color(d, self.rack.spectrum_palette),
+                                    NAMES[d],
+                                );
                                 skin::meter(
                                     ui,
                                     self.audio.as_ref().map_or(0., |a| a.peak(d)),

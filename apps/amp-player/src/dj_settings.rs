@@ -46,10 +46,18 @@ impl Player {
             ui.separator();ui.heading("Tempo and quantization");self.clock_settings(ui);
             ui.separator();ui.heading("Waveforms");
             let old=self.rack.overlay_waveforms;
-            ui.horizontal_wrapped(|ui|{ui.selectable_value(&mut self.rack.overlay_waveforms,false,"Stacked A / B");ui.selectable_value(&mut self.rack.overlay_waveforms,true,"Overlay blue / red");});
+            ui.horizontal_wrapped(|ui|{ui.selectable_value(&mut self.rack.overlay_waveforms,false,"Stacked A / B");ui.selectable_value(&mut self.rack.overlay_waveforms,true,"Overlay A / B");});
             if old!=self.rack.overlay_waveforms && let Some(path)=deck_rack::waveform_preference(){
                 let result=std::fs::create_dir_all(path.parent().unwrap()).and_then(|()|std::fs::write(path,if self.rack.overlay_waveforms {"overlay"}else{"stacked"}));if let Err(error)=result {self.status=error.to_string();}
             }
+            ui.label("Spectrum and title colors");
+            let previous = self.rack.spectrum_palette;
+            ui.horizontal_wrapped(|ui| {
+                ui.selectable_value(&mut self.rack.spectrum_palette, deck_rack::SpectrumPalette::RedBlue, "Red / Blue");
+                ui.selectable_value(&mut self.rack.spectrum_palette, deck_rack::SpectrumPalette::DeckAccents, "Yellow / Neon Blue");
+            });
+            if previous != self.rack.spectrum_palette && let Err(error) = deck_rack::save_spectrum_palette(self.rack.spectrum_palette) { self.status = error; }
+            ui.weak("Deck names and song titles follow the spectrum colors. Borders and controls keep their yellow / neon-blue accents.");
             ui.add(egui::Slider::new(&mut self.wave_span,4. ..=60.).text("Visible seconds"));
             ui.separator();ui.heading("Layout");
             skin::switch(ui,&mut self.rack.expanded,"Expanded controls");
