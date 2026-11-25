@@ -1118,6 +1118,31 @@ impl Player {
         }
         self.status = format!("Deck {} stopped", deck + 1);
     }
+    /// Explicit unload: stop this voice and forget its track, not the library file.
+    fn clear_deck(&mut self, deck: usize) {
+        if deck >= 6 {
+            return;
+        }
+        self.run.regular_deck_replaced(deck);
+        self.cancel_deck_automation(deck);
+        if self.pair().contains(&deck) {
+            self.auto = false;
+        }
+        if let Some(audio) = &mut self.audio {
+            audio.stop(deck);
+        }
+        self.loaded[deck] = None;
+        self.loaded_snapshot[deck] = None;
+        self.loaded_origin[deck] = None;
+        self.pending_load[deck] = None;
+        self.playing[deck] = false;
+        self.jog_resume[deck] = None;
+        self.jog_auto[deck] = false;
+        self.jog_target[deck] = 0.;
+        self.jog_angle[deck] = 0.;
+        self.waveforms[deck] = Default::default();
+        self.status = format!("{} cleared", deck_rack::NAMES[deck]);
+    }
     fn toggle_deck(&mut self, deck: usize) {
         self.toggle_owned_deck(playback_owner::Owner::Dj, deck);
     }

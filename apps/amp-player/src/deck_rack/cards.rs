@@ -122,6 +122,26 @@ impl Player {
             Err(error) => self.status = error,
         }
     }
+    fn card_clear_button(&mut self, ui: &mut egui::Ui, deck: usize) {
+        let loaded = self.loaded[deck].is_some()
+            || self.loaded_snapshot[deck].is_some()
+            || self.pending_load[deck].is_some();
+        let response = ui
+            .add_enabled(
+                loaded,
+                egui::Button::new("×").min_size(egui::vec2(24., 26.)),
+            )
+            .on_hover_text(format!(
+                "Clear {} · stop and unload this track",
+                NAMES[deck]
+            ));
+        response.widget_info(|| {
+            egui::WidgetInfo::labeled(egui::Role::Button, loaded, format!("Clear {}", NAMES[deck]))
+        });
+        if response.clicked() {
+            self.clear_deck(deck);
+        }
+    }
     fn card_live_button(&mut self, ui: &mut egui::Ui, deck: usize) {
         let live = self.pair()[deck % 2] == deck;
         let response = ui.add_sized([68., 26.], egui::Button::new(
@@ -454,14 +474,17 @@ impl Player {
                             }
                         });
                     });
-                    ui.add(
-                        egui::Label::new(
-                            egui::RichText::new(self.title(deck))
-                                .color(spectrum_color(deck, self.rack.spectrum_palette)),
+                    ui.horizontal(|ui| {
+                        self.card_clear_button(ui, deck);
+                        ui.add(
+                            egui::Label::new(
+                                egui::RichText::new(self.title(deck))
+                                    .color(spectrum_color(deck, self.rack.spectrum_palette)),
+                            )
+                            .truncate(),
                         )
-                        .truncate(),
-                    )
-                    .on_hover_text(self.title(deck));
+                        .on_hover_text(self.title(deck));
+                    });
                     let position = self
                         .audio
                         .as_ref()
@@ -707,18 +730,21 @@ impl Player {
                                             self.card_open_tools(ui.ctx(), d, 0);
                                         }
                                     });
-                                    ui.add(
-                                        egui::Label::new(
-                                            egui::RichText::new(self.title(d))
-                                                .size(18.)
-                                                .strong()
-                                                .color(spectrum_color(
-                                                    d,
-                                                    self.rack.spectrum_palette,
-                                                )),
-                                        )
-                                        .truncate(),
-                                    );
+                                    ui.horizontal(|ui| {
+                                        self.card_clear_button(ui, d);
+                                        ui.add(
+                                            egui::Label::new(
+                                                egui::RichText::new(self.title(d))
+                                                    .size(18.)
+                                                    .strong()
+                                                    .color(spectrum_color(
+                                                        d,
+                                                        self.rack.spectrum_palette,
+                                                    )),
+                                            )
+                                            .truncate(),
+                                        );
+                                    });
                                     let track = self.loaded_track(d);
                                     let artist = track
                                         .and_then(|t| t.preparation.extensions.get("artist"))
@@ -1955,5 +1981,32 @@ mod tests {
             serde_json::to_value(player.show_editor.playlists(&settings)).unwrap(),
             drafts
         );
+    }
+}
+
+#[cfg(test)]
+mod clear_deck_tests {
+    use super::*;
+    #[test]
+    fn clear_deck_removes_only_the_requested_track_and_pending_resume() {
+        for deck in 0..6 {
+            let mut player = Player::default();
+            player.loaded = [Some(42); 6];
+            player.playing = [true; 6];
+            player.pending_load[deck] = Some((PathBuf::from("pending.mp3"), None));
+            player.jog_resume[deck] = Some((true, egui::ViewportId::ROOT));
+            let live = player.rack.live;
+            player.clear_deck(deck);
+            for other in 0..6 {
+                assert_eq!(
+                    player.loaded[other],
+                    if other == deck { None } else { Some(42) }
+                );
+                assert_eq!(player.playing[other], other != deck);
+            }
+            assert!(player.pending_load[deck].is_none());
+            assert!(player.jog_resume[deck].is_none());
+            assert_eq!(player.rack.live, live);
+        }
     }
 }
