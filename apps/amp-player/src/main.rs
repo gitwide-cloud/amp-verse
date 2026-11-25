@@ -3339,9 +3339,15 @@ impl Player {
             return;
         }
         for deck in 0..6 {
-            if self.jog_resume[deck].is_some_and(|(_, viewport)| viewport != ctx.viewport_id())
-                && (self.dj_open || (self.mini.minimized && !self.mini.dismissed))
-            {
+            if self.jog_resume[deck].is_some_and(|(_, viewport)| {
+                let owner_open =
+                    if viewport == egui::ViewportId::from_hash_of("amp-minimized-controls") {
+                        self.mini.minimized && !self.mini.dismissed
+                    } else {
+                        self.dj_open
+                    };
+                viewport != ctx.viewport_id() && owner_open
+            }) {
                 continue;
             }
             if let Some((resume, _)) = self.jog_resume[deck].take()
