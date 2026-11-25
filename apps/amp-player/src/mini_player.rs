@@ -197,6 +197,24 @@ impl Player {
 mod tests {
     use super::*;
     #[test]
+    fn dismissed_compact_window_cannot_keep_a_jog_hold_alive() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            dj_open: true,
+            ..Default::default()
+        };
+        player.mini.minimized = true;
+        player.jog_resume[0] = Some((
+            false,
+            egui::ViewportId::from_hash_of("amp-minimized-controls"),
+        ));
+        player.release_jog_wheels(&ctx);
+        assert!(player.jog_resume[0].is_some());
+        player.mini.dismissed = true;
+        player.release_jog_wheels(&ctx);
+        assert!(player.jog_resume[0].is_none());
+    }
+    #[test]
     fn companion_follows_minimize_restore_and_dismissal() {
         let mut s = State::default();
         assert!(!s.visible(false, false));
