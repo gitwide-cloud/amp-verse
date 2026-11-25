@@ -3,7 +3,6 @@ import android.content.*;
 import android.content.pm.PackageManager;
 import android.net.Uri;
 import androidx.media3.common.Player;
-import androidx.test.core.app.ActivityScenario;
 import androidx.test.ext.junit.runners.AndroidJUnit4;
 import androidx.test.platform.app.InstrumentationRegistry;
 import org.junit.Test;
@@ -24,20 +23,23 @@ public class ExternalAudioDeviceTest {
     }
     @Test public void openWithPlaysAcrossBackgroundAndKeepsLibrary()throws Exception{
         Uri uri=Uri.parse("content://cloud.gitwide.ampverse.test.external/song");
-        instrumentation.getContext().grantUriPermission(context.getPackageName(),uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);
         int saved=LibraryStore.read(context).size();
-        try(ActivityScenario<MainActivity> activity=ActivityScenario.launch(audio(uri).setPackage(context.getPackageName()))){
-            awaitPlaying();
+        Intent sender=new Intent().setComponent(new ComponentName(instrumentation.getContext().getPackageName(),ExternalAudioSenderActivity.class.getName())).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        try{
+            context.startActivity(sender);awaitPlaying();
             assertEquals(saved,LibraryStore.read(context).size());
-            activity.moveToState(androidx.lifecycle.Lifecycle.State.CREATED);
+            // Close the actual receiver Activity: only the playback-service grant should remain.
+            instrumentation.runOnMainSync(()->{
+                for(android.app.Activity a:androidx.test.runner.lifecycle.ActivityLifecycleMonitorRegistry.getInstance().getActivitiesInStage(androidx.test.runner.lifecycle.Stage.RESUMED))if(a instanceof MainActivity)a.finish();
+            });
             Thread.sleep(300);
+            assertEquals(PackageManager.PERMISSION_GRANTED,context.checkUriPermission(uri,android.os.Process.myPid(),android.os.Process.myUid(),Intent.FLAG_GRANT_READ_URI_PERMISSION));
             awaitPlaying();
-            activity.moveToState(androidx.lifecycle.Lifecycle.State.RESUMED);
-            // A second request reaches the existing activity; bad access must leave playback intact.
-            activity.onActivity(a->a.onNewIntent(audio(Uri.parse("content://cloud.gitwide.ampverse.test.external/missing"))));
-            Thread.sleep(300);awaitPlaying();
+            // An unreadable second open must not replace the playing file or change the library.
+            context.startActivity(new Intent(sender).putExtra("missing",true));
+            Thread.sleep(500);awaitPlaying();
             assertEquals(saved,LibraryStore.read(context).size());
-        }finally{instrumentation.runOnMainSync(()->{Player p=PlaybackService.player();if(p!=null){p.pause();p.clearMediaItems();}});instrumentation.getContext().revokeUriPermission(uri,Intent.FLAG_GRANT_READ_URI_PERMISSION);}
+        }finally{instrumentation.runOnMainSync(()->{Player p=PlaybackService.player();if(p!=null){p.pause();p.clearMediaItems();}});}
     }
     private void awaitPlaying()throws Exception{
         long deadline=System.currentTimeMillis()+12000;boolean[] ready={false};
