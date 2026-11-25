@@ -2368,25 +2368,7 @@ impl Player {
         );
     }
     fn expand_smart_list(&mut self) {
-        if self.queue.len() > 1000 {
-            self.status = "Smart Lists support up to 1,000 songs at a time".into();
-            return;
-        }
-        if let Some(lib) = &self.library {
-            let songs: Vec<_> = lib.tracks.iter().map(|t| &t.preparation).collect();
-            match amp_core::smart::curate(&songs, &self.queue, self.queue.len().saturating_add(20))
-            {
-                Ok(queue) => {
-                    let added = queue.len().saturating_sub(self.queue.len());
-                    self.queue = queue;
-                    self.queue_selected = None;
-                    self.status = format!(
-                        "Smart List added {added} prepared neighbors within ±6% BPM and ±20% energy; review and Save the playlist"
-                    );
-                }
-                Err(e) => self.status = e,
-            }
-        }
+        self.find_suggestions(self.queue.clone(), true);
     }
     fn curate_playlist(&mut self) {
         if self.queue.len() > 1000 {

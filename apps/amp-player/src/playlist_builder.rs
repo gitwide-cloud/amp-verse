@@ -345,11 +345,14 @@ impl Player {
         if !self.refresh_playlist_preview() {
             return;
         }
+        self.find_suggestions(self.playlist_preview.queue.clone(), false);
+    }
+    fn find_suggestions(&mut self, seeds: Vec<usize>, to_queue: bool) {
+        self.library_builder.suggest_to_queue = to_queue;
         self.library_builder.suggestions.clear();
         let Some(lib) = &self.library else {
             return;
         };
-        let seeds = &self.playlist_preview.queue;
         if seeds.is_empty() {
             self.status = "Add a song before requesting similar songs.".into();
             return;
@@ -412,7 +415,11 @@ impl Player {
             return;
         }
         ui.separator();
-        ui.strong("Suggested songs · preview, then choose Add");
+        ui.strong(if self.library_builder.suggest_to_queue {
+            "Suggested songs for playback queue · preview, then choose Add"
+        } else {
+            "Suggested songs for playlist · preview, then choose Add"
+        });
         let mut add = None;
         let mut preview = None;
         egui::ScrollArea::vertical()
@@ -447,7 +454,14 @@ impl Player {
             self.preview_library_song(index);
         }
         if let Some(index) = add {
-            self.add_indices_to_playlist(&[index]);
+            if self.library_builder.suggest_to_queue {
+                if !self.queue.contains(&index) {
+                    self.queue.push(index);
+                }
+                self.status = "Suggestion added to playback queue.".into();
+            } else {
+                self.add_indices_to_playlist(&[index]);
+            }
             if let Some(lib) = &self.library {
                 let path = &lib.tracks[index].path;
                 self.library_builder.suggestions.retain(|p| p != path);

@@ -28,6 +28,7 @@ pub(super) struct LibraryBuilder {
     folders: String,
     tracks: String,
     suggestions: Vec<PathBuf>,
+    suggest_to_queue: bool,
     results: Option<LibraryResults>,
 }
 struct LibraryResults {
@@ -1394,6 +1395,7 @@ impl Player {
         if !self.queue.is_empty() {
             self.organized_queue(ui, 130.);
         }
+        self.playlist_suggestions_ui(ui);
     }
     fn queue_library_folder(&mut self) {
         let Some(library) = &self.library else {
@@ -1723,6 +1725,23 @@ mod tests {
         assert_eq!(player.queue, vec![7]);
         let (file, _) = player.playlist_preview.snapshot.as_ref().unwrap();
         assert_eq!(Playlist::load(file, &player.root).unwrap().tracks, before);
+    }
+    #[test]
+    fn queue_find_similar_is_also_review_only() {
+        let (_dir, mut player) = card_fixture();
+        for track in &mut player.library.as_mut().unwrap().tracks {
+            track
+                .preparation
+                .extensions
+                .insert("artist".into(), serde_json::json!("Shared artist"));
+        }
+        player.queue = vec![0];
+        let before = player.playlist_preview.paths.clone();
+        player.expand_smart_list();
+        assert_eq!(player.queue, vec![0]);
+        assert_eq!(player.playlist_preview.paths, before);
+        assert!(!player.library_builder.suggestions.is_empty());
+        assert!(player.library_builder.suggest_to_queue);
     }
     #[test]
     fn library_search_matches_partial_metadata_not_only_title() {
