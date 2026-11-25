@@ -1,5 +1,50 @@
 // Shared Library and normal-playlist picker. Selection never owns playback.
 impl Player {
+    fn library_browser_results(&mut self) -> Vec<usize> {
+        let fresh = self.library_builder.results.as_ref().is_some_and(|r| {
+            r.generation == self.library_generation
+                && r.folder == self.folder
+                && r.general == self.search
+                && r.tracks == self.library_builder.tracks
+                && r.refreshed.elapsed() < Duration::from_secs(1)
+        });
+        if !fresh {
+            let indices = self
+                .library
+                .as_ref()
+                .map(|lib| {
+                    lib.tracks
+                        .iter()
+                        .enumerate()
+                        .filter(|(_, t)| {
+                            (self
+                                .search
+                                .trim()
+                                .is_empty()
+                                .then(|| t.path.starts_with(&self.folder))
+                                .unwrap_or(true))
+                                && matches_track(t, &self.search)
+                                && matches_track(t, &self.library_builder.tracks)
+                        })
+                        .map(|(i, _)| i)
+                        .collect()
+                })
+                .unwrap_or_default();
+            self.library_builder.results = Some(LibraryResults {
+                generation: self.library_generation,
+                folder: self.folder.clone(),
+                general: self.search.clone(),
+                tracks: self.library_builder.tracks.clone(),
+                refreshed: std::time::Instant::now(),
+                indices,
+            });
+        }
+        self.library_builder
+            .results
+            .as_ref()
+            .map(|r| r.indices.clone())
+            .unwrap_or_default()
+    }
     fn checked_library_indices(&self) -> Vec<usize> {
         self.library
             .as_ref()
@@ -116,22 +161,7 @@ impl Player {
                 self.folder = PathBuf::new();
             }
         });
-        let filtered: Vec<_> = self
-            .library
-            .as_ref()
-            .map(|lib| {
-                lib.tracks
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, t)| {
-                        t.path.starts_with(&self.folder)
-                            && matches_track(t, &self.search)
-                            && matches_track(t, &self.library_builder.tracks)
-                    })
-                    .map(|(i, _)| i)
-                    .collect()
-            })
-            .unwrap_or_default();
+        let filtered = self.library_browser_results();
         let checked = self.checked_library_indices().len();
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("{checked} checked · {} matching", filtered.len()));

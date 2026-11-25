@@ -28,6 +28,15 @@ pub(super) struct LibraryBuilder {
     folders: String,
     tracks: String,
     suggestions: Vec<PathBuf>,
+    results: Option<LibraryResults>,
+}
+struct LibraryResults {
+    generation: u64,
+    folder: PathBuf,
+    general: String,
+    tracks: String,
+    refreshed: std::time::Instant,
+    indices: Vec<usize>,
 }
 fn matches_track(track: &amp_core::Track, query: &str) -> bool {
     let query = query.trim().to_lowercase();
@@ -842,7 +851,7 @@ impl Player {
             ui.add_space(10.);
             ui.separator();
             if self.playlist_preview.queue.len() != self.playlist_preview.paths.len() {
-                ui.colored_label(skin::accent(ui), format!("{} saved songs are unavailable in the current index. Reconnect the source or rescan; the saved playlist is retained.", self.playlist_preview.paths.len()));
+                ui.colored_label(skin::accent(ui), format!("This playlist contains unavailable songs. Reconnect the source or rescan; all {} saved songs are retained.", self.playlist_preview.paths.len()));
             }
             ui.add(egui::Label::new(&self.status).wrap());
             self.playlist_preview_table(
@@ -1587,6 +1596,30 @@ mod tests {
         player.workspace.enabled = true;
         player.workspace.rendering = true;
         (dir, player)
+    }
+    #[test]
+    fn global_search_escapes_folder_scope_and_track_search_refines_it() {
+        let (_dir, mut player) = card_fixture();
+        player.folder = "No matching folder".into();
+        player.search = "Artist 1".into();
+        assert_eq!(player.library_browser_results(), vec![0]);
+        player.library_builder.tracks = "no such title".into();
+        assert!(player.library_browser_results().is_empty());
+        player.library_builder.tracks.clear();
+        player.search.clear();
+        assert!(player.library_browser_results().is_empty());
+    }
+    #[test]
+    fn folder_additions_save_descendants_without_replacing_playback() {
+        let (_dir, mut player) = card_fixture();
+        player.queue = vec![7];
+        player.create_preview_playlist("Folder builder").unwrap();
+        player.add_folder_to_playlist();
+        player.add_folder_to_playlist();
+        assert_eq!(player.playlist_preview.queue.len(), 8);
+        assert_eq!(player.queue, vec![7]);
+        let (file, _) = player.playlist_preview.snapshot.as_ref().unwrap();
+        assert_eq!(Playlist::load(file, &player.root).unwrap().tracks.len(), 8);
     }
     #[test]
     fn checked_songs_have_explicit_queue_and_playlist_destinations() {
