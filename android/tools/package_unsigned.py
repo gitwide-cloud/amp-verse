@@ -12,6 +12,10 @@ import shutil
 import subprocess
 
 
+def valid_version(version):
+    return re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:beta|rc)\.[1-9]\d*)?", version) is not None
+
+
 def package(root, destination, sdk):
     destination.mkdir(parents=True, exist_ok=True)
     tools = sdk / "build-tools/35.0.0"
@@ -23,7 +27,7 @@ def package(root, destination, sdk):
     shutil.copy2(signer, local_tools / "apksigner.jar")
     if (tools / "NOTICE.txt").is_file():
         shutil.copy2(tools / "NOTICE.txt", local_tools / "NOTICE.txt")
-    report = {"schema": 1, "kind": "unsigned-beta-requires-local-signing", "source_commit": os.environ.get("GITHUB_SHA", "local"), "build_tools": "35.0.0", "release_channel": "beta", "packages": []}
+    report = {"schema": 1, "kind": "unsigned-beta-requires-local-signing", "source_commit": os.environ.get("GITHUB_SHA", "local"), "build_tools": "35.0.0", "release_channel": "rc" if "-rc." in (root / "release.properties").read_text() else "beta", "packages": []}
     common_version = None
     for module in ("lite", "full", "dj", "lab", "cast", "podcasts", "remote"):
         folder = root / (f"app/build/outputs/apk/{module}/release" if module in ("lite", "full") else f"modules/{module}/build/outputs/apk/release")
@@ -40,7 +44,7 @@ def package(root, destination, sdk):
             raise ValueError("Could not inspect embedded APK identity")
         package_id, version_code, version = identity.groups()
         expected = "cloud.gitwide.ampverse" + ("" if module in ("lite", "full") else "." + module)
-        if package_id != expected or not re.fullmatch(r"(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-beta\.[1-9]\d*)?", version):
+        if package_id != expected or not valid_version(version):
             raise ValueError("Unexpected APK package identity/version")
         pair = version, int(version_code)
         if common_version is not None and pair != common_version:
