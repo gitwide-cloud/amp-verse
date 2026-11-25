@@ -485,12 +485,23 @@ pub fn ranked_with_snapshot(
     let wanted = target.or(p.target_energy).or(playing.and_then(energy));
     let score = |t: &Track| {
         let mut prepared = t.preparation.clone();
-        let entry = crate::energy_profile::automatic_entry(
-            &prepared,
-            wanted.map_or(0.5, |e| (e - 1.) / 9.),
-            8.,
-        )
-        .map(|entry| entry.energy)
+        let entry = if p.style == Style::Hype {
+            let at = if p.use_manual_cues {
+                crate::hype_sections::marked_entry(&prepared)
+            } else {
+                None
+            }
+            .or_else(|| crate::hype_sections::entry(&prepared))
+            .unwrap_or(prepared.cue_in);
+            crate::energy_profile::read(&prepared).and_then(|profile| profile.at(at))
+        } else {
+            crate::energy_profile::automatic_entry(
+                &prepared,
+                wanted.map_or(0.5, |e| (e - 1.) / 9.),
+                8.,
+            )
+            .map(|entry| entry.energy)
+        }
         .or_else(|| {
             crate::energy_profile::read(&prepared).and_then(|profile| profile.at(prepared.cue_in))
         });
@@ -604,6 +615,37 @@ mod tests {
         assert_eq!(p.next(), 9.);
         p.completed = 3;
         assert_eq!(p.next(), 3.);
+    }
+    #[test]
+    fn hype_selection_scores_the_drop_it_will_actually_play() {
+        let make = |name: &str, opening: f64, peak: f64| {
+            let mut preparation = Preparation::default();
+            preparation.extensions.insert("energy_profile".into(), serde_json::json!({
+                "version":1,"duration":160.,"step":2.,
+                "curve":([vec![opening;40],vec![peak;30],vec![0.2;10]].concat()),
+                "sections":[{"id":"intro","name":"Intro","start":0.,"end":80.,"energy":opening},{"id":"drop","name":"Strong","start":80.,"end":140.,"energy":peak},{"id":"tail","name":"Tail","start":140.,"end":160.,"energy":0.2}]
+            }));
+            Track {
+                path: name.into(),
+                title: name.into(),
+                preparation,
+            }
+        };
+        let tracks = vec![
+            make("wrong-drop.wav", 0.8, 1.),
+            make("matched-drop.wav", 0.2, 0.8),
+        ];
+        let saved: Vec<_> = tracks.iter().map(|t| t.preparation.clone()).collect();
+        let mut profile = Settings::default().playlists.remove(0);
+        profile.style = Style::Hype;
+        assert_eq!(choose(&profile, &tracks, None, &[], Some(8.2), 0), Some(1));
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|t| t.preparation.clone())
+                .collect::<Vec<_>>(),
+            saved
+        );
     }
     #[test]
     fn selection_uses_entry_section_energy_instead_of_only_song_average() {

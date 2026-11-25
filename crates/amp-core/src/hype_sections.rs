@@ -87,7 +87,11 @@ pub fn entry(p: &Preparation) -> Option<f64> {
             .iter()
             .filter(|v| **v >= threshold)
             .count();
-        if next >= threshold && next - old >= 0.06 && strong * 4 >= hold * 3 {
+        if profile.curve[i] >= threshold
+            && next >= threshold
+            && next - old >= 0.06
+            && strong * 4 >= hold * 3
+        {
             candidates.push((at, 0.7 * next + 0.3 * (next - old)));
         }
     }
@@ -150,7 +154,7 @@ pub fn exit(p: &Preparation, transition: f64) -> Option<f64> {
     for i in start..profile.curve.len().saturating_sub(window) {
         let next = mean(&profile.curve, i, window)?;
         let at = i as f64 * profile.step;
-        if at + 2. > end {
+        if at + window as f64 * profile.step > end {
             break;
         }
         if at >= first + minimum + transition && peak >= 0.35 && peak - next >= 0.10 {
@@ -158,7 +162,7 @@ pub fn exit(p: &Preparation, transition: f64) -> Option<f64> {
                 .iter()
                 .filter(|v| **v <= peak - 0.08)
                 .count();
-            if weak * 4 >= window * 3 {
+            if profile.curve[i] <= peak - 0.08 && weak * 4 >= window * 3 {
                 return Some(at);
             }
         }

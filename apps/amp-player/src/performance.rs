@@ -898,6 +898,7 @@ impl Player {
             .as_ref()
             .ok_or("Load a Smart Playlist first")?
             .clone();
+        p.style = self.run.style;
         p.excluded.extend(self.run.failed_songs.iter().cloned());
         let current = self.loaded[self.active_deck()];
         let tracks = &self.library.as_ref().ok_or("Library unavailable")?.tracks;
