@@ -37,7 +37,9 @@ jobs:
       - name: Determine download version
         id: package_version
         shell: bash
-        run: echo "version=$(python tools/package_downloads.py desktop-version)" >> "$GITHUB_OUTPUT"
+        run: |
+          version=$(python tools/package_downloads.py desktop-version)
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
