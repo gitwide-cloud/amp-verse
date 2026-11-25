@@ -217,6 +217,10 @@ public final class PlaybackService extends MediaSessionService {
         };
         return renderers;
     }
+    @Override public int onStartCommand(Intent intent,int flags,int startId) {
+        if(intent!=null&&ExternalAudio.GRANT_ACTION.equals(intent.getAction()))return START_NOT_STICKY;
+        return super.onStartCommand(intent,flags,startId);
+    }
     @Override public MediaSession onGetSession(MediaSession.ControllerInfo info) {
         if(!info.isTrusted()&&getPackageManager().checkSignatures(info.getUid(),android.os.Process.myUid())!=android.content.pm.PackageManager.SIGNATURE_MATCH)return null;
         return session;

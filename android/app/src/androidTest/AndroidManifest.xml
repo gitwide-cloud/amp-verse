@@ -1,5 +1,6 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <application>
         <provider android:name="cloud.gitwide.ampverse.FolderTestProvider" android:authorities="cloud.gitwide.ampverse.test.documents" android:permission="android.permission.MANAGE_DOCUMENTS" android:exported="true" android:grantUriPermissions="true" />
+        <provider android:name="cloud.gitwide.ampverse.ExternalAudioTestProvider" android:authorities="cloud.gitwide.ampverse.test.external" android:exported="false" android:grantUriPermissions="true" />
     </application>
 </manifest>
