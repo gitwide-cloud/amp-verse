@@ -201,12 +201,14 @@ mod viewport_tests {
             .get_mut(&egui::ViewportId::ROOT)
             .unwrap()
             .minimized = Some(true);
-        let _ = ctx.run_ui(raw, |ui| assert!(root_minimized(ui.ctx())));
+        let mut output = ctx.run_ui(raw, |ui| assert!(root_minimized(ui.ctx())));
+        output.textures_delta.clear();
         let mut raw = egui::RawInput::default();
         raw.viewports
             .get_mut(&egui::ViewportId::ROOT)
             .unwrap()
             .minimized = Some(false);
-        let _ = ctx.run_ui(raw, |ui| assert!(!root_minimized(ui.ctx())));
+        let mut output = ctx.run_ui(raw, |ui| assert!(!root_minimized(ui.ctx())));
+        output.textures_delta.clear();
     }
 }
