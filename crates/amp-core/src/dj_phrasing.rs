@@ -17,6 +17,39 @@ impl Pace {
         }
     }
 }
+/// Minimum complete musical passage before an automatic Hype handoff.
+/// Only manual/reviewed section roles are semantic evidence. Legacy automatic
+/// `drop` cues are loudness estimates and must not authorize a short vocal-only cut.
+fn hype_passage_end(p: &Preparation, end: f64) -> f64 {
+    let phrase = if crate::mix_schedule::timing_reliable(p) {
+        p.bpm.map(|b| 64. * 60. / b)
+    } else {
+        None
+    }
+    .unwrap_or(32.)
+    .max(16.);
+    let reviewed = p.analysis.as_ref().is_some_and(|a| a.reviewed);
+    let hook = p
+        .manual_cues
+        .iter()
+        .chain(p.cues.iter().filter(|_| reviewed))
+        .filter(|c| matches!(c.kind.as_str(), "hook" | "chorus" | "chorus_start" | "drop"))
+        .filter(|c| {
+            c.seconds.is_finite()
+                && c.seconds >= 0.
+                && c.seconds + phrase > p.cue_in
+                && c.seconds < end
+        })
+        .min_by(|a, b| a.seconds.total_cmp(&b.seconds));
+    if let Some(hook) = hook {
+        (hook.seconds.max(p.cue_in) + phrase).min(end)
+    } else {
+        // Without semantic evidence retain most short songs and at least two
+        // minutes of longer ones. This is a conservative duration fallback,
+        // not a claim that a chorus has been detected.
+        p.cue_in + ((end - p.cue_in) * 0.65).min(120.)
+    }
+}
 /// Latest handoff horizon in source seconds. Cue/phrase data and source preparation are never changed.
 pub fn exit(p: &Preparation, style: Style, pace: Pace, duration: f64, fade: f64) -> f64 {
     let end = p.cue_out.unwrap_or(duration).min(duration);
@@ -44,7 +77,12 @@ pub fn exit(p: &Preparation, style: Style, pace: Pace, duration: f64, fade: f64)
         .map(|b| 32. * 60. / b);
     let reserve = fade.max(0.) + phrase.unwrap_or(4.);
     let minimum = if pace == Pace::Quick { 32. } else { 45. };
-    let first = p.cue_in + minimum + reserve;
+    let mut first = p.cue_in + minimum + reserve;
+    if style == Style::Hype {
+        // Scheduling can launch up to a phrase before the horizon. Reserve both
+        // the complete fade and that phrase so neither cuts the protected passage.
+        first = first.max(hype_passage_end(p, end) + reserve);
+    }
     if first + 8. >= end {
         return end;
     }
@@ -110,7 +148,7 @@ mod tests {
         let saved = p.clone();
         let balanced = exit(&p, Style::Steady, Pace::Balanced, 300., 3.);
         let quick = exit(&p, Style::Hype, Pace::Quick, 300., 3.);
-        assert!(quick < balanced && balanced < 200.);
+        assert!(quick >= 120. && balanced < 200.);
         assert_eq!(balanced % 16., 0.);
         assert_eq!(p, saved);
         assert_eq!(exit(&p, Style::Hype, Pace::Full, 300., 3.), 300.);
@@ -148,6 +186,78 @@ mod tests {
         };
         let end = exit(&p, Style::Hype, Pace::Quick, 300., 8.);
         assert!(end >= 110. + 32. + 8. + 16.);
-        assert!(end < 250.);
+        assert!(end < 300.);
+    }
+    #[test]
+    fn hype_does_not_fade_before_a_late_marked_hook_has_played() {
+        let mut p = Preparation {
+            bpm: Some(120.),
+            beat_offset: Some(0.),
+            manual_override: true,
+            ..Default::default()
+        };
+        p.extensions
+            .insert("mix_phrase_anchor".into(), serde_json::json!(0.));
+        p.manual_cues.push(crate::preparation::Cue {
+            id: "hook".into(),
+            kind: "chorus_start".into(),
+            seconds: 96.,
+            ..Default::default()
+        });
+        let saved = p.clone();
+        // Sixteen bars of the actual hook must finish before even the fade starts.
+        assert!(exit(&p, Style::Hype, Pace::Quick, 240., 8.) - 8. >= 128.);
+        assert_eq!(p, saved);
+    }
+    #[test]
+    fn unreviewed_energy_peaks_do_not_justify_a_sixty_second_hype_cut() {
+        let mut p = Preparation {
+            cue_in: 15.963718820861676,
+            cue_out: Some(217.5954648526077),
+            bpm: Some(129.00085844822527),
+            ..Default::default()
+        };
+        p.cues.push(crate::preparation::Cue {
+            id: "auto-energy-1".into(),
+            kind: "drop".into(),
+            seconds: p.cue_in,
+            ..Default::default()
+        });
+        assert!(exit(&p, Style::Hype, Pace::Quick, 219.61142857142855, 5.) - 5. >= p.cue_in + 120.);
+    }
+    #[test]
+    fn hype_keeps_short_and_unanalysed_tracks_inside_the_audio() {
+        for duration in [8., 25., 60., 179.12163265306123, 219.61142857142855] {
+            let p = Preparation::default();
+            let at = exit(&p, Style::Hype, Pace::Quick, duration, 8.);
+            assert!(at <= duration && at >= duration.min((duration * 0.65 + 8.).min(128.)));
+        }
+    }
+    #[test]
+    fn reported_edm_decks_retain_a_substantial_passage_before_handoff() {
+        let examples: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/reported-edm-passages.json"))
+                .unwrap();
+        for example in examples.as_array().unwrap() {
+            let p: Preparation = serde_json::from_value(example["preparation"].clone()).unwrap();
+            let original = p.clone();
+            let duration = p.analysis.as_ref().unwrap().duration;
+            for fade in [3., 5., 8., 15.] {
+                let end = p.cue_out.unwrap_or(duration);
+                let protected = p.cue_in + ((end - p.cue_in) * 0.65).min(120.);
+                let horizon = exit(&p, Style::Hype, Pace::Quick, duration, fade);
+                assert!(
+                    horizon >= protected + fade || horizon == end,
+                    "{}: {horizon}",
+                    example["title"]
+                );
+                assert!(horizon <= end);
+                println!(
+                    "{}: entry={:.2}, Hype Quick exit={horizon:.2}, fade={fade:.1}",
+                    example["title"], p.cue_in
+                );
+            }
+            assert_eq!(p, original);
+        }
     }
 }

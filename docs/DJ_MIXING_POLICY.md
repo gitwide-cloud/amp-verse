@@ -101,3 +101,29 @@ A late request no longer schedules an eight-second fade over a two-second tail.
 The stored fade preference is unchanged; buildup/drop plans keep their explicit
 musical duration and existing source bounds. This is a timing safeguard, not an
 analysis-accuracy improvement.
+
+## Hype passage protection (1.1 release candidate)
+
+Short Hype handoffs must not be justified by loudness alone. A manual hook,
+chorus, chorus-start or drop marker protects sixteen bars after that marker
+(or after the runtime entry, if later). Analysis cues receive this semantic
+weight only when their preparation has been reviewed. Unreviewed legacy
+`auto-energy-*` cues labelled “drop” remain energy estimates.
+
+The bar duration uses a reliable prepared grid. Otherwise the protected marked
+passage uses 32 seconds; it does not invent a beatgrid. When no trusted musical
+marker exists, Hype keeps 65% of the remaining short song, capped at two minutes
+for longer songs, before allowing an automatic handoff. This conservative
+fallback reduces vocal-only snippets; it does not identify a chorus.
+
+The exit horizon reserves the fade and an additional scheduling phrase so a
+quantized launch cannot start fading inside the protected passage. Full Track,
+explicit manual mix-out/cue-out, source bounds and manual mixing remain in
+control. Preparation, audio, metadata revisions and playlist rules are not
+rewritten. Steady and Chill keep their existing pacing.
+
+Regression coverage includes the reported Get It Started CK Cut and Thong Song
+intro preparation, multiple fade durations, late marked hooks, short songs,
+manual exits and unchanged preparation. Fixture data contains timing/energy
+metadata only, no audio or source location. Mathematical tests establish timing
+bounds; they do not establish subjective musical quality or semantic detection.
