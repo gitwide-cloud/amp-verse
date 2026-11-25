@@ -730,8 +730,7 @@ impl Editor {
             ui,
             root,
             self.input.as_deref(),
-            self.start,
-            self.end,
+            self.start..self.end,
             self.filter(),
             self.processing,
         );

@@ -103,11 +103,12 @@ impl Editor {
         ui: &mut egui::Ui,
         root: &Path,
         input: Option<&Path>,
-        start: f64,
-        end: f64,
+        selection: std::ops::Range<f64>,
         filter: String,
         processing: amp_core::lab_processing::Processing,
     ) {
+        let start = selection.start;
+        let end = selection.end;
         ui.heading("Quick sample editor");
         ui.label("Use the waveform IN / OUT selection above, then preview or send to a pad.");
         ui.horizontal_wrapped(|ui| {
