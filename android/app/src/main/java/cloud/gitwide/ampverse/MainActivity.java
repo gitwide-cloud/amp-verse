@@ -348,10 +348,12 @@ public final class MainActivity extends Activity {
                 try{
                     // Extend a temporary content grant to the playback service, so closing
                     // the activity does not revoke access while background audio is playing.
-                    if("content".equals(request.getData().getScheme()))startService(new Intent(this,PlaybackService.class)
-                        .setAction(ExternalAudio.GRANT_ACTION).setData(request.getData())
-                        .setClipData(android.content.ClipData.newRawUri("Audio",request.getData()))
-                        .addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION));
+                    if("content".equals(request.getData().getScheme())){
+                        Intent grant=new Intent(this,PlaybackService.class).setAction(ExternalAudio.GRANT_ACTION)
+                            .setData(request.getData()).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        grant.setClipData(android.content.ClipData.newRawUri("Audio",request.getData()));
+                        startService(grant);
+                    }
                     PlaybackService.switchToPlayer();
                     player.setMediaItem(ready);player.prepare();player.play();
                     module="AMP Player";library=false;message="Opened audio file. Your saved library is unchanged.";draw();
