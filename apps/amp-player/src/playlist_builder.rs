@@ -160,13 +160,13 @@ impl Player {
         let checked = self.checked_library_indices().len();
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("{checked} checked · {} matching", filtered.len()));
-            if ui.button("Check results").clicked() {
-                if let Some(lib) = &self.library {
-                    for &i in &filtered {
-                        self.library_builder
-                            .checked
-                            .insert(lib.tracks[i].path.clone());
-                    }
+            if ui.button("Check results").clicked()
+                && let Some(lib) = &self.library
+            {
+                for &i in &filtered {
+                    self.library_builder
+                        .checked
+                        .insert(lib.tracks[i].path.clone());
                 }
             }
             if ui.button("Clear checks").clicked() {
