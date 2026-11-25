@@ -28,10 +28,14 @@ pub(super) fn root_minimized(ctx: &egui::Context) -> bool {
 }
 impl Player {
     pub(super) fn minimized_controls(&mut self, ctx: &egui::Context) {
-        let dj = match (self.workspace.enabled, self.workspace.pane) {
-            (true, 0) => false,
-            (true, 2) => true,
-            _ => self.playback_owner == playback_owner::Owner::Dj,
+        let dj = if self.playing.iter().any(|playing| *playing) {
+            self.playback_owner == playback_owner::Owner::Dj
+        } else {
+            match (self.workspace.enabled, self.workspace.pane) {
+                (true, 0) => false,
+                (true, 2) => true,
+                _ => self.playback_owner == playback_owner::Owner::Dj,
+            }
         };
         if !self.mini.visible(root_minimized(ctx), dj) {
             return;
