@@ -22,6 +22,7 @@ pub struct Lane {
     pub hide_caption: bool,
     pub seek: Option<f64>,
     pub scrub: Option<f64>,
+    pub drag: Option<f64>,
     path: Option<PathBuf>,
     cancel: Option<Arc<AtomicBool>>,
     rx: Option<mpsc::Receiver<Result<Peaks, String>>>,
@@ -59,6 +60,16 @@ pub(super) fn wheel_seek(ui: &egui::Ui, response: &egui::Response) -> Option<f64
             f64::from(-delta.clamp(-120., 120.)) * if input.modifiers.shift { 0.005 } else { 0.05 },
         )
     })
+}
+/// Drag the waveform as a record: moving it right moves the audio backwards.
+pub(super) fn pointer_drag(ui: &egui::Ui, response: &egui::Response, span: f64) -> Option<f64> {
+    if !response.dragged_by(egui::PointerButton::Primary) || !span.is_finite() || span <= 0. {
+        return None;
+    }
+    Some(
+        -f64::from(ui.input(|i| i.pointer.delta().x)) / f64::from(response.rect.width().max(1.))
+            * span,
+    )
 }
 #[derive(Default)]
 struct CacheEntry {
@@ -359,6 +370,7 @@ impl Lane {
         span: f64,
         deck: usize,
     ) {
+        self.drag = None;
         self.prepare(ui, root, track);
         let color = self.tint.unwrap_or(if deck.is_multiple_of(2) {
             super::skin::ORANGE
@@ -370,7 +382,7 @@ impl Lane {
             if self.ignore_seek {
                 egui::Sense::hover()
             } else {
-                egui::Sense::click()
+                egui::Sense::click_and_drag()
             },
         );
         #[cfg(test)]
@@ -383,7 +395,9 @@ impl Lane {
             self.scrub = Some(delta);
         }
         if !self.ignore_seek {
-            response.clone().on_hover_text("Click a section to mix into it. Wheel down: forward; wheel up: rewind. Shift-wheel: fine seek.");
+            self.drag = pointer_drag(ui, &response, span);
+            response.clone().on_hover_cursor(if self.drag.is_some() { egui::CursorIcon::Grabbing } else { egui::CursorIcon::Grab })
+                .on_hover_text("Click: seek here. Drag: scrub audio. Alt-click: timed section jump. Wheel: seek; Shift-wheel: fine seek.");
         }
         if !self.overlay {
             painter.rect_filled(rect, 3., Color32::from_rgb(5, 7, 10));
@@ -771,5 +785,59 @@ mod wheel_tests {
             }
             assert_eq!(result, Some(if fine { 0.2 } else { 2. }));
         }
+    }
+}
+
+#[cfg(test)]
+mod pointer_scrub_tests {
+    use super::*;
+    #[test]
+    fn dragging_waveform_emits_hand_motion_without_a_section_jump() {
+        let ctx = egui::Context::default();
+        let mut lane = Lane::default();
+        let mut rect = egui::Rect::NOTHING;
+        let mut dragged = false;
+        for frame in 0..5 {
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(600., 200.),
+                )),
+                ..Default::default()
+            };
+            let pos = if frame < 3 {
+                rect.center()
+            } else {
+                rect.center() + egui::vec2(30., 0.)
+            };
+            if frame > 0 {
+                raw.events.push(egui::Event::PointerMoved(pos));
+            }
+            if frame == 2 || frame == 4 {
+                raw.events.push(egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: frame == 2,
+                    modifiers: egui::Modifiers::NONE,
+                });
+            }
+            let mut out = ctx.run_ui(raw, |ui| {
+                lane.show(ui, Path::new("."), None, 60., 20., 0);
+                rect = ctx.data(|d| d.get_temp(egui::Id::unique(("waveform-lane", 0))).unwrap());
+                if frame == 3 {
+                    dragged = lane.drag.is_some_and(|delta| delta < 0.);
+                    assert!(
+                        lane.seek.is_none(),
+                        "Dragging must not queue a section jump"
+                    );
+                }
+                lane.drag = None;
+            });
+            out.textures_delta.clear();
+        }
+        assert!(
+            dragged,
+            "Waveform drag was visual-only: no audio hand motion emitted"
+        );
     }
 }

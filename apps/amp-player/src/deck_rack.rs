@@ -311,19 +311,34 @@ impl Player {
             if let Some(delta) = self.waveforms[d].scrub.take() {
                 self.seek_deck_relative(d, delta);
             }
+            if let Some(delta) = self.waveforms[d].drag.take() {
+                self.scrub_waveform(ui.ctx(), d, delta, false);
+            }
             if let Some(at) = self.waveforms[d].seek.take() {
-                self.mix_to_waveform_section(ui.ctx(), d, at);
+                self.seek_waveform(ui.ctx(), d, at);
             }
         }
         if self.rack.overlay_waveforms {
             let height = wave_height * 2.;
             let (rect, response) = ui.allocate_exact_size(
                 egui::vec2(ui.available_width(), height),
-                egui::Sense::click(),
+                egui::Sense::click_and_drag(),
             );
-            let response = response.on_hover_text(
-                "Click to mix into a section on live B; Shift-click for live A. Paused decks prepare the section.",
+            let response = response.on_hover_cursor(egui::CursorIcon::Grab).on_hover_text(
+                "Click: seek live B; Shift-click: live A. Drag: scrub that deck. Alt-click: timed section jump.",
             );
+            let drag_id = response.id.with("scrub-deck");
+            if response.drag_started() {
+                let d = self.rack.live[usize::from(!ui.input(|i| i.modifiers.shift))];
+                ui.ctx().data_mut(|data| data.insert_temp(drag_id, d));
+            }
+            if let Some(delta) = crate::waveform::pointer_drag(ui, &response, self.wave_span) {
+                let d = ui
+                    .ctx()
+                    .data(|data| data.get_temp::<usize>(drag_id))
+                    .unwrap_or(self.rack.live[1]);
+                self.scrub_waveform(ui.ctx(), d, delta, false);
+            }
             if let Some(delta) = crate::waveform::wheel_seek(ui, &response) {
                 let d = self.rack.live[usize::from(!ui.input(|i| i.modifiers.shift))];
                 self.seek_deck_relative(d, delta);
@@ -339,7 +354,7 @@ impl Player {
                 let delta = ((pointer.x - rect.left()) / rect.width()) as f64 * self.wave_span
                     - self.wave_span * 0.3;
                 let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
-                self.mix_to_waveform_section(ui.ctx(), d, position + delta);
+                self.seek_waveform(ui.ctx(), d, position + delta);
             }
             for side in 0..2 {
                 let d = self.rack.live[side];

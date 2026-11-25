@@ -3244,9 +3244,49 @@ impl Player {
             ui.ctx().request_repaint_after(Duration::from_millis(8));
         }
     }
+    fn seek_waveform(&mut self, ctx: &egui::Context, deck: usize, at: f64) {
+        if ctx.input(|i| i.modifiers.alt) {
+            self.mix_to_waveform_section(ctx, deck, at);
+        } else if let Some(audio) = &self.audio {
+            self.seek_deck_relative(deck, at - audio.source_position(deck));
+        }
+    }
+    fn scrub_waveform(&mut self, ctx: &egui::Context, deck: usize, delta: f64, player: bool) {
+        if deck >= 6 || !delta.is_finite() {
+            return;
+        }
+        if self.jog_resume[deck].is_none() {
+            self.begin_jog_as(
+                deck,
+                0.,
+                ctx.viewport_id(),
+                if player {
+                    playback_owner::Owner::Player
+                } else {
+                    playback_owner::Owner::Dj
+                },
+            );
+        }
+        if self.jog_resume[deck].is_some() {
+            self.jog_target[deck] = (self.jog_target[deck] + delta).max(0.);
+            if let Some(audio) = &self.audio {
+                audio.vinyl_target(deck, self.jog_target[deck]);
+            }
+            ctx.request_repaint_after(Duration::from_millis(8));
+        }
+    }
     fn begin_jog(&mut self, deck: usize, angle: f32, viewport: egui::ViewportId) {
+        self.begin_jog_as(deck, angle, viewport, playback_owner::Owner::Dj);
+    }
+    fn begin_jog_as(
+        &mut self,
+        deck: usize,
+        angle: f32,
+        viewport: egui::ViewportId,
+        owner: playback_owner::Owner,
+    ) {
         if deck < 6 && self.audio.as_ref().is_some_and(|a| a.loaded(deck)) {
-            self.claim_playback(playback_owner::Owner::Dj, deck, false);
+            self.claim_playback(owner, deck, false);
         }
         let Some(audio) = &self.audio else {
             return;
@@ -3254,7 +3294,8 @@ impl Player {
         if deck >= 6 || !audio.loaded(deck) {
             return;
         }
-        let paired = audio.controls.pair_indices().contains(&deck);
+        let paired =
+            owner == playback_owner::Owner::Dj && audio.controls.pair_indices().contains(&deck);
         self.jog_auto[deck] = paired && self.run.auto;
         self.jog_resume[deck] = Some((audio.playing(deck), viewport));
         self.jog_angle[deck] = angle;

@@ -93,6 +93,9 @@ impl Player {
                     "Publisher audio stream. Download this episode for local offline playback.",
                 );
             } else {
+                self.waveforms[0].ignore_seek = false;
+                self.waveforms[0].overlay = false;
+                self.waveforms[0].overview = false;
                 self.waveforms[0].height = Some(if ui.available_height() < 220. {
                     56.
                 } else {
@@ -106,6 +109,15 @@ impl Player {
                     self.wave_span,
                     0,
                 );
+                if let Some(at) = self.waveforms[0].seek.take() {
+                    self.seek_waveform(ui.ctx(), 0, at);
+                }
+                if let Some(delta) = self.waveforms[0].scrub.take() {
+                    self.seek_deck_relative(0, delta);
+                }
+                if let Some(delta) = self.waveforms[0].drag.take() {
+                    self.scrub_waveform(ui.ctx(), 0, delta, true);
+                }
             }
         });
         ui.add_space(card_gap);
