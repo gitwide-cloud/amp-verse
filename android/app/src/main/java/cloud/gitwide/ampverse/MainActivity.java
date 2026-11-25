@@ -28,6 +28,8 @@ import java.util.concurrent.Executors;
 @androidx.annotation.OptIn(markerClass = androidx.media3.common.util.UnstableApi.class)
 public final class MainActivity extends Activity {
     private MediaController player;
+    private Intent pendingExternalAudio;
+    private boolean openingExternalAudio;
     private CastPanel castPanel;
     private DjPanel djPanel;
     private RemotePanel remotePanel;
@@ -61,7 +63,7 @@ public final class MainActivity extends Activity {
     private final Runnable tick = new Runnable() { public void run() { refresh(); handler.postDelayed(this, 500); } };
     @Override public void onCreate(Bundle state) {
         super.onCreate(state);
-        if(TvActivity.television(this)&&!getIntent().getBooleanExtra("phone-ui",false)){startActivity(new Intent(this,TvActivity.class).putExtra("module",getIntent().getStringExtra("module")));finish();return;}
+        if(!ExternalAudio.accepts(getIntent())&&TvActivity.television(this)&&!getIntent().getBooleanExtra("phone-ui",false)){startActivity(new Intent(this,TvActivity.class).putExtra("module",getIntent().getStringExtra("module")));finish();return;}
         try{CatalogStore.migrate(this);}catch(Exception error){message=error.getMessage();}
         prefs = getSharedPreferences("settings", MODE_PRIVATE);
         if (state != null) { module=state.getString("module","AMP Player"); library=module.equals("AMP Library");libraryTab=state.getString("libraryTab","Songs");effectSide=state.getInt("effectSide",0);effectPad=state.getInt("effectPad",0); }
@@ -69,10 +71,12 @@ public final class MainActivity extends Activity {
         if(module.equals("AMP Cast")||module.equals("AMP Remote"))deviceMode=module;
         if(state!=null){Bundle positions=state.getBundle("scroll-positions");if(positions!=null)for(String key:positions.keySet())scrollPositions.put(key,positions.getInt(key));}
         boolean openLab=module.equals("AMP Lab")&&Modules.embedded("lab");if(openLab)module="AMP Player";
+        if(state==null)pendingExternalAudio=ExternalAudio.accepts(getIntent())?getIntent():null;
+        else pendingExternalAudio=state.getParcelable("external-audio");
         draw();if(openLab)handler.post(()->selectModule("AMP Lab"));
     }
-    @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);if(intent.hasExtra("module"))selectModule(intent.getStringExtra("module"));}
-    @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state);saveScroll();Bundle positions=new Bundle();for(Map.Entry<String,Integer> value:scrollPositions.entrySet())positions.putInt(value.getKey(),value.getValue());state.putBundle("scroll-positions",positions); state.putString("module", module);state.putString("libraryTab",libraryTab);state.putInt("effectSide",effectSide);state.putInt("effectPad",effectPad); }
+    @Override protected void onNewIntent(Intent intent){super.onNewIntent(intent);setIntent(intent);if(ExternalAudio.accepts(intent)){pendingExternalAudio=intent;playExternalAudio();}else if(intent.hasExtra("module"))selectModule(intent.getStringExtra("module"));}
+    @Override protected void onSaveInstanceState(Bundle state) { super.onSaveInstanceState(state);if(pendingExternalAudio!=null)state.putParcelable("external-audio",pendingExternalAudio);saveScroll();Bundle positions=new Bundle();for(Map.Entry<String,Integer> value:scrollPositions.entrySet())positions.putInt(value.getKey(),value.getValue());state.putBundle("scroll-positions",positions); state.putString("module", module);state.putString("libraryTab",libraryTab);state.putInt("effectSide",effectSide);state.putInt("effectPad",effectPad); }
     @Override public void onStart() {
         super.onStart();
         connection = new MediaController.Builder(this, new SessionToken(this, new ComponentName(this, PlaybackService.class))).buildAsync();
@@ -82,6 +86,7 @@ public final class MainActivity extends Activity {
             try {
                 player = pending.get();
                 syncSavedLibrary();
+                playExternalAudio();
                 player.addListener(new Player.Listener() {
                     @Override public void onPlayerError(PlaybackException error) { message = isRadio()?"Phone station playback failed. Check the host stream and tap Listen to retry.":"Cannot play this file: " + error.getErrorCodeName(); if(castPanel!=null&&isRadio())castPanel.phoneFeedback(message);refresh(); }
                     @Override public void onMediaItemTransition(MediaItem item, int reason) { refresh(); }
@@ -322,6 +327,40 @@ public final class MainActivity extends Activity {
         CheckBox enabled=new CheckBox(this);enabled.setText("Equalizer enabled");enabled.setChecked(prefs.getBoolean("eq-enabled",false));enabled.setOnCheckedChangeListener((v,value)->prefs.edit().putBoolean("eq-enabled",value).apply());content.addView(enabled);
         for(int i=0;i<AudioDsp.FREQUENCIES.length;i++){final int band=i;TextView name=new TextView(this);name.setText(AudioDsp.FREQUENCIES[i]+" Hz  /  "+prefs.getInt("eq-band-"+i,0)+" dB");content.addView(name);SeekBar gain=new SeekBar(this);gain.setMax(24);gain.setProgress(prefs.getInt("eq-band-"+i,0)+12);gain.setContentDescription(AudioDsp.FREQUENCIES[i]+" Hz gain");gain.setOnSeekBarChangeListener(new SeekBar.OnSeekBarChangeListener(){public void onProgressChanged(SeekBar b,int value,boolean user){if(user){prefs.edit().putInt("eq-band-"+band,value-12).apply();name.setText(AudioDsp.FREQUENCIES[band]+" Hz  /  "+(value-12)+" dB");}}public void onStartTrackingTouch(SeekBar b){}public void onStopTrackingTouch(SeekBar b){}});content.addView(gain);}
         new android.app.AlertDialog.Builder(this).setTitle("AMP Equalizer · 5 bands").setView(scroll).setNegativeButton("Flat / reset",(d,w)->{android.content.SharedPreferences.Editor edit=prefs.edit();for(int i=0;i<5;i++)edit.putInt("eq-band-"+i,0);edit.apply();}).setPositiveButton("Done",null).show();
+    }
+    /** Open-with is playback, not a library import or a persistent copy. */
+    private void playExternalAudio() {
+        if(player==null||pendingExternalAudio==null||openingExternalAudio)return;
+        Intent request=pendingExternalAudio;
+        openingExternalAudio=true;
+        java.util.concurrent.ExecutorService worker=Executors.newSingleThreadExecutor();
+        worker.execute(()->{
+            MediaItem item=null;String problem="";
+            try{item=ExternalAudio.prepare(this,request);}catch(Exception error){problem="Cannot open this audio file. Choose it again from Files or import it in Library.";}
+            final MediaItem ready=item;final String failure=problem;
+            runOnUiThread(()->{
+                openingExternalAudio=false;
+                if(isFinishing()||isDestroyed())return;
+                if(pendingExternalAudio!=request){playExternalAudio();return;}
+                if(player==null)return; // Reconnect before consuming the pending request.
+                pendingExternalAudio=null;
+                if(ready==null){message=failure;draw();return;}
+                try{
+                    // Extend a temporary content grant to the playback service, so closing
+                    // the activity does not revoke access while background audio is playing.
+                    if("content".equals(request.getData().getScheme())){
+                        Intent grant=new Intent(this,PlaybackService.class).setAction(ExternalAudio.GRANT_ACTION)
+                            .setData(request.getData()).addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                        grant.setClipData(android.content.ClipData.newRawUri("Audio",request.getData()));
+                        startService(grant);
+                    }
+                    PlaybackService.switchToPlayer();
+                    player.setMediaItem(ready);player.prepare();player.play();
+                    module="AMP Player";library=false;message="Opened audio file. Your saved library is unchanged.";draw();
+                }catch(RuntimeException error){message="Cannot open this audio file. Choose it again from Files.";draw();}
+            });
+            worker.shutdown();
+        });
     }
     private void importSongs() {
         if (importing) return;
