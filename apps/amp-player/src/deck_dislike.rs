@@ -10,8 +10,11 @@ impl Player {
             return Some(loaded);
         }
         let indexed = self.library.as_ref()?.tracks.get(self.loaded[deck]?)?;
-        let relative = amp_core::relative_folder(&origin.join(&loaded.path), &self.root)?;
-        (indexed.path == relative).then_some(indexed)
+        let actual = crate::playlist_sync::root_key(&origin.join(&loaded.path));
+        let expected = crate::playlist_sync::root_key(&amp_core::music_sources::audio_path(
+            &self.root, &indexed.path,
+        ));
+        (actual == expected).then_some(indexed)
     }
     pub(super) fn can_dislike_deck(&self, deck: usize) -> bool {
         deck < 6
