@@ -878,7 +878,7 @@ impl Player {
                                     if ui.small_button("Stem settings").clicked() {
                                         self.card_open_tools(ui.ctx(), d, 1);
                                     }
-                                    if ui.add_enabled(self.can_dislike_deck(d), egui::Button::new("Dislike")).on_hover_text("Remove the current song from its active playlist, keep the music file, and mix next immediately. Available on the current deck with a loaded playlist.").clicked() {
+                                    if ui.add_enabled(self.can_dislike_deck(d), egui::Button::new("Dislike")).on_hover_text("Remove this deck’s song from the playback playlist, keep the music file, and mix next immediately. Load a playback playlist first.").clicked() {
                                         self.dislike_deck(d);
                                     }
                                 if stems {

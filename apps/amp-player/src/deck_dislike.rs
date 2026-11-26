@@ -3,7 +3,7 @@ use amp_core::Playlist;
 impl Player {
     pub(super) fn can_dislike_deck(&self, deck: usize) -> bool {
         deck < 6
-            && deck == self.active_deck()
+            && self.pair().contains(&deck)
             && self.loaded_track(deck).is_some()
             && self.loaded_origin[deck].as_deref() == Some(self.root.as_path())
             && (self.run.profile.is_some()
@@ -12,7 +12,7 @@ impl Player {
     fn remove_deck_song_from_playlist(&mut self, deck: usize) -> Result<String, String> {
         if !self.can_dislike_deck(deck) {
             return Err(
-                "Dislike needs the current deck and its loaded playlist. Load a playlist first."
+                "Dislike needs a loaded deck and its playback playlist. Load a playlist first."
                     .into(),
             );
         }
@@ -111,7 +111,8 @@ impl Player {
                     })
             })
             .map(|(d, _)| d)
-            .or(self.run.transition.filter(|incoming| *incoming == deck));
+            .or(self.run.transition.filter(|incoming| *incoming == deck))
+            .or_else(|| (!fading && deck != self.active_deck()).then_some(deck));
         let automatic = self.run.auto;
         if !fading || bad_incoming.is_some() {
             if let Some(incoming) = bad_incoming
@@ -230,7 +231,24 @@ mod dislike_tests {
         assert!(paths.iter().all(|p| dir.path().join(p).is_file()));
     }
     #[test]
-    fn dislike_without_a_playback_playlist_or_on_another_deck_changes_nothing() {
+    fn dislike_can_reject_a_loaded_incoming_deck_without_rejecting_the_current_song() {
+        let (dir, mut player) = fixture();
+        let initial = show::Settings::default();
+        initial.save(dir.path()).unwrap();
+        player.run.settings = show::Settings::load(dir.path()).unwrap();
+        player.run.profile = Some(player.run.settings.playlists[0].clone());
+        player.loaded[1] = Some(1);
+        player.loaded_snapshot[1] = Some(player.library.as_ref().unwrap().tracks[1].clone());
+        player.loaded_origin[1] = Some(dir.path().into());
+        let incoming = show::song_id(player.loaded_track(1).unwrap());
+        let current = show::song_id(player.loaded_track(0).unwrap());
+        player.remove_deck_song_from_playlist(1).unwrap();
+        let saved = show::Settings::load(dir.path()).unwrap();
+        assert!(saved.playlists[0].excluded.contains(&incoming));
+        assert!(!saved.playlists[0].excluded.contains(&current));
+    }
+    #[test]
+    fn dislike_without_a_playback_playlist_or_on_an_empty_deck_changes_nothing() {
         let (_dir, mut player) = fixture();
         player.queue = vec![0, 1];
         assert!(player.remove_deck_song_from_playlist(0).is_err());
