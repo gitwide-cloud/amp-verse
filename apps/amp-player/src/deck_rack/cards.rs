@@ -158,17 +158,39 @@ impl Player {
             .get(&egui::TextStyle::Button)
             .map_or(14., |font| font.size)
             * 4.;
+        // Draw only the visible cross: a font's em box reserves large blank ascenders.
+        let icon_size = (glyph_size * 0.42).max(16.);
         let response = ui
-            .add_enabled(
-                loaded,
-                egui::Button::new(
-                    egui::RichText::new("×")
-                        .size(glyph_size)
-                        .strong()
-                        .color(egui::Color32::from_rgb(255, 60, 70)),
-                )
-                .min_size(egui::vec2(glyph_size + 8., glyph_size + 8.)),
-            )
+            .add_enabled_ui(loaded, |ui| {
+                let (rect, response) = ui.allocate_exact_size(
+                    egui::vec2(icon_size + 6., icon_size + 6.),
+                    egui::Sense::click(),
+                );
+                let visuals = ui.style().interact(&response);
+                ui.painter().rect(
+                    rect,
+                    visuals.corner_radius,
+                    visuals.weak_bg_fill,
+                    if response.has_focus() {
+                        ui.visuals().selection.stroke
+                    } else {
+                        visuals.bg_stroke
+                    },
+                    egui::StrokeKind::Inside,
+                );
+                let red = egui::Color32::from_rgb(255, 60, 70);
+                let stroke =
+                    egui::Stroke::new(3.5, if loaded { red } else { red.gamma_multiply(0.4) });
+                let offset = egui::vec2(icon_size * 0.5, icon_size * 0.5);
+                ui.painter()
+                    .line_segment([rect.center() - offset, rect.center() + offset], stroke);
+                let other = egui::vec2(offset.x, -offset.y);
+                ui.painter()
+                    .line_segment([rect.center() - other, rect.center() + other], stroke);
+                response
+            })
+            .inner
+            .on_hover_cursor(egui::CursorIcon::PointingHand)
             .on_hover_text(format!(
                 "Clear {} · stop and unload this track",
                 NAMES[deck]
