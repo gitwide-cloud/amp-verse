@@ -87,6 +87,7 @@ mod transcription;
 use dj_engine::stems;
 mod theme;
 mod track_columns;
+mod track_sort;
 mod transition_controls;
 mod transition_styles;
 #[allow(dead_code)] // Shared implementation also used by the standalone installer binary.

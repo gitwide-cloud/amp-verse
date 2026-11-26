@@ -37,3 +37,7 @@ Find Similar produces up to twenty review-only candidates using prepared mixing 
 ## Deck Dislike
 
 Dislike sits next to Stem settings, including when the EQ tab is selected. It targets the current deck and the playback playlist, never a list merely being browsed. Smart Playlists save an exclusion; normal playlists remove every occurrence of that song path while keeping other songs in order. Music files stay in place. Saving must succeed before playback changes. A successful click starts Mix Next immediately; if there is no playable replacement, the rejected deck stops. A valid incoming transition already in progress finishes without restarting. The deck clear X uses a red glyph at four times its normal button font size.
+
+### Sort track lists
+
+Click a column heading to sort the displayed songs ascending; click it again to reverse. The arrow marks the active column and direction. Text is compared without case, BPM and duration sort numerically, and missing values stay last. The # heading returns to the original list order. Sorting preserves checked songs, the selected track, saved playlist order and playback. It is available in playlist details, the queue, library search and the DJ browser; DJ column-edge dragging still resizes columns.

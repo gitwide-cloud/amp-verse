@@ -275,19 +275,34 @@ pub(super) fn collection(
     response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, ui.is_enabled(), name));
     response
 }
-pub(super) fn track_header(ui: &mut egui::Ui) {
+pub(super) fn track_header(ui: &mut egui::Ui, table: &str) {
     let p = theme::current(ui.ctx()).palette();
     let (rect, _) =
         ui.allocate_exact_size(egui::vec2(ui.available_width(), 34.), egui::Sense::hover());
     ui.painter().rect_filled(rect, 6., p.background);
+    let names = ["#", "Title", "Artist", "BPM", "Key", "Length", "Analysis"];
+    let keys = ["#", "title", "artist", "bpm", "key", "length", "analysis"];
+    let labels: [String; 7] =
+        std::array::from_fn(|i| crate::track_sort::label(ui.ctx(), table, keys[i], names[i]));
     columns(
         ui,
         rect,
-        ["#", "Title", "Artist", "BPM", "Key", "Length", "Analysis"],
+        std::array::from_fn(|i| labels[i].as_str()),
         p.muted,
     );
+    let mut x = rect.left() + 6.;
+    for ((key, name), width) in keys.into_iter().zip(names).zip(column_widths(rect)) {
+        if width > 0. {
+            let cell = egui::Rect::from_min_size(
+                egui::pos2(x, rect.top()),
+                egui::vec2(width, rect.height()),
+            );
+            crate::track_sort::header(ui, table, key, name, cell);
+        }
+        x += width;
+    }
 }
-fn columns(ui: &egui::Ui, rect: egui::Rect, values: [&str; 7], color: egui::Color32) {
+fn column_widths(rect: egui::Rect) -> [f32; 7] {
     let wide = rect.width() >= 590.;
     let artist = if wide { rect.width() * 0.20 } else { 0. };
     let small = if wide {
@@ -296,9 +311,12 @@ fn columns(ui: &egui::Ui, rect: egui::Rect, values: [&str; 7], color: egui::Colo
         [30., 52., 40., 58., 0.]
     };
     let title = (rect.width() - small.iter().sum::<f32>() - artist - 20.).max(65.);
-    let widths = [
+    [
         small[0], title, artist, small[1], small[2], small[3], small[4],
-    ];
+    ]
+}
+fn columns(ui: &egui::Ui, rect: egui::Rect, values: [&str; 7], color: egui::Color32) {
+    let widths = column_widths(rect);
     let mut x = rect.left() + 6.;
     for (value, width) in values.into_iter().zip(widths) {
         if width > 0. {
