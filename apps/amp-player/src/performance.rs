@@ -109,6 +109,7 @@ pub struct Run {
     pub preloaded: Option<(usize, usize)>,
     pub(super) pending: Option<(usize, Instant)>,
     pub(super) pending_at: Option<f64>,
+    feedback_handoff: Option<Instant>,
     transition: Option<usize>,
     recent: VecDeque<String>,
     ducked: Option<f32>,
@@ -149,6 +150,7 @@ impl Default for Run {
             preloaded: None,
             pending: None,
             pending_at: None,
+            feedback_handoff: None,
             transition: None,
             recent: VecDeque::new(),
             ducked: None,
@@ -317,6 +319,7 @@ impl Run {
         self.auto = false;
         self.pending = None;
         self.pending_at = None;
+        self.feedback_handoff = None;
         self.transition = None;
         self.preloaded = None;
         if let Some(regular) = &mut self.regular
@@ -2328,6 +2331,7 @@ impl Player {
         }
         self.run.active = self.active_deck();
         if let Some((incoming, started)) = self.run.pending {
+            let feedback_skip = self.run.feedback_handoff == Some(started);
             let ready = self.audio.as_ref().is_some_and(|a| {
                 a.load_current(incoming)
                     && a.loaded(incoming)
@@ -2349,7 +2353,9 @@ impl Player {
                 if self.run.auto {
                     self.match_auto_pair(outgoing, incoming);
                 }
-                let chosen = if self.run.force_mashup {
+                let chosen = if feedback_skip {
+                    None
+                } else if self.run.force_mashup {
                     Some(crate::transition_styles::Style::Mashup)
                 } else if self.run.auto && self.run.effect_done != Some(started) {
                     self.loaded_track(outgoing)
@@ -2423,7 +2429,8 @@ impl Player {
                     } else {
                         None
                     };
-                let bridge_needed = !self.run.auto
+                let bridge_needed = !feedback_skip
+                    && !self.run.auto
                     && self.run.scratch_assist
                     && !(chosen.is_none()
                         && self
@@ -2637,7 +2644,10 @@ impl Player {
                     if dual_vocals {
                         a.set_handoff_mode(3);
                     }
-                    let result = if let Some((build_grid, _)) = build_plan {
+                    let result = if feedback_skip {
+                        a.set_handoff_mode(0);
+                        a.crossfade(self.fade_seconds)
+                    } else if let Some((build_grid, _)) = build_plan {
                         self.status =
                             "16-beat buildup handoff: incoming track owns the drop".into();
                         a.scheduled_crossfade(seconds, build_grid)
@@ -2746,6 +2756,7 @@ impl Player {
                 }
                 self.run.pending = None;
                 self.run.pending_at = None;
+                self.run.feedback_handoff = None;
             }
         }
         if let Some(incoming) = self.run.transition
@@ -3491,6 +3502,17 @@ mod tests {
             std::fs::copy(&fixture, root.path().join(format!("source-{i}/song.wav"))).unwrap();
         }
         let mut player = normal_test_player(root.path());
+        for track in &mut player.library.as_mut().unwrap().tracks {
+            track.preparation.bpm = Some(120.);
+            track.preparation.harmonic_key = Some("8A".into());
+            track.preparation.analysis = Some(amp_core::preparation::AnalysisInfo {
+                engine: "dislike-fixture".into(),
+                duration: 12.,
+                tempo_confidence: 1.,
+                key_confidence: 1.,
+                reviewed: false,
+            });
+        }
         player.channel_gain = [0.; 6];
         player.fade_seconds = 0.5;
         player.run.transitions.enabled = false;

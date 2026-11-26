@@ -141,7 +141,10 @@ impl Player {
             reservation.queue = self.queue.clone();
         }
         match self.execute_control(Action::MixNext { immediate: true }) {
-            Ok(()) => self.status = format!("{message} · mixing next now"),
+            Ok(()) => {
+                self.run.feedback_handoff = self.run.pending.map(|(_, started)| started);
+                self.status = format!("{message} · mixing next now");
+            }
             Err(error) => {
                 self.stop(deck);
                 self.status = format!("{message} · no next song could start: {error}");
