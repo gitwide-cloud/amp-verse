@@ -1486,6 +1486,9 @@ impl Player {
         }
     }
     fn folder_tree(ui: &mut egui::Ui, folder: &Folder, path: &Path, selected: &mut PathBuf) {
+        if !folder.has_tracks() {
+            return;
+        }
         let mut label = egui::text::LayoutJob::simple_singleline(
             amp_core::music_sources::display_name(&folder.name).to_owned(),
             egui::TextStyle::Body.resolve(ui.style()),

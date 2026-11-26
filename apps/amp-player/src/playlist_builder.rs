@@ -113,6 +113,9 @@ impl Player {
         selected: &mut PathBuf,
         query: &str,
     ) {
+        if !folder.has_tracks() {
+            return;
+        }
         if query.is_empty() {
             Self::folder_tree(ui, folder, path, selected);
             return;

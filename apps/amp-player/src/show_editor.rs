@@ -828,6 +828,10 @@ fn source_folder_tree(
     selected: Option<&std::path::PathBuf>,
     choice: &mut Option<std::path::PathBuf>,
 ) {
+    if !folder.has_tracks() {
+        return;
+    }
+
     let label = format!(
         "{} · {} songs",
         amp_core::music_sources::display_name(&folder.name),
