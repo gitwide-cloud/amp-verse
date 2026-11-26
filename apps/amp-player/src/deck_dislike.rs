@@ -289,6 +289,20 @@ mod dislike_tests {
         player.loaded_origin[0] = Some(dir.path().join("Other/Album"));
         assert!(!player.can_dislike_deck(0));
     }
+    #[cfg(windows)]
+    #[test]
+    fn recovered_verbatim_unc_path_matches_the_library_without_nas_access() {
+        let (_dir, mut player) = fixture();
+        let filename = player.loaded_track(0).unwrap().path.clone();
+        player.library.as_mut().unwrap().tracks[0].path =
+            std::path::PathBuf::from("Artist/Album").join(filename);
+        player.root = std::path::PathBuf::from(r"\\LAGnas\Public\plex\music");
+        player.loaded_origin[0] = Some(std::path::PathBuf::from(
+            r"\\?\UNC\LAGnas\Public\plex\music\Artist\Album",
+        ));
+        player.run.profile = Some(show::Settings::default().playlists[0].clone());
+        assert!(player.can_dislike_deck(0));
+    }
     #[test]
     fn repeated_dislike_does_not_restart_the_pending_handoff() {
         let (dir, mut player) = fixture();
