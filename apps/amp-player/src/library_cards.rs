@@ -216,7 +216,7 @@ pub(super) fn artwork(
         );
     }
 }
-pub(super) fn collection(
+pub(crate) fn collection(
     ui: &mut egui::Ui,
     root: &Path,
     track: Option<&amp_core::Track>,

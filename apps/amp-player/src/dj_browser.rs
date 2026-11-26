@@ -408,6 +408,7 @@ impl Player {
         let mut load_smart = false;
         let mut matching_smart = false;
         let mut edit_smart = false;
+        let mut new_playlist = false;
         let mut context_edit = None;
         ui.horizontal_top(|ui| {
             ui.allocate_ui_with_layout(
@@ -416,6 +417,16 @@ impl Player {
                 |ui| {
                     ui.set_width(sidebar_width);
                     ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Truncate);
+                    ui.strong("My Playlists & Sources");
+                    new_playlist = ui
+                        .add_sized([sidebar_width, 34.], egui::Button::new("+ New Playlist"))
+                        .on_hover_text("Create a playlist in Library")
+                        .clicked();
+                    ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("dj-source-sidebar")
+                        .max_height((height - 110.).max(0.))
+                        .show(ui, |ui| {
                     ui.selectable_value(
                         &mut self.dj_browser.source,
                         Source::Smart,
@@ -428,21 +439,25 @@ impl Player {
                     );
                     ui.selectable_value(&mut self.dj_browser.source, Source::Folders, "Folders");
                     ui.separator();
-                    egui::ScrollArea::vertical()
-                        .id_salt("dj-source-sidebar")
-                        .max_height((height - 160.).max(70.))
-                        .show(ui, |ui| match self.dj_browser.source {
+                            match self.dj_browser.source {
                             Source::Smart => {
                                 for profile in settings_snapshot
                                     .as_ref()
                                     .map(|settings| settings.playlists.as_slice())
                                     .unwrap_or(&[])
                                 {
-                                    let row = ui.selectable_value(
-                                        &mut self.dj_browser.smart,
-                                        profile.id.clone(),
+                                    let row = organized_library::cards::collection(
+                                        ui,
+                                        &snapshot_root,
+                                        None,
                                         smart_playlist_name(profile, &self.run.settings),
+                                        &format!("{} · smart rules", show_editor::source_summary(profile)),
+                                        self.dj_browser.smart == profile.id,
+                                        sidebar_width,
                                     );
+                                    if row.clicked() {
+                                        self.dj_browser.smart = profile.id.clone();
+                                    }
                                     if let Some(action) = show_editor::playlist_menu(&row) {
                                         context_edit = Some((profile.id.clone(), action));
                                     }
@@ -450,21 +465,28 @@ impl Player {
                             }
                             Source::Playlists => {
                                 if ui
-                                    .selectable_label(
-                                        self.dj_browser.playlist.is_none(),
-                                        "Current playlist / queue",
-                                    )
+                                    .add(egui::Button::new("Current playlist / queue")
+                                        .selected(self.dj_browser.playlist.is_none())
+                                        .min_size(egui::vec2(sidebar_width, 34.)))
                                     .clicked()
                                 {
                                     self.dj_browser.playlist = None;
                                 }
                                 for (i, (_, list)) in self.dj_browser.playlists.iter().enumerate() {
-                                    if ui
-                                        .selectable_label(
-                                            self.dj_browser.playlist == Some(i),
-                                            &list.name,
-                                        )
-                                        .clicked()
+                                    let track = library_snapshot.as_ref().and_then(|lib| {
+                                        list.tracks.iter().find_map(|path| {
+                                            self.dj_browser.path_index.get(path).and_then(|&index| lib.tracks.get(index))
+                                        })
+                                    });
+                                    if organized_library::cards::collection(
+                                        ui,
+                                        &snapshot_root,
+                                        track,
+                                        &list.name,
+                                        &format!("{} tracks", list.tracks.len()),
+                                        self.dj_browser.playlist == Some(i),
+                                        sidebar_width,
+                                    ).clicked()
                                     {
                                         self.dj_browser.playlist = Some(i);
                                     }
@@ -489,6 +511,7 @@ impl Player {
                                         &mut self.dj_browser.folder,
                                     );
                                 }
+                            }
                             }
                         });
                 },
@@ -969,6 +992,18 @@ impl Player {
                     }
                 }
                 Err(e) => self.status = e.to_string(),
+            }
+        }
+        if new_playlist {
+            self.workspace.pane = 1;
+            self.library_open = true;
+            if self.dj_browser.source == Source::Smart {
+                self.library_page = 1;
+                self.show_editor
+                    .new_playlist(&self.root, &self.run.settings);
+            } else {
+                self.library_page = 2;
+                self.new_playlist_name = Some(String::new());
             }
         }
         if edit_smart && self.dj_browser.source != Source::Smart {
