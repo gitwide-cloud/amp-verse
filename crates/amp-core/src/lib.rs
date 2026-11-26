@@ -106,6 +106,13 @@ pub struct Folder {
     pub folders: Vec<Folder>,
     pub tracks: Vec<usize>,
 }
+impl Folder {
+    /// A branch is browsable when it contains indexed audio, directly or below it.
+    /// This also works with cached trees that retain empty filesystem directories.
+    pub fn has_tracks(&self) -> bool {
+        !self.tracks.is_empty() || self.folders.iter().any(Self::has_tracks)
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Library {
     pub tracks: Vec<Track>,
@@ -583,5 +590,44 @@ mod tests {
         symlink(root.path(), root.path().join("cycle")).unwrap();
         assert!(scan(root.path()).unwrap().tracks.is_empty());
         assert!(resolve(root.path(), Path::new("link.mp3")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod folder_visibility_tests {
+    #[test]
+    fn audio_branches_remain_visible_without_removing_empty_or_artwork_folders() {
+        let root = tempfile::tempdir().unwrap();
+        for folder in ["Empty", "Artwork", "Parent/Album", "audios/Empty"] {
+            std::fs::create_dir_all(root.path().join(folder)).unwrap();
+        }
+        std::fs::write(root.path().join("Artwork/cover.jpg"), b"cover").unwrap();
+        std::fs::write(root.path().join("Parent/Album/song.mp3"), b"fixture").unwrap();
+        let library = super::scan(root.path()).unwrap();
+        assert!(library.tree.has_tracks());
+        let visible: Vec<_> = library
+            .tree
+            .folders
+            .iter()
+            .filter(|f| f.has_tracks())
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(visible, ["Parent"]);
+        assert!(
+            library
+                .tree
+                .folders
+                .iter()
+                .find(|f| f.name == "Parent")
+                .unwrap()
+                .folders[0]
+                .has_tracks()
+        );
+        assert!(root.path().join("Empty").is_dir());
+        assert!(root.path().join("audios/Empty").is_dir());
+        assert_eq!(
+            std::fs::read(root.path().join("Artwork/cover.jpg")).unwrap(),
+            b"cover"
+        );
     }
 }
