@@ -906,21 +906,19 @@ impl Player {
                                     self.card_open_tools(ui.ctx(), d, 1);
                                 }
                                 self.card_dislike_button(ui, d);
-                                if stems {
-                                    if let Some(audio) = &self.audio {
-                                        let knobs = std::array::from_fn(|i| {
-                                            f32::from_bits(
-                                                audio.controls.stem_knobs[d][i].load(Relaxed),
-                                            )
-                                        });
-                                        ui.small(if !amp_core::stem_mix::changed(knobs) {
-                                            "Idle"
-                                        } else if audio.controls.stems_loaded[d].load(Relaxed) {
-                                            "Active"
-                                        } else {
-                                            "Preparing…"
-                                        });
-                                    }
+                                if stems && let Some(audio) = &self.audio {
+                                    let knobs = std::array::from_fn(|i| {
+                                        f32::from_bits(
+                                            audio.controls.stem_knobs[d][i].load(Relaxed),
+                                        )
+                                    });
+                                    ui.small(if !amp_core::stem_mix::changed(knobs) {
+                                        "Idle"
+                                    } else if audio.controls.stems_loaded[d].load(Relaxed) {
+                                        "Active"
+                                    } else {
+                                        "Preparing…"
+                                    });
                                 }
                             });
                             ui.ctx().data_mut(|data| data.insert_temp(mode_key, stems));
