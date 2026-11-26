@@ -184,6 +184,7 @@ struct Player {
     selected: Option<usize>,
     folder: PathBuf,
     search: String,
+    library_builder: organized_library::LibraryBuilder,
     audio: Option<mixer::Engine>,
     sampler: sampler::Sampler,
     sample_library: sample_library::Browser,
@@ -299,6 +300,7 @@ impl Default for Player {
             selected: None,
             folder: PathBuf::new(),
             search: String::new(),
+            library_builder: Default::default(),
             audio: None,
             sampler: Default::default(),
             sample_library: Default::default(),
@@ -2366,25 +2368,7 @@ impl Player {
         );
     }
     fn expand_smart_list(&mut self) {
-        if self.queue.len() > 1000 {
-            self.status = "Smart Lists support up to 1,000 songs at a time".into();
-            return;
-        }
-        if let Some(lib) = &self.library {
-            let songs: Vec<_> = lib.tracks.iter().map(|t| &t.preparation).collect();
-            match amp_core::smart::curate(&songs, &self.queue, self.queue.len().saturating_add(20))
-            {
-                Ok(queue) => {
-                    let added = queue.len().saturating_sub(self.queue.len());
-                    self.queue = queue;
-                    self.queue_selected = None;
-                    self.status = format!(
-                        "Smart List added {added} prepared neighbors within ±6% BPM and ±20% energy; review and Save the playlist"
-                    );
-                }
-                Err(e) => self.status = e,
-            }
-        }
+        self.find_suggestions(self.queue.clone(), true);
     }
     fn curate_playlist(&mut self) {
         if self.queue.len() > 1000 {

@@ -142,14 +142,32 @@ impl Player {
             Err(error) => self.status = error,
         }
     }
+    fn card_dislike_button(&mut self, ui: &mut egui::Ui, deck: usize) {
+        if ui.add_enabled(self.can_dislike_deck(deck), egui::Button::new("Dislike"))
+            .on_hover_text("Remove this deck’s song from the playback playlist, keep the music file, and mix next immediately. Load a playback playlist first.").clicked() {
+            self.dislike_deck(deck);
+        }
+    }
     fn card_clear_button(&mut self, ui: &mut egui::Ui, deck: usize) {
         let loaded = self.loaded[deck].is_some()
             || self.loaded_snapshot[deck].is_some()
             || self.pending_load[deck].is_some();
+        let glyph_size = ui
+            .style()
+            .text_styles
+            .get(&egui::TextStyle::Button)
+            .map_or(14., |font| font.size)
+            * 4.;
         let response = ui
             .add_enabled(
                 loaded,
-                egui::Button::new("×").min_size(egui::vec2(24., 26.)),
+                egui::Button::new(
+                    egui::RichText::new("×")
+                        .size(glyph_size)
+                        .strong()
+                        .color(egui::Color32::from_rgb(255, 60, 70)),
+                )
+                .min_size(egui::vec2(glyph_size + 8., glyph_size + 8.)),
             )
             .on_hover_text(format!(
                 "Clear {} · stop and unload this track",
@@ -723,124 +741,145 @@ impl Player {
                                 egui::Layout::top_down(egui::Align::Min),
                                 |ui| {
                                     ui.set_width(info);
-                                    ui.horizontal_wrapped(|ui| {
-                                        ui.label(
-                                            egui::RichText::new(NAMES[d]).size(22.).strong().color(
-                                                spectrum_color(d, self.rack.spectrum_palette),
-                                            ),
-                                        );
-                                        ui.colored_label(
-                                            spectrum_color(d, self.rack.spectrum_palette),
-                                            if d.is_multiple_of(2) {
-                                                "DECK A"
+                                    egui::ScrollArea::vertical()
+                                        .id_salt(("deck-track-info", d))
+                                        .max_height(wheel)
+                                        .auto_shrink([false, false])
+                                        .show(ui, |ui| {
+                                            ui.horizontal_wrapped(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(NAMES[d])
+                                                        .size(22.)
+                                                        .strong()
+                                                        .color(spectrum_color(
+                                                            d,
+                                                            self.rack.spectrum_palette,
+                                                        )),
+                                                );
+                                                ui.colored_label(
+                                                    spectrum_color(d, self.rack.spectrum_palette),
+                                                    if d.is_multiple_of(2) {
+                                                        "DECK A"
+                                                    } else {
+                                                        "DECK B"
+                                                    },
+                                                );
+                                                if info >= 160.
+                                                    && ui
+                                                        .small_button("···")
+                                                        .on_hover_text("Keep deck controls open")
+                                                        .clicked()
+                                                {
+                                                    self.card_open_tools(ui.ctx(), d, 0);
+                                                }
+                                            });
+                                            ui.horizontal(|ui| {
+                                                self.card_clear_button(ui, d);
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(self.title(d))
+                                                            .size(18.)
+                                                            .strong()
+                                                            .color(spectrum_color(
+                                                                d,
+                                                                self.rack.spectrum_palette,
+                                                            )),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            });
+                                            let track = self.loaded_track(d);
+                                            let artist = track
+                                                .and_then(|t| {
+                                                    t.preparation.extensions.get("artist")
+                                                })
+                                                .and_then(|v| v.as_str())
+                                                .unwrap_or("Artist unavailable");
+                                            if width >= 400. {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        egui::RichText::new(artist).size(16.),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            }
+                                            let bpm = track
+                                                .and_then(|t| t.preparation.bpm)
+                                                .map(|b| b * self.deck_rate(d));
+                                            let key = track
+                                                .and_then(|t| t.preparation.harmonic_key.as_deref())
+                                                .unwrap_or("—");
+                                            ui.label(format!(
+                                                "{} BPM   {key}",
+                                                bpm.map_or("—".into(), |b| format!("{b:.1}"))
+                                            ));
+                                            let position = self.audio.as_ref().map_or(0., |a| {
+                                                if self.loaded_track(d).is_some() {
+                                                    a.source_position(d)
+                                                } else {
+                                                    0.
+                                                }
+                                            });
+                                            let duration = self
+                                                .audio
+                                                .as_ref()
+                                                .and_then(|a| a.remaining(d))
+                                                .map(|r| position + r as f64)
+                                                .or_else(|| {
+                                                    track.and_then(|t| {
+                                                        t.preparation
+                                                            .analysis
+                                                            .as_ref()
+                                                            .map(|a| a.duration)
+                                                    })
+                                                });
+                                            let time = |s: f64| {
+                                                format!(
+                                                    "{:02}:{:02}",
+                                                    (s.max(0.) / 60.) as u64,
+                                                    (s.max(0.) as u64) % 60
+                                                )
+                                            };
+                                            let timing = format!(
+                                                "{} / {}",
+                                                time(position),
+                                                duration.map_or("—:—".into(), time)
+                                            );
+                                            if short_controls {
+                                                ui.horizontal_wrapped(|ui| {
+                                                    ui.spacing_mut().item_spacing.x = 4.;
+                                                    ui.small(timing);
+                                                    self.card_tempo_value(ui, d);
+                                                });
                                             } else {
-                                                "DECK B"
-                                            },
-                                        );
-                                        if info >= 160.
-                                            && ui
-                                                .small_button("···")
-                                                .on_hover_text("Keep deck controls open")
-                                                .clicked()
-                                        {
-                                            self.card_open_tools(ui.ctx(), d, 0);
-                                        }
-                                    });
-                                    ui.horizontal(|ui| {
-                                        self.card_clear_button(ui, d);
-                                        ui.add(
-                                            egui::Label::new(
-                                                egui::RichText::new(self.title(d))
-                                                    .size(18.)
-                                                    .strong()
-                                                    .color(spectrum_color(
-                                                        d,
-                                                        self.rack.spectrum_palette,
-                                                    )),
-                                            )
-                                            .truncate(),
-                                        );
-                                    });
-                                    let track = self.loaded_track(d);
-                                    let artist = track
-                                        .and_then(|t| t.preparation.extensions.get("artist"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("Artist unavailable");
-                                    if width >= 400. {
-                                        ui.add(
-                                            egui::Label::new(egui::RichText::new(artist).size(16.))
-                                                .truncate(),
-                                        );
-                                    }
-                                    let bpm = track
-                                        .and_then(|t| t.preparation.bpm)
-                                        .map(|b| b * self.deck_rate(d));
-                                    let key = track
-                                        .and_then(|t| t.preparation.harmonic_key.as_deref())
-                                        .unwrap_or("—");
-                                    ui.label(format!(
-                                        "{} BPM   {key}",
-                                        bpm.map_or("—".into(), |b| format!("{b:.1}"))
-                                    ));
-                                    let position = self.audio.as_ref().map_or(0., |a| {
-                                        if self.loaded_track(d).is_some() {
-                                            a.source_position(d)
-                                        } else {
-                                            0.
-                                        }
-                                    });
-                                    let duration = self
-                                        .audio
-                                        .as_ref()
-                                        .and_then(|a| a.remaining(d))
-                                        .map(|r| position + r as f64)
-                                        .or_else(|| {
-                                            track.and_then(|t| {
-                                                t.preparation.analysis.as_ref().map(|a| a.duration)
-                                            })
+                                                ui.small(timing);
+                                                if compact_card {
+                                                    self.card_tempo(ui, d);
+                                                }
+                                            }
+                                            let mut seek = position as f32;
+                                            ui.spacing_mut().slider_width = info;
+                                            let response = ui.add_enabled(
+                                                duration.is_some(),
+                                                egui::Slider::new(
+                                                    &mut seek,
+                                                    0. ..=duration.unwrap_or(1.).max(0.01) as f32,
+                                                )
+                                                .show_value(false),
+                                            );
+                                            if response.drag_stopped()
+                                                || response.changed() && !response.dragged()
+                                            {
+                                                self.mix_to_waveform_section(
+                                                    ui.ctx(),
+                                                    d,
+                                                    seek as f64,
+                                                );
+                                            }
+                                            if !compact_card {
+                                                self.card_transport(ui, d, info, false);
+                                            }
                                         });
-                                    let time = |s: f64| {
-                                        format!(
-                                            "{:02}:{:02}",
-                                            (s.max(0.) / 60.) as u64,
-                                            (s.max(0.) as u64) % 60
-                                        )
-                                    };
-                                    let timing = format!(
-                                        "{} / {}",
-                                        time(position),
-                                        duration.map_or("—:—".into(), time)
-                                    );
-                                    if short_controls {
-                                        ui.horizontal_wrapped(|ui| {
-                                            ui.spacing_mut().item_spacing.x = 4.;
-                                            ui.small(timing);
-                                            self.card_tempo_value(ui, d);
-                                        });
-                                    } else {
-                                        ui.small(timing);
-                                        if compact_card {
-                                            self.card_tempo(ui, d);
-                                        }
-                                    }
-                                    let mut seek = position as f32;
-                                    ui.spacing_mut().slider_width = info;
-                                    let response = ui.add_enabled(
-                                        duration.is_some(),
-                                        egui::Slider::new(
-                                            &mut seek,
-                                            0. ..=duration.unwrap_or(1.).max(0.01) as f32,
-                                        )
-                                        .show_value(false),
-                                    );
-                                    if response.drag_stopped()
-                                        || response.changed() && !response.dragged()
-                                    {
-                                        self.mix_to_waveform_section(ui.ctx(), d, seek as f64);
-                                    }
-                                    if !compact_card {
-                                        self.card_transport(ui, d, info, false);
-                                    }
                                 },
                             );
                             self.rack_platter(ui, d, wheel);
@@ -863,24 +902,23 @@ impl Player {
                             ui.horizontal_wrapped(|ui| {
                                 ui.selectable_value(&mut stems, false, "EQ");
                                 ui.selectable_value(&mut stems, true, "Stems");
-                                if stems {
-                                    if ui.small_button("Stem settings").clicked() {
-                                        self.card_open_tools(ui.ctx(), d, 1);
-                                    }
-                                    if let Some(audio) = &self.audio {
-                                        let knobs = std::array::from_fn(|i| {
-                                            f32::from_bits(
-                                                audio.controls.stem_knobs[d][i].load(Relaxed),
-                                            )
-                                        });
-                                        ui.small(if !amp_core::stem_mix::changed(knobs) {
-                                            "Idle"
-                                        } else if audio.controls.stems_loaded[d].load(Relaxed) {
-                                            "Active"
-                                        } else {
-                                            "Preparing…"
-                                        });
-                                    }
+                                if ui.small_button("Stem settings").clicked() {
+                                    self.card_open_tools(ui.ctx(), d, 1);
+                                }
+                                self.card_dislike_button(ui, d);
+                                if stems && let Some(audio) = &self.audio {
+                                    let knobs = std::array::from_fn(|i| {
+                                        f32::from_bits(
+                                            audio.controls.stem_knobs[d][i].load(Relaxed),
+                                        )
+                                    });
+                                    ui.small(if !amp_core::stem_mix::changed(knobs) {
+                                        "Idle"
+                                    } else if audio.controls.stems_loaded[d].load(Relaxed) {
+                                        "Active"
+                                    } else {
+                                        "Preparing…"
+                                    });
                                 }
                             });
                             ui.ctx().data_mut(|data| data.insert_temp(mode_key, stems));
@@ -1059,6 +1097,9 @@ impl Player {
                                             (action.rect, ui.layer_id(), ui.clip_rect()),
                                         );
                                     });
+                                    if tab == 1 {
+                                        self.card_dislike_button(ui, d);
+                                    }
                                     if action.clicked() {
                                         self.card_open_tools(ui.ctx(), d, tab);
                                         if tab == 3 {
