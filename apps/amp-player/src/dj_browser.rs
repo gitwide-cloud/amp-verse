@@ -423,6 +423,10 @@ impl Player {
                         .on_hover_text("Create a playlist in Library")
                         .clicked();
                     ui.separator();
+                    egui::ScrollArea::vertical()
+                        .id_salt("dj-source-sidebar")
+                        .max_height((height - 110.).max(0.))
+                        .show(ui, |ui| {
                     ui.selectable_value(
                         &mut self.dj_browser.source,
                         Source::Smart,
@@ -435,10 +439,7 @@ impl Player {
                     );
                     ui.selectable_value(&mut self.dj_browser.source, Source::Folders, "Folders");
                     ui.separator();
-                    egui::ScrollArea::vertical()
-                        .id_salt("dj-source-sidebar")
-                        .max_height((height - 220.).max(50.))
-                        .show(ui, |ui| match self.dj_browser.source {
+                            match self.dj_browser.source {
                             Source::Smart => {
                                 for profile in settings_snapshot
                                     .as_ref()
@@ -510,6 +511,7 @@ impl Player {
                                         &mut self.dj_browser.folder,
                                     );
                                 }
+                            }
                             }
                         });
                 },
