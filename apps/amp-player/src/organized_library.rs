@@ -66,6 +66,24 @@ fn folder_matches(folder: &Folder, path: &Path, query: &str) -> bool {
 }
 include!("playlist_builder.rs");
 impl Player {
+    pub(super) fn apply_disliked_playlist(&mut self, path: &Path, song: &Path, saved: &Playlist) {
+        if self
+            .playlist_preview
+            .snapshot
+            .as_ref()
+            .is_some_and(|(p, _)| p == path)
+        {
+            self.playlist_preview.paths.retain(|p| p != song);
+            if let Some(lib) = &self.library {
+                self.playlist_preview
+                    .queue
+                    .retain(|i| lib.tracks.get(*i).is_some_and(|t| t.path != song));
+            }
+            self.playlist_preview.snapshot = Some((path.to_path_buf(), saved.clone()));
+            self.playlist_preview.selected = None;
+        }
+    }
+
     pub(super) fn library_ui(&mut self, ui: &mut egui::Ui) {
         let blocked = self.live_mix.as_ref().is_some_and(|b| b.running())
             || self.run.auto

@@ -3464,6 +3464,101 @@ mod tests {
         assert!(player.run.preloaded.is_none());
     }
     #[test]
+    #[ignore = "muted native audio and FFmpeg; generated dislike fixtures only"]
+    fn dislike_regular_skips_immediately_and_persists_membership() {
+        let root = tempfile::tempdir().unwrap();
+        let fixture = root.path().join("fixture.wav");
+        assert!(
+            amp_core::command("ffmpeg")
+                .args([
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "anullsrc=r=44100:cl=stereo",
+                    "-t",
+                    "12"
+                ])
+                .arg(&fixture)
+                .status()
+                .unwrap()
+                .success()
+        );
+        for i in 0..3 {
+            std::fs::create_dir(root.path().join(format!("source-{i}"))).unwrap();
+            std::fs::copy(&fixture, root.path().join(format!("source-{i}/song.wav"))).unwrap();
+        }
+        let mut player = normal_test_player(root.path());
+        player.channel_gain = [0.; 6];
+        player.fade_seconds = 0.5;
+        player.run.transitions.enabled = false;
+        let path = root.path().join("dislike.json");
+        let list = amp_core::Playlist {
+            version: 1,
+            name: "Dislike integration".into(),
+            tracks: (0..3)
+                .map(|i| format!("source-{i}/song.wav").into())
+                .collect(),
+            sync: None,
+            companion_available: false,
+        };
+        list.save_in_library(&path, root.path()).unwrap();
+        player.dj_browser.playlists.push((
+            path.clone(),
+            amp_core::Playlist::load(&path, root.path()).unwrap(),
+        ));
+        player
+            .execute_control(Action::LoadPlaylist {
+                playlist: regular_playlist_id(&path),
+            })
+            .unwrap();
+        wait(&mut player, |p| {
+            p.run
+                .preloaded
+                .is_some_and(|(d, _)| p.audio.as_ref().unwrap().controls.ready[d].load(Relaxed))
+        });
+        player
+            .execute_control(Action::AutoDj { enabled: true })
+            .unwrap();
+        wait(&mut player, |p| {
+            p.loaded[p.active_deck()] == Some(0) && p.queue.len() == 2 && p.run.preloaded.is_some()
+        });
+        for expected in [1, 2] {
+            let deck = player.active_deck();
+            player.dislike_deck(deck);
+            assert!(
+                player.run.pending_at.is_none(),
+                "Dislike must not schedule an outro wait"
+            );
+            wait(&mut player, |p| {
+                p.loaded[p.active_deck()] == Some(expected)
+                    && p.run.transition.is_none()
+                    && p.run.pending.is_none()
+            });
+            let saved = amp_core::Playlist::load(&path, root.path()).unwrap();
+            assert!(
+                !saved
+                    .tracks
+                    .contains(&format!("source-{}/song.wav", expected - 1).into())
+            );
+        }
+        let deck = player.active_deck();
+        player.dislike_deck(deck);
+        assert!(
+            amp_core::Playlist::load(&path, root.path())
+                .unwrap()
+                .tracks
+                .is_empty()
+        );
+        assert!(!player.audio.as_ref().unwrap().playing(deck));
+        assert!(!player.run.auto);
+        for i in 0..3 {
+            assert!(root.path().join(format!("source-{i}/song.wav")).is_file());
+        }
+    }
+    #[test]
     #[ignore = "muted native audio and FFmpeg; generated playlist fixtures only"]
     fn regular_playlist_automatic_preload_shuffle_cancel_and_handoff() {
         let root = tempfile::tempdir().unwrap();
@@ -4881,3 +4976,5 @@ mod tests {
         assert!(player.audio.as_ref().unwrap().take_error().is_none());
     }
 }
+
+include!("deck_dislike.rs");

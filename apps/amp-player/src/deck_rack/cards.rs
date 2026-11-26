@@ -146,10 +146,22 @@ impl Player {
         let loaded = self.loaded[deck].is_some()
             || self.loaded_snapshot[deck].is_some()
             || self.pending_load[deck].is_some();
+        let glyph_size = ui
+            .style()
+            .text_styles
+            .get(&egui::TextStyle::Button)
+            .map_or(14., |font| font.size)
+            * 4.;
         let response = ui
             .add_enabled(
                 loaded,
-                egui::Button::new("×").min_size(egui::vec2(24., 26.)),
+                egui::Button::new(
+                    egui::RichText::new("×")
+                        .size(glyph_size)
+                        .strong()
+                        .color(egui::Color32::from_rgb(255, 60, 70)),
+                )
+                .min_size(egui::vec2(glyph_size + 8., glyph_size + 8.)),
             )
             .on_hover_text(format!(
                 "Clear {} · stop and unload this track",
@@ -863,10 +875,13 @@ impl Player {
                             ui.horizontal_wrapped(|ui| {
                                 ui.selectable_value(&mut stems, false, "EQ");
                                 ui.selectable_value(&mut stems, true, "Stems");
-                                if stems {
                                     if ui.small_button("Stem settings").clicked() {
                                         self.card_open_tools(ui.ctx(), d, 1);
                                     }
+                                    if ui.add_enabled(self.can_dislike_deck(d), egui::Button::new("Dislike")).on_hover_text("Remove the current song from its active playlist, keep the music file, and mix next immediately. Available on the current deck with a loaded playlist.").clicked() {
+                                        self.dislike_deck(d);
+                                    }
+                                if stems {
                                     if let Some(audio) = &self.audio {
                                         let knobs = std::array::from_fn(|i| {
                                             f32::from_bits(

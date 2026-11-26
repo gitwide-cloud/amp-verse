@@ -33,3 +33,7 @@ New Playlist creates a blank saved playlist without capturing or replacing the p
 Checkboxes select songs independently of playback. Add checked to queue and Add checked to playlist are explicit destinations; adding a folder includes its descendants. Repeated additions keep existing membership once, preserve order and save through the normal playlist store/sync path. The Library page also offers a saved-playlist destination menu. Originals stay in place.
 
 Find Similar produces up to twenty review-only candidates using prepared mixing neighbors, then artist/genre matches where needed. Preview auditions a short excerpt without adding it; Add is required for membership. Preview is blocked while decks are playing so it cannot interrupt a live mix. Missing sources are reported explicitly and saving is blocked until reconnected; their saved paths are preserved.
+
+## Deck Dislike
+
+Dislike sits next to Stem settings, including when the EQ tab is selected. It targets the current deck and the playback playlist, never a list merely being browsed. Smart Playlists save an exclusion; normal playlists remove every occurrence of that song path while keeping other songs in order. Music files stay in place. Saving must succeed before playback changes. A successful click starts Mix Next immediately; if there is no playable replacement, the rejected deck stops. A valid incoming transition already in progress finishes without restarting. The deck clear X uses a red glyph at four times its normal button font size.
