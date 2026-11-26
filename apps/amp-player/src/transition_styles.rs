@@ -96,7 +96,7 @@ impl Settings {
     }
     pub fn pick(self, completed: u32) -> Option<Style> {
         if !self.enabled
-            || !(2..=12).contains(&self.every)
+            || !(1..=12).contains(&self.every)
             || !completed.wrapping_add(1).is_multiple_of(self.every)
         {
             return None;
@@ -140,15 +140,15 @@ pub fn load() -> Settings {
     crate::theme::settings_path()
         .and_then(|p| std::fs::read(p.with_file_name("auto-transitions.json")).ok())
         .and_then(|b| serde_json::from_slice::<Settings>(&b).ok())
-        .filter(|s| (2..=12).contains(&s.every) && [8, 16, 32].contains(&s.mashup_beats))
+        .filter(|s| (1..=12).contains(&s.every) && [8, 16, 32].contains(&s.mashup_beats))
         .unwrap_or_default()
 }
 pub fn save(settings: Settings) -> Result<(), String> {
     if ![8, 16, 32].contains(&settings.mashup_beats) {
         return Err("Mashup length must be 8, 16 or 32 beats".into());
     }
-    if !(2..=12).contains(&settings.every) {
-        return Err("Effect frequency must be 2–12 mixes".into());
+    if !(1..=12).contains(&settings.every) {
+        return Err("Effect frequency must be 1–12 mixes".into());
     }
     let path = crate::theme::settings_path()
         .ok_or("Settings folder unavailable")?
@@ -264,6 +264,58 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<Settings>(&serde_json::to_string(&updated).unwrap()).unwrap(),
             updated
+        );
+    }
+    #[test]
+    fn every_mix_rotates_enabled_effects_and_rejects_invalid_intervals() {
+        let settings = Settings {
+            every: 1,
+            techniques: [false, false, true, true, false, false],
+            ..Default::default()
+        };
+        let restored: Settings =
+            serde_json::from_slice(&serde_json::to_vec(&settings).unwrap()).unwrap();
+        for completed in 0..8 {
+            assert_eq!(
+                restored.pick(completed),
+                Some(if completed % 2 == 0 {
+                    Style::Brake
+                } else {
+                    Style::Filter
+                })
+            );
+        }
+        assert_eq!(
+            Settings {
+                every: 0,
+                ..settings
+            }
+            .pick(0),
+            None
+        );
+        assert_eq!(
+            Settings {
+                every: 13,
+                ..settings
+            }
+            .pick(0),
+            None
+        );
+        assert_eq!(
+            Settings {
+                enabled: false,
+                ..settings
+            }
+            .pick(0),
+            None
+        );
+        assert_eq!(
+            Settings {
+                techniques: [false; 6],
+                ..settings
+            }
+            .pick(0),
+            None
         );
     }
     #[test]

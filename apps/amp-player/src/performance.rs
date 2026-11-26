@@ -1579,8 +1579,8 @@ impl Player {
                 loop_build,
                 stem_swap,
             } => {
-                if !(2..=12).contains(&every) {
-                    return Err("Effect frequency must be 2–12 mixes".into());
+                if !(1..=12).contains(&every) {
+                    return Err("Effect frequency must be 1–12 mixes".into());
                 }
                 let settings = crate::transition_styles::Settings {
                     tempo_recovery: self.run.transitions.tempo_recovery,

@@ -1,6 +1,6 @@
 # Auto DJ transition styles
 
-Open DJ / Transition options. Variety rotates enabled techniques at the saved frequency (every 2–12 mixes, default 4). Each technique has an independent switch: Scratch, Stutter, Tape brake, Filter sweep, Bass swap, Beatmatch, Loop buildup and Stem handoff. The two new techniques start switched off; enable them individually. Clean fade bypasses effects. Your crossfade time is a separate saved setting.
+Open DJ / Transition options. Variety rotates enabled techniques at the saved frequency (every 1–12 mixes, default 4). Each technique has an independent switch: Scratch, Stutter, Tape brake, Filter sweep, Bass swap, Beatmatch, Loop buildup and Stem handoff. The two new techniques start switched off; enable them individually. Clean fade bypasses effects. Your crossfade time is a separate saved setting.
 
 Scratch plays a short outgoing jog phrase. Stutter repeats a short outgoing segment; Tape brake slows its tail; Filter sweep closes its low-pass. Bass swap performs a staged two-deck EQ blend over the saved crossfade duration: incoming highs enter first, bass exchanges around the midpoint, then mids blend. Cuts are relative to each deck's existing EQ; both decks' original settings return after completion or cancellation. These temporary effects release their controls when a handoff finishes, automation stops, or the jog wheel is taken manually. Tempo matching uses the existing +/-16% pitch range and prepared BPM; beat phase and key lock remain manual. Saved cues and source audio are unchanged.
 
