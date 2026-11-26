@@ -690,7 +690,7 @@ impl Player {
                                 ui.painter_at(rect).text(
                                     rect.left_center(),
                                     egui::Align2::LEFT_CENTER,
-                                    crate::track_sort::label(ui.ctx(),"dj-browser",&column.key,track_columns::label(&column.key)),
+                                    track_columns::label(&column.key),
                                     egui::FontId::proportional(14.),
                                     ui.visuals().text_color(),
                                 );

@@ -34,13 +34,25 @@ fn toggle(ctx: &egui::Context, table: &str, key: &str) {
     }
     ctx.data_mut(|d| d.insert_temp(id(table), sort));
 }
-pub fn label(ctx: &egui::Context, table: &str, key: &str, name: &str) -> String {
-    let sort = choice(ctx, table);
-    if sort.key == key {
-        format!("{name} {}", if sort.descending { "▼" } else { "▲" })
-    } else {
-        name.into()
+fn direction(ui: &egui::Ui, table: &str, key: &str, rect: egui::Rect) {
+    let sort = choice(ui.ctx(), table);
+    if sort.key != key {
+        return;
     }
+    let center = egui::pos2(rect.right() - 8., rect.center().y);
+    let dy = if sort.descending { 1. } else { -1. };
+    let points = vec![
+        center + egui::vec2(-3.5, -2. * dy),
+        center + egui::vec2(3.5, -2. * dy),
+        center + egui::vec2(0., 3. * dy),
+    ];
+    ui.painter()
+        .with_clip_rect(rect.intersect(ui.clip_rect()))
+        .add(egui::Shape::convex_polygon(
+            points,
+            ui.visuals().text_color(),
+            egui::Stroke::NONE,
+        ));
 }
 pub fn header(ui: &mut egui::Ui, table: &str, key: &str, name: &str, rect: egui::Rect) {
     let response = ui
@@ -57,15 +69,16 @@ pub fn header(ui: &mut egui::Ui, table: &str, key: &str, name: &str, rect: egui:
     if response.clicked() {
         toggle(ui.ctx(), table, key);
     }
+    direction(ui, table, key, rect);
 }
 pub fn button(ui: &mut egui::Ui, table: &str, key: &str, name: &str, width: f32) {
-    let text = label(ui.ctx(), table, key, name);
     let response = ui
-        .add_sized([width, 24.], egui::Button::new(text).frame(false))
+        .add_sized([width, 24.], egui::Button::new(name).frame(false))
         .on_hover_text("Click to sort; click again to reverse. Playback order stays unchanged.");
     if response.clicked() {
         toggle(ui.ctx(), table, key);
     }
+    direction(ui, table, key, response.rect);
 }
 #[derive(Clone)]
 enum Value {

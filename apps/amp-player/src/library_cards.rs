@@ -282,14 +282,7 @@ pub(super) fn track_header(ui: &mut egui::Ui, table: &str) {
     ui.painter().rect_filled(rect, 6., p.background);
     let names = ["#", "Title", "Artist", "BPM", "Key", "Length", "Analysis"];
     let keys = ["#", "title", "artist", "bpm", "key", "length", "analysis"];
-    let labels: [String; 7] =
-        std::array::from_fn(|i| crate::track_sort::label(ui.ctx(), table, keys[i], names[i]));
-    columns(
-        ui,
-        rect,
-        std::array::from_fn(|i| labels[i].as_str()),
-        p.muted,
-    );
+    columns(ui, rect, names, p.muted);
     let mut x = rect.left() + 6.;
     for ((key, name), width) in keys.into_iter().zip(names).zip(column_widths(rect)) {
         if width > 0. {
