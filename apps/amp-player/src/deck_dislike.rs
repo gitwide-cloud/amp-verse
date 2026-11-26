@@ -1,11 +1,25 @@
 use amp_core::Playlist;
 // Playlist feedback is saved before playback is changed. Audio files are never deleted.
 impl Player {
+    // Session recovery loads an absolute file into a temporary per-folder snapshot.
+    // Resolve that snapshot back to its indexed identity without filesystem reads.
+    fn dislike_track(&self, deck: usize) -> Option<&amp_core::Track> {
+        let loaded = self.loaded_track(deck)?;
+        let origin = self.loaded_origin[deck].as_ref()?;
+        if origin == &self.root {
+            return Some(loaded);
+        }
+        let indexed = self.library.as_ref()?.tracks.get(self.loaded[deck]?)?;
+        let actual = crate::playlist_sync::root_key(&origin.join(&loaded.path));
+        let expected = crate::playlist_sync::root_key(&amp_core::music_sources::audio_path(
+            &self.root, &indexed.path,
+        ));
+        (actual == expected).then_some(indexed)
+    }
     pub(super) fn can_dislike_deck(&self, deck: usize) -> bool {
         deck < 6
             && self.pair().contains(&deck)
-            && self.loaded_track(deck).is_some()
-            && self.loaded_origin[deck].as_deref() == Some(self.root.as_path())
+            && self.dislike_track(deck).is_some()
             && (self.run.profile.is_some()
                 || (self.run.has_regular_playlist() && self.playlist_snapshot.is_some()))
     }
@@ -16,7 +30,7 @@ impl Player {
                     .into(),
             );
         }
-        let track = self.loaded_track(deck).ok_or("No song loaded")?.clone();
+        let track = self.dislike_track(deck).ok_or("No indexed song loaded")?.clone();
         let id = show::song_id(&track);
         let playlist_name;
         if let Some(profile) = self.run.profile.as_ref() {
@@ -114,7 +128,7 @@ impl Player {
                     .as_ref()
                     .and_then(|lib| lib.tracks.get(*i))
                     .is_some_and(|t| {
-                        self.loaded_track(deck)
+                        self.dislike_track(deck)
                             .is_some_and(|current| t.path == current.path)
                     })
             })
@@ -257,6 +271,37 @@ mod dislike_tests {
         let saved = show::Settings::load(dir.path()).unwrap();
         assert!(saved.playlists[0].excluded.contains(&incoming));
         assert!(!saved.playlists[0].excluded.contains(&current));
+    }
+    #[test]
+    fn restored_folder_snapshot_uses_the_indexed_smart_identity() {
+        let (dir, mut player) = fixture();
+        let indexed = player.library.as_ref().unwrap().tracks[0].clone();
+        let nested = std::path::PathBuf::from("Artist/Album").join(&indexed.path);
+        player.library.as_mut().unwrap().tracks[0].path = nested.clone();
+        player.loaded_origin[0] = Some(dir.path().join("Artist/Album"));
+        show::Settings::default().save(dir.path()).unwrap();
+        player.run.settings = show::Settings::load(dir.path()).unwrap();
+        player.run.profile = Some(player.run.settings.playlists[0].clone());
+        let id = show::song_id(&player.library.as_ref().unwrap().tracks[0]);
+        assert!(player.can_dislike_deck(0));
+        player.remove_deck_song_from_playlist(0).unwrap();
+        assert!(show::Settings::load(dir.path()).unwrap().playlists[0].excluded.contains(&id));
+        player.loaded_origin[0] = Some(dir.path().join("Other/Album"));
+        assert!(!player.can_dislike_deck(0));
+    }
+    #[cfg(windows)]
+    #[test]
+    fn recovered_verbatim_unc_path_matches_the_library_without_nas_access() {
+        let (_dir, mut player) = fixture();
+        let filename = player.loaded_track(0).unwrap().path.clone();
+        player.library.as_mut().unwrap().tracks[0].path =
+            std::path::PathBuf::from("Artist/Album").join(filename);
+        player.root = std::path::PathBuf::from(r"\\LAGnas\Public\plex\music");
+        player.loaded_origin[0] = Some(std::path::PathBuf::from(
+            r"\\?\UNC\LAGnas\Public\plex\music\Artist\Album",
+        ));
+        player.run.profile = Some(show::Settings::default().playlists[0].clone());
+        assert!(player.can_dislike_deck(0));
     }
     #[test]
     fn repeated_dislike_does_not_restart_the_pending_handoff() {

@@ -2850,12 +2850,14 @@ impl Player {
         if deck == 0 {
             self.auto = false;
         }
-        self.loaded[deck] = amp_core::relative_folder(&path, &self.root).and_then(|relative| {
-            self.library
-                .as_ref()?
-                .tracks
-                .iter()
-                .position(|track| track.path == relative)
+        let file_key = playlist_sync::root_key(&path);
+        self.loaded[deck] = self.library.as_ref().and_then(|library| {
+            library.tracks.iter().position(|track| {
+                playlist_sync::root_key(&amp_core::music_sources::audio_path(
+                    &self.root,
+                    &track.path,
+                )) == file_key
+            })
         });
         let mut snapshot = track;
         snapshot.preparation = saved_preparation;

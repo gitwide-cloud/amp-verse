@@ -727,7 +727,7 @@ fn view(binding: &Binding) -> Result<SavedView, String> {
         .collect::<Result<Vec<_>, String>>()?;
     Ok(SavedView { settings, normal })
 }
-fn root_key(path: &Path) -> String {
+pub(crate) fn root_key(path: &Path) -> String {
     let value = path.to_string_lossy();
     #[cfg(windows)]
     {
