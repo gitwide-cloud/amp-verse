@@ -450,7 +450,7 @@ impl Player {
                                         ui,
                                         &snapshot_root,
                                         None,
-                                        &smart_playlist_name(profile, &self.run.settings),
+                                        smart_playlist_name(profile, &self.run.settings),
                                         &format!("{} · smart rules", show_editor::source_summary(profile)),
                                         self.dj_browser.smart == profile.id,
                                         sidebar_width,
