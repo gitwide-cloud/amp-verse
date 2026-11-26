@@ -88,6 +88,14 @@ impl Player {
         Ok(format!("{} removed from {playlist_name}", track.title))
     }
     pub(super) fn dislike_deck(&mut self, deck: usize) {
+        if self.can_dislike_deck(deck)
+            && self.run.pending.is_some_and(|(incoming, started)| {
+                incoming != deck && self.run.feedback_handoff == Some(started)
+            })
+        {
+            self.status = "Dislike already saved · next song is being prepared".into();
+            return;
+        }
         let message = match self.remove_deck_song_from_playlist(deck) {
             Ok(message) => message,
             Err(error) => {
@@ -249,6 +257,24 @@ mod dislike_tests {
         let saved = show::Settings::load(dir.path()).unwrap();
         assert!(saved.playlists[0].excluded.contains(&incoming));
         assert!(!saved.playlists[0].excluded.contains(&current));
+    }
+    #[test]
+    fn repeated_dislike_does_not_restart_the_pending_handoff() {
+        let (dir, mut player) = fixture();
+        show::Settings::default().save(dir.path()).unwrap();
+        player.run.settings = show::Settings::load(dir.path()).unwrap();
+        player.run.profile = Some(player.run.settings.playlists[0].clone());
+        player.remove_deck_song_from_playlist(0).unwrap();
+        let before = serde_json::to_value(show::Settings::load(dir.path()).unwrap()).unwrap();
+        let stamp = Instant::now();
+        player.run.pending = Some((1, stamp));
+        player.run.feedback_handoff = Some(stamp);
+        player.dislike_deck(0);
+        assert_eq!(player.run.pending, Some((1, stamp)));
+        assert_eq!(
+            serde_json::to_value(show::Settings::load(dir.path()).unwrap()).unwrap(),
+            before
+        );
     }
     #[test]
     fn dislike_without_a_playback_playlist_or_on_an_empty_deck_changes_nothing() {
