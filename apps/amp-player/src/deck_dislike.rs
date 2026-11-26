@@ -134,11 +134,10 @@ impl Player {
             .regular
             .as_mut()
             .and_then(|r| r.reservation.as_mut())
+            && let Some(slot) = self.queue.iter().position(|i| *i == reservation.index)
         {
-            if let Some(slot) = self.queue.iter().position(|i| *i == reservation.index) {
-                reservation.slot = slot;
-                reservation.queue = self.queue.clone();
-            }
+            reservation.slot = slot;
+            reservation.queue = self.queue.clone();
         }
         match self.execute_control(Action::MixNext { immediate: true }) {
             Ok(()) => self.status = format!("{message} · mixing next now"),
