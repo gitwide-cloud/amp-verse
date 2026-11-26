@@ -1115,13 +1115,23 @@ impl Player {
         self.status = format!("Added {added} songs from this playlist to the queue.");
     }
     fn playlist_preview_table(&mut self, ui: &mut egui::Ui, height: f32) {
-        cards::track_header(ui);
+        cards::track_header(ui, "playlist-preview");
+        let rows = self.library.as_ref().map(|lib| {
+            crate::track_sort::rows(
+                ui.ctx(),
+                "playlist-preview",
+                self.library_generation,
+                lib,
+                &self.playlist_preview.queue,
+            )
+        });
         egui::ScrollArea::vertical()
             .id_salt("playlist-preview-tracks")
             .max_height(height)
             .show_rows(ui, 36., self.playlist_preview.queue.len(), |ui, range| {
                 if let Some(lib) = &self.library {
-                    for row in range {
+                    for position in range {
+                        let row = rows.as_ref().unwrap()[position];
                         if let Some(track) = self
                             .playlist_preview
                             .queue
@@ -1504,7 +1514,16 @@ impl Player {
                     });
                 });
             }
-            cards::track_header(ui);
+            cards::track_header(ui, "playlist-queue");
+            let rows = self.library.as_ref().map(|lib| {
+                crate::track_sort::rows(
+                    ui.ctx(),
+                    "playlist-queue",
+                    self.library_generation,
+                    lib,
+                    &self.queue,
+                )
+            });
             egui::ScrollArea::vertical()
                 .auto_shrink([false, false])
                 .id_salt("organized-queue")
@@ -1517,7 +1536,8 @@ impl Player {
                         ui.weak("Select songs in Library or drop a local audio file here.");
                     }
                     if let Some(lib) = &self.library {
-                        for row in range {
+                        for position in range {
+                            let row = rows.as_ref().unwrap()[position];
                             if let Some(index) = self.queue.get(row).copied()
                                 && let Some(track) = lib.tracks.get(index)
                             {

@@ -675,7 +675,7 @@ impl Player {
                             + 120.;
                         ui.set_min_width(width);
                         ui.horizontal(|ui| {
-                            ui.add_sized([28., 24.], egui::Label::new("#"));
+                            crate::track_sort::button(ui,"dj-browser","#","#",28.);
                             for column in self
                                 .dj_browser
                                 .columns
@@ -694,6 +694,8 @@ impl Player {
                                     egui::FontId::proportional(14.),
                                     ui.visuals().text_color(),
                                 );
+                                let clickable=egui::Rect::from_min_max(rect.min,egui::pos2(rect.right()-6.,rect.bottom()));
+                                crate::track_sort::header(ui,"dj-browser",&column.key,track_columns::label(&column.key),clickable);
                                 let edge = egui::Rect::from_min_max(
                                     egui::pos2(rect.right() - 5., rect.top()),
                                     rect.right_bottom(),
@@ -719,6 +721,13 @@ impl Player {
                             ui.label("Load");
                         });
                         ui.separator();
+                        let order=crate::track_sort::rows_with_display(ui.ctx(),"dj-browser",self.dj_browser.refresh_generation,lib,&indices,|track,key| {
+     (key=="stems").then(|| {
+         let path=amp_core::music_sources::audio_path(&snapshot_root,&track.path);
+         self.dj_browser.stem_status.get(&path).map_or("Checking…",|(_,ready)|if *ready {"Complete"} else {"Not prepared"}).to_owned()
+     })
+ });
+                        let indices:Vec<_>=order.iter().map(|row|indices[*row]).collect();
                         egui::ScrollArea::vertical()
                             .id_salt("dj-source-tracks")
                             .max_height((height - if self.rack.six { 110. } else { 155. }).max(34.))

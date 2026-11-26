@@ -156,7 +156,7 @@ impl Player {
                 self.folder = PathBuf::new();
             }
         });
-        let filtered = self.library_browser_results();
+        let mut filtered = self.library_browser_results();
         let checked = self.checked_library_indices().len();
         ui.horizontal_wrapped(|ui| {
             ui.label(format!("{checked} checked · {} matching", filtered.len()));
@@ -268,8 +268,12 @@ impl Player {
                     let title_width = (row_width*0.29).max(190.);
                     ui.horizontal(|ui| {
                         ui.add_sized([28.,20.],egui::Label::new("✓"));
-                        for (label, w) in [("Title",title_width),("Artist",155.),("Album / Genre",180.),("Length / BPM / Key",155.)] { ui.add_sized([w,20.],egui::Label::new(label)); }
+                        for (key,label,w) in [("title","Title",title_width),("artist","Artist",155.),("album","Album / Genre",180.),("length","Length / BPM / Key",155.)] { crate::track_sort::button(ui,"library-picker",key,label,w); }
                     });
+                    if let Some(lib)=&self.library {
+                        let order=crate::track_sort::rows(ui.ctx(),"library-picker",self.library_generation,lib,&filtered);
+                        filtered=order.iter().map(|row|filtered[*row]).collect();
+                    }
                     egui::ScrollArea::vertical().id_salt(("builder-rows",editing)).max_height((height-195.).max(80.)).show_rows(ui, 50., filtered.len(), |ui, range| {
                         if let Some(lib) = &self.library { for position in range {
                             let index=filtered[position]; let track=&lib.tracks[index];
