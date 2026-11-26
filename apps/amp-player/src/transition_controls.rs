@@ -144,8 +144,8 @@ pub fn inline(
     ui.separator();
     ui.horizontal_wrapped(|ui| {
         ui.label("Use an effect every");
-        ui.add(egui::DragValue::new(&mut settings.every).range(2..=12));
-        ui.label("mixes");
+        ui.add(egui::DragValue::new(&mut settings.every).range(1..=12));
+        ui.label(if settings.every == 1 { "mix" } else { "mixes" });
     });
     ui.weak("Unsupported combinations use a clean blend. Turning every type off is safe.");
     egui::CollapsingHeader::new("Timing and mix options").show(ui, |ui| {
