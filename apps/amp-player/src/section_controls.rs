@@ -2,6 +2,26 @@ use crate::{Player, mix_schedule::Timing};
 use eframe::egui;
 use std::sync::atomic::Ordering::Relaxed;
 impl Player {
+    /// Live waveforms select musical sections, rather than abruptly seeking audio.
+    pub(super) fn mix_to_waveform_section(&mut self, ctx: &egui::Context, deck: usize, at: f64) {
+        if !at.is_finite() {
+            return;
+        }
+        let Some(track) = self.loaded_track(deck) else {
+            return;
+        };
+        let (start, _) = crate::manual_load::bounds(&track.preparation);
+        let target = amp_core::energy_profile::read(&track.preparation)
+            .and_then(|profile| {
+                profile
+                    .sections
+                    .into_iter()
+                    .find(|section| at >= section.start && at < section.end)
+            })
+            .map_or(at.max(0.), |section| section.start.max(start));
+        ctx.data_mut(|data| data.insert_temp(egui::Id::unique(("section-target", deck)), target));
+        self.select_deck_section(deck, target);
+    }
     pub(super) fn deck_sections(&mut self, ui: &mut egui::Ui, deck: usize) {
         let Some(track) = self.loaded_track(deck).cloned() else {
             return;
@@ -9,6 +29,7 @@ impl Player {
         let Some(profile) = amp_core::energy_profile::read(&track.preparation) else {
             return;
         };
+        let (start, out) = crate::manual_load::bounds(&track.preparation);
         let position = self.audio.as_ref().map_or(0., |a| a.source_position(deck));
         let mut choice = None;
         ui.horizontal_wrapped(|ui| {
@@ -99,11 +120,16 @@ impl Player {
                 ui.horizontal(|ui| {
                     for section in &profile.sections {
                         let current = position >= section.start && position < section.end;
+                        let allowed =
+                            section.end > start && out.is_none_or(|out| section.start < out);
                         if ui
-                            .selectable_label(
-                                current,
-                                format!("{} · {:.0}", section.name, 1. + section.energy * 9.),
-                            )
+                            .add_enabled_ui(allowed, |ui| {
+                                ui.selectable_label(
+                                    current,
+                                    format!("{} · {:.0}", section.name, 1. + section.energy * 9.),
+                                )
+                            })
+                            .inner
                             .on_hover_text(format!(
                                 "{:.1}–{:.1} seconds · click to select / queue",
                                 section.start, section.end
@@ -121,13 +147,16 @@ impl Player {
             self.select_deck_section(deck, at);
         }
     }
-    fn select_deck_section(&mut self, deck: usize, at: f64) {
+    pub(super) fn select_deck_section(&mut self, deck: usize, at: f64) {
+        if deck >= 6 || !at.is_finite() {
+            self.status = "Choose a valid deck section".into();
+            return;
+        }
         let Some(mut track) = self.loaded_track(deck).cloned() else {
             return;
         };
-        if at < amp_core::energy_profile::entry_bound(&track.preparation)
-            || track.preparation.cue_out.is_some_and(|out| at >= out)
-        {
+        crate::manual_load::full_track(&mut track.preparation);
+        if at < track.preparation.cue_in || track.preparation.cue_out.is_some_and(|out| at >= out) {
             self.status = "Section is outside this track's protected cue bounds".into();
             return;
         }
@@ -136,24 +165,36 @@ impl Player {
         let root = self.loaded_origin[deck]
             .clone()
             .unwrap_or_else(|| self.root.clone());
+        let in_pair = self.pair().contains(&deck);
         let Some(audio) = &mut self.audio else { return };
-        if audio.fading() {
+        if in_pair && audio.fading() {
             self.status = "Finish or cancel the current crossfade before choosing a section".into();
             return;
         }
         let playing = audio.playing(deck);
         let was_auto = self.run.auto;
+        // A section is the landing, rather than the beginning of the fade.
+        // Work only on this session clone; approved source bounds stay intact.
+        let rate = f64::from(audio.controls.effective_rate(deck));
+        let pre_roll = at - f64::from(self.fade_seconds) * rate;
+        if playing && pre_roll >= original.cue_in {
+            track.preparation.cue_in = pre_roll;
+        }
         let grid = crate::mix_schedule::grid(
             &original,
             &original,
-            at,
+            track.preparation.cue_in,
             audio.source_position(deck) - audio.position(deck),
             self.run.transitions.timing,
         );
-        self.run.cancel_effects(audio);
-        audio.set_fader(audio.fader());
-        self.run.cancel_automation();
-        self.auto = false;
+        if in_pair {
+            self.run.cancel_effects(audio);
+            audio.set_fader(audio.fader());
+            self.run.cancel_automation();
+        }
+        if deck == 0 {
+            self.auto = false;
+        }
         let result = if playing {
             audio.schedule_section(deck, &root, &track, grid, self.fade_seconds)
         } else {
@@ -163,6 +204,7 @@ impl Player {
             self.run.auto = was_auto;
         }
         if !playing
+            && in_pair
             && result.is_ok()
             && let Some(index) = self.loaded[deck]
         {
@@ -181,5 +223,87 @@ impl Player {
             .into(),
             Err(e) => e,
         };
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn explicit_sections_ignore_generated_tail_bounds_but_preserve_manual_protection() {
+        let mut player = Player::default();
+        let mut track = amp_core::Track {
+            path: "missing.mp3".into(),
+            title: "Full song".into(),
+            preparation: Default::default(),
+        };
+        track.preparation.cue_in = 195.;
+        track.preparation.cue_out = Some(212.);
+        track.preparation.cues.push(amp_core::preparation::Cue {
+            id: "auto-in".into(),
+            kind: "boundary".into(),
+            seconds: 2.,
+            ..Default::default()
+        });
+        let saved = track.preparation.clone();
+        assert_eq!(crate::manual_load::bounds(&saved), (0., None));
+        let mut runtime = saved.clone();
+        crate::manual_load::full_track(&mut runtime);
+        assert_eq!(runtime.cues, saved.cues);
+        player.loaded_snapshot[0] = Some(track.clone());
+        for at in [0., 1., 213.] {
+            player.status = "unchanged".into();
+            player.select_deck_section(0, at);
+            assert_eq!(
+                player.status, "unchanged",
+                "explicit section {at} must pass generated bounds even without an audio engine"
+            );
+        }
+        assert_eq!(
+            player.loaded_snapshot[0].as_ref().unwrap().preparation,
+            saved
+        );
+        track.preparation.manual_override = true;
+        player.loaded_snapshot[0] = Some(track);
+        for at in [1., 213.] {
+            player.status = "unchanged".into();
+            player.select_deck_section(0, at);
+            assert!(player.status.contains("protected cue bounds"));
+        }
+        player.status = "unchanged".into();
+        player.select_deck_section(0, 200.);
+        assert_eq!(player.status, "unchanged");
+    }
+    #[test]
+    fn live_waveform_selects_section_start_without_editing_saved_cues() {
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        let mut track = amp_core::Track {
+            path: "missing.mp3".into(),
+            title: "Sections".into(),
+            preparation: Default::default(),
+        };
+        track.preparation.extensions.insert("energy_profile".into(), serde_json::json!({"version":1,"duration":20.,"step":1.,"curve":[],"sections":[{"id":"intro","name":"Intro","start":0.,"end":10.,"energy":0.3},{"id":"drop","name":"Drop","start":10.,"end":20.,"energy":0.9}]}));
+        track.preparation.cue_in = 5.;
+        track.preparation.manual_override = true;
+        player.loaded_snapshot[0] = Some(track);
+        player.mix_to_waveform_section(&ctx, 0, 16.);
+        assert_eq!(
+            ctx.data(|d| d.get_temp::<f64>(egui::Id::unique(("section-target", 0usize)))),
+            Some(10.)
+        );
+        assert_eq!(
+            player.loaded_snapshot[0]
+                .as_ref()
+                .unwrap()
+                .preparation
+                .cue_in,
+            5.
+        );
+        player.mix_to_waveform_section(&ctx, 0, 7.);
+        assert_eq!(
+            ctx.data(|d| d.get_temp::<f64>(egui::Id::unique(("section-target", 0usize)))),
+            Some(5.)
+        );
     }
 }

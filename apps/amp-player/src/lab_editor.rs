@@ -9,9 +9,21 @@ use std::{
     time::Duration,
 };
 
+#[derive(Clone, Copy, PartialEq)]
+struct EditState {
+    start: f64,
+    end: f64,
+    fade_in: f64,
+    fade_out: f64,
+    gain: f64,
+    normalize: bool,
+    processing: amp_core::lab_processing::Processing,
+}
 #[derive(Default)]
 pub(super) struct Editor {
     sample: crate::sample_editor::Editor,
+    saved_edit: Option<EditState>,
+    export_edit: Option<(PathBuf, EditState)>,
     input: Option<PathBuf>,
     duration: f64,
     start: f64,
@@ -20,6 +32,7 @@ pub(super) struct Editor {
     fade_out: f64,
     gain: f64,
     normalize: bool,
+    processing: amp_core::lab_processing::Processing,
     player: Option<Child>,
     exporting: Option<Receiver<Result<PathBuf, String>>>,
     status: String,
@@ -27,6 +40,7 @@ pub(super) struct Editor {
     wave_job: Option<Receiver<Result<Vec<[f32; 2]>, String>>>,
     peak_db: Option<f64>,
     preview_job: Option<Receiver<Result<PathBuf, String>>>,
+    preview_cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
     preview_path: Option<PathBuf>,
     started: Option<std::time::Instant>,
     offset: f64,
@@ -49,6 +63,9 @@ impl Editor {
     }
     pub(super) fn stop(&mut self) {
         self.sample.stop();
+        if let Some(cancel) = self.preview_cancel.take() {
+            cancel.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
         self.kill_player();
         self.preview_job = None;
         self.started = None;
@@ -148,10 +165,41 @@ impl Editor {
         };
         self.load_path(p);
     }
-    pub(super) fn load_path(&mut self, p: PathBuf) {
-        self.stop();
+    fn edit_state(&self) -> EditState {
+        EditState {
+            start: self.start,
+            end: self.end,
+            fade_in: self.fade_in,
+            fade_out: self.fade_out,
+            gain: self.gain,
+            normalize: self.normalize,
+            processing: self.processing,
+        }
+    }
+    fn unsaved(&self) -> bool {
+        self.input.is_some() && self.saved_edit != Some(self.edit_state())
+    }
+    pub(super) fn load_path(&mut self, p: PathBuf) -> bool {
+        if self.exporting.is_some() {
+            self.status = "Wait for the current export before opening another file.".into();
+            return false;
+        }
+        let approved = !self.unsaved() || rfd::MessageDialog::new()
+            .set_title("Unsaved AMP Lab edits")
+            .set_description("Replace the current edits? Choose No to keep editing and export first. Downloaded MP3s remain saved and can be opened later.")
+            .set_buttons(rfd::MessageButtons::YesNo).show() == rfd::MessageDialogResult::Yes;
+        self.load_path_with_permission(p, approved)
+    }
+    fn load_path_with_permission(&mut self, p: PathBuf, approved: bool) -> bool {
+        if self.exporting.is_some() || !approved {
+            self.status =
+                "Current edits retained. Export first, then open the downloaded MP3 when ready."
+                    .into();
+            return false;
+        }
         match duration(&p) {
             Ok(d) if d > 0.0 && d.is_finite() => {
+                self.stop();
                 self.duration = d;
                 self.start = 0.0;
                 self.end = d;
@@ -159,7 +207,9 @@ impl Editor {
                 self.fade_out = 0.0;
                 self.gain = 0.0;
                 self.normalize = false;
+                self.processing = Default::default();
                 self.input = Some(p.clone());
+                self.saved_edit = Some(self.edit_state());
                 self.status = "Reading waveform…".into();
                 self.waveform.clear();
                 self.peak_db = None;
@@ -168,13 +218,21 @@ impl Editor {
                 thread::spawn(move || {
                     let _ = tx.send(read_waveform(&p, d));
                 });
+                true
             }
-            Ok(_) => self.status = "Invalid track duration".into(),
-            Err(e) => self.status = e,
+            Ok(_) => {
+                self.status = "Invalid track duration".into();
+                false
+            }
+            Err(e) => {
+                self.status = e;
+                false
+            }
         }
     }
     fn filter(&self) -> String {
         let mut f = vec!["asetpts=PTS-STARTPTS".to_string()];
+        f.extend(self.processing.filters().unwrap_or_default());
         if self.normalize {
             f.push("loudnorm=I=-16:TP=-3:LRA=11".into())
         }
@@ -216,6 +274,13 @@ impl Editor {
         } else {
             "Preparing original preview…".into()
         };
+        let processing = if edited {
+            self.processing
+        } else {
+            Default::default()
+        };
+        let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.preview_cancel = Some(cancel.clone());
         thread::spawn(move || {
             let output = std::env::temp_dir().join(format!(
                 "mp3-lab-preview-{}-{}.wav",
@@ -225,30 +290,9 @@ impl Editor {
                     .unwrap()
                     .as_nanos()
             ));
-            let result = command("ffmpeg")
-                .args([
-                    "-hide_banner",
-                    "-nostdin",
-                    "-n",
-                    "-loglevel",
-                    "error",
-                    "-ss",
-                ])
-                .arg(format!("{start:.5}"))
-                .arg("-i")
-                .arg(p)
-                .arg("-t")
-                .arg(format!("{length:.5}"))
-                .args(["-vn", "-af"])
-                .arg(filter)
-                .args(["-c:a", "pcm_s16le", "-ar", "48000"])
-                .arg(&output)
-                .output();
-            let result = match result {
-                Ok(r) if r.status.success() => Ok(output.clone()),
-                Ok(r) => Err(String::from_utf8_lossy(&r.stderr).into_owned()),
-                Err(e) => Err(e.to_string()),
-            };
+            let result =
+                crate::lab_audio::render(&p, start, length, processing, &filter, &output, cancel)
+                    .map(|_| output.clone());
             let failed = result.is_err();
             if tx.send(result).is_err() || failed {
                 let _ = std::fs::remove_file(output);
@@ -287,48 +331,29 @@ impl Editor {
         self.stop();
         let (tx, rx) = mpsc::channel();
         self.exporting = Some(rx);
+        self.export_edit = Some((input.clone(), self.edit_state()));
         let start = self.start;
         let length = self.length();
         let filters = self.filter();
+        let processing = self.processing;
         self.status = "Exporting 256 kbps MP3".into();
         thread::spawn(move || {
-            let result = command("ffmpeg")
-                .args([
-                    "-hide_banner",
-                    "-nostdin",
-                    "-n",
-                    "-loglevel",
-                    "error",
-                    "-ss",
-                ])
-                .arg(format!("{start:.5}"))
-                .arg("-i")
-                .arg(&input)
-                .arg("-t")
-                .arg(format!("{length:.5}"))
-                .args(["-vn", "-af"])
-                .arg(filters)
-                .args([
-                    "-codec:a",
-                    "libmp3lame",
-                    "-b:a",
-                    "256k",
-                    "-id3v2_version",
-                    "3",
-                ])
-                .arg(&output)
-                .output();
-            let outcome = match result {
-                Ok(r) if r.status.success() => Ok(output),
-                Ok(r) => Err(String::from_utf8_lossy(&r.stderr).to_string()),
-                Err(e) => Err(e.to_string()),
-            };
+            let outcome = crate::lab_audio::render(
+                &input,
+                start,
+                length,
+                processing,
+                &filters,
+                &output,
+                std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+            )
+            .map(|_| output);
             let _ = tx.send(outcome);
         });
     }
 }
 fn command(name: &str) -> Command {
-    amp_core::command(name)
+    crate::lab_youtube::audio_command(name)
 }
 pub(super) fn duration(p: &Path) -> Result<f64, String> {
     let o = command("ffprobe")
@@ -426,7 +451,14 @@ impl Editor {
             match rx.try_recv() {
                 Ok(result) => {
                     self.status = match result {
-                        Ok(p) => format!("Saved {}", p.display()),
+                        Ok(p) => {
+                            if let Some((source, state)) = self.export_edit.take()
+                                && self.input.as_ref() == Some(&source)
+                            {
+                                self.saved_edit = Some(state);
+                            }
+                            format!("Saved {}", p.display())
+                        }
                         Err(e) => format!("Export failed: {e}"),
                     };
                     self.exporting = None;
@@ -558,10 +590,12 @@ impl Editor {
             if let Some(track) = load {
                 match amp_core::resolve(root, &track.path) {
                     Ok(path) => {
-                        self.load_path(path);
-                        self.start = track.preparation.cue_in;
-                        self.end = track.preparation.cue_out.unwrap_or(self.duration);
-                        self.clamp();
+                        if self.load_path(path) {
+                            self.start = track.preparation.cue_in;
+                            self.end = track.preparation.cue_out.unwrap_or(self.duration);
+                            self.clamp();
+                            self.saved_edit = Some(self.edit_state());
+                        }
                     }
                     Err(error) => self.status = error.to_string(),
                 }
@@ -690,14 +724,15 @@ impl Editor {
             });
         });
         self.clamp();
+        crate::lab_audio::controls(ui, &mut self.processing);
         ui.separator();
         self.sample.show(
             ui,
             root,
             self.input.as_deref(),
-            self.start,
-            self.end,
+            self.start..self.end,
             self.filter(),
+            self.processing,
         );
         ui.separator();
         ui.label(&self.status);
@@ -831,6 +866,46 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn declined_replacement_and_active_export_keep_unsaved_work() {
+        let mut editor = Editor::default();
+        editor.input = Some("original.mp3".into());
+        editor.duration = 10.;
+        editor.end = 10.;
+        editor.saved_edit = Some(editor.edit_state());
+        assert!(!editor.unsaved());
+        editor.gain = 3.;
+        assert!(editor.unsaved());
+        assert!(!editor.load_path_with_permission("downloaded.mp3".into(), false));
+        assert_eq!(editor.input.as_deref(), Some(Path::new("original.mp3")));
+        assert_eq!(editor.gain, 3.);
+        let (_tx, rx) = mpsc::channel();
+        editor.exporting = Some(rx);
+        assert!(!editor.load_path_with_permission("downloaded.mp3".into(), true));
+        assert!(editor.unsaved());
+    }
+    #[test]
+    #[ignore = "requires AMP_LAB_LOADED_MP3 and FFmpeg; real Lab open pipeline"]
+    fn downloaded_mp3_loads_waveform_and_keeps_source() {
+        let path = PathBuf::from(std::env::var_os("AMP_LAB_LOADED_MP3").unwrap());
+        let bytes = std::fs::read(&path).unwrap();
+        let mut editor = Editor::default();
+        assert!(editor.load_path_with_permission(path.clone(), true));
+        let ctx = egui::Context::default();
+        let start = std::time::Instant::now();
+        while editor.wave_job.is_some() && start.elapsed() < Duration::from_secs(15) {
+            editor.poll(&ctx);
+            thread::sleep(Duration::from_millis(30));
+        }
+        assert!(!editor.waveform.is_empty());
+        assert!(editor.duration > 0.);
+        assert!(!editor.unsaved());
+        editor.fade_in = 0.1;
+        editor.normalize = true;
+        assert!(editor.unsaved());
+        assert!(editor.filter().contains("loudnorm"));
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
+    }
     #[test]
     fn waveform_trim_handle_drags_update_selection() {
         let ctx = egui::Context::default();

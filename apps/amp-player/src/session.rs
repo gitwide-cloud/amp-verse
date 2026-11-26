@@ -6,8 +6,81 @@ pub struct Deck {
     pub path: PathBuf,
     pub position: f64,
 }
+fn default_pair() -> [usize; 2] {
+    [0, 1]
+}
+fn deck_slots<'de, D: serde::Deserializer<'de>>(d: D) -> Result<[Option<Deck>; 6], D::Error> {
+    let slots = Vec::<Option<Deck>>::deserialize(d)?;
+    if slots.len() != 2 && slots.len() != 6 {
+        return Err(serde::de::Error::custom(
+            "Expected two legacy or six deck slots",
+        ));
+    }
+    let mut result = std::array::from_fn(|_| None);
+    for (index, value) in slots.into_iter().enumerate() {
+        result[index] = value;
+    }
+    Ok(result)
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct DeckSettings {
+    gain: f32,
+    pitch: f32,
+    eq: [f32; 3],
+    filter: f32,
+    key_lock: bool,
+    synced: bool,
+    stems: [f32; 3],
+}
+impl DeckSettings {
+    fn valid(&self) -> bool {
+        self.gain.is_finite()
+            && (0. ..=1.).contains(&self.gain)
+            && self.pitch.is_finite()
+            && (-50. ..=100.).contains(&self.pitch)
+            && self
+                .eq
+                .iter()
+                .all(|v| v.is_finite() && (-24. ..=12.).contains(v))
+            && self.filter.is_finite()
+            && (200. ..=22000.).contains(&self.filter)
+            && self
+                .stems
+                .iter()
+                .all(|v| v.is_finite() && (0. ..=1.).contains(v))
+    }
+}
+#[derive(Clone, Serialize, Deserialize)]
+struct SideSnapshot {
+    deck: Option<Deck>,
+    config: side_deck::Config,
+}
+impl SideSnapshot {
+    fn valid(&self) -> bool {
+        self.config.volume.is_finite()
+            && (0. ..=1.).contains(&self.config.volume)
+            && self
+                .deck
+                .as_ref()
+                .is_none_or(|d| d.path.is_absolute() && d.position.is_finite() && d.position >= 0.)
+    }
+}
 #[derive(Clone, Serialize, Deserialize)]
 pub struct Snapshot {
+    #[serde(default)]
+    playback_owner: crate::playback_owner::Owner,
+    #[serde(default)]
+    player_sequence: crate::player_sequence::Sequence,
+    #[serde(default)]
+    side_decks: Option<[SideSnapshot; 2]>,
+    #[serde(default)]
+    deck_settings: Option<[DeckSettings; 6]>,
+    #[serde(default)]
+    clock: Option<(f32, u32)>,
+    #[serde(default)]
+    rack: deck_rack::Rack,
+    #[serde(default = "default_pair")]
+    pair: [usize; 2],
     #[serde(default)]
     sizes: [Option<[f32; 2]>; 6],
     #[serde(default)]
@@ -22,7 +95,8 @@ pub struct Snapshot {
     automatic_restore: bool,
     version: u32,
     root: PathBuf,
-    decks: [Option<Deck>; 2],
+    #[serde(deserialize_with = "deck_slots")]
+    decks: [Option<Deck>; 6],
     queue: Vec<PathBuf>,
     playlist: Option<(PathBuf, Playlist)>,
     requests: Vec<String>,
@@ -50,6 +124,8 @@ pub struct Recovery {
     initial_sizes: [Option<[f32; 2]>; 6],
     automatic_restore: bool,
     attempted: bool,
+    startup_size: Option<egui::Vec2>,
+    manually_resized: bool,
     sizes: [Option<[f32; 2]>; 6],
     splits: [Option<f32>; 3],
     pub pending: Option<Snapshot>,
@@ -124,14 +200,33 @@ impl Recovery {
 }
 impl Snapshot {
     fn valid(&self, root: &Path) -> bool {
-        self.sizes.iter().flatten().all(|size| {
-            size.iter()
-                .all(|n| n.is_finite() && *n >= 80. && *n <= 16384.)
-        }) && self
-            .splits
-            .iter()
-            .flatten()
-            .all(|n| n.is_finite() && *n >= 0. && *n <= 16384.)
+        self.side_decks
+            .as_ref()
+            .is_none_or(|sides| sides.iter().all(SideSnapshot::valid))
+            && self
+                .deck_settings
+                .as_ref()
+                .is_none_or(|decks| decks.iter().all(DeckSettings::valid))
+            && self.clock.is_none_or(|(b, q)| {
+                b.is_finite() && (40. ..=240.).contains(&b) && [0, 1, 4, 8, 16, 32].contains(&q)
+            })
+            && self.rack.live[0] < 6
+            && self.rack.live[1] < 6
+            && self.rack.live[0].is_multiple_of(2)
+            && self.rack.live[1] % 2 == 1
+            && self.pair[0] < 6
+            && self.pair[1] < 6
+            && self.pair[0].is_multiple_of(2)
+            && self.pair[1] % 2 == 1
+            && self.sizes.iter().flatten().all(|size| {
+                size.iter()
+                    .all(|n| n.is_finite() && *n >= 80. && *n <= 16384.)
+            })
+            && self
+                .splits
+                .iter()
+                .flatten()
+                .all(|n| n.is_finite() && *n >= 0. && *n <= 16384.)
             && self.version == 1
             && self.root == root
             && self.volume <= 100
@@ -167,6 +262,27 @@ impl Snapshot {
 }
 impl Player {
     pub(super) fn try_automatic_recovery(&mut self, ctx: &egui::Context) {
+        if self.recovery.pending.is_some() && !self.recovery.attempted {
+            let (size, maximized) = ctx.input(|i| {
+                (
+                    i.viewport().inner_rect.map(|r| r.size()),
+                    i.viewport().maximized == Some(true) || i.viewport().fullscreen == Some(true),
+                )
+            });
+            if maximized {
+                self.recovery.manually_resized = true;
+            }
+            if let Some(size) = size {
+                if let Some(initial) = self.recovery.startup_size {
+                    if (initial - size).length() > 2. {
+                        self.recovery.manually_resized = true;
+                    }
+                } else {
+                    self.recovery.startup_size = Some(size);
+                }
+            }
+        }
+
         if self.library.is_some()
             && self.recovery.pending.is_some()
             && self.recovery.automatic_restore
@@ -180,7 +296,7 @@ impl Player {
         if self.recovery.pending.is_some() {
             return;
         }
-        for pane in 0..6 {
+        for (pane, size) in self.recovery.sizes.iter_mut().enumerate() {
             if let Some(rect) = ctx.input(|i| {
                 i.raw
                     .viewports
@@ -192,7 +308,7 @@ impl Player {
                     })
                     .and_then(|v| v.inner_rect)
             }) {
-                self.recovery.sizes[pane] = Some([rect.width(), rect.height()]);
+                *size = Some([rect.width(), rect.height()]);
             }
         }
         for (index, key) in ["dj-wave-height", "dj-library-height", "dj-source-width"]
@@ -219,6 +335,58 @@ impl Player {
     }
     fn session_snapshot(&self) -> Snapshot {
         Snapshot {
+            side_decks: Some(std::array::from_fn(|side| SideSnapshot {
+                config: self.sides[side].config.clone(),
+                deck: self.sides[side]
+                    .track
+                    .as_ref()
+                    .and_then(|_| self.sides[side].config.path.as_ref())
+                    .map(|path| Deck {
+                        path: path.clone(),
+                        position: self.sides[side].position().max(0.),
+                    }),
+            })),
+            deck_settings: Some(std::array::from_fn(|d| DeckSettings {
+                gain: self.channel_gain[d],
+                pitch: self.pitch[d],
+                eq: self.eq[d],
+                filter: self.filter[d],
+                key_lock: self.audio.as_ref().is_some_and(|a| {
+                    a.controls.key_lock[d].load(std::sync::atomic::Ordering::Relaxed)
+                }),
+                synced: self.audio.as_ref().is_some_and(|a| {
+                    a.controls.synced[d].load(std::sync::atomic::Ordering::Relaxed)
+                }),
+                stems: std::array::from_fn(|i| {
+                    self.audio.as_ref().map_or(1., |a| {
+                        f32::from_bits(
+                            a.controls.stem_level[d][i].load(std::sync::atomic::Ordering::Relaxed),
+                        )
+                    })
+                }),
+            })),
+            clock: self.audio.as_ref().map(|a| {
+                (
+                    f32::from_bits(
+                        a.controls
+                            .master_bpm
+                            .load(std::sync::atomic::Ordering::Relaxed),
+                    ),
+                    a.controls
+                        .quantization
+                        .load(std::sync::atomic::Ordering::Relaxed),
+                )
+            }),
+            rack: self.rack.clone(),
+            playback_owner: self.playback_owner,
+            player_sequence: {
+                let mut sequence = self.player_sequence.clone();
+                if self.playback_owner == crate::playback_owner::Owner::Player {
+                    sequence.resume_auto |= self.auto;
+                }
+                sequence
+            },
+            pair: self.pair(),
             sizes: self.recovery.sizes,
             splits: self.recovery.splits,
             hidden: self.dj_library_hidden,
@@ -248,7 +416,7 @@ impl Player {
                         .as_ref()?
                         .tracks
                         .get(*i)
-                        .map(|t| self.root.join(&t.path))
+                        .map(|t| amp_core::music_sources::audio_path(&self.root, &t.path))
                 })
                 .collect(),
             playlist: self.playlist_snapshot.clone(),
@@ -271,6 +439,7 @@ impl Player {
     }
     pub(super) fn checkpoint(&mut self, wait: bool) {
         if self.library.is_none()
+            || self.sides.iter().any(side_deck::SideDeck::playing)
             || self.recovery.file.is_none()
             || self.recovery.pending.is_some()
             || self.recovery.error.is_some()
@@ -306,7 +475,7 @@ impl Player {
         let active = self
             .audio
             .as_ref()
-            .is_some_and(|a| a.playing(0) || a.playing(1));
+            .is_some_and(|a| (0..6).any(|d| a.playing(d)));
         let mut restore = false;
         let mut discard = false;
         ui.horizontal_wrapped(|ui| {
@@ -333,7 +502,7 @@ impl Player {
             || self
                 .audio
                 .as_ref()
-                .is_some_and(|a| a.playing(0) || a.playing(1) || a.fading())
+                .is_some_and(|a| (0..6).any(|d| a.playing(d)) || a.fading())
         {
             return;
         }
@@ -348,6 +517,15 @@ impl Player {
             return;
         }
         let mut errors = Vec::new();
+        if snapshot.pair != self.pair()
+            && let Err(e) = self
+                .ensure_audio()
+                .and_then(|_| self.audio.as_ref().unwrap().assign_pair(snapshot.pair))
+        {
+            self.recovery.error = Some(e);
+            return;
+        }
+        self.rack = snapshot.rack.clone();
         for (deck, saved) in snapshot.decks.iter().enumerate() {
             if let Some(saved) = saved
                 && let Err(e) = self.safe_load_path(deck, saved.path.clone(), Some(saved.position))
@@ -355,17 +533,54 @@ impl Player {
                 errors.push(e);
             }
         }
-        self.queue = snapshot
-            .queue
-            .iter()
-            .filter_map(|path| {
-                self.library
-                    .as_ref()?
-                    .tracks
-                    .iter()
-                    .position(|t| self.root.join(&t.path) == *path)
-            })
-            .collect();
+        if let Some(sides) = &snapshot.side_decks {
+            for (side, saved) in sides.iter().enumerate() {
+                self.sides[side].config = saved.config.clone();
+                if let Some(deck) = &saved.deck {
+                    // load and seek preserve a paused state; never resume cue audio on recovery.
+                    if let Err(error) = self.sides[side]
+                        .load(deck.path.clone())
+                        .and_then(|_| self.sides[side].seek(deck.position))
+                    {
+                        errors.push(format!("Cue deck {}: {error}", side + 1));
+                    }
+                }
+            }
+        }
+        if let Some(a) = &self.audio {
+            if let Some((bpm, quantization)) = snapshot.clock {
+                let _ = a.set_clock(bpm, quantization);
+            }
+            if let Some(settings) = &snapshot.deck_settings {
+                for (d, saved) in settings.iter().enumerate() {
+                    self.channel_gain[d] = saved.gain;
+                    self.pitch[d] = saved.pitch;
+                    self.eq[d] = saved.eq;
+                    self.filter[d] = saved.filter;
+                    a.set_gain(d, saved.gain);
+                    a.set_rate(d, 1. + saved.pitch / 100.);
+                    for (band, value) in saved.eq.into_iter().enumerate() {
+                        a.set_eq(d, band, value);
+                    }
+                    a.set_filter(d, saved.filter);
+                    use std::sync::atomic::Ordering::Relaxed;
+                    a.controls.key_lock[d].store(saved.key_lock, Relaxed);
+                    let _ = a.restore_stems(d, saved.stems);
+                    // Sync is restored while paused; loading never starts playback.
+                    let _ = a.restore_sync(d, saved.synced);
+                }
+            }
+        }
+        self.queue =
+            snapshot
+                .queue
+                .iter()
+                .filter_map(|path| {
+                    self.library.as_ref()?.tracks.iter().position(|t| {
+                        amp_core::music_sources::audio_path(&self.root, &t.path) == *path
+                    })
+                })
+                .collect();
         let missing = snapshot.queue.len() - self.queue.len();
         self.playlist_snapshot = snapshot.playlist.clone();
         self.run.playlist = snapshot.playlist_id.clone();
@@ -381,6 +596,8 @@ impl Player {
         self.run.crossfade = snapshot.crossfade;
         self.run.auto = false;
         self.auto = false;
+        self.playback_owner = snapshot.playback_owner;
+        self.player_sequence = snapshot.player_sequence.clone();
         self.run.preloaded = None;
         self.library_open = snapshot.panels[1];
         self.dj_open = snapshot.panels[2];
@@ -402,7 +619,7 @@ impl Player {
                 ctx.data_mut(|d| d.insert_persisted(egui::Id::unique(key), value));
             }
         }
-        if snapshot.sizes[0].is_some() {
+        if snapshot.sizes[0].is_some() && !self.recovery.manually_resized {
             let size = self.recovered_window_size(0, ctx.input(|i| i.viewport().monitor_size));
             ctx.send_viewport_cmd_to(
                 egui::ViewportId::ROOT,
@@ -438,6 +655,91 @@ impl Player {
 mod tests {
     use super::*;
     #[test]
+    #[ignore = "requires local audio fixture and native output; recovery remains silent"]
+    fn auxiliary_cue_positions_restore_paused_without_changing_preparation() {
+        let path = PathBuf::from(std::env::var_os("AMP_WAVEFORM_FIXTURE").expect("fixture"))
+            .canonicalize()
+            .unwrap();
+        let root = path.parent().unwrap().to_path_buf();
+        let before = amp_core::preparation::load(&path).unwrap();
+        let mut original = Player {
+            root: root.clone(),
+            library: Some(amp_core::scan(&root).unwrap()),
+            ..Default::default()
+        };
+        original.sides[0].poll(0.);
+        original.sides[0].load(path.clone()).unwrap();
+        original.sides[0].seek(2.).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        let snapshot = original.session_snapshot();
+        let saved = snapshot.side_decks.as_ref().unwrap()[0]
+            .deck
+            .as_ref()
+            .unwrap()
+            .position;
+        let mut restored = Player {
+            root: root.clone(),
+            library: Some(amp_core::scan(&root).unwrap()),
+            ..Default::default()
+        };
+        restored.sides[0].poll(0.);
+        restored.recovery.pending = Some(snapshot);
+        restored.restore_session(&egui::Context::default());
+        std::thread::sleep(std::time::Duration::from_millis(100));
+        assert!(
+            restored.recovery.error.is_none(),
+            "{:?}",
+            restored.recovery.error
+        );
+        assert!(!restored.sides[0].playing());
+        assert!((restored.sides[0].position() - saved).abs() < 0.05);
+        assert!(!restored.run.auto);
+        assert_eq!(amp_core::preparation::load(&path).unwrap(), before);
+    }
+    #[test]
+    fn delayed_recovery_does_not_reapply_window_size_after_manual_resize() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut player = Player {
+            root: dir.path().into(),
+            ..Default::default()
+        };
+        let mut snapshot = player.session_snapshot();
+        snapshot.sizes[0] = Some([1100., 900.]);
+        player.recovery.pending = Some(snapshot);
+        player.recovery.automatic_restore = true;
+        let ctx = egui::Context::default();
+        for size in [egui::vec2(1100., 900.), egui::vec2(850., 650.)] {
+            let mut raw = egui::RawInput::default();
+            raw.viewports
+                .get_mut(&egui::ViewportId::ROOT)
+                .unwrap()
+                .inner_rect = Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size));
+            let mut output = ctx.run_ui(raw, |ui| player.try_automatic_recovery(ui.ctx()));
+            output.textures_delta.clear();
+        }
+        assert!(player.recovery.manually_resized);
+        player.library = Some(Library {
+            tracks: vec![],
+            tree: Folder {
+                name: "music".into(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        });
+        let mut output = ctx.run_ui(Default::default(), |ui| {
+            player.try_automatic_recovery(ui.ctx())
+        });
+        assert!(player.recovery.attempted);
+        assert!(
+            !output
+                .viewport_output
+                .values()
+                .flat_map(|v| &v.commands)
+                .any(|c| matches!(c, egui::ViewportCommand::InnerSize(_)))
+        );
+        output.textures_delta.clear();
+    }
+    #[test]
     fn rejects_cycles_wrong_library_and_nonfinite_positions() {
         let player = Player {
             root: PathBuf::from("C:/music"),
@@ -465,6 +767,12 @@ mod tests {
         };
         let mut s = player.session_snapshot();
         s.requests = vec!["requested-song".into()];
+        s.playback_owner = crate::playback_owner::Owner::Dj;
+        s.side_decks.as_mut().unwrap()[1].deck = Some(Deck {
+            path: dir.path().join("cue.wav"),
+            position: 23.5,
+        });
+        s.side_decks.as_mut().unwrap()[1].config.volume = 0.42;
         s.queue = vec![dir.path().join("missing.mp3")];
         let file = dir.path().join("session.ampdb");
         let mut recovery = Recovery {
@@ -479,7 +787,27 @@ mod tests {
             .unwrap();
         let loaded: Snapshot = serde_json::from_value(value).unwrap();
         assert_eq!(loaded.requests, s.requests);
+        assert_eq!(loaded.playback_owner, crate::playback_owner::Owner::Dj);
         assert_eq!(loaded.queue, s.queue);
+        assert_eq!(
+            loaded.side_decks.as_ref().unwrap()[1]
+                .deck
+                .as_ref()
+                .unwrap()
+                .position,
+            23.5
+        );
+        assert_eq!(loaded.side_decks.as_ref().unwrap()[1].config.volume, 0.42);
+        let mut invalid = loaded.clone();
+        invalid.side_decks.as_mut().unwrap()[0].config.volume = f32::NAN;
+        assert!(!invalid.valid(&player.root));
+        let mut legacy = serde_json::to_value(&s).unwrap();
+        legacy.as_object_mut().unwrap().remove("side_decks");
+        assert!(
+            serde_json::from_value::<Snapshot>(legacy)
+                .unwrap()
+                .valid(&player.root)
+        );
         assert!(loaded.valid(&player.root));
     }
     #[test]

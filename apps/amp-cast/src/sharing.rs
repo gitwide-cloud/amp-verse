@@ -10,6 +10,8 @@ pub fn routes() -> Router<Arc<Cast>> {
         .route("/api/smart/enable", post(enable))
         .route("/api/smart/manifest", get(manifest))
         .route("/api/smart/tracks/{id}/metadata", get(metadata))
+        .route("/api/smart/tracks/{id}/basic", get(basic_metadata))
+        .route("/api/smart/tracks/{id}/preparation", get(metadata))
         .route("/api/smart/tracks/{id}/audio", get(audio))
         .route("/api/smart/playlists/{id}/play", post(play))
 }
@@ -24,6 +26,56 @@ async fn enable(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
     }
     cast.sharing.store(true, Relaxed);
     StatusCode::NO_CONTENT.into_response()
+}
+pub(crate) fn normal_playlist_data(
+    cast: &Cast,
+    path: &std::path::Path,
+) -> Result<(amp_core::Playlist, Value), String> {
+    use std::io::Read;
+    const MAX: usize = 4 * 1024 * 1024;
+    let bytes = if let Some(bytes) = amp_core::catalog_db::read(path)? {
+        bytes
+    } else {
+        let mut bytes = Vec::new();
+        std::fs::File::open(path)
+            .map_err(|_| "Playlist unavailable")?
+            .take(MAX as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "Playlist unavailable")?;
+        bytes
+    };
+    if bytes.len() > MAX {
+        return Err("Playlist metadata exceeds supported size".into());
+    }
+    let value: Value =
+        serde_json::from_slice(&bytes).map_err(|_| "Playlist metadata is invalid")?;
+    let mut playlist: amp_core::Playlist =
+        serde_json::from_value(value.clone()).map_err(|_| "Playlist metadata is invalid")?;
+    if playlist.version != 1 || playlist.tracks.len() > 20000 {
+        return Err("Playlist metadata is unsupported".into());
+    }
+    if playlist.sync.as_ref().is_some_and(|r| {
+        !r.library_id.is_empty() && Some(r.library_id.as_str()) != cast.library_id.as_deref()
+    }) {
+        return Err("Playlist belongs to another library".into());
+    }
+    for path in &mut playlist.tracks {
+        let portable = player_control::portable_path(path);
+        let library = cast.library_id.clone().unwrap_or_default();
+        let reference = amp_core::playlist_sync_contract::TrackRef {
+            library_id: library.clone(),
+            track_key: format!("song_{:x}", Sha256::digest(portable.as_bytes())),
+            relative_path: portable.clone(),
+        };
+        reference.validate(&library)?;
+        *path = PathBuf::from(portable);
+    }
+    // Availability is deliberately not validated here. Missing audio must not
+    // hide the rest of a saved playlist or rewrite its durable references.
+    Ok((playlist, value))
+}
+fn normal_playlist(cast: &Cast, path: &std::path::Path) -> Result<amp_core::Playlist, String> {
+    normal_playlist_data(cast, path).map(|(playlist, _)| playlist)
 }
 pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
     let mut result = Vec::new();
@@ -40,6 +92,12 @@ pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
     }
     let mut files = amp_core::catalog_db::playlist_paths(&cast.root)?;
     files.sort();
+    let available: std::collections::HashMap<_, _> = cast
+        .tracks
+        .iter()
+        .enumerate()
+        .map(|(i, t)| (player_control::portable_path(&t.path), i))
+        .collect();
     for path in files.into_iter().take(1000) {
         if !path.starts_with(cast.root.join("ampdj/playlists")) {
             continue;
@@ -51,13 +109,13 @@ pub(crate) fn lists(cast: &Cast) -> Result<Vec<Value>, String> {
         {
             continue;
         }
-        if let Ok(p) = amp_core::Playlist::load(&path, &cast.root) {
+        if let Ok(p) = normal_playlist(cast, &path) {
             let tracks: Vec<_> = p
                 .tracks
                 .iter()
-                .filter_map(|path| cast.tracks.iter().position(|t| &t.path == path))
+                .filter_map(|path| available.get(&player_control::portable_path(path)).copied())
                 .collect();
-            result.push(json!({"id":format!("normal_{}",path.file_stem().unwrap_or_default().to_string_lossy()),"name":p.name,"kind":"playlist","tracks":tracks}));
+            result.push(json!({"id":format!("normal_{}",path.file_stem().unwrap_or_default().to_string_lossy()),"name":p.name,"kind":"playlist","unavailable":p.tracks.len().saturating_sub(tracks.len()),"tracks":tracks}));
         }
     }
     Ok(result)
@@ -173,13 +231,123 @@ async fn manifest(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response
     }
     let work=tokio::task::spawn_blocking(move||lists(&cast).map(|playlists|{
         let shared:std::collections::HashSet<u64>=playlists.iter().filter_map(|p|p["tracks"].as_array()).flatten().filter_map(Value::as_u64).collect();
-        json!({"version":1,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"name":cast.station_name,"playlists":playlists,"tracks":cast.tracks.iter().enumerate().filter(|(id,_)|shared.contains(&(*id as u64))).map(|(id,t)|json!({"id":id,"title":t.title,"extension":t.path.extension().unwrap_or_default().to_string_lossy()})).collect::<Vec<_>>()})
+        json!({"version":1,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"name":cast.station_name,"playlists":playlists,"tracks":cast.tracks.iter().enumerate().filter(|(id,_)|shared.contains(&(*id as u64))).map(|(id,t)|json!({"id":id,"title":t.title,"track_key":amp_core::show::song_id(t),"extension":t.path.extension().unwrap_or_default().to_string_lossy()})).collect::<Vec<_>>()})
     })).await;
     match work {
         Ok(Ok(value)) => Json(value).into_response(),
         _ => StatusCode::SERVICE_UNAVAILABLE.into_response(),
     }
 }
+fn basic_tags(track: &Track) -> serde_json::Map<String, Value> {
+    let mut tags = serde_json::Map::new();
+    for key in [
+        "title",
+        "artist",
+        "album",
+        "album_artist",
+        "genre",
+        "genres",
+        "year",
+        "date",
+        "track",
+        "disc",
+        "comment",
+        "media_kind",
+    ] {
+        if let Some(value) = track.preparation.extensions.get(key) {
+            tags.insert(key.to_string(), value.clone());
+        }
+    }
+    // Scanner keys are Lofty ItemKey names, not the manual extension names.
+    // Project only known ordinary tags; an explicit manual value (including empty) wins.
+    if let Some(embedded) = track.preparation.extensions.get("embedded_tags") {
+        for (key, source) in [
+            ("title", "TrackTitle"),
+            ("artist", "TrackArtist"),
+            ("album", "AlbumTitle"),
+            ("album_artist", "AlbumArtist"),
+            ("date", "RecordingDate"),
+            ("year", "Year"),
+            ("track", "TrackNumber"),
+            ("disc", "DiscNumber"),
+            ("comment", "Comment"),
+        ] {
+            if tags.contains_key(key) {
+                continue;
+            }
+            let Some(values) = embedded.get(source).and_then(Value::as_array) else {
+                continue;
+            };
+            let mut text = Vec::new();
+            for value in values
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+            {
+                if !text.contains(&value) {
+                    text.push(value);
+                }
+            }
+            if !text.is_empty() {
+                tags.insert(key.into(), json!(text.join("; ")));
+            }
+        }
+    }
+    let genres = amp_core::genres::values(&track.preparation);
+    if !genres.is_empty() {
+        tags.entry("genre")
+            .or_insert_with(|| json!(genres.join("; ")));
+        tags.insert("genres".into(), json!(genres));
+    }
+    tags.insert(
+        "content_advisory".into(),
+        json!(amp_core::content_advisory::classification(
+            &track.preparation
+        )),
+    );
+    tags.entry("title").or_insert_with(|| json!(track.title));
+    tags
+}
+
+// Basic playback has no dependency on a preparation record, its revision or schema.
+// Tags come from the already-loaded catalog snapshot; only non-DJ fields cross this API.
+async fn basic_metadata(
+    State(cast): State<Arc<Cast>>,
+    Path(id): Path<usize>,
+    headers: HeaderMap,
+) -> Response {
+    if !allowed(&cast, &headers) {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let work = tokio::task::spawn_blocking(move || -> Result<Value, StatusCode> {
+        let track = shared_track(&cast, id)?;
+        let path = amp_core::resolve(&cast.root, &track.path).map_err(|_| StatusCode::NOT_FOUND)?;
+        let before = std::fs::metadata(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+        let mut file = std::fs::File::open(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+        let mut hasher = Sha256::new();
+        let mut buffer = [0; 65536];
+        let mut size = 0u64;
+        loop {
+            let n = std::io::Read::read(&mut file, &mut buffer).map_err(|_| StatusCode::SERVICE_UNAVAILABLE)?;
+            if n == 0 { break; }
+            size += n as u64;
+            hasher.update(&buffer[..n]);
+        }
+        let after = std::fs::metadata(&path).map_err(|_| StatusCode::NOT_FOUND)?;
+        if before.len() != size || before.len() != after.len() || before.modified().ok() != after.modified().ok() {
+            return Err(StatusCode::CONFLICT);
+        }
+        let tags = basic_tags(track);
+        Ok(json!({"version":1,"id":id,"title":tags.get("title").and_then(Value::as_str).unwrap_or(&track.title),"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"bytes":size,"sha256":format!("{:x}",hasher.finalize()),"track_key":amp_core::show::song_id(track),"tags":tags}))
+    }).await;
+    match work {
+        Ok(Ok(value)) => Json(value).into_response(),
+        Ok(Err(code)) => code.into_response(),
+        Err(_) => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+    }
+}
+
 async fn metadata(
     State(cast): State<Arc<Cast>>,
     Path(id): Path<usize>,
@@ -191,13 +359,17 @@ async fn metadata(
     let work=tokio::task::spawn_blocking(move||->Result<Value,StatusCode>{
         let track=shared_track(&cast,id)?; let path=amp_core::resolve(&cast.root,&track.path).map_err(|_|StatusCode::NOT_FOUND)?;
         let (preparation,revision)=amp_core::preparation::load_with_revision(&path).map_err(|_|StatusCode::UNPROCESSABLE_ENTITY)?;
+        let before=std::fs::metadata(&path).map_err(|_|StatusCode::NOT_FOUND)?;
         let mut file=std::fs::File::open(&path).map_err(|_|StatusCode::NOT_FOUND)?;
         let mut hasher=Sha256::new(); let mut buffer=[0;65536]; let mut size=0u64;
         loop {let n=std::io::Read::read(&mut file,&mut buffer).map_err(|_|StatusCode::SERVICE_UNAVAILABLE)?;if n==0 {break;} size+=n as u64;hasher.update(&buffer[..n]);}
         if amp_core::preparation::revision(&path)!=revision {return Err(StatusCode::CONFLICT);}
         let checksum=format!("{:x}",hasher.finalize());
-        if preparation.source_sha256.as_deref().is_some_and(|saved|saved!=checksum) {return Err(StatusCode::CONFLICT);}
-        Ok(json!({"version":1,"id":id,"title":track.title,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"bytes":size,"sha256":checksum,"preparation":preparation}))
+        let after=std::fs::metadata(&path).map_err(|_|StatusCode::NOT_FOUND)?;
+        if before.len()!=after.len()||before.modified().ok()!=after.modified().ok(){return Err(StatusCode::CONFLICT);}
+        let preparation_current=preparation.source_sha256.as_deref().is_none_or(|saved|saved==checksum);
+        let metadata_revision=amp_core::coordination::revision(&serde_json::to_value(&preparation).map_err(|_|StatusCode::UNPROCESSABLE_ENTITY)?);
+        Ok(json!({"version":1,"id":id,"title":track.title,"server_id":cast.server_id,"station_id":cast.station_id,"library_id":cast.library_id,"bytes":size,"sha256":checksum,"track_key":amp_core::show::song_id(track),"preparation_current":preparation_current,"revision":metadata_revision,"preparation":preparation}))
     }).await;
     match work {
         Ok(Ok(value)) => Json(value).into_response(),
@@ -209,6 +381,7 @@ async fn audio(
     State(cast): State<Arc<Cast>>,
     Path(id): Path<usize>,
     headers: HeaderMap,
+    method: axum::http::Method,
 ) -> Response {
     if !allowed(&cast, &headers) {
         return StatusCode::FORBIDDEN.into_response();
@@ -223,6 +396,21 @@ async fn audio(
         Ok(Err(code)) => return code.into_response(),
         _ => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
+    let mime = match path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "mp3" => "audio/mpeg",
+        "wav" => "audio/wav",
+        "flac" => "audio/flac",
+        "ogg" | "opus" => "audio/ogg",
+        "m4a" | "m4b" | "mp4" => "audio/mp4",
+        "aac" => "audio/aac",
+        _ => "application/octet-stream",
+    };
     let mut file = match tokio::fs::File::open(path).await {
         Ok(f) => f,
         Err(_) => return StatusCode::NOT_FOUND.into_response(),
@@ -231,20 +419,326 @@ async fn audio(
         Ok(m) => m.len(),
         Err(_) => return StatusCode::SERVICE_UNAVAILABLE.into_response(),
     };
-    let stream = async_stream::stream! {let mut buffer=vec![0;65536];loop {match file.read(&mut buffer).await { Ok(0)=>break, Ok(n)=>yield Ok::<Bytes,std::io::Error>(Bytes::copy_from_slice(&buffer[..n])), Err(e)=>{yield Err(e);break;} }}};
-    Response::builder()
-        .header("content-type", "application/octet-stream")
-        .header("content-length", size)
-        .header("cache-control", "no-store")
-        .body(Body::from_stream(stream))
-        .unwrap()
+    let range = if method == axum::http::Method::GET && !headers.contains_key("if-range") {
+        match headers
+            .get("range")
+            .and_then(|v| v.to_str().ok())
+            .map(|value| byte_range(value, size))
+            .transpose()
+        {
+            Ok(value) => value.flatten(),
+            Err(()) => {
+                return Response::builder()
+                    .status(StatusCode::RANGE_NOT_SATISFIABLE)
+                    .header("content-range", format!("bytes */{size}"))
+                    .body(Body::empty())
+                    .unwrap();
+            }
+        }
+    } else {
+        None
+    };
+    let (start, length) = range.map_or((0, size), |(start, end)| (start, end - start + 1));
+    use tokio::io::AsyncSeekExt;
+    if start > 0 && file.seek(std::io::SeekFrom::Start(start)).await.is_err() {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    }
+    let mut remaining = length;
+    let stream = async_stream::stream! {
+        let mut buffer=vec![0;65536];
+        while remaining>0 {let limit=remaining.min(buffer.len() as u64) as usize;
+            match file.read(&mut buffer[..limit]).await {
+                Ok(0)=>{yield Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof,"Shared audio changed during transfer"));break;},
+                Ok(n)=>{remaining-=n as u64;yield Ok::<Bytes,std::io::Error>(Bytes::copy_from_slice(&buffer[..n]));},
+                Err(e)=>{yield Err(e);break;}
+            }
+        }
+    };
+    let mut response = Response::builder()
+        .status(if range.is_some() {
+            StatusCode::PARTIAL_CONTENT
+        } else {
+            StatusCode::OK
+        })
+        .header("content-type", mime)
+        .header("accept-ranges", "bytes")
+        .header("content-length", length)
+        .header("cache-control", "no-store");
+    if let Some((start, end)) = range {
+        response = response.header("content-range", format!("bytes {start}-{end}/{size}"));
+    }
+    response.body(Body::from_stream(stream)).unwrap()
 }
 
+// Multiple ranges/unknown units are deliberately ignored (full response), not
+// incorrectly represented as a single partial response. If-Range is ignored
+// until a strong validator is available, so changed files cannot be stitched.
+fn byte_range(value: &str, size: u64) -> Result<Option<(u64, u64)>, ()> {
+    let Some(spec) = value.strip_prefix("bytes=") else {
+        return Ok(None);
+    };
+    if spec.contains(',') {
+        return Ok(None);
+    }
+    let (first, last) = spec.trim().split_once('-').ok_or(())?;
+    if size == 0 {
+        return Err(());
+    }
+    let (start, end) = if first.is_empty() {
+        let suffix = last.parse::<u64>().map_err(|_| ())?;
+        if suffix == 0 {
+            return Err(());
+        }
+        (size.saturating_sub(suffix), size - 1)
+    } else {
+        let start = first.parse::<u64>().map_err(|_| ())?;
+        let end = if last.is_empty() {
+            size - 1
+        } else {
+            last.parse::<u64>().map_err(|_| ())?.min(size - 1)
+        };
+        (start, end)
+    };
+    if start >= size || start > end {
+        return Err(());
+    }
+    Ok(Some((start, end)))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
     use axum::http::Request;
     use tower::ServiceExt;
+    #[tokio::test]
+    async fn shared_audio_supports_seeking_head_and_unsatisfiable_ranges() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("song.mp3"), b"0123456789").unwrap();
+        amp_core::show::Settings::default()
+            .save(dir.path())
+            .unwrap();
+        let cast = Cast::new(dir.path().into(), amp_core::scan(dir.path()).unwrap(), None);
+        cast.sharing.store(true, Relaxed);
+        let app = router(cast);
+        for (range, status, body) in [
+            ("bytes=2-4", 206, "234"),
+            ("bytes=-3", 206, "789"),
+            ("bytes=8-", 206, "89"),
+            ("bytes=0-999", 206, "0123456789"),
+            ("bytes=20-", 416, ""),
+            ("bytes=0-1,4-5", 200, "0123456789"),
+        ] {
+            let response = app
+                .clone()
+                .oneshot(
+                    Request::get("/api/smart/tracks/0/audio")
+                        .header("range", range)
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status().as_u16(), status, "{range}");
+            assert_eq!(
+                &axum::body::to_bytes(response.into_body(), 100)
+                    .await
+                    .unwrap()[..],
+                body.as_bytes()
+            );
+        }
+        let response = app
+            .oneshot(
+                Request::head("/api/smart/tracks/0/audio")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.headers()["content-type"], "audio/mpeg");
+        assert_eq!(response.headers()["content-length"], "10");
+        assert!(
+            axum::body::to_bytes(response.into_body(), 100)
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(byte_range("bytes=0-0", 0), Err(()));
+        assert_eq!(byte_range("bytes=-0", 10), Err(()));
+    }
+    #[test]
+    fn basic_advisory_uses_shared_conservative_classification() {
+        let mut track = Track {
+            path: "song.mp3".into(),
+            title: "Song".into(),
+            preparation: amp_core::Preparation::default(),
+        };
+        assert_eq!(basic_tags(&track)["content_advisory"], "Unknown");
+        track.preparation.extensions.insert(
+            "embedded_tags".into(),
+            json!({"ParentalAdvisory":["2"], "Bpm":["128"]}),
+        );
+        assert_eq!(basic_tags(&track)["content_advisory"], "Clean");
+        amp_core::content_advisory::set_manual(
+            &mut track.preparation,
+            amp_core::content_advisory::Classification::Explicit,
+        );
+        assert_eq!(basic_tags(&track)["content_advisory"], "Explicit");
+        amp_core::content_advisory::set_manual(
+            &mut track.preparation,
+            amp_core::content_advisory::Classification::Unknown,
+        );
+        assert_eq!(
+            basic_tags(&track)["content_advisory"],
+            "Unknown",
+            "manual Unknown must defeat embedded Clean"
+        );
+        track.preparation.extensions.remove("content_advisory");
+        track.preparation.extensions.insert(
+            "embedded_tags".into(),
+            json!({"ParentalAdvisory":["2","1"]}),
+        );
+        let tags = basic_tags(&track);
+        assert_eq!(tags["content_advisory"], "Unknown");
+        assert!(!tags.contains_key("embedded_tags"));
+        assert!(!tags.contains_key("bpm"));
+    }
+
+    #[test]
+    fn basic_tags_include_scanned_metadata_without_exposing_analysis() {
+        let mut preparation = amp_core::Preparation::default();
+        preparation.extensions.insert(
+            "embedded_tags".into(),
+            json!({
+                "TrackTitle":["Embedded title"], "TrackArtist":["First artist","Second artist"],
+                "AlbumTitle":["Real album"], "AlbumArtist":["Album artist"],
+                "RecordingDate":["2024-03-12"], "TrackNumber":["7"], "DiscNumber":["2"],
+                "Comment":["Ordinary note"], "Bpm":["128"], "InitialKey":["8A"]
+            }),
+        );
+        preparation
+            .extensions
+            .insert("embedded_genres".into(), json!(["Rnb", "House"]));
+        preparation
+            .extensions
+            .insert("analysis".into(), json!({"secret_dj_data":true}));
+        let mut track = Track {
+            path: "song.mp3".into(),
+            title: "Catalog title".into(),
+            preparation,
+        };
+        let tags = basic_tags(&track);
+        assert_eq!(tags["artist"], "First artist; Second artist");
+        assert_eq!(tags["album"], "Real album");
+        assert_eq!(tags["album_artist"], "Album artist");
+        assert_eq!(tags["date"], "2024-03-12");
+        assert_eq!(tags["track"], "7");
+        assert_eq!(tags["disc"], "2");
+        assert_eq!(tags["comment"], "Ordinary note");
+        assert_eq!(tags["title"], "Embedded title");
+        assert_eq!(tags["genres"], json!(["R&B", "house"]));
+        for key in ["embedded_tags", "analysis", "bpm", "key", "InitialKey"] {
+            assert!(!tags.contains_key(key));
+        }
+        track
+            .preparation
+            .extensions
+            .insert("title".into(), json!("Manual title"));
+        track
+            .preparation
+            .extensions
+            .insert("artist".into(), json!("Manual artist"));
+        track
+            .preparation
+            .extensions
+            .insert("album".into(), json!("Manual album"));
+        track
+            .preparation
+            .extensions
+            .insert("genre".into(), json!("Rock"));
+        let tags = basic_tags(&track);
+        assert_eq!(tags["artist"], "Manual artist");
+        assert_eq!(tags["album"], "Manual album");
+        assert_eq!(tags["genres"], json!(["Rock"]));
+        assert_eq!(tags["title"], "Manual title");
+        track
+            .preparation
+            .extensions
+            .insert("artist".into(), json!(""));
+        assert_eq!(
+            basic_tags(&track)["artist"],
+            "",
+            "intentional manual clearing must not resurrect embedded tags"
+        );
+    }
+
+    #[tokio::test]
+    async fn basic_metadata_does_not_require_or_expose_dj_preparation() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("song.mp3"), b"original audio bytes").unwrap();
+        amp_core::show::Settings::default()
+            .save(dir.path())
+            .unwrap();
+        let library = amp_core::scan(dir.path()).unwrap();
+        let cast = Cast::new(dir.path().into(), library, Some("access".into()));
+        cast.sharing.store(true, Relaxed);
+        // Broken optional preparation must not prevent basic playback metadata.
+        std::fs::write(amp_core::sidecar(&dir.path().join("song.mp3")), b"invalid").unwrap();
+        let app = router(cast);
+        let request = |path| {
+            Request::get(path)
+                .header("x-amp-password", "access")
+                .body(Body::empty())
+                .unwrap()
+        };
+        assert_eq!(
+            app.clone()
+                .oneshot(
+                    Request::get("/api/smart/tracks/0/basic")
+                        .header("x-amp-password", "wrong")
+                        .body(Body::empty())
+                        .unwrap()
+                )
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::FORBIDDEN
+        );
+        let response = app
+            .clone()
+            .oneshot(request("/api/smart/tracks/0/basic"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let basic: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            basic["sha256"],
+            format!("{:x}", Sha256::digest(b"original audio bytes"))
+        );
+        assert_eq!(basic["bytes"], 20);
+        assert!(basic["track_key"].as_str().unwrap().starts_with("song_"));
+        for field in [
+            "preparation",
+            "preparation_current",
+            "revision",
+            "stems",
+            "bpm",
+            "cues",
+        ] {
+            assert!(basic.get(field).is_none(), "DJ field leaked: {field}");
+        }
+        assert_eq!(
+            app.oneshot(request("/api/smart/tracks/0/preparation"))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::UNPROCESSABLE_ENTITY
+        );
+    }
+
     #[tokio::test]
     async fn sharing_is_opt_in_authenticated_and_copies_originals_with_cues() {
         let dir = tempfile::tempdir().unwrap();
@@ -261,6 +755,7 @@ mod tests {
             number: Some(3),
             ..Default::default()
         });
+        prep.source_sha256 = Some(format!("{:x}", Sha256::digest(b"original audio bytes")));
         amp_core::preparation::save(dir.path(), std::path::Path::new("song.mp3"), &prep).unwrap();
         amp_core::show::Settings::default()
             .save(dir.path())
@@ -268,6 +763,7 @@ mod tests {
         let library = amp_core::scan(dir.path()).unwrap();
         std::fs::create_dir_all(dir.path().join("ampdj/playlists")).unwrap();
         amp_core::Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: "My saved playlist".into(),
@@ -337,6 +833,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(metadata["preparation"]["manual_cues"][0]["id"], "my-drop");
+        assert!(metadata["track_key"].as_str().unwrap().starts_with("song_"));
+        assert!(metadata["revision"].is_object());
+        let response = app
+            .clone()
+            .oneshot(request("/api/smart/tracks/0/preparation", "access"))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let explicit: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            metadata, explicit,
+            "legacy and explicit DJ preparation contracts retain the same identities/revisions"
+        );
+        let response = app
+            .clone()
+            .oneshot(request("/api/smart/tracks/0/basic", "access"))
+            .await
+            .unwrap();
+        let basic: Value = serde_json::from_slice(
+            &axum::body::to_bytes(response.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        for key in [
+            "track_key",
+            "sha256",
+            "bytes",
+            "server_id",
+            "station_id",
+            "library_id",
+        ] {
+            assert_eq!(basic[key], metadata[key], "identity mismatch: {key}");
+        }
+        assert_eq!(basic["tags"]["title"], "song");
+
+        std::fs::write(dir.path().join("song.mp3"), b"changed audio bytes").unwrap();
+        let changed = app
+            .clone()
+            .oneshot(request("/api/smart/tracks/0/metadata", "access"))
+            .await
+            .unwrap();
+        assert_eq!(changed.status(), StatusCode::OK);
+        let changed: Value = serde_json::from_slice(
+            &axum::body::to_bytes(changed.into_body(), 1024 * 1024)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(changed["preparation_current"], false);
+        assert_eq!(changed["preparation"]["manual_cues"][0]["id"], "my-drop");
+        std::fs::write(dir.path().join("song.mp3"), b"original audio bytes").unwrap();
+
         let response = app
             .clone()
             .oneshot(request("/api/smart/tracks/0/audio", "access"))
@@ -370,6 +924,40 @@ mod tests {
 mod catalog_station_tests {
     use super::*;
     #[test]
+    fn server_clean_selection_excludes_explicit_and_unknown_after_saved_rule_reload() {
+        use amp_core::content_advisory::{Classification, set_manual};
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = amp_core::show::Settings::default();
+        settings.playlists[0]
+            .filters
+            .push(amp_core::smart_filters::Filter::new(
+                amp_core::smart_filters::Field::Clean,
+            ));
+        settings.save(root.path()).unwrap();
+        let mut library = amp_core::scan(root.path()).unwrap();
+        for (i, advisory) in [
+            Classification::Clean,
+            Classification::Explicit,
+            Classification::Unknown,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let mut preparation = amp_core::Preparation::default();
+            set_manual(&mut preparation, advisory);
+            library.tracks.push(Track {
+                path: format!("{i}.mp3").into(),
+                title: "Clean radio edit".into(),
+                preparation,
+            });
+        }
+        let cast = Cast::new(root.path().into(), library, None);
+        let sources = lists(&cast).unwrap();
+        let smart = sources.iter().find(|v| v["kind"] == "smart").unwrap();
+        assert_eq!(smart["tracks"], json!([0]));
+        assert_eq!(smart["rules"]["filters"][0]["field"], "Clean");
+    }
+    #[test]
     fn station_sources_read_database_documents_without_loose_json() {
         let root = tempfile::tempdir().unwrap();
         amp_core::show::Settings::default()
@@ -377,6 +965,7 @@ mod catalog_station_tests {
             .unwrap();
         let normal = root.path().join("ampdj/playlists/test.json");
         amp_core::Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: "Saved normal".into(),
@@ -398,5 +987,24 @@ mod catalog_station_tests {
         let sources = lists(&cast).unwrap();
         assert!(sources.iter().any(|p| p["name"] == "Demo"));
         assert!(sources.iter().any(|p| p["name"] == "Saved normal"));
+    }
+}
+
+#[cfg(test)]
+mod normal_metadata_tests {
+    use super::*;
+    #[test]
+    fn oversized_raw_normal_document_is_rejected_without_rewriting_it() {
+        let root = tempfile::tempdir().unwrap();
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        let file = root.path().join("oversized.json");
+        let bytes = vec![b' '; 4 * 1024 * 1024 + 1];
+        std::fs::write(&file, &bytes).unwrap();
+        assert!(normal_playlist(&cast, &file).is_err());
+        assert_eq!(std::fs::read(&file).unwrap(), bytes);
     }
 }

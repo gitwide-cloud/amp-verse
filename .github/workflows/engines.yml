@@ -1,0 +1,147 @@
+name: Verify AMP Rust engines
+on:
+  push:
+    branches: ['feature/rust-engine-knowledge-*', 'codex/sag75-server-manager']
+    paths:
+      - 'crates/**'
+      - 'apps/amp-cast/**'
+      - 'apps/amp-engine/**'
+      - 'apps/amp-server-manager/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'tests/sag65/**'
+      - 'tools/check_chroma.py'
+      - 'deploy/install-windows-server.ps1'
+      - 'deploy/show-windows-server-access.ps1'
+      - 'tools/test_windows_server_access.ps1'
+      - 'tools/test_windows_server_install.ps1'
+      - 'deploy/Show Server Access Code.cmd'
+      - '.github/workflows/engines.yml'
+  pull_request:
+    paths:
+      - 'crates/**'
+      - 'apps/amp-cast/**'
+      - 'apps/amp-engine/**'
+      - 'apps/amp-server-manager/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+      - 'tests/sag65/**'
+      - 'tools/check_chroma.py'
+      - 'deploy/install-windows-server.ps1'
+      - 'deploy/show-windows-server-access.ps1'
+      - 'tools/test_windows_server_access.ps1'
+      - 'tools/test_windows_server_install.ps1'
+      - 'deploy/Show Server Access Code.cmd'
+      - '.github/workflows/engines.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: amp-rust-engines-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  engines:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-24.04, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-on-failure: true
+      - name: Linux codec fixtures
+        if: runner.os == 'Linux'
+        timeout-minutes: 8
+        run: |
+          if ! command -v ffmpeg >/dev/null; then
+            # CI only: bypass a slow regional HTTP mirror, retaining Ubuntu archive signatures.
+            cat > "$RUNNER_TEMP/amp-ubuntu.list" <<'SOURCES'
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble main restricted universe multiverse
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://archive.ubuntu.com/ubuntu noble-updates main restricted universe multiverse
+          deb [signed-by=/usr/share/keyrings/ubuntu-archive-keyring.gpg] https://security.ubuntu.com/ubuntu noble-security main restricted universe multiverse
+          SOURCES
+            sources=(-o "Dir::Etc::sourcelist=$RUNNER_TEMP/amp-ubuntu.list" -o Dir::Etc::sourceparts=- -o APT::Get::List-Cleanup=0)
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" update
+            sudo apt-get -o Acquire::Retries=2 -o Acquire::https::Timeout=20 "${sources[@]}" install -y --no-install-recommends ffmpeg
+          fi
+          ffmpeg -version
+      - name: Windows codec fixtures
+        if: runner.os == 'Windows'
+        timeout-minutes: 10
+        run: |
+          python tools/setup_ci_ffmpeg.py --self-test
+          python tools/setup_ci_ffmpeg.py
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Verify Studio browser session flow
+        run: node --test apps/amp-cast/web/studio-session.test.cjs
+      - run: cargo fmt --all --check
+      - name: Verify native chroma parity and measure bounded component throughput
+        run: python tools/check_chroma.py --out test-output/chroma
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: amp-chroma-evidence-${{ runner.os }}-${{ github.sha }}
+          path: |
+            test-output/chroma/report.json
+            test-output/chroma/verification.log
+      - name: Core, database, analysis, server and engine tests
+        run: cargo test -p amp-core --features analysis -p amp-cast -p amp-engine -p amp-dj-policy --all-targets --locked
+      - name: Verify knowledge IDs with insertion-ordered JSON enabled
+        run: cargo test -p amp-core --features analysis,knowledge-order-check knowledge::tests --locked
+      - name: Strict engine lint
+        run: cargo clippy -p amp-core --features analysis -p amp-cast -p amp-engine -p amp-dj-policy --all-targets --locked -- -D warnings
+      - name: Verify integrated transition data and Cast true peak
+        run: |
+          python tests/sag65/generate_sag65_fixtures.py --out-dir target/sag65-fixtures
+          cargo test -p amp-core -p amp-cast f10 --locked -- --ignored --nocapture --test-threads=1
+          cargo test -p amp-core --test sag65_vectors --locked -- --nocapture --test-threads=1
+      - name: Verify finite server Player queues with generated real audio
+        run: cargo test -p amp-cast --lib player_control::tests::generated --locked -- --ignored --test-threads=1
+      - name: Generated audio adaptive stream and worker lifecycle tests
+        run: cargo test -p amp-cast --lib hls::tests --locked -- --include-ignored --test-threads=1
+      - name: Verify private Windows access-code recovery
+        if: runner.os == 'Windows'
+        run: powershell.exe -NoProfile -File tools/test_windows_server_access.ps1
+      - name: Verify one existing Windows server install is reused
+        if: runner.os == 'Windows'
+        run: powershell.exe -NoProfile -File tools/test_windows_server_install.ps1
+      - name: Build standalone server and analysis engine
+        run: cargo build -p amp-cast -p amp-engine --release --locked
+      - uses: actions/setup-dotnet@v4
+        if: runner.os == 'Windows'
+        with:
+          dotnet-version: '10.0.x'
+      - name: Build optional Windows manager
+        if: runner.os == 'Windows'
+        run: dotnet publish apps/amp-server-manager/Windows -c Release -r win-x64 --self-contained true -o engine-checkpoint/manager
+      - name: Stage source-identified engine build
+        shell: bash
+        run: |
+          mkdir -p engine-checkpoint
+          if [ "${{ runner.os }}" = "Windows" ]; then ext=.exe; else ext=; fi
+          cp target/release/amp-cast$ext target/release/amp-prepare$ext target/release/amp-engine$ext engine-checkpoint/
+          cp LICENSE THIRD_PARTY_NOTICES.md docs/SERVER_ANALYSIS_DATABASE.md engine-checkpoint/
+          if [ "${{ runner.os }}" = "Windows" ]; then cp deploy/install-windows-server.ps1 deploy/show-windows-server-access.ps1 "deploy/Show Server Access Code.cmd" engine-checkpoint/; fi
+          cp test-output/chroma/report.json engine-checkpoint/chroma-benchmark.json
+          python -c "import hashlib,json,pathlib; d=pathlib.Path('engine-checkpoint'); files=[{'name':p.name,'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in sorted(d.iterdir()) if p.is_file()]; (d/'build.json').write_text(json.dumps({'commit':'${{ github.sha }}','os':'${{ runner.os }}','preview':True,'deployed':False,'files':files},indent=2))"
+      - name: Hash optional manager files
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = (Resolve-Path engine-checkpoint/manager).Path
+          $files = @(Get-ChildItem $root -File -Recurse | ForEach-Object { @{path=[IO.Path]::GetRelativePath($root, $_.FullName); sha256=(Get-FileHash $_.FullName).Hash.ToLowerInvariant(); size=$_.Length} })
+          @{source_commit='${{ github.sha }}'; installed=$false; files=$files} | ConvertTo-Json -Depth 5 | Set-Content engine-checkpoint/manager/build.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: amp-engines-${{ runner.os }}-${{ github.sha }}
+          path: engine-checkpoint/

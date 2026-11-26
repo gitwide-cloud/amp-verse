@@ -16,6 +16,30 @@ import static org.junit.Assert.*;
 
 @RunWith(AndroidJUnit4.class)
 public class SettingsDeviceTest {
+    @Test public void desktopOnlyReleaseExplainsMissingPhonePackage()throws Exception{
+        try{AppUpdate.androidPackage(new org.json.JSONObject("{\"packages\":{\"windows-x64\":{}}}"));fail("No Android package");}catch(java.io.IOException error){assertTrue(error.getMessage().contains("no Android installer"));assertTrue(error.getMessage().contains("unchanged"));}
+        assertNotNull(AppUpdate.androidPackage(new org.json.JSONObject("{\"packages\":{\"android-arm64\":{}}}")));
+    }
+    @Test public void cancellationPreventsPendingInstaller() {
+        Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
+        SharedPreferences updates=context.getSharedPreferences("updates",0);
+        boolean oldInstall=updates.getBoolean("install",false),oldCancel=AppUpdate.cancelled;
+        try {
+            AppUpdate.cancelled=true;updates.edit().putBoolean("install",true).commit();
+            try(ActivityScenario<SettingsActivity> scenario=ActivityScenario.launch(SettingsActivity.class)) {
+                scenario.onActivity(activity->{AppUpdate.installPending(activity);assertFalse(updates.getBoolean("install",true));});
+            }
+        }finally{AppUpdate.cancelled=oldCancel;updates.edit().putBoolean("install",oldInstall).commit();}
+    }
+    @Test public void invalidUpdatePreservesInstalledApp() throws Exception {
+        Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
+        File invalid=new File(context.getCacheDir(),"invalid-update.apk");
+        try {
+            try(FileOutputStream out=new FileOutputStream(invalid)){out.write(new byte[]{1,2,3});}
+            try{AppUpdate.validate(context,invalid,BuildConfig.VERSION_CODE+1);fail("Invalid APK accepted");}
+            catch(java.io.IOException expected){assertTrue(expected.getMessage().contains("newer AMP Verse"));}
+        }finally{invalid.delete();}
+    }
     @Test public void settingsThemeAndPlaybackPersistAcrossRecreation() throws Exception {
         Context context=InstrumentationRegistry.getInstrumentation().getTargetContext();
         SharedPreferences prefs=context.getSharedPreferences("settings",Context.MODE_PRIVATE);

@@ -1,0 +1,11 @@
+# Transition landing schedules — 1.0.21
+
+Normal Auto DJ blends now commit a source-clock launch against the earlier of the prepared musical exit and the actual audio tail. The planner selects the last compatible grid point with room for the saved fade duration and a 150 ms tail margin. It uses actual playback rate, decoder-relative cue origins, and the existing confidence-gated beat/phrase grid. It rejects invalid numbers and deadlines that have already passed.
+
+The audio callback accepts that fixed boundary. Receiving a command just before a boundary no longer means recalculating a whole later phrase because of the callback's normal scheduling lookahead. If no safe future boundary fits, Auto DJ uses a shortened tail-safe blend rather than waiting past the musical exit. Manual next-grid transitions retain their existing behavior. Scratch, buildup and mashup routines retain their specialized scheduling; this update does not claim those are fully redesigned.
+
+Live section selection now treats the clicked section as the blend's landing: its session-only source begins one saved fade duration earlier, adjusted for playback rate, when that pre-roll fits inside protected cue bounds. Near the beginning, where pre-roll cannot fit, it retains the selected start. Saved cues and analysis are never rewritten by section selection.
+
+Reference inspection: official Flow 8 guidance describes preparing grids/sections and crossfading into a selected section (https://flow8deck.com/howtoguide). Targeted inspection of the user's installed .NET settings exposed separate same-section/other-section settings and end-grid/delay/duration options. Its native mixer implementation was not recovered. AMP's implementation is independent Rust code; no proprietary code or reference binaries are included in source or packages.
+
+Verification includes source-time/rate/deadline planner cases, fixed-boundary callback tests at and immediately before a phrase boundary, the existing synthetic pre-roll/drop render test, saved-duration/grid tests, existing section tests, workspace checks and isolated release startup. These verify scheduling, not the accuracy of every song's analyzed downbeat. Real music listening with the new build remains necessary; current playback is intentionally left running on the old installed executable.

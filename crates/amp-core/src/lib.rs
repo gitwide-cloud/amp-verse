@@ -1,22 +1,39 @@
 //! Offline-first library, preparation data and process audio adapter. No GUI or network dependency.
+pub mod dj_engine;
+pub mod dj_logic;
+pub mod library_engine;
+pub mod limiter;
+pub mod loudness;
+pub mod perceptual_energy;
+pub mod vocal_profile;
 #[cfg(feature = "analysis")]
-pub mod analysis;
+pub use library_engine::analysis;
 pub mod arrangement;
+pub mod background;
 pub mod batch;
-pub mod catalog_db;
+pub mod lab_processing;
+pub(crate) use library_engine::catalog_shards;
+pub mod content_advisory;
 pub mod coordination;
+pub mod cue_policy;
 pub mod discovery;
 pub mod energy_profile;
 pub mod engine_api;
-pub mod mix_schedule;
-pub mod offline;
-pub mod preparation;
-pub mod review;
+pub mod knowledge;
+pub mod playlist_sync_contract;
+pub mod podcast_feed;
 pub mod show;
 pub mod smart;
-pub mod stem_archive;
-pub mod stem_mix;
-pub mod storage;
+pub mod smart_cycle;
+pub mod smart_filters;
+// Compatibility names keep existing integrations on the same implementation.
+pub use dj_engine::{stem_archive, stem_mix};
+pub use dj_logic::{dj_phrasing, hype_sections, mix_schedule, transition_plan};
+pub use library_engine::{
+    analysis_queue, artwork, catalog_db, consolidate, genres, media_kind, music_sources, offline,
+    preparation, review, storage,
+};
+
 use serde::{Deserialize, Serialize};
 use std::{
     fs, io,
@@ -89,6 +106,13 @@ pub struct Folder {
     pub folders: Vec<Folder>,
     pub tracks: Vec<usize>,
 }
+impl Folder {
+    /// A branch is browsable when it contains indexed audio, directly or below it.
+    /// This also works with cached trees that retain empty filesystem directories.
+    pub fn has_tracks(&self) -> bool {
+        !self.tracks.is_empty() || self.folders.iter().any(Self::has_tracks)
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Library {
     pub tracks: Vec<Track>,
@@ -102,15 +126,33 @@ pub fn sidecar(path: &Path) -> PathBuf {
 }
 
 pub fn scan(root: &Path) -> io::Result<Library> {
+    scan_mode(root, true)
+}
+/// Enumerate job inputs without reading audio tags or preparation for every file.
+/// Analysis workers reload preparation under the shared lease; these are not playback snapshots.
+pub fn scan_job_inputs(root: &Path) -> io::Result<Library> {
+    scan_mode(root, false)
+}
+fn scan_mode(root: &Path, metadata: bool) -> io::Result<Library> {
+    let mut library = scan_single(root, metadata)?;
+    music_sources::append(root, &mut library, metadata)?;
+    Ok(library)
+}
+fn scan_single(root: &Path, metadata: bool) -> io::Result<Library> {
     let root = root.canonicalize()?;
     storage::register(&root);
     let mut tracks = Vec::new();
-    let catalog = catalog_db::preparations(&root).map_err(io::Error::other)?;
+    let mut catalog = if metadata {
+        catalog_db::preparations(&root).map_err(io::Error::other)?
+    } else {
+        Default::default()
+    };
     fn visit(
         dir: &Path,
         root: &Path,
         tracks: &mut Vec<Track>,
-        catalog: &std::collections::BTreeMap<String, Preparation>,
+        catalog: &mut std::collections::BTreeMap<String, Preparation>,
+        metadata: bool,
     ) -> io::Result<Folder> {
         let mut folder = Folder {
             name: dir.file_name().unwrap_or_default().to_string_lossy().into(),
@@ -130,7 +172,9 @@ pub fn scan(root: &Path) -> io::Result<Library> {
                 continue;
             }
             if ty.is_dir() {
-                folder.folders.push(visit(&path, root, tracks, catalog)?);
+                folder
+                    .folders
+                    .push(visit(&path, root, tracks, catalog, metadata)?);
             } else if ty.is_file() && supported(&path) {
                 let key = format!(
                     "tracks/{}.json",
@@ -139,11 +183,28 @@ pub fn scan(root: &Path) -> io::Result<Library> {
                         .to_string_lossy()
                         .replace('\\', "/")
                 );
-                let preparation = if let Some(prep) = catalog.get(&key) {
-                    prep.clone()
+                let mut preparation = if !metadata {
+                    Preparation::default()
+                } else if let Some(prep) = catalog.remove(&key) {
+                    prep
                 } else {
                     preparation::load(&path).map_err(io::Error::other)?
                 };
+                if metadata {
+                    genres::read_embedded(&path, &mut preparation);
+                } else if let Ok(stat) = entry.metadata()
+                    && let Ok(time) = stat.modified()
+                    && let Ok(time) = time.duration_since(std::time::UNIX_EPOCH)
+                {
+                    preparation.extensions.insert("scan_source_stat".into(),serde_json::json!({"size":stat.len(),"modified_ns":time.as_nanos().to_string()}));
+                }
+                let content = media_kind::kind(&path, &preparation);
+                if content != media_kind::Kind::Music {
+                    preparation.extensions.insert(
+                        "media_kind_detected".into(),
+                        serde_json::json!(content.id()),
+                    );
+                }
                 folder.tracks.push(tracks.len());
                 tracks.push(Track {
                     path: path.strip_prefix(root).unwrap().into(),
@@ -165,14 +226,14 @@ pub fn scan(root: &Path) -> io::Result<Library> {
         }
         Ok(folder)
     }
-    let tree = visit(&root, &root, &mut tracks, &catalog)?;
+    let tree = visit(&root, &root, &mut tracks, &mut catalog, metadata)?;
     Ok(Library { tracks, tree })
 }
 pub fn supported(p: &Path) -> bool {
     p.extension().is_some_and(|e| {
         matches!(
             e.to_string_lossy().to_lowercase().as_str(),
-            "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "aac"
+            "mp3" | "wav" | "flac" | "ogg" | "opus" | "m4a" | "m4b" | "aac"
         )
     })
 }
@@ -196,7 +257,7 @@ pub fn folder_contains(path: &Path, folder: &Path) -> bool {
 /// Return the original spelling of the relative portion, without substring-prefix matches.
 pub fn relative_folder(path: &Path, root: &Path) -> Option<PathBuf> {
     if !folder_contains(path, root) {
-        return None;
+        return music_sources::relative(root, path);
     }
     Some(path.components().skip(root.components().count()).collect())
 }
@@ -210,7 +271,7 @@ pub fn resolve(root: &Path, relative: &Path) -> io::Result<PathBuf> {
     {
         return Err(io::Error::other("Expected a relative library path"));
     }
-    let root = root.canonicalize()?;
+    let (root, relative) = music_sources::owner(root, relative)?;
     let file = root.join(relative).canonicalize()?;
     if !file.starts_with(root) || !file.is_file() {
         return Err(io::Error::other("Track outside library"));
@@ -220,6 +281,8 @@ pub fn resolve(root: &Path, relative: &Path) -> io::Result<PathBuf> {
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Playlist {
+    #[serde(default)]
+    pub companion_available: bool,
     #[serde(default, rename = "_amp_sync", skip_serializing_if = "Option::is_none")]
     pub sync: Option<coordination::Revision>,
     pub version: u32,
@@ -363,6 +426,8 @@ impl Drop for Deck {
     }
 }
 
+pub use library_engine::transcripts;
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -466,6 +531,7 @@ mod tests {
         assert_eq!(library.tree.folders[0].tracks, [0]);
         assert_eq!(library.tracks[0].preparation, prep);
         let list = Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: "Evening".into(),
@@ -524,5 +590,44 @@ mod tests {
         symlink(root.path(), root.path().join("cycle")).unwrap();
         assert!(scan(root.path()).unwrap().tracks.is_empty());
         assert!(resolve(root.path(), Path::new("link.mp3")).is_err());
+    }
+}
+
+#[cfg(test)]
+mod folder_visibility_tests {
+    #[test]
+    fn audio_branches_remain_visible_without_removing_empty_or_artwork_folders() {
+        let root = tempfile::tempdir().unwrap();
+        for folder in ["Empty", "Artwork", "Parent/Album", "audios/Empty"] {
+            std::fs::create_dir_all(root.path().join(folder)).unwrap();
+        }
+        std::fs::write(root.path().join("Artwork/cover.jpg"), b"cover").unwrap();
+        std::fs::write(root.path().join("Parent/Album/song.mp3"), b"fixture").unwrap();
+        let library = super::scan(root.path()).unwrap();
+        assert!(library.tree.has_tracks());
+        let visible: Vec<_> = library
+            .tree
+            .folders
+            .iter()
+            .filter(|f| f.has_tracks())
+            .map(|f| f.name.as_str())
+            .collect();
+        assert_eq!(visible, ["Parent"]);
+        assert!(
+            library
+                .tree
+                .folders
+                .iter()
+                .find(|f| f.name == "Parent")
+                .unwrap()
+                .folders[0]
+                .has_tracks()
+        );
+        assert!(root.path().join("Empty").is_dir());
+        assert!(root.path().join("audios/Empty").is_dir());
+        assert_eq!(
+            std::fs::read(root.path().join("Artwork/cover.jpg")).unwrap(),
+            b"cover"
+        );
     }
 }

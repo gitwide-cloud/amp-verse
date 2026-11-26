@@ -1,7 +1,18 @@
 //! Phrase mashup policy and envelopes; operates on loaded snapshots, never saved stem defaults.
 use amp_core::Preparation;
 /// Conservative pairing: same/relative key, close effective tuning, and phase-capable tempo grids.
+#[cfg(test)]
 pub fn compatible(out: &Preparation, incoming: &Preparation, out_rate: f64, in_rate: f64) -> bool {
+    compatible_with_keylock(out, incoming, out_rate, in_rate, [false, false])
+}
+/// Compare effective pitch after the real loaded Key Lock processors, not varispeed alone.
+pub fn compatible_with_keylock(
+    out: &Preparation,
+    incoming: &Preparation,
+    out_rate: f64,
+    in_rate: f64,
+    key_lock: [bool; 2],
+) -> bool {
     let (Some(a), Some(b)) = (out.bpm, incoming.bpm) else {
         return false;
     };
@@ -11,39 +22,43 @@ pub fn compatible(out: &Preparation, incoming: &Preparation, out_rate: f64, in_r
     if !out_rate.is_finite() || !in_rate.is_finite() || out_rate <= 0. || in_rate <= 0. {
         return false;
     }
-    if (a * out_rate / (b * in_rate) - 1.).abs() > 0.005
-        || (12. * (out_rate / in_rate).log2()).abs() > 0.2
+    let pitch_out = if key_lock[0] { 1. } else { out_rate };
+    let pitch_in = if key_lock[1] { 1. } else { in_rate };
+    if (a * out_rate / (b * in_rate) - 1.).abs() > 0.0005
+        || (12. * (pitch_out / pitch_in).log2()).abs() > 0.2
     {
         return false;
     }
     let key = |p: &Preparation| {
-        p.harmonic_key.as_ref().and_then(|k| {
-            let n = k.get(..k.len().checked_sub(1)?)?.parse::<u8>().ok()?;
-            let mode = k.chars().last()?;
-            (n > 0 && n <= 12 && matches!(mode, 'A' | 'B')).then_some(n)
-        })
+        p.harmonic_key
+            .as_ref()
+            .map(|k| k.trim().to_ascii_uppercase())
+            .and_then(|k| {
+                let n = k.get(..k.len().checked_sub(1)?)?.parse::<u8>().ok()?;
+                let mode = k.chars().last()?;
+                (n > 0 && n <= 12 && matches!(mode, 'A' | 'B')).then_some(n)
+            })
     };
     key(out).zip(key(incoming)).is_some_and(|(a, b)| a == b)
 }
-/// During hold: outgoing vocals + incoming instruments/drums, with just one vocal source.
-/// Returns bus levels and per-deck stem masks, independent of saved/live stem gains.
+/// Incoming vocal over outgoing backing; reveal incoming backing at the landing.
+/// Session masks multiply user stem gains; no saved stem setting is changed.
 pub fn envelope(elapsed: u64, fade: u64, hold: u64, incoming: usize) -> ([f32; 2], [[f32; 3]; 2]) {
     let outgoing = 1 - incoming;
     let mut weights = [1.; 2];
     let mut masks = [[1.; 3]; 2];
     if elapsed < fade {
         let p = elapsed as f32 / fade.max(1) as f32;
-        weights[incoming] = p;
-        masks[outgoing] = [1., 1. - p, 1. - p];
-        masks[incoming] = [0., 1., 1.];
+        masks[outgoing] = [(1. - p / 0.60).max(0.), 1., 1.];
+        masks[incoming] = [((p - 0.65) / 0.35).clamp(0., 1.), 0., 0.];
     } else if elapsed < fade + hold {
-        masks[outgoing] = [1., 0., 0.];
-        masks[incoming] = [0., 1., 1.];
+        masks[outgoing] = [0., 1., 1.];
+        masks[incoming] = [1., 0., 0.];
     } else {
         let p = ((elapsed - fade - hold) as f32 / fade.max(1) as f32).min(1.);
         weights[outgoing] = 1. - p;
-        masks[outgoing] = [1., 0., 0.];
-        masks[incoming] = [p, 1., 1.];
+        masks[outgoing] = [0., 1., 1.];
+        masks[incoming] = [1., p, p];
     }
     (weights, masks)
 }
@@ -51,15 +66,45 @@ pub fn envelope(elapsed: u64, fade: u64, hold: u64, incoming: usize) -> ([f32; 2
 mod tests {
     use super::*;
     #[test]
+    fn actual_key_lock_allows_tempo_matched_mashups_without_varispeed_detuning() {
+        let a = Preparation {
+            bpm: Some(120.),
+            harmonic_key: Some("8A".into()),
+            ..Default::default()
+        };
+        let b = Preparation {
+            bpm: Some(110.),
+            harmonic_key: Some("8b".into()),
+            ..Default::default()
+        };
+        assert!(!compatible(&a, &b, 1., 120. / 110.));
+        assert!(compatible_with_keylock(
+            &a,
+            &b,
+            1.,
+            120. / 110.,
+            [true, true]
+        ));
+        assert!(!compatible_with_keylock(
+            &a,
+            &b,
+            1.,
+            120. / 110.,
+            [true, false]
+        ));
+        assert!(!compatible_with_keylock(&a, &b, 1., 1., [true, true]));
+    }
+    #[test]
     fn hold_has_one_vocal_and_restores_the_incoming_mix() {
         let (w, m) = envelope(150, 100, 200, 1);
         assert_eq!(w, [1., 1.]);
-        assert_eq!(m, [[1., 0., 0.], [0., 1., 1.]]);
+        assert_eq!(m, [[0., 1., 1.], [1., 0., 0.]]);
         let (w, m) = envelope(400, 100, 200, 1);
         assert_eq!(w, [0., 1.]);
         assert_eq!(m[1], [1.; 3]);
         for t in 0..400 {
             let (_, m) = envelope(t, 100, 200, 0);
+            assert_eq!(m[0][0] * m[1][0], 0.);
             assert!(m.iter().flatten().all(|v| (0. ..=1.).contains(v)));
         }
     }

@@ -1,0 +1,61 @@
+# AMP Lab — YouTube URL import
+
+In desktop **AMP Lab**, paste a YouTube video URL and press **Download MP3**. Progress covers downloading and MP3 conversion; **Cancel** stops the stage and its child processes. **Retry** appears after errors. The completed MP3 automatically enters the existing waveform editor with preview, selection, fades, gain, normalize and export. There is no format selector.
+
+The original download is a **256 kbps MP3**. Re-encoding does not improve the source quality. Lab exports suggest a separate `_clip.mp3` and reject existing destinations/source overwrites. If you have unexported edits, Lab asks before replacing them. Declining retains the editor and completed download; export first, then choose **Open downloaded MP3**. An active export also prevents replacement. This protection is shared by Open audio, From Library and URL imports.
+
+Completed originals persist in:
+
+- Windows: `%LOCALAPPDATA%\AMPVerse\AMP Lab\downloads`
+- Linux: `$XDG_DATA_HOME/amp-verse/lab/downloads`, or `~/.local/share/amp-verse/lab/downloads`.
+
+Titles are sanitized and byte-bounded, video IDs identify sources, and collisions get numbered filenames. Each action uses its own temporary directory. Failures/Cancel remove incomplete files; completed files are retained. Completed MP3s are published atomically without replacing existing files.
+
+## Dependencies and recovery
+
+Windows x86_64 and Linux x86_64 packages include the official **yt-dlp 2026.10.26** standalone binary and **Deno 2.9.8** under `tools/lab-youtube`. These run as separate tools, not a plugin/add-on. The official yt-dlp standalone includes matching EJS scripts. YouTube support requires a supported JavaScript runtime (Deno >=2.3.0); see [yt-dlp's official EJS guide](https://github.com/yt-dlp/yt-dlp/wiki/EJS). The standalone includes Python; users do not need to install Python for normal downloading. yt-dlp's current Python-package minimum is 3.11; see [the pinned upstream release](https://github.com/yt-dlp/yt-dlp/releases/tag/2026.10.26).
+
+**FFmpeg, ffprobe and ffplay remain the existing AMP Lab audio dependencies**, located beside AMP Verse or on PATH. FFmpeg must include `libmp3lame`. This feature does not redistribute a new codec build. Linux: install your distribution's `ffmpeg` package (for example `sudo apt install ffmpeg`). Windows: use your existing AMP Verse audio tools, or obtain a Windows build linked from [FFmpeg's official download page](https://ffmpeg.org/download.html); place ffmpeg.exe, ffprobe.exe and ffplay.exe beside amp-player.exe. Retain that build's licenses and corresponding-source instructions.
+
+To repair or update the downloader/runtime bundle, run the included setup script with Python 3.11+:
+
+```text
+python setup/setup_lab_youtube.py --dest tools/lab-youtube
+```
+
+From a source checkout:
+
+```text
+python tools/setup_lab_youtube.py --dest target/release/tools/lab-youtube
+```
+
+The script fetches pinned official GitHub releases, verifies release SHA256 digests (or official checksum manifests), stages writes, and retains upstream licenses, third-party notices and project source archives. It neither invokes a shell nor installs global packages. Maintain the pinned versions in the script and ship updates through normal AMP Verse packages. Missing tools produce a readable error with **Downloads / tools → Locate tools** and **Setup instructions**. A selected tools folder is remembered locally. The `AMP_LAB_TOOLS` environment variable supports developer/managed installs. Unsupported architectures can provide their own official matching yt-dlp/EJS, Deno and audio tools; automatic packaging currently follows the project's Windows/Linux x86_64 targets.
+
+## Boundaries
+
+Accepts ordinary YouTube watch, youtu.be, Shorts, live-video permalink and embed URLs containing a single valid video ID. Canonicalization removes playlist/tracking parameters, and yt-dlp also receives `--no-playlist`. Channel URLs and ongoing livestreams are rejected. With Playlist off, video URLs still download one video and strip playlist parameters. With Playlist on, a YouTube playlist URL (or video URL with a list ID) queues up to 500 unique video IDs. Items download/convert sequentially; failed/private items are reported and skipped. A collision-safe M3U8 playlist is also saved beside the MP3s, containing only successful downloads in playlist order (including a partial playlist after Cancel). Completed MP3s remain available under Downloaded MP3s; choose a result to open through Lab’s normal unsaved-edit protection. Cancel stops the active process tree and retains completed files. Re-running a playlist currently downloads its available entries again with collision-safe names; persistent resume/deduplication is not implemented. No cookies, browser sessions, user yt-dlp configuration, user plugins, DRM bypass or access-control bypass are used. Private/unavailable videos, network failures, disk errors and conversion errors leave the existing editor/source intact.
+
+The UI uses bounded worker channels. Processes use structured argument arrays and isolated Windows Job Objects / Unix process groups; cancellation and timeouts terminate the whole tree. No URL-import screens are added to Player, DJ, Library or Android.
+
+## Verification
+
+Focused tests cover URL validation and playlist stripping, progress parsing, safe Unicode filenames, atomic filename collisions, missing tools, disk-path errors, private/network/invalid-audio failures, original preservation, and declined/blocked edit replacement. A locally compiled fake downloader and **real FFmpeg/Deno** exercise the entire download/conversion/publication/automatic-delivery path, including Cancel during download and conversion and a spawned grandchild heartbeat. A real editor-open test verifies waveform decoding and source preservation.
+
+Live verification on Windows also succeeded against the public Big Buck Bunny test video (`aqz-KE-bpKQ`) using the official pinned yt-dlp/Deno and installed FFmpeg. The older upstream test ID `BaW_jenozKc` was unavailable and correctly reported as such; its fixtures remain deterministic local tests. Live YouTube access is intentionally excluded from routine CI, where it could fail due to video/network availability. Linux CI runs the local pipeline with real codecs and packages the official runtime bundle.
+
+## Hidden Suno URL support
+
+Paste a Suno song (`https://suno.com/song/<uuid>`), short share (`/s/...`), or an explicit Suno CDN audio-download link into the existing YouTube URL field. The label changes to **Suno URL** only while a Suno link is present; no extra tab, catalog add-on or always-visible provider selector is added. The YouTube Playlist choice stays available for YouTube and is ignored/hidden for single-song Suno imports.
+
+Suno imports read publicly exposed downloadable audio for the exact song, reject placeholder/silence and unrelated song URLs, and retain the title and canonical source link in the MP3 metadata. They use the same 256 kbps MP3 conversion, progress, Cancel, collision-safe publication and protected editor-open flow. Conversion does not increase the source quality. Suno only requires the existing FFmpeg/ffprobe tools; it does not use yt-dlp or Deno.
+
+Public song pages and audio redirects are bounded and restricted to Suno's known hosts and matching song identity. Audio downloads are capped at 256 MB, page reads at 4 MB, and temporary files are removed on cancellation/failure. Unencoded public progressive-audio records are supported alongside legacy audio metadata. Some current Suno share links expose encoded playback data instead of a standard downloadable audio file; these require Suno's official export flow. Explicitly disabled downloads, encoded playback records and encrypted media are rejected, rather than saving an unusable MP3. No login cookies, credential extraction, guessed CDN URLs or access-control bypass are used. If Suno does not expose a standard downloadable file, use the contextual **Open in Suno** link and its official export menu, then **Open exported MP3...** to bring that file into Lab through the same unsaved-edit protection. Short links without a resolvable public song identity require the full song link. Suno playlists, profiles and account-only exports are not implemented.
+
+Verification includes Suno song/share/CDN validation, tracking removal, Next.js public metadata extraction, HTML title decoding, placeholder rejection, cancellation/size bounds, and real FFmpeg conversion/tagging and final Lab decoding on Windows and Linux. Live availability depends on Suno; fixture tests do not establish that a particular restricted link can be downloaded.
+
+Official export help: https://help.suno.com/en/articles/2409921
+
+1.0.8 verification: local playlist fixture with a successful item and a private
+item, real FFmpeg conversion, retained successful audio/M3U8 membership, result
+selection without automatic editor replacement, and existing process-tree Cancel
+tests passed. Live playlist downloading was not exercised in this pass.

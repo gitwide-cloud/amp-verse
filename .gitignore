@@ -5,3 +5,11 @@
 /android/**/build/
 /android/local.properties
 __pycache__/
+/integrations/companion/node_modules/
+/integrations/companion/pkg/
+
+/integrations/companion/*.tgz
+
+# Optional .NET Windows server manager
+apps/amp-server-manager/**/bin/
+apps/amp-server-manager/**/obj/

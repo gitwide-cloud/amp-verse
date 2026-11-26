@@ -12,7 +12,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.List;
 
-/** Only locally copied audio enters this queue. Atomic metadata replacement, no network. */
+/** Local references stay in place. Only AMP playlist downloads enter managed sync storage. */
 final class LibraryStore {
     static List<MediaItem> read(Context context) {
         List<MediaItem> items = new ArrayList<>();
@@ -24,12 +24,28 @@ final class LibraryStore {
             JSONArray array = new JSONArray(packed!=null?packed:new String(Files.readAllBytes(index.toPath()), StandardCharsets.UTF_8));
             for (int i = 0; i < array.length(); i++) {
                 JSONObject entry = array.getJSONObject(i);
-                File file = new File(context.getFilesDir(), entry.getString("file"));
-                if (!file.getCanonicalPath().startsWith(context.getFilesDir().getCanonicalPath() + File.separator)) continue;
-                if (file.isFile()) items.add(item(file, entry.getString("title")));
+                if(entry.has("uri")) {
+                    Uri uri=Uri.parse(entry.getString("uri"));
+                    if(!"content".equals(uri.getScheme()))continue;
+                    MediaMetadata.Builder metadata=new MediaMetadata.Builder().setTitle(entry.optString("title")).setArtist(entry.optString("artist")).setAlbumTitle(entry.optString("album"));
+                    if(entry.has("preparation"))metadata.setExtras(DjEngine.preparedExtras(entry.getString("preparation")));
+                    items.add(new MediaItem.Builder().setMediaId(entry.getString("id")).setUri(uri).setMediaMetadata(metadata.build()).build());
+                } else {
+                    File file = new File(context.getFilesDir(), entry.getString("file"));
+                    if (!file.getCanonicalPath().startsWith(context.getFilesDir().getCanonicalPath() + File.separator)) continue;
+                    if (file.isFile()) items.add(item(file, entry.getString("title")));
+                }
             }
         } catch (Exception error) { throw new IllegalStateException("Cannot read saved library", error); }
         return items;
+    }
+    static MediaItem reference(Context context,Uri uri,String name,String preparation) {
+        String title=name,artist="",album="";
+        android.media.MediaMetadataRetriever tags=new android.media.MediaMetadataRetriever();
+        try{tags.setDataSource(context,uri);String value=tags.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_TITLE);if(value!=null&&!value.isEmpty())title=value;value=tags.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ARTIST);if(value!=null)artist=value;value=tags.extractMetadata(android.media.MediaMetadataRetriever.METADATA_KEY_ALBUM);if(value!=null)album=value;}catch(Exception ignored){}finally{try{tags.release();}catch(Exception ignored){}}
+        MediaMetadata.Builder metadata=new MediaMetadata.Builder().setTitle(title).setArtist(artist).setAlbumTitle(album);
+        if(preparation!=null)metadata.setExtras(DjEngine.preparedExtras(preparation));
+        return new MediaItem.Builder().setMediaId("local-"+java.util.UUID.nameUUIDFromBytes(uri.toString().getBytes(StandardCharsets.UTF_8))).setUri(uri).setMediaMetadata(metadata.build()).build();
     }
     static MediaItem item(File file, String title) {
         MediaMetadata.Builder metadata=new MediaMetadata.Builder().setTitle(title).setArtist("Local audio");
@@ -41,8 +57,17 @@ final class LibraryStore {
     static void write(Context context, List<MediaItem> items) throws Exception {
         JSONArray array = new JSONArray();
         for (MediaItem item : items) {
-            File file = new File(item.localConfiguration.uri.getPath());
-            array.put(new JSONObject().put("file", "audio/" + file.getName()).put("title", item.mediaMetadata.title));
+            if(item.localConfiguration==null)continue;
+            Uri uri=item.localConfiguration.uri;
+            if("content".equals(uri.getScheme())) {
+                JSONObject entry=new JSONObject().put("uri",uri.toString()).put("id",item.mediaId).put("title",item.mediaMetadata.title).put("artist",item.mediaMetadata.artist==null?"":item.mediaMetadata.artist).put("album",item.mediaMetadata.albumTitle==null?"":item.mediaMetadata.albumTitle);
+                if(item.mediaMetadata.extras!=null&&item.mediaMetadata.extras.containsKey("amp-preparation"))entry.put("preparation",item.mediaMetadata.extras.getString("amp-preparation"));
+                array.put(entry);
+            }else{
+                File file = new File(uri.getPath());
+                if(!file.getCanonicalPath().startsWith(new File(context.getFilesDir(),"audio").getCanonicalPath()+File.separator))continue;
+                array.put(new JSONObject().put("file", "audio/" + file.getName()).put("title", item.mediaMetadata.title));
+            }
         }
         CatalogStore.put(context,"library",array.toString());
     }

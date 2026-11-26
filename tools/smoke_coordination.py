@@ -1,6 +1,7 @@
 """Generated files only: two devices, incremental analysis and independent servers."""
 import hashlib,json,math,os,socket,struct,subprocess,sys,tempfile,time,urllib.request,urllib.error,wave
 from pathlib import Path
+from fixture_catalog import raw
 prepare=str(Path(sys.argv[1]).resolve());cast=str(Path(sys.argv[2]).resolve())
 def port():
     with socket.socket() as s:s.bind(('127.0.0.1',0));return s.getsockname()[1]
@@ -25,11 +26,11 @@ with tempfile.TemporaryDirectory(prefix='amp-coordination-',dir=os.environ.get('
     for p in jobs:
         out,err=p.communicate(timeout=45);assert p.returncode==0,(out,err);outputs.append(out)
     assert sum(s.count('/ BPM ') for s in outputs)==6,outputs
-    records={p.name:p.read_bytes() for p in (music/'ampdj/tracks').glob('*.json')}
+    records={f'song{n}':raw(music,f'tracks/song{n}.wav.json') for n in range(6)}
     assert len(records)==6
     repeat=subprocess.run([prepare,str(music),'--jobs','3'],env=envs[1],capture_output=True,text=True,timeout=30)
     assert repeat.returncode==0 and repeat.stdout.count('skipped Complete')==6,repeat.stdout+repeat.stderr
-    assert records=={p.name:p.read_bytes() for p in (music/'ampdj/tracks').glob('*.json')}
+    assert records=={f'song{n}':raw(music,f'tracks/song{n}.wav.json') for n in range(6)}
     assert json.loads((folder/'device0/device.json').read_text())['id']!=json.loads((folder/'device1/device.json').read_text())['id']
     def start(env):
         p=subprocess.Popen([cast,str(music)],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
@@ -63,7 +64,7 @@ with tempfile.TemporaryDirectory(prefix='amp-coordination-',dir=os.environ.get('
             if state['reused_or_claimed']==6:break
             assert time.monotonic()<until,state
             time.sleep(.1)
-        assert records=={p.name:p.read_bytes() for p in (music/'ampdj/tracks').glob('*.json')}
+        assert records=={f'song{n}':raw(music,f'tracks/song{n}.wav.json') for n in range(6)}
         print('PASS: two devices coordinate six jobs exactly once; reuse preserves bytes; server IDs persist; station controls stay independent; headless analysis resumes')
     finally:
         for p,base,_ in servers:

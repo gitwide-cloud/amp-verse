@@ -1,4 +1,4 @@
-name: Android preview
+name: Android beta
 on:
   push:
     branches: [main]
@@ -11,22 +11,30 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
           java-version: '17'
       - uses: android-actions/setup-android@v3
         with:
-          packages: platform-tools platforms;android-35 build-tools;35.0.0
+          packages: platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.0.12077973
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
       - uses: gradle/actions/setup-gradle@v4
         with:
-          gradle-version: '8.9'
-      - run: gradle -p android :app:assembleDebug :app:assembleDebugAndroidTest :app:lintDebug
+          gradle-version: '8.11.1'
+      - run: gradle -p android :app:assembleLiteDebug :app:assembleFullDebug :app:assembleFullDebugAndroidTest :app:testFullDebugUnitTest :app:lintFullDebug :app:lintLiteDebug :amp-dj:assembleDebug :amp-dj:lintDebug :amp-lab:assembleDebug :amp-lab:lintDebug :amp-cast:assembleDebug :amp-cast:lintDebug :amp-podcasts:assembleDebug :amp-podcasts:lintDebug :amp-remote:assembleDebug :amp-remote:lintDebug
+      - name: Package verified editions and signed companion APKs
+        run: python tools/package_android_modules.py --variant debug --release-tag "android-beta-${{ github.sha }}" --destination android-dist
       - uses: actions/upload-artifact@v4
         with:
-          name: amp-verse-android-preview
+          name: amp-verse-android-modules-${{ github.run_number }}
           path: |
-            android/app/build/outputs/apk/debug/*.apk
+            android-dist/
             third-party/mp3-lab/android-third-party-sources.zip
             third-party/mp3-lab/LICENSE
             third-party/mp3-lab/THIRD_PARTY_NOTICES.md

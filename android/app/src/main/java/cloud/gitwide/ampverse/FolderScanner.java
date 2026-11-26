@@ -38,16 +38,34 @@ final class FolderScanner {
         Uri root=DocumentsContract.buildDocumentUriUsingTree(tree,DocumentsContract.getTreeDocumentId(tree));
         Uri folder=child(resolver,root,"ampdj");if(folder==null)return;
         Uri catalog=child(resolver,folder,"catalog.ampdb");if(catalog==null)return;
-        java.io.File copy=java.io.File.createTempFile("amp-catalog-",".ampdb",context.getCacheDir());
-        try {
-            try(java.io.InputStream input=resolver.openInputStream(catalog);java.io.OutputStream output=new java.io.FileOutputStream(copy)) {
-                if(input==null)throw new IOException("Cannot read catalog");byte[] buffer=new byte[65536];int count;long total=0;
-                while((count=input.read(buffer))!=-1){total+=count;if(total>512L*1024*1024)throw new IOException("Catalog too large");output.write(buffer,0,count);}
-            }
-            try(android.database.sqlite.SQLiteDatabase db=android.database.sqlite.SQLiteDatabase.openDatabase(copy.getPath(),null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY);Cursor c=db.rawQuery("SELECT key,document FROM records WHERE key LIKE 'tracks/%'",null)) {
-                while(c.moveToNext()){String value=c.getString(1);org.json.JSONObject prep=new org.json.JSONObject(value);double cue=prep.optDouble("cue_in",0);if(!Double.isFinite(cue)||cue<0)throw new IOException("Invalid catalog cue");packed.get().put(c.getString(0),value);}
-            }
-        } finally {copy.delete();}
+        java.io.File copy=copyCatalog(context,resolver,catalog);
+        try(android.database.sqlite.SQLiteDatabase db=android.database.sqlite.SQLiteDatabase.openDatabase(copy.getPath(),null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY)) {
+            int version=db.getVersion();
+            if(version==1)loadRecords(db);
+            else if(version==2){
+                Uri snapshots=child(resolver,folder,"catalogs");if(snapshots==null)throw new IOException("Song catalog folder is missing");
+                try(Cursor c=db.rawQuery("SELECT file FROM shards ORDER BY id",null)){
+                    while(c.moveToNext()){
+                        String name=c.getString(0);if(name==null||!name.matches("songs-[A-Za-z0-9-]+\\.ampdb"))throw new IOException("Invalid song catalog location");
+                        Uri source=child(resolver,snapshots,name);if(source==null)throw new IOException("A song catalog is unavailable");
+                        java.io.File shard=copyCatalog(context,resolver,source);
+                        try(android.database.sqlite.SQLiteDatabase songs=android.database.sqlite.SQLiteDatabase.openDatabase(shard.getPath(),null,android.database.sqlite.SQLiteDatabase.OPEN_READONLY)){if(songs.getVersion()!=1)throw new IOException("Unsupported song catalog version");loadRecords(songs);}finally{shard.delete();}
+                    }
+                }
+            }else throw new IOException("Unsupported library catalog version");
+        }catch(Exception error){packed.get().clear();throw error;}finally{copy.delete();}
+    }
+    private static java.io.File copyCatalog(android.content.Context context,ContentResolver resolver,Uri source)throws IOException {
+        java.io.File copy=java.io.File.createTempFile("amp-catalog-",".ampdb",context.getCacheDir());boolean complete=false;
+        try(java.io.InputStream input=resolver.openInputStream(source);java.io.OutputStream output=new java.io.FileOutputStream(copy)){
+            if(input==null)throw new IOException("Cannot read catalog");byte[] buffer=new byte[65536];int count;long total=0;
+            while((count=input.read(buffer))!=-1){total+=count;if(total>512L*1024*1024)throw new IOException("Catalog too large");output.write(buffer,0,count);}complete=true;return copy;
+        }finally{if(!complete)copy.delete();}
+    }
+    private static void loadRecords(android.database.sqlite.SQLiteDatabase db)throws Exception {
+        try(Cursor c=db.rawQuery("SELECT key,document FROM records WHERE key LIKE 'tracks/%'",null)){
+            while(c.moveToNext()){String value=c.getString(1);org.json.JSONObject prep=new org.json.JSONObject(value);double cue=prep.optDouble("cue_in",0);if(!Double.isFinite(cue)||cue<0)throw new IOException("Invalid catalog cue");packed.get().put(c.getString(0),value);}
+        }
     }
     static boolean audio(String name,String mime) {
         if(mime!=null&&mime.startsWith("audio/"))return true;
@@ -55,7 +73,7 @@ final class FolderScanner {
     }
     static List<Uri> scan(ContentResolver resolver,Uri tree)throws IOException {
         List<Uri> songs=new ArrayList<>();ArrayDeque<String[]> directories=new ArrayDeque<>();Set<String> visited=new HashSet<>();
-        paths.get().clear();directories.add(new String[]{DocumentsContract.getTreeDocumentId(tree),""});
+        paths.get().clear();packed.get().clear();directories.add(new String[]{DocumentsContract.getTreeDocumentId(tree),""});
         while(!directories.isEmpty()){
             String[] next=directories.removeFirst();String directory=next[0];if(!visited.add(directory))continue;
             Uri children=DocumentsContract.buildChildDocumentsUriUsingTree(tree,directory);

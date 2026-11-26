@@ -24,8 +24,46 @@ pub enum Fallback {
     #[default]
     RelaxRecent,
 }
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, Default)]
+pub enum ArcShape {
+    #[default]
+    Linear,
+    Wave {
+        amplitude: f64,
+        period_transitions: u32,
+    },
+    WarmupPeakCooldown {
+        peak_fraction: f64,
+        peak_energy: f64,
+        end_energy: f64,
+    },
+}
+impl ArcShape {
+    fn valid(self) -> bool {
+        match self {
+            Self::Linear => true,
+            Self::Wave {
+                amplitude,
+                period_transitions,
+            } => amplitude.is_finite() && (0. ..=9.).contains(&amplitude) && period_transitions > 0,
+            Self::WarmupPeakCooldown {
+                peak_fraction,
+                peak_energy,
+                end_energy,
+            } => {
+                peak_fraction.is_finite()
+                    && peak_fraction > 0.
+                    && peak_fraction < 1.
+                    && (1. ..=10.).contains(&peak_energy)
+                    && (1. ..=10.).contains(&end_energy)
+            }
+        }
+    }
+}
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct EnergyPlan {
+    #[serde(default)]
+    pub arc: ArcShape,
     pub target: f64,
     pub transitions: u32,
     pub hold: bool,
@@ -37,6 +75,8 @@ pub struct PlaylistSource {
 }
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SmartPlaylist {
+    #[serde(default)]
+    pub companion_available: bool,
     pub id: String,
     pub name: String,
     /// Imported sources stay bound to their originating library until explicitly remapped.
@@ -47,6 +87,11 @@ pub struct SmartPlaylist {
     // Keep the conservative state in device-local startup caches; shared loads recompute it.
     #[serde(default)]
     pub source_unavailable: bool,
+    /// Empty means all genres; selected genres are combined with OR.
+    #[serde(default)]
+    pub genres: Vec<String>,
+    #[serde(default)]
+    pub filters: Vec<crate::smart_filters::Filter>,
     pub style: Style,
     #[serde(default)]
     pub folders: Vec<PathBuf>,
@@ -75,6 +120,13 @@ pub struct SmartPlaylist {
     #[serde(default = "yes")]
     pub use_manual_cues: bool,
 }
+impl SmartPlaylist {
+    pub fn requires_advisory(&self) -> bool {
+        self.filters
+            .iter()
+            .any(|f| f.field() == crate::smart_filters::Field::Clean)
+    }
+}
 fn default_recent() -> usize {
     5
 }
@@ -96,11 +148,14 @@ impl Default for Settings {
             playlists: [("demo", "Demo", Style::Steady)]
                 .into_iter()
                 .map(|(id, name, style)| SmartPlaylist {
+                    companion_available: false,
                     id: id.into(),
                     name: name.into(),
                     source_library: None,
                     source_root_hint: None,
                     source_unavailable: false,
+                    genres: vec![],
+                    filters: vec![],
                     style,
                     folders: vec![],
                     playlist_sources: vec![],
@@ -121,6 +176,16 @@ impl Default for Settings {
     }
 }
 impl Settings {
+    pub fn required_version(&self) -> u32 {
+        if self.playlists.iter().any(|p| p.requires_advisory()) {
+            3
+        } else if self.playlists.iter().any(|p| !p.filters.is_empty()) {
+            2
+        } else {
+            1
+        }
+    }
+
     pub fn resolve_sources(&mut self, root: &Path) {
         if self.playlists.iter().all(|p| p.source_library.is_none()) {
             for p in &mut self.playlists {
@@ -137,7 +202,23 @@ impl Settings {
         }
     }
     fn normalize(&mut self) {
+        if (1..=3).contains(&self.version) {
+            self.version = if self.playlists.iter().any(|p| p.requires_advisory()) {
+                3
+            } else if self.playlists.iter().any(|p| !p.filters.is_empty()) {
+                2
+            } else {
+                1
+            };
+        }
         for p in &mut self.playlists {
+            p.genres = p
+                .genres
+                .iter()
+                .map(|g| crate::genres::canonical(g))
+                .collect();
+            let mut seen_genres = std::collections::HashSet::new();
+            p.genres.retain(|g| seen_genres.insert(g.clone()));
             if !p.allowed.is_empty() {
                 p.restrict_allowed = true;
             }
@@ -147,7 +228,7 @@ impl Settings {
         }
     }
     pub fn validate(&self) -> Result<(), String> {
-        if self.version != 1 || self.playlists.len() > 1000 {
+        if !(1..=3).contains(&self.version) || self.playlists.len() > 1000 {
             return Err("Unsupported show settings".into());
         }
         let mut ids = std::collections::HashSet::new();
@@ -158,11 +239,19 @@ impl Settings {
                 || p.target_energy
                     .is_some_and(|e| !e.is_finite() || !(1. ..=10.).contains(&e))
                 || p.recent_repeat > 1000
+                || (p.requires_advisory() && self.version < 3)
+                || p.filters.len() > 64
+                || p.filters.iter().any(|f| f.validate().is_err())
+                || p.genres.len() > 256
+                || p.genres
+                    .iter()
+                    .any(|g| g.trim().is_empty() || g.len() > 256)
             {
                 return Err("Invalid Smart Playlist rule".into());
             }
             if let Some(plan) = &p.energy_progression {
-                Progression::new(5., plan.target, plan.transitions, plan.hold)?;
+                Progression::new(5., plan.target, plan.transitions, plan.hold)?
+                    .with_arc(plan.arc)?;
             }
             if p.folders.iter().any(|p| {
                 p.is_absolute()
@@ -244,7 +333,11 @@ impl SmartPlaylistExport {
         }
         let package = Self {
             format: "ampverse-smart-playlist".into(),
-            version: if playlist.playlist_sources.is_empty() {
+            version: if playlist.requires_advisory() {
+                4
+            } else if !playlist.filters.is_empty() {
+                3
+            } else if playlist.playlist_sources.is_empty() {
                 1
             } else {
                 2
@@ -259,10 +352,13 @@ impl SmartPlaylistExport {
         Ok(bytes)
     }
     fn validate(&self) -> Result<(), String> {
-        if self.format != "ampverse-smart-playlist" || !(1..=2).contains(&self.version) {
+        if self.format != "ampverse-smart-playlist" || !(1..=4).contains(&self.version) {
             return Err("Unsupported AMP Smart Playlist file".into());
         }
         let p = &self.playlist;
+        if p.requires_advisory() && self.version < 4 {
+            return Err("Clean rules require playlist export version 4".into());
+        }
         // Check both separator spellings, regardless of the importing operating system.
         if p.folders.iter().any(|f| {
             let s = f.to_string_lossy().replace('\\', "/");
@@ -275,7 +371,7 @@ impl SmartPlaylistExport {
         }
         Settings {
             sync: None,
-            version: 1,
+            version: if p.requires_advisory() { 3 } else { 1 },
             playlists: vec![p.clone()],
         }
         .validate()
@@ -307,11 +403,24 @@ pub fn eligible(p: &SmartPlaylist, t: &Track) -> bool {
         return false;
     }
     let id = song_id(t);
+    // Broad folder selections are still music mixes. Spoken audio requires an
+    // explicit song selection or playlist membership, not merely a parent folder.
+    if !crate::media_kind::is_music(&t.path, &t.preparation)
+        && !p.allowed.contains(&id)
+        && !p
+            .playlist_sources
+            .iter()
+            .any(|source| source.songs.contains(&id))
+    {
+        return false;
+    }
     // Folder sources include all descendants. Older drafts used restrict_allowed as
     // an empty-source guard; do not require per-song Allow ticks after a folder is chosen.
     let allowed = p.allowed.contains(&id)
         || (p.allowed.is_empty() && (!p.restrict_allowed || !p.folders.is_empty()));
-    !p.excluded.contains(&id)
+    p.filters.iter().all(|f| f.matches(t))
+        && (p.genres.is_empty() || crate::genres::matches(&p.genres, &t.preparation))
+        && !p.excluded.contains(&id)
         && ((allowed
             && ((!p.restrict_folders && p.folders.is_empty())
                 || p.folders.iter().any(|f| crate::folder_contains(&t.path, f))))
@@ -376,42 +485,42 @@ pub fn ranked_with_snapshot(
     let wanted = target.or(p.target_energy).or(playing.and_then(energy));
     let score = |t: &Track| {
         let mut prepared = t.preparation.clone();
-        if let Some(profile) = crate::energy_profile::read(&prepared) {
-            let entry = if !crate::energy_profile::mixing_allowed(&prepared) {
-                profile.at(prepared.cue_in)
+        let entry = if p.style == Style::Hype {
+            let at = if p.use_manual_cues {
+                crate::hype_sections::marked_entry(&prepared)
             } else {
-                profile
-                    .entry(
-                        wanted.map_or(0.5, |e| (e - 1.) / 9.),
-                        crate::energy_profile::entry_bound(&prepared),
-                        prepared.cue_out.unwrap_or(profile.duration),
-                        8.,
-                    )
-                    .map(|s| s.energy)
-            };
-            if let Some(e) = entry {
-                prepared
-                    .extensions
-                    .insert("energy".into(), serde_json::json!(e));
+                None
             }
+            .or_else(|| crate::hype_sections::entry(&prepared))
+            .unwrap_or(prepared.cue_in);
+            crate::energy_profile::read(&prepared).and_then(|profile| profile.at(at))
+        } else {
+            crate::energy_profile::automatic_entry(
+                &prepared,
+                wanted.map_or(0.5, |e| (e - 1.) / 9.),
+                8.,
+            )
+            .map(|entry| entry.energy)
         }
-        let e = match (wanted, energy(&prepared)) {
-            (Some(a), Some(b)) => (a - b).abs(),
-            _ => 3.,
-        };
-        let tempo = playing
-            .and_then(|p| p.bpm)
-            .zip(t.preparation.bpm)
-            .map_or(1., |(a, b)| (a / b).ln().abs() * 5.);
-        e + tempo
-            + playing.map_or(1., |p| {
-                crate::smart::cost(p, &prepared, wanted.map(|e| (e - 1.) / 9.))
-            })
-            - if p.preferred.contains(&song_id(t)) {
-                0.25
-            } else {
-                0.
-            }
+        .or_else(|| {
+            crate::energy_profile::read(&prepared).and_then(|profile| profile.at(prepared.cue_in))
+        });
+        if let Some(e) = entry {
+            prepared
+                .extensions
+                .insert("energy".into(), serde_json::json!(e));
+        }
+        playing.map_or_else(
+            || match (wanted, energy(&prepared)) {
+                (Some(a), Some(b)) => (a - b).abs(),
+                _ => 3.,
+            },
+            |p| crate::smart::cost(p, &prepared, wanted.map(|e| (e - 1.) / 9.)),
+        ) - if p.preferred.contains(&song_id(t)) {
+            0.25
+        } else {
+            0.
+        }
     };
     let mut scored: Vec<_> = candidates.iter().map(|(i, t)| (score(t), *i)).collect();
     scored.sort_by(|a, b| a.0.total_cmp(&b.0).then(a.1.cmp(&b.1)));
@@ -419,6 +528,7 @@ pub fn ranked_with_snapshot(
 }
 #[derive(Debug, Clone, Serialize)]
 pub struct Progression {
+    pub arc: ArcShape,
     pub start: f64,
     pub target: f64,
     pub total: u32,
@@ -436,6 +546,7 @@ impl Progression {
             return Err("Energy must be 1–10 and progression 1–100 transitions".into());
         }
         Ok(Self {
+            arc: ArcShape::Linear,
             start,
             target,
             total,
@@ -443,10 +554,40 @@ impl Progression {
             hold,
         })
     }
+    pub fn with_arc(mut self, arc: ArcShape) -> Result<Self, String> {
+        if !arc.valid() {
+            return Err("Invalid energy arc".into());
+        }
+        self.arc = arc;
+        Ok(self)
+    }
     pub fn next(&self) -> f64 {
-        self.start
-            + (self.target - self.start) * (self.completed + 1).min(self.total) as f64
-                / self.total as f64
+        let step = (self.completed + 1).min(self.total) as f64;
+        let progress = step / self.total as f64;
+        let linear = self.start + (self.target - self.start) * progress;
+        match self.arc {
+            ArcShape::Linear => linear,
+            ArcShape::Wave {
+                amplitude,
+                period_transitions,
+            } => (linear
+                + amplitude
+                    * (std::f64::consts::TAU * step / period_transitions.max(1) as f64).sin())
+            .clamp(1., 10.),
+            ArcShape::WarmupPeakCooldown {
+                peak_fraction,
+                peak_energy,
+                end_energy,
+            } => {
+                if progress <= peak_fraction {
+                    self.start + (peak_energy - self.start) * progress / peak_fraction
+                } else {
+                    peak_energy
+                        + (end_energy - peak_energy) * (progress - peak_fraction)
+                            / (1. - peak_fraction)
+                }
+            }
+        }
     }
     pub fn remaining(&self) -> u32 {
         self.total.saturating_sub(self.completed)
@@ -455,6 +596,57 @@ impl Progression {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn f07_arcs_advance_only_on_completed_handoffs_and_legacy_defaults() {
+        let legacy: EnergyPlan =
+            serde_json::from_str(r#"{"target":5.0,"transitions":4,"hold":false}"#).unwrap();
+        assert!(matches!(legacy.arc, ArcShape::Linear));
+        let mut p = Progression::new(2., 5., 4, false)
+            .unwrap()
+            .with_arc(ArcShape::WarmupPeakCooldown {
+                peak_fraction: 0.5,
+                peak_energy: 9.,
+                end_energy: 3.,
+            })
+            .unwrap();
+        assert_eq!(p.next(), 5.5);
+        assert_eq!(p.next(), 5.5);
+        p.completed = 1;
+        assert_eq!(p.next(), 9.);
+        p.completed = 3;
+        assert_eq!(p.next(), 3.);
+    }
+    #[test]
+    fn hype_selection_scores_the_drop_it_will_actually_play() {
+        let make = |name: &str, opening: f64, peak: f64| {
+            let mut preparation = Preparation::default();
+            preparation.extensions.insert("energy_profile".into(), serde_json::json!({
+                "version":1,"duration":160.,"step":2.,
+                "curve":([vec![opening;40],vec![peak;30],vec![0.2;10]].concat()),
+                "sections":[{"id":"intro","name":"Intro","start":0.,"end":80.,"energy":opening},{"id":"drop","name":"Strong","start":80.,"end":140.,"energy":peak},{"id":"tail","name":"Tail","start":140.,"end":160.,"energy":0.2}]
+            }));
+            Track {
+                path: name.into(),
+                title: name.into(),
+                preparation,
+            }
+        };
+        let tracks = vec![
+            make("wrong-drop.wav", 0.8, 1.),
+            make("matched-drop.wav", 0.2, 0.8),
+        ];
+        let saved: Vec<_> = tracks.iter().map(|t| t.preparation.clone()).collect();
+        let mut profile = Settings::default().playlists.remove(0);
+        profile.style = Style::Hype;
+        assert_eq!(choose(&profile, &tracks, None, &[], Some(8.2), 0), Some(1));
+        assert_eq!(
+            tracks
+                .iter()
+                .map(|t| t.preparation.clone())
+                .collect::<Vec<_>>(),
+            saved
+        );
+    }
     #[test]
     fn selection_uses_entry_section_energy_instead_of_only_song_average() {
         let make = |name: &str, average: f64, local: f64| {
@@ -482,6 +674,168 @@ mod tests {
             choose(&profile, &tracks, Some(0), &[], Some(8.2), 0),
             Some(1)
         );
+    }
+    #[test]
+    fn selection_does_not_rank_an_unreachable_late_energy_section() {
+        let make = |name: &str, early: f64, late: f64| {
+            let mut preparation = Preparation {
+                cue_out: Some(150.),
+                ..Default::default()
+            };
+            preparation.extensions.insert(
+                "energy_profile".into(),
+                serde_json::json!({
+                    "version":1,"duration":150.,"step":1.,"curve":[],"sections":[
+                        {"id":"early","name":"Early","start":0.,"end":132.,"energy":early},
+                        {"id":"late","name":"Late","start":132.,"end":150.,"energy":late}
+                    ]
+                }),
+            );
+            Track {
+                path: name.into(),
+                title: name.into(),
+                preparation,
+            }
+        };
+        let tracks = vec![
+            make("late-match.wav", 0.2, 0.9),
+            make("early-match.wav", 0.8, 0.8),
+        ];
+        let profile = Settings::default().playlists.remove(0);
+        // The .9 outro is outside the automatic entry horizon; .8 is the
+        // closest energy that can actually be used when loading the next song.
+        assert_eq!(choose(&profile, &tracks, None, &[], Some(9.1), 0), Some(1));
+    }
+    #[test]
+    fn selection_scores_saved_entry_when_no_early_section_is_available() {
+        let mut unreachable = Preparation {
+            cue_out: Some(150.),
+            ..Default::default()
+        };
+        unreachable
+            .extensions
+            .insert("energy".into(), serde_json::json!(0.9));
+        unreachable.extensions.insert(
+            "energy_profile".into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[0.2],"sections":[
+                    {"id":"late","name":"Late","start":80.,"end":150.,"energy":0.9}
+                ]
+            }),
+        );
+        let mut available = unreachable.clone();
+        available.extensions.insert(
+            "energy_profile".into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[0.8],"sections":[
+                    {"id":"early","name":"Early","start":0.,"end":150.,"energy":0.8}
+                ]
+            }),
+        );
+        let tracks = vec![
+            Track {
+                path: "unreachable.wav".into(),
+                title: "Unreachable".into(),
+                preparation: unreachable,
+            },
+            Track {
+                path: "available.wav".into(),
+                title: "Available".into(),
+                preparation: available,
+            },
+        ];
+        let saved = tracks[0].preparation.clone();
+        assert_eq!(
+            crate::energy_profile::automatic_entry(&saved, 0.9, 8.),
+            None
+        );
+        let profile = Settings::default().playlists.remove(0);
+        assert_eq!(choose(&profile, &tracks, None, &[], Some(9.1), 0), Some(1));
+        assert_eq!(tracks[0].preparation, saved);
+    }
+    #[test]
+    fn selection_scores_saved_entry_when_automatic_section_selection_is_protected() {
+        let mut protected = Preparation {
+            cue_out: Some(150.),
+            ..Default::default()
+        };
+        protected.extensions.insert(
+            "energy_profile".into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[],"sections":[
+                    {"id":"saved","name":"Saved entry","start":0.,"end":16.,"energy":0.2},
+                    {"id":"strong","name":"Strong","start":16.,"end":150.,"energy":0.9}
+                ]
+            }),
+        );
+        let mut playable = Preparation {
+            cue_out: Some(150.),
+            ..Default::default()
+        };
+        playable.extensions.insert(
+            "energy_profile".into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[],"sections":[
+                    {"id":"main","name":"Main","start":0.,"end":150.,"energy":0.8}
+                ]
+            }),
+        );
+        let profile = Settings::default().playlists.remove(0);
+        for protection in ["manual_override", "manual_cue", "reviewed", "disabled"] {
+            let mut preparation = protected.clone();
+            // Explicit section-mixing opt-in must not bypass the desktop's
+            // existing protection for manual cues or reviewed preparation.
+            preparation
+                .extensions
+                .insert("energy_section_mixing".into(), serde_json::json!(true));
+            match protection {
+                "manual_override" => preparation.manual_override = true,
+                "manual_cue" => preparation.manual_cues.push(crate::preparation::Cue {
+                    id: "saved".into(),
+                    kind: "hot".into(),
+                    seconds: 0.,
+                    ..Default::default()
+                }),
+                "reviewed" => {
+                    preparation.analysis = Some(crate::preparation::AnalysisInfo {
+                        engine: "fixture".into(),
+                        duration: 150.,
+                        tempo_confidence: 0.,
+                        key_confidence: 0.,
+                        reviewed: true,
+                    })
+                }
+                _ => {
+                    preparation
+                        .extensions
+                        .insert("energy_section_mixing".into(), serde_json::json!(false));
+                }
+            }
+            let tracks = vec![
+                Track {
+                    path: "protected.wav".into(),
+                    title: "Protected".into(),
+                    preparation,
+                },
+                Track {
+                    path: "playable.wav".into(),
+                    title: "Playable".into(),
+                    preparation: playable.clone(),
+                },
+            ];
+            let saved = tracks[0].preparation.clone();
+            assert_eq!(
+                crate::energy_profile::automatic_entry(&saved, 0.9, 8.),
+                None,
+                "{protection}"
+            );
+            assert_eq!(
+                choose(&profile, &tracks, None, &[], Some(9.1), 0),
+                Some(1),
+                "{protection}"
+            );
+            assert_eq!(tracks[0].preparation, saved);
+        }
     }
     #[test]
     fn allow_exclude_and_recent_fallback_are_enforced() {
@@ -577,6 +931,7 @@ mod portable_playlist_tests {
         let mut p = Settings::default().playlists.remove(0);
         p.name = "Portable mix".into();
         p.style = Style::Hype;
+        p.genres = vec!["Rock".into(), "R&B".into()];
         p.folders = vec!["Dance/House".into()];
         p.restrict_folders = true;
         p.allowed = vec!["song_allowed".into()];
@@ -589,6 +944,7 @@ mod portable_playlist_tests {
         p.fallback = Fallback::Stop;
         p.use_manual_cues = false;
         p.energy_progression = Some(EnergyPlan {
+            arc: ArcShape::Linear,
             target: 9.,
             transitions: 6,
             hold: true,

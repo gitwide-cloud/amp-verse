@@ -37,8 +37,25 @@ pub struct Grid {
 }
 impl Grid {
     pub fn next(self, position: f64) -> f64 {
-        self.anchor + ((position - self.anchor) / self.period).ceil() * self.period
+        amp_dj_policy::next_boundary(self.anchor, self.period, position)
     }
+}
+/// Commit the last phase-matched launch that finishes before the chosen exit.
+/// All positions use outgoing decoder source time; duration uses wall seconds.
+/// A late caller gets no schedule rather than waiting another whole phrase.
+pub fn launch_before_exit(grid: Grid, now: f64, exit: f64, rate: f64, seconds: f64) -> Option<f64> {
+    if ![grid.period, grid.anchor, now, exit, rate, seconds]
+        .iter()
+        .all(|v| v.is_finite())
+        || grid.period <= 0.
+        || rate <= 0.
+        || seconds <= 0.
+    {
+        return None;
+    }
+    let latest = exit - (seconds + 0.15) * rate;
+    let at = grid.anchor + ((latest - grid.anchor) / grid.period).floor() * grid.period;
+    (at >= now + 0.02 * rate).then_some(at)
 }
 /// Reviewed phrase starts override counted estimates; no semantic chorus/verse recognition is implied.
 pub fn phrase_anchor(p: &Preparation) -> Option<f64> {
@@ -46,13 +63,31 @@ pub fn phrase_anchor(p: &Preparation) -> Option<f64> {
         .get("mix_phrase_anchor")
         .and_then(|v| v.as_f64())
         .filter(|v| v.is_finite() && *v >= 0.)
-        .or_else(|| {
-            p.extensions
-                .get("mix_bar_anchor")
-                .and_then(|v| v.as_f64())
-                .filter(|v| v.is_finite() && *v >= 0.)
-        })
-        .or(p.beat_offset)
+}
+/// Hand-approved grids retain priority. Automatic constant grids must not drive
+/// quantized transitions when analysis reports low confidence or audible drift.
+pub fn timing_reliable(p: &Preparation) -> bool {
+    p.bpm
+        .is_some_and(|b| b.is_finite() && (40. ..=300.).contains(&b))
+        && p.beat_offset.is_some_and(|o| o.is_finite() && o >= 0.)
+        && (p.manual_override
+            || p.analysis.as_ref().is_some_and(|a| a.reviewed)
+            || p.analysis.as_ref().is_some_and(|a| {
+                if !a.tempo_confidence.is_finite() {
+                    return false;
+                }
+                match p.extensions.get("rhythm_quality") {
+                    Some(quality) => {
+                        a.tempo_confidence >= 0.50
+                            && quality.get("stable").and_then(|v| v.as_bool()) == Some(true)
+                            && quality
+                                .get("windows")
+                                .and_then(|v| v.as_u64())
+                                .is_some_and(|windows| windows >= 3)
+                    }
+                    None => a.tempo_confidence >= 0.65,
+                }
+            }))
 }
 /// Source-time grid. Bar anchors are explicit user corrections, never inferred from beat phase.
 pub fn grid(
@@ -62,7 +97,7 @@ pub fn grid(
     origin: f64,
     timing: Timing,
 ) -> Option<Grid> {
-    if timing == Timing::Immediate {
+    if timing == Timing::Immediate || !timing_reliable(out) || !timing_reliable(incoming) {
         return None;
     }
     let beat = 60.
@@ -97,14 +132,237 @@ pub fn grid(
         anchor: anchor - origin + phase * beat * multiple,
     })
 }
+/// Account for actual playback rates and half/double-time pulse interpretations.
+/// Ambiguous half-time pairs may align beats, but do not claim matching musical bars/phrases.
+#[allow(clippy::too_many_arguments)]
+pub fn grid_at_rates(
+    out: &Preparation,
+    incoming: &Preparation,
+    entry: f64,
+    origin: f64,
+    timing: Timing,
+    out_rate: f64,
+    in_rate: f64,
+) -> Option<Grid> {
+    if ![out_rate, in_rate].iter().all(|r| r.is_finite() && *r > 0.) {
+        return None;
+    }
+    let ratio = out.bpm? * out_rate / (incoming.bpm? * in_rate);
+    let factor = [1., 0.5, 2.]
+        .into_iter()
+        .find(|factor| (ratio / factor - 1.).abs() <= 0.0005)?;
+    if factor != 1. && timing.phrase_beats().is_some() {
+        return None;
+    }
+    let mut pulse = incoming.clone();
+    pulse.bpm = pulse.bpm.map(|b| b * factor);
+    grid(
+        out,
+        &pulse,
+        entry,
+        origin,
+        if factor != 1. && timing == Timing::Bar {
+            Timing::Beat
+        } else {
+            timing
+        },
+    )
+}
+/// When musical phrases are ambiguous (half/double time), retain beat alignment.
+#[allow(clippy::too_many_arguments)]
+pub fn safe_grid_at_rates(
+    out: &Preparation,
+    incoming: &Preparation,
+    entry: f64,
+    origin: f64,
+    timing: Timing,
+    out_rate: f64,
+    in_rate: f64,
+) -> Option<Grid> {
+    use crate::transition_plan::{
+        Handoff, TransitionTier, plan_transition, requested_timing, timing_snapshot,
+    };
+    let plan = plan_transition(
+        timing_snapshot(out, false),
+        timing_snapshot(incoming, false),
+        requested_timing(timing),
+        Handoff::Fade,
+        out_rate,
+        0.2,
+        3.,
+        f64::NAN,
+    );
+    let timing = match plan.tier {
+        TransitionTier::T0PhraseLocked => timing,
+        TransitionTier::T1BarLocked => Timing::Bar,
+        TransitionTier::T2BeatLocked => Timing::Beat,
+        _ => return None,
+    };
+    grid_at_rates(out, incoming, entry, origin, timing, out_rate, in_rate)
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn automatic(confidence: f64) -> Preparation {
+        Preparation {
+            bpm: Some(124.),
+            beat_offset: Some(0.1),
+            analysis: Some(crate::preparation::AnalysisInfo {
+                engine: "fixture".into(),
+                duration: 60.,
+                tempo_confidence: confidence,
+                key_confidence: 0.8,
+                reviewed: false,
+            }),
+            ..Default::default()
+        }
+    }
+    #[test]
+    fn f11_unknown_sparse_and_low_confidence_grids_are_rejected() {
+        let mut p = automatic(0.94);
+        for quality in [
+            serde_json::json!({"stable":null,"windows":2}),
+            serde_json::json!({"stable":true,"windows":2}),
+            serde_json::json!({"stable":true}),
+            serde_json::json!({"stable":false,"windows":8}),
+        ] {
+            p.extensions.insert("rhythm_quality".into(), quality);
+            assert!(!timing_reliable(&p));
+        }
+        p.extensions.insert(
+            "rhythm_quality".into(),
+            serde_json::json!({"stable":true,"windows":3}),
+        );
+        assert!(timing_reliable(&p));
+        p.analysis.as_mut().unwrap().tempo_confidence = 0.42;
+        assert!(!timing_reliable(&p));
+        p.manual_override = true;
+        assert!(timing_reliable(&p));
+        p.bpm = None;
+        assert!(!timing_reliable(&p));
+    }
+    #[test]
+    fn legacy_requires_confidence_and_phrase_is_never_inferred() {
+        let mut p = automatic(0.64);
+        assert!(!timing_reliable(&p));
+        p.analysis.as_mut().unwrap().tempo_confidence = 0.65;
+        assert!(timing_reliable(&p));
+        assert!(phrase_anchor(&p).is_none());
+        p.extensions
+            .insert("mix_bar_anchor".into(), serde_json::json!(0.1));
+        assert!(phrase_anchor(&p).is_none());
+        p.analysis = None;
+        assert!(!timing_reliable(&p));
+    }
+    #[test]
+    fn f02_unreviewed_phrase_downgrades_without_mutating_preparation() {
+        let p = automatic(0.94);
+        let saved = serde_json::to_vec(&p).unwrap();
+        assert!(grid(&p, &p, 0.1, 0., Timing::Phrase16).is_none());
+        let fallback = safe_grid_at_rates(&p, &p, 0.1, 0., Timing::Phrase16, 1., 1.).unwrap();
+        assert!((fallback.period - 60. / 124.).abs() < 1e-12);
+        assert_eq!(saved, serde_json::to_vec(&p).unwrap());
+    }
+    #[test]
+    fn committed_launch_finishes_before_exit_without_changing_fade_length() {
+        let grid = Grid {
+            period: 8.,
+            anchor: 5.,
+        };
+        assert_eq!(launch_before_exit(grid, 20., 32., 1., 3.), Some(21.));
+        assert_eq!(launch_before_exit(grid, 21.01, 32., 1., 3.), None);
+        let grid = Grid {
+            period: 0.5,
+            anchor: 0.13,
+        };
+        for rate in [0.84, 1., 1.16] {
+            let at = launch_before_exit(grid, 20., 30., rate, 3.).unwrap();
+            assert!(at + 3.15 * rate <= 30. + 1e-9);
+            assert!(at + grid.period + 3.15 * rate > 30.);
+            assert!(((at - grid.anchor) / grid.period).fract().abs() < 1e-9);
+        }
+        assert!(launch_before_exit(grid, 29.9, 30., 1., 3.).is_none());
+        assert!(launch_before_exit(grid, f64::NAN, 30., 1., 3.).is_none());
+    }
+    #[test]
+    fn matched_grids_keep_phase_for_a_thousand_beats_and_reject_drift() {
+        let mut a = Preparation {
+            bpm: Some(128.),
+            beat_offset: Some(0.13),
+            manual_override: true,
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
+            ..Default::default()
+        };
+        let mut b = Preparation {
+            bpm: Some(125.),
+            beat_offset: Some(0.27),
+            manual_override: true,
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
+            ..Default::default()
+        };
+        a.extensions
+            .insert("mix_phrase_anchor".into(), serde_json::json!(0.13));
+        b.extensions
+            .insert("mix_phrase_anchor".into(), serde_json::json!(0.27));
+        let rate = 128. / 125.;
+        let entry = 10.321;
+        let origin = 0.4;
+        let g = grid_at_rates(&a, &b, entry, origin, Timing::Phrase16, 1., rate).unwrap();
+        let launch = g.next(3.);
+        for n in 0..1000 {
+            let time = n as f64 * 60. / 128.;
+            let phase_out = (launch + origin + time - 0.13) / (60. / 128.);
+            let phase_in = (entry + time * rate - 0.27) / (60. / 125.);
+            let error = (phase_out - phase_in + 0.5).rem_euclid(1.) - 0.5;
+            assert!(error.abs() < 1e-9);
+        }
+        assert!(grid_at_rates(&a, &b, entry, origin, Timing::Beat, 1., rate * 1.001).is_none());
+    }
+    #[test]
+    fn preroll_and_exact_fade_land_on_reviewed_phrase_boundary() {
+        let a = Preparation {
+            bpm: Some(120.),
+            beat_offset: Some(0.),
+            manual_override: true,
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
+            ..Default::default()
+        };
+        let mut b = a.clone();
+        b.extensions
+            .insert("mix_phrase_anchor".into(), serde_json::json!(20.));
+        let grid = grid_at_rates(&a, &b, 17., 0., Timing::Phrase16, 1., 1.).unwrap();
+        let start = grid.next(0.1);
+        assert!((start - 5.).abs() < 1e-9);
+        assert!(((start + 3.) / grid.period).fract().abs() < 1e-9);
+        let mut half = b.clone();
+        half.bpm = Some(60.);
+        assert!(grid_at_rates(&a, &half, 17., 0., Timing::Beat, 1., 1.).is_some());
+        assert!(grid_at_rates(&a, &half, 17., 0., Timing::Phrase16, 1., 1.).is_none());
+        assert!(grid_at_rates(&a, &b, 17., 0., Timing::Beat, 1., 1.1).is_none());
+    }
+    #[test]
+    fn drifting_automatic_grids_fall_back_until_reviewed() {
+        let mut p = Preparation {
+            bpm: Some(120.),
+            beat_offset: Some(0.),
+            manual_override: true,
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
+            ..Default::default()
+        };
+        p.manual_override = false;
+        p.extensions
+            .insert("rhythm_quality".into(), serde_json::json!({"stable":false}));
+        assert!(grid(&p, &p, 0., 0., Timing::Phrase16).is_none());
+        p.manual_override = true;
+        assert!(grid(&p, &p, 0., 0., Timing::Phrase16).is_some());
+    }
     #[test]
     fn phase_matches_entry_and_bars_require_reviewed_anchors() {
         let mut p = Preparation {
             bpm: Some(120.),
             beat_offset: Some(0.1),
+            manual_override: true,
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
             ..Default::default()
         };
         let g = grid(&p, &p, 1.35, 1., Timing::Beat).unwrap();
@@ -123,6 +381,8 @@ mod tests {
         let mut a = Preparation {
             bpm: Some(120.),
             beat_offset: Some(0.1),
+            manual_override: true,
+            extensions: [("mix_phrase_anchor".into(), serde_json::json!(0.))].into(),
             ..Default::default()
         };
         a.extensions

@@ -10,10 +10,16 @@ $repo = Split-Path $PSScriptRoot -Parent
 $binary = Join-Path $repo 'target/release/amp-player.exe'
 if (!(Test-Path -LiteralPath $binary)) { throw 'Build the release desktop binaries first.' }
 New-Item -ItemType Directory -Force -Path $Destination | Out-Null
-$binaries=if($WithCast -and !$PlayerOnly){@('amp-player.exe','amp-cast.exe','amp-prepare.exe')}else{@('amp-player.exe')}
+$binaries=if($WithCast -and !$PlayerOnly){@('amp-player.exe','amp-cast.exe','amp-prepare.exe','amp-update.exe')}else{@('amp-player.exe','amp-update.exe')}
 foreach ($name in $binaries) {
     Copy-Item -LiteralPath (Join-Path $repo "target/release/$name") -Destination $Destination -Force
 }
+$keyLock = Join-Path $repo 'target/release/amp-keylock.dll'
+if (!(Test-Path -LiteralPath $keyLock)) { throw 'Key Lock backend is missing; rebuild the desktop package before installing.' }
+Copy-Item -LiteralPath $keyLock -Destination $Destination -Force
+$keyLockNotices=Join-Path $Destination 'licenses/signalsmith'
+New-Item -ItemType Directory -Force -Path $keyLockNotices | Out-Null
+Copy-Item -Path (Join-Path $repo 'apps/amp-player/vendor/signalsmith/*') -Destination $keyLockNotices -Recurse -Force
 if ($WithAnalysis) {
     $addons = Join-Path $Destination 'addons'
     New-Item -ItemType Directory -Force -Path $addons | Out-Null
@@ -33,16 +39,19 @@ if ($AudioTools) {
     Copy-Item -LiteralPath (Join-Path $AudioTools 'THIRD_PARTY_NOTICES.md') -Destination (Join-Path $Destination 'AUDIO_TOOL_NOTICES.md') -Force
 }
 Copy-Item -LiteralPath (Join-Path $repo 'assets/amp-verse.ico') -Destination $Destination -Force
+Copy-Item -LiteralPath (Join-Path $repo 'tools/launch-desktop.vbs') -Destination (Join-Path $Destination 'Launch AMP Verse.vbs') -Force
 $ampLabNotices=Join-Path $Destination 'licenses/mp3-lab'
 New-Item -ItemType Directory -Force -Path $ampLabNotices | Out-Null
 foreach($name in @('LICENSE','PROVENANCE.md')) {Copy-Item -LiteralPath (Join-Path $repo "third-party/mp3-lab/$name") -Destination $ampLabNotices -Force}
 $catalogNotices=Join-Path $Destination 'licenses/rusqlite'
+Copy-Item -LiteralPath (Join-Path $repo 'licenses') -Destination $Destination -Recurse -Force
 New-Item -ItemType Directory -Force -Path $catalogNotices | Out-Null
 Copy-Item -LiteralPath (Join-Path $repo 'licenses/rusqlite/LICENSE') -Destination $catalogNotices -Force
 $shell = New-Object -ComObject WScript.Shell
 foreach ($folder in @([Environment]::GetFolderPath('Desktop'), [Environment]::GetFolderPath('Programs'))) {
     $shortcut = $shell.CreateShortcut((Join-Path $folder 'AMP Verse.lnk'))
-    $shortcut.TargetPath = Join-Path $Destination 'amp-player.exe'
+    $shortcut.TargetPath = Join-Path $env:WINDIR 'System32/wscript.exe'
+    $shortcut.Arguments = '"' + (Join-Path $Destination 'Launch AMP Verse.vbs') + '"'
     $shortcut.WorkingDirectory = $Destination
     $shortcut.IconLocation = (Join-Path $Destination 'amp-verse.ico') + ',0'
     $shortcut.Description = 'AMP Verse network audio player and DJ'

@@ -1,0 +1,135 @@
+name: Signed Android release candidate
+on:
+  push:
+    tags: ['android-rc-build-v*-rc.*', 'v*-rc.*']
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: 'RC tag matching android/release.properties, e.g. v1.1.0-rc.1'
+        required: true
+        type: string
+      native_run_id:
+        description: 'Optional successful native run ID; empty selects a matching qualified run'
+        required: false
+        type: string
+      publish:
+        description: 'Publish a prerelease after reviewing the signed build; never stable latest'
+        default: false
+        type: boolean
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: signed-android-rc-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  signed-build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '2'
+    outputs:
+      tag: ${{ steps.gate.outputs.tag }}
+      version: ${{ steps.gate.outputs.version }}
+      artifact_only: ${{ steps.gate.outputs.artifact_only }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify RC identity, canonical source and successful native proof before accessing signing secrets
+        id: gate
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.release_tag }}
+          NATIVE_RUN_ID: ${{ inputs.native_run_id }}
+        run: |
+          python3 tools/test_android_rc.py
+          python3 tools/android_rc.py gate --ref "$GITHUB_REF" --tag "$REQUESTED_TAG" --native-run "$NATIVE_RUN_ID" --output "$RUNNER_TEMP/android-rc-gate.json"
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.0.12077973
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build with the existing persistent Android signing identity
+        env:
+          KEYSTORE_BASE64: ${{ secrets.AMP_ANDROID_KEYSTORE_BASE64 }}
+          AMP_ANDROID_KEYSTORE: ${{ runner.temp }}/amp-release.keystore
+          AMP_ANDROID_STORE_PASSWORD: ${{ secrets.AMP_ANDROID_STORE_PASSWORD }}
+          AMP_ANDROID_KEY_ALIAS: ${{ secrets.AMP_ANDROID_KEY_ALIAS }}
+          AMP_ANDROID_KEY_PASSWORD: ${{ secrets.AMP_ANDROID_KEY_PASSWORD }}
+        run: |
+          test -n "$KEYSTORE_BASE64" || { echo 'Persistent Android signing secrets are required; no substitute key will be generated.'; exit 1; }
+          printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$AMP_ANDROID_KEYSTORE"
+          trap 'rm -f "$AMP_ANDROID_KEYSTORE"' EXIT
+          gradle -p android :app:assembleLiteRelease :app:assembleFullRelease :app:testFullReleaseUnitTest :app:lintFullRelease :app:lintLiteRelease :amp-dj:assembleRelease :amp-dj:lintRelease :amp-lab:assembleRelease :amp-lab:lintRelease :amp-cast:assembleRelease :amp-cast:lintRelease :amp-podcasts:assembleRelease :amp-podcasts:lintRelease :amp-remote:assembleRelease :amp-remote:lintRelease
+          python3 tools/package_android_modules.py --variant release --release-tag "${{ steps.gate.outputs.tag }}" --destination android-rc-dist
+          python3 tools/android_rc.py manifest --directory android-rc-dist --gate-file "$RUNNER_TEMP/android-rc-gate.json"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: signed-android-rc-${{ steps.gate.outputs.version }}-${{ github.sha }}
+          path: android-rc-dist/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: signed-android-rc-reports-${{ github.sha }}
+          path: |
+            android/app/build/reports/
+            android/app/build/test-results/
+            android/modules/*/build/reports/
+
+  publish-prerelease:
+    needs: signed-build
+    if: needs.signed-build.outputs.artifact_only != 'true' && ((github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')) || (github.event_name == 'workflow_dispatch' && inputs.publish))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: signed-android-rc-${{ needs.signed-build.outputs.version }}-${{ github.sha }}
+          path: android-rc-dist
+      - name: Refuse to overwrite any existing RC release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RC_TAG: ${{ needs.signed-build.outputs.tag }}
+        run: |
+          python3 - <<'PYTHON'
+          import os,urllib.request,urllib.error
+          request=urllib.request.Request('https://api.github.com/repos/gitwide-cloud/amp-verse/releases/tags/'+os.environ['RC_TAG'],headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'],'Accept':'application/vnd.github+json'})
+          try:
+              urllib.request.urlopen(request,timeout=20).close()
+          except urllib.error.HTTPError as error:
+              if error.code != 404: raise
+          else:
+              raise SystemExit('RC already exists; increment the RC/versionCode instead of replacing tested assets.')
+          PYTHON
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ needs.signed-build.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: AMP Verse Android ${{ needs.signed-build.outputs.version }}
+          prerelease: true
+          make_latest: 'false'
+          generate_release_notes: true
+          body: |
+            Signed Android release candidate using the existing AMP Verse installation identity.
+            Install the matching Full APK over the existing app through Android's installer; saved app data is retained.
+            To test phone broadcasting on Android 11+: stop playback, open Audio settings, enable New mixer (beta), close AMP Verse from Recents, then reopen it.
+            Native emulator streaming and stopped-playback activation are verified. Physical phone/background/speaker/LAN acceptance remains a tester gate.
+          files: |
+            android-rc-dist/*.apk
+            android-rc-dist/*.json
+            android-rc-dist/*.sha256
+            android-rc-dist/SHA256SUMS.txt

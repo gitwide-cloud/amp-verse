@@ -1,4 +1,8 @@
-//! Shared two-deck device stream. FFmpeg decoding stays off the audio callback.
+//! DJ Engine: device rendering and stem preparation. Musical decisions live in DJ Logic.
+#[path = "stems.rs"]
+pub(crate) mod stems;
+#[path = "mixer/vinyl_follow.rs"]
+mod vinyl_follow;
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use rtrb::{Consumer, PushError, RingBuffer};
 use std::{
@@ -14,7 +18,29 @@ use std::{
     time::Duration,
 };
 type Frame = [f32; 2];
-type DeckFrame = [f32; 6];
+// Six separated channels plus an untouched stereo bypass during warm-up.
+type DeckFrame = [f32; 8];
+fn stereo_frame(frame: DeckFrame, separated: bool, gain: [f32; 3], drums_only: bool) -> Frame {
+    if separated && drums_only {
+        [frame[4] * gain[2] + frame[6], frame[5] * gain[2] + frame[7]]
+    } else if separated {
+        std::array::from_fn(|ch| {
+            frame[ch] * gain[0] + frame[ch + 2] * gain[1] + frame[ch + 4] * gain[2] + frame[ch + 6]
+        })
+    } else {
+        [frame[0], frame[1]]
+    }
+}
+fn runtime_stem_knobs(
+    preparation: &amp_core::Preparation,
+    original: bool,
+) -> Result<[f32; 3], String> {
+    if original {
+        Ok([0.; 3])
+    } else {
+        amp_core::stem_mix::knobs(preparation)
+    }
+}
 fn atom(v: f32) -> AtomicU32 {
     AtomicU32::new(v.to_bits())
 }
@@ -24,57 +50,164 @@ fn get(v: &AtomicU32) -> f32 {
 fn set(v: &AtomicU32, x: f32) {
     v.store(x.to_bits(), Relaxed);
 }
+pub const DECKS: usize = 6;
+pub const MASTER: usize = DECKS;
+/// Only effects owned by the departing automatic performance. Applying this
+/// value and selecting the live deck is one indivisible audio command.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct LiveTakeoverCleanup {
+    pub auto_loop_deck: Option<usize>,
+    pub scratch_decks: u8,
+    pub restore_cutoff: Option<(usize, f32)>,
+}
+impl LiveTakeoverCleanup {
+    fn validate(self) -> Result<(), String> {
+        if self.auto_loop_deck.is_some_and(|deck| deck >= DECKS)
+            || self.scratch_decks & !((1 << DECKS) - 1) != 0
+            || self.restore_cutoff.is_some_and(|(deck, value)| {
+                deck >= DECKS || !value.is_finite() || !(20. ..=20000.).contains(&value)
+            })
+        {
+            return Err("Invalid live takeover cleanup".into());
+        }
+        Ok(())
+    }
+}
 pub struct Controls {
+    pub(crate) output_gate: Arc<crate::output_admission::Gate>,
+    pub broadcast_player_only: AtomicBool,
+    pub pair: [AtomicU32; 2],
+    pub master_bpm: AtomicU32,
+    clock_origin_frame: AtomicU64,
+    clock_origin_beat: AtomicU64,
+    pub quantization: AtomicU32,
+    pub synced: [AtomicBool; 6],
+    pub key_lock: [AtomicBool; 6],
+    pub key_lock_available: [AtomicBool; 6],
+    pub bpm: [AtomicU32; 6],
+    pub beat_offset: [AtomicU64; 6],
     pub sample_playing: [AtomicBool; 9],
     pub sample_looping: [AtomicBool; 9],
     sample_generation: [AtomicU64; 9],
     sample_gain: [AtomicU32; 9],
     sample_master: AtomicU32,
-    pub deck_generation: [AtomicU64; 2],
+    pub deck_generation: [AtomicU64; 6],
     pub level_fading: AtomicBool,
     pub fade_progress: AtomicU32,
-    pub play: [AtomicBool; 2],
-    pub loaded: [AtomicBool; 2],
-    pub ready: [AtomicBool; 2],
-    pub finished: [AtomicBool; 2],
-    pub gain: [AtomicU32; 2],
-    pub rate: [AtomicU32; 2],
-    pub scratching: [AtomicBool; 2],
-    pub scratch_rate: [AtomicU32; 2],
-    vinyl_target: [AtomicU64; 2],
-    vinyl_follow: [AtomicBool; 2],
-    pub section_state: [AtomicU32; 2],
-    source_origin: [AtomicU64; 2],
-    section_epoch: [AtomicU64; 2],
-    pub eq: [[AtomicU32; 3]; 2],
-    pub trim_db: [AtomicU32; 2],
-    pub stem_level: [[AtomicU32; 3]; 2],
-    pub stem_knobs: [[AtomicU32; 3]; 2],
-    pub stems_loaded: [AtomicBool; 2],
-    pub eq_kill: [[AtomicBool; 3]; 2],
-    pub sweep: [AtomicU32; 2],
-    pub cue: [AtomicBool; 2],
+    pub play: [AtomicBool; 6],
+    pub loaded: [AtomicBool; 6],
+    pub ready: [AtomicBool; 6],
+    pub finished: [AtomicBool; 6],
+    pub gain: [AtomicU32; 6],
+    pub rate: [AtomicU32; 6],
+    pub scratching: [AtomicBool; 6],
+    pub scratch_rate: [AtomicU32; 6],
+    vinyl_target: [AtomicU64; 6],
+    vinyl_anchor: [AtomicU64; 6],
+    vinyl_follow: [AtomicBool; 6],
+    pub section_state: [AtomicU32; 6],
+    source_origin: [AtomicU64; 6],
+    section_epoch: [AtomicU64; 6],
+    pub eq: [[AtomicU32; 3]; 6],
+    pub trim_db: [AtomicU32; 6],
+    pub tempo_recovery: [AtomicBool; 6],
+    auto_gain_db: [AtomicU32; 6],
+    pub stem_level: [[AtomicU32; 3]; 6],
+    pub stem_knobs: [[AtomicU32; 3]; 6],
+    pub stems_loaded: [AtomicBool; 6],
+    pub on_demand_stems: [AtomicBool; 6],
+    pub lazy_stems: [AtomicBool; 6],
+    pub stem_processing_ready: [AtomicBool; 6],
+    pub prepared_stems: [AtomicBool; 6],
+    pub eq_kill: [[AtomicBool; 3]; 6],
+    pub sweep: [AtomicU32; 6],
+    pub cue: [AtomicBool; 6],
+    pub phones_only: [AtomicBool; 6],
     pub cue_blend: AtomicU32,
     pub cue_volume: AtomicU32,
-    pub cutoff: [AtomicU32; 2],
-    pub position: [AtomicU64; 2],
-    pub duration_frames: [AtomicU64; 2],
-    pub peak: [AtomicU32; 2],
-    pub scope: [[AtomicU32; 96]; 2],
-    pub looping: [AtomicBool; 2],
+    pub cutoff: [AtomicU32; 6],
+    pub position: [AtomicU64; 6],
+    pub duration_frames: [AtomicU64; 6],
+    pub peak: [AtomicU32; 6],
+    pub scope: [[AtomicU32; 96]; 6],
+    pub looping: [AtomicBool; 6],
     pub crossfader: AtomicU32,
     pub master: AtomicU32,
+    player_envelope: AtomicU32,
     pub fading: AtomicBool,
     pub mashup_active: AtomicBool,
-    pub underruns: [AtomicU64; 2],
+    pub underruns: [AtomicU64; 6],
     pub rendered: AtomicU64,
     pub error: Mutex<Option<String>>,
     pub monitor_error: Mutex<Option<String>>,
     pub decode_errors: Mutex<Vec<(usize, u64, String)>>,
+    pub stem_warnings: Mutex<Vec<(usize, u64, String)>>,
+}
+impl Controls {
+    /// Editing a loaded, armed deck must not require a first separation result.
+    pub(crate) fn stem_controls_available(&self, deck: usize) -> bool {
+        deck < DECKS
+            && self.loaded[deck].load(Relaxed)
+            && (self.on_demand_stems[deck].load(Relaxed) || self.stems_loaded[deck].load(Relaxed))
+    }
+    pub(crate) fn pause_for_receiver(&self) {
+        for play in &self.play {
+            play.store(false, Relaxed);
+        }
+        for play in &self.sample_playing {
+            play.store(false, Relaxed);
+        }
+        self.fading.store(false, Relaxed);
+        self.level_fading.store(false, Relaxed);
+        self.mashup_active.store(false, Relaxed);
+        for deck in 0..DECKS {
+            self.scratching[deck].store(false, Relaxed);
+            self.vinyl_follow[deck].store(false, Relaxed);
+            self.section_state[deck].store(0, Relaxed);
+        }
+    }
+
+    pub(super) fn set_broadcast_source(&self, player_only: bool) {
+        self.broadcast_player_only
+            .store(player_only, std::sync::atomic::Ordering::Release);
+    }
+
+    pub fn beat_at(&self, frame: u64, rate: u32) -> f64 {
+        f64::from_bits(self.clock_origin_beat.load(Relaxed))
+            + frame.saturating_sub(self.clock_origin_frame.load(Relaxed)) as f64 / rate as f64
+                * get(&self.master_bpm) as f64
+                / 60.
+    }
+    pub fn effective_rate(&self, d: usize) -> f32 {
+        if self.synced[d].load(Relaxed) && get(&self.bpm[d]) > 0. {
+            get(&self.master_bpm) / get(&self.bpm[d])
+        } else {
+            get(&self.rate[d])
+        }
+        .clamp(0.5, 2.)
+    }
+    pub fn pair_indices(&self) -> [usize; 2] {
+        std::array::from_fn(|i| self.pair[i].load(Relaxed) as usize)
+    }
+    pub fn other(&self, deck: usize) -> usize {
+        self.pair_indices()[1 - deck % 2]
+    }
 }
 impl Default for Controls {
     fn default() -> Self {
         Self {
+            output_gate: crate::output_admission::current(),
+            broadcast_player_only: AtomicBool::new(false),
+            pair: [AtomicU32::new(0), AtomicU32::new(1)],
+            key_lock: std::array::from_fn(|_| AtomicBool::new(false)),
+            key_lock_available: std::array::from_fn(|_| AtomicBool::new(false)),
+            master_bpm: atom(120.),
+            clock_origin_frame: AtomicU64::new(0),
+            clock_origin_beat: AtomicU64::new(0),
+            quantization: AtomicU32::new(4),
+            synced: std::array::from_fn(|_| AtomicBool::new(false)),
+            bpm: std::array::from_fn(|_| atom(0.)),
+            beat_offset: std::array::from_fn(|_| AtomicU64::new(0)),
             sample_playing: std::array::from_fn(|_| AtomicBool::new(false)),
             sample_looping: std::array::from_fn(|_| AtomicBool::new(false)),
             sample_generation: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -92,18 +225,26 @@ impl Default for Controls {
             scratching: std::array::from_fn(|_| AtomicBool::new(false)),
             scratch_rate: std::array::from_fn(|_| atom(0.)),
             vinyl_target: std::array::from_fn(|_| AtomicU64::new(0)),
+            vinyl_anchor: std::array::from_fn(|_| AtomicU64::new(0)),
             vinyl_follow: std::array::from_fn(|_| AtomicBool::new(false)),
             section_state: std::array::from_fn(|_| AtomicU32::new(0)),
             source_origin: std::array::from_fn(|_| AtomicU64::new(0)),
             section_epoch: std::array::from_fn(|_| AtomicU64::new(0)),
             eq: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             trim_db: std::array::from_fn(|_| atom(0.)),
+            tempo_recovery: std::array::from_fn(|_| AtomicBool::new(false)),
+            auto_gain_db: std::array::from_fn(|_| atom(0.)),
             stem_level: std::array::from_fn(|_| std::array::from_fn(|_| atom(1.))),
             stem_knobs: std::array::from_fn(|_| std::array::from_fn(|_| atom(0.))),
             stems_loaded: std::array::from_fn(|_| AtomicBool::new(false)),
+            on_demand_stems: std::array::from_fn(|_| AtomicBool::new(false)),
+            lazy_stems: std::array::from_fn(|_| AtomicBool::new(false)),
+            stem_processing_ready: std::array::from_fn(|_| AtomicBool::new(false)),
+            prepared_stems: std::array::from_fn(|_| AtomicBool::new(false)),
             eq_kill: std::array::from_fn(|_| std::array::from_fn(|_| AtomicBool::new(false))),
             sweep: std::array::from_fn(|_| atom(0.)),
             cue: std::array::from_fn(|_| AtomicBool::new(false)),
+            phones_only: std::array::from_fn(|_| AtomicBool::new(false)),
             cue_blend: atom(0.),
             cue_volume: atom(0.5),
             cutoff: std::array::from_fn(|_| atom(22000.)),
@@ -114,6 +255,7 @@ impl Default for Controls {
             looping: std::array::from_fn(|_| AtomicBool::new(false)),
             crossfader: atom(0.),
             master: atom(0.75),
+            player_envelope: atom(1.),
             fading: AtomicBool::new(false),
             mashup_active: AtomicBool::new(false),
             underruns: std::array::from_fn(|_| AtomicU64::new(0)),
@@ -121,10 +263,12 @@ impl Default for Controls {
             error: Mutex::new(None),
             monitor_error: Mutex::new(None),
             decode_errors: Mutex::new(Vec::new()),
+            stem_warnings: Mutex::new(Vec::new()),
         }
     }
 }
 struct Source {
+    key_lock: Option<Box<crate::key_lock::Processor>>,
     ring: Consumer<DeckFrame>,
     duration: Arc<AtomicU64>,
     done: Arc<AtomicBool>,
@@ -134,6 +278,7 @@ struct Source {
     position: f64,
     primed: bool,
     separated: bool,
+    stem_degraded: Arc<AtomicBool>,
     stem_knobs: [f32; 3],
 }
 impl Source {
@@ -143,7 +288,7 @@ impl Source {
     }
     fn next(&mut self, rate: f32) -> Option<DeckFrame> {
         if rate.abs() < 0.0001 {
-            return Some([0.; 6]);
+            return Some([0.; 8]);
         }
         self.position = self.position.max(self.history_start as f64);
         let index = self.position.floor() as u64;
@@ -185,6 +330,12 @@ struct Voice {
     stem_mix: [f32; 3],
     gain: f32,
     looped: Option<Loop>,
+    pending_loop: Option<(u64, Vec<DeckFrame>)>,
+    tail_frames: usize,
+    manual_vinyl: bool,
+    vinyl_motion: vinyl_follow::Follow,
+    resume_fill: usize,
+    resume_origin: f64,
 }
 struct LevelFade {
     from: f32,
@@ -193,7 +344,21 @@ struct LevelFade {
     elapsed: u64,
     stop: bool,
 }
+struct ScratchIntro {
+    beat: u64,
+    elapsed: u64,
+    origin: f64,
+}
+// Four one-beat forward/reverse drum strokes, calculated on the audio clock.
+fn scratch_motion(elapsed: u64, beat: u64) -> (f64, f32) {
+    let phase = (elapsed % beat.max(1)) as f64 / beat.max(1) as f64;
+    let offset = phase.min(1. - phase);
+    let edge = (phase / 0.02).min((1. - phase) / 0.02).clamp(0., 1.) as f32;
+    (offset, edge * if phase < 0.5 { 0.4 } else { 0.16 })
+}
 struct Fade {
+    handoff_mode: u32,
+    drum_start: Option<u64>,
     from: f32,
     to: f32,
     total: u64,
@@ -203,6 +368,7 @@ struct Fade {
     grid: Option<crate::mix_schedule::Grid>,
     boundary: Option<f64>,
     mashup: Option<(u64, u64)>,
+    scratch: Option<ScratchIntro>,
 }
 #[derive(Default)]
 struct SampleVoice {
@@ -211,23 +377,41 @@ struct SampleVoice {
     playing: bool,
 }
 enum Command {
+    Admitted(u64, Box<Command>),
+    HandoffMode(u32),
+    StemLevels(usize, [f32; 3]),
+    RestoreSync(usize, bool),
+    Clock(f32, u32),
+    Launch(usize),
+    Pair([usize; 2]),
+    SelectLive(usize, LiveTakeoverCleanup),
     Monitor(Option<rtrb::Producer<Frame>>),
     Broadcast(Option<rtrb::Producer<Frame>>),
     SampleLoad(usize, u64, Option<Arc<[Frame]>>),
     SampleTrigger(usize),
     SampleStop(Option<usize>),
     Load(usize, Source, bool, u64),
+    LoadHoldingStemFilters(usize, Source, bool, u64),
     Level(usize, f32, f32, bool),
     LevelSet(usize, f32),
     Stop(usize),
+    Pause(usize),
+    Play(usize),
     Fader(f32),
     Fade {
         to: f32,
         seconds: f32,
     },
     ScheduledFade {
+        at: Option<f64>,
         to: f32,
         seconds: f32,
+        grid: crate::mix_schedule::Grid,
+    },
+    ScratchFade {
+        to: f32,
+        seconds: f32,
+        beat: f32,
         grid: crate::mix_schedule::Grid,
     },
     Mashup {
@@ -242,6 +426,24 @@ enum Command {
     Loop(usize, Option<Vec<DeckFrame>>),
     LoopHalve(usize),
 }
+impl Command {
+    fn starts_audio(&self) -> bool {
+        matches!(
+            self,
+            Self::Play(_)
+                | Self::Launch(_)
+                | Self::SampleTrigger(_)
+                | Self::Load(_, _, true, _)
+                | Self::LoadHoldingStemFilters(_, _, true, _)
+                | Self::Fade { .. }
+                | Self::ScheduledFade { .. }
+                | Self::ScratchFade { .. }
+                | Self::Mashup { .. }
+                | Self::Section(..)
+        )
+    }
+}
+
 struct SectionChange {
     source: Option<Source>,
     origin: f64,
@@ -254,20 +456,36 @@ struct SectionChange {
     old: Option<Source>,
 }
 struct Mixer {
-    sections: [Option<SectionChange>; 2],
-    voices: [Voice; 2],
+    pending_handoff: u32,
+    master_limiter: amp_core::limiter::LookaheadLimiter,
+    player_limiter: amp_core::limiter::LookaheadLimiter,
+    cue_limiter: amp_core::limiter::LookaheadLimiter,
+    player_envelope: f32,
+    launches: [Option<u64>; 6],
+    sections: [Option<SectionChange>; 6],
+    voices: [Voice; 6],
     samples: [SampleVoice; 9],
     commands: mpsc::Receiver<Command>,
     pub controls: Arc<Controls>,
     rate: u32,
     fade: Option<Fade>,
-    levels: [Option<LevelFade>; 3],
+    // Audio-clock smoothing only for deliberate live routing changes. Sources
+    // and transport stay untouched, including decks leaving the pair.
+    route_weights: [f32; DECKS],
+    route_frames: u32,
+    levels: [Option<LevelFade>; 7],
     monitor: Option<rtrb::Producer<Frame>>,
     broadcast: Option<rtrb::Producer<Frame>>,
 }
 impl Mixer {
     fn new(rate: u32, commands: mpsc::Receiver<Command>, controls: Arc<Controls>) -> Self {
         Self {
+            master_limiter: amp_core::limiter::LookaheadLimiter::new(rate),
+            player_limiter: amp_core::limiter::LookaheadLimiter::new(rate),
+            cue_limiter: amp_core::limiter::LookaheadLimiter::new(rate),
+            pending_handoff: 0,
+            player_envelope: 1.,
+            launches: Default::default(),
             sections: Default::default(),
             voices: Default::default(),
             samples: Default::default(),
@@ -275,6 +493,8 @@ impl Mixer {
             controls,
             rate,
             fade: None,
+            route_weights: [1., 0., 1., 1., 1., 1.],
+            route_frames: 0,
             levels: Default::default(),
             monitor: None,
             broadcast: None,
@@ -282,7 +502,110 @@ impl Mixer {
     }
     fn process_commands(&mut self) {
         while let Ok(command) = self.commands.try_recv() {
+            let command = match command {
+                Command::Admitted(epoch, command) => {
+                    if (self.controls.output_gate.leased()
+                        || epoch != self.controls.output_gate.epoch())
+                        && command.starts_audio()
+                    {
+                        continue;
+                    }
+                    *command
+                }
+                command => command,
+            };
+            // Sample the deck's latest knobs on the audio thread, not when decoding
+            // starts: edits made while the incoming track buffers must also survive.
+            let command = match command {
+                Command::LoadHoldingStemFilters(d, mut source, play, generation) => {
+                    source.stem_knobs =
+                        std::array::from_fn(|i| get(&self.controls.stem_knobs[d][i]));
+                    Command::Load(d, source, play, generation)
+                }
+                command => command,
+            };
             match command {
+                Command::LoadHoldingStemFilters(..) => {
+                    unreachable!("stem-filter load already normalized")
+                }
+                Command::Admitted(..) => unreachable!("command envelope already removed"),
+                Command::HandoffMode(mode) => self.pending_handoff = mode,
+                Command::RestoreSync(d, enabled) => {
+                    let bpm = get(&self.controls.bpm[d]);
+                    let ratio = get(&self.controls.master_bpm) / bpm;
+                    self.controls.synced[d].store(
+                        enabled
+                            && self.controls.loaded[d].load(Relaxed)
+                            && bpm > 0.
+                            && (0.5..=2.).contains(&ratio),
+                        Relaxed,
+                    );
+                }
+                Command::StemLevels(d, levels) => {
+                    for (i, value) in levels.into_iter().enumerate() {
+                        set(&self.controls.stem_level[d][i], value);
+                        set(&self.controls.stem_knobs[d][i], value - 1.);
+                    }
+                }
+                Command::Clock(bpm, q) => {
+                    let frame = self.controls.rendered.load(Relaxed);
+                    let beat = self.controls.beat_at(frame, self.rate);
+                    self.controls
+                        .clock_origin_beat
+                        .store(beat.to_bits(), Relaxed);
+                    self.controls.clock_origin_frame.store(frame, Relaxed);
+                    set(&self.controls.master_bpm, bpm);
+                    self.controls.quantization.store(q, Relaxed);
+                }
+                Command::Launch(d) => {
+                    self.launches[d] = Some(u64::MAX);
+                }
+                Command::Pair(pair) => {
+                    if self.fade.is_none()
+                        && pair
+                            .iter()
+                            .chain(self.controls.pair_indices().iter())
+                            .all(|d| !self.controls.play[*d].load(Relaxed))
+                    {
+                        for (side, d) in pair.into_iter().enumerate() {
+                            self.controls.pair[side].store(d as u32, Relaxed);
+                        }
+                    }
+                }
+                Command::SelectLive(deck, cleanup) => {
+                    if let Some(owned) = cleanup.auto_loop_deck {
+                        // Unlike ordinary Loop(None), takeover must not seek to
+                        // the old loop end. Keep the decoder's current cursor.
+                        self.voices[owned].looped = None;
+                        self.voices[owned].pending_loop = None;
+                        self.controls.looping[owned].store(false, Relaxed);
+                    }
+                    for owned in 0..DECKS {
+                        if cleanup.scratch_decks & (1 << owned) != 0 {
+                            self.controls.tempo_recovery[owned].store(false, Relaxed);
+                            self.controls.scratching[owned]
+                                .store(false, std::sync::atomic::Ordering::Release);
+                            self.controls.vinyl_follow[owned]
+                                .store(false, std::sync::atomic::Ordering::Release);
+                            set(&self.controls.scratch_rate[owned], 1.);
+                        }
+                    }
+                    if let Some((owned, value)) = cleanup.restore_cutoff {
+                        set(&self.controls.cutoff[owned], value);
+                    }
+                    // A deliberate manual takeover cancels only the pair
+                    // handoff: never finish it by stopping its outgoing source.
+                    self.fade = None;
+                    self.pending_handoff = 0;
+                    self.controls.fading.store(false, Relaxed);
+                    self.controls.mashup_active.store(false, Relaxed);
+                    // Even the same pair may be leaving a mashup's overridden
+                    // buses; ramp back to the current manual fader weights.
+                    self.route_frames = (self.rate / 100).max(1);
+                    if self.controls.pair_indices()[deck % 2] != deck {
+                        self.controls.pair[deck % 2].store(deck as u32, Relaxed);
+                    }
+                }
                 Command::Monitor(producer) => self.monitor = producer,
                 Command::Broadcast(producer) => self.broadcast = producer,
                 Command::SampleLoad(pad, generation, frames) => {
@@ -312,7 +635,7 @@ impl Mixer {
                 }
 
                 Command::Level(slot, to, seconds, stop) => {
-                    let from = if slot == 2 {
+                    let from = if slot == MASTER {
                         get(&self.controls.master)
                     } else {
                         get(&self.controls.gain[slot])
@@ -327,7 +650,7 @@ impl Mixer {
                 }
                 Command::LevelSet(slot, value) => {
                     self.levels[slot] = None;
-                    if slot == 2 {
+                    if slot == MASTER {
                         set(&self.controls.master, value);
                     } else {
                         set(&self.controls.gain[slot], value);
@@ -341,6 +664,33 @@ impl Mixer {
                     self.sections[d] = Some(s);
                     self.controls.section_state[d].store(1, Relaxed);
                 }
+                Command::ScratchFade {
+                    to,
+                    seconds,
+                    beat,
+                    grid,
+                } => {
+                    self.fade = Some(Fade {
+                        handoff_mode: std::mem::take(&mut self.pending_handoff),
+                        drum_start: None,
+                        from: get(&self.controls.crossfader),
+                        to,
+                        total: (seconds * self.rate as f32).max(1.) as u64,
+                        elapsed: 0,
+                        incoming: self.controls.pair_indices()[usize::from(to > 0.5)],
+                        started: false,
+                        grid: Some(grid),
+                        boundary: None,
+                        mashup: None,
+                        scratch: Some(ScratchIntro {
+                            beat: (beat * self.rate as f32).round().max(1.) as u64,
+                            elapsed: 0,
+                            origin: 0.,
+                        }),
+                    });
+                    set(&self.controls.fade_progress, 0.);
+                    self.controls.fading.store(true, Relaxed);
+                }
                 Command::Mashup {
                     to,
                     fade,
@@ -350,42 +700,61 @@ impl Mixer {
                     let fade = (fade * self.rate as f32).max(1.) as u64;
                     let hold = (hold * self.rate as f32).max(1.) as u64;
                     self.fade = Some(Fade {
+                        handoff_mode: std::mem::take(&mut self.pending_handoff),
+                        drum_start: None,
                         from: get(&self.controls.crossfader),
                         to,
                         total: fade * 2 + hold,
                         elapsed: 0,
-                        incoming: usize::from(to > 0.5),
+                        incoming: self.controls.pair_indices()[usize::from(to > 0.5)],
                         started: false,
                         grid: Some(grid),
                         boundary: None,
                         mashup: Some((fade, hold)),
+                        scratch: None,
                     });
                     set(&self.controls.fade_progress, 0.);
                     self.controls.fading.store(true, Relaxed);
                     self.controls.mashup_active.store(true, Relaxed);
                 }
-                Command::ScheduledFade { to, seconds, grid } => {
+                Command::ScheduledFade {
+                    to,
+                    seconds,
+                    grid,
+                    at,
+                } => {
                     set(&self.controls.fade_progress, 0.);
                     self.fade = Some(Fade {
+                        handoff_mode: std::mem::take(&mut self.pending_handoff),
+                        drum_start: None,
                         from: get(&self.controls.crossfader),
                         to,
                         total: (seconds * self.rate as f32).max(1.) as u64,
                         elapsed: 0,
-                        incoming: usize::from(to > 0.5),
+                        incoming: self.controls.pair_indices()[usize::from(to > 0.5)],
                         started: false,
                         grid: Some(grid),
-                        boundary: None,
+                        boundary: at,
                         mashup: None,
+                        scratch: None,
                     });
                     self.controls.fading.store(true, Relaxed);
                 }
                 Command::Load(d, s, play, generation) => {
+                    self.controls.tempo_recovery[d].store(false, Relaxed);
+                    self.launches[d] = None;
                     self.sections[d] = None;
                     self.controls.section_state[d].store(0, Relaxed);
                     self.levels[d] = None;
                     self.controls.scratching[d].store(false, Relaxed);
                     self.controls.play[d].store(play, Relaxed);
-                    self.controls.stems_loaded[d].store(s.separated, Relaxed);
+                    self.controls.stems_loaded[d].store(
+                        s.separated
+                            && !s.stem_degraded.load(Relaxed)
+                            && !self.controls.lazy_stems[d].load(Relaxed),
+                        Relaxed,
+                    );
+                    self.controls.key_lock_available[d].store(s.key_lock.is_some(), Relaxed);
                     let gains = amp_core::stem_mix::gains(s.stem_knobs);
                     for (i, gain) in gains.iter().enumerate() {
                         set(&self.controls.stem_knobs[d][i], s.stem_knobs[i]);
@@ -404,23 +773,46 @@ impl Mixer {
                     self.controls.position[d].store(0, Relaxed);
                     self.controls.deck_generation[d]
                         .store(generation, std::sync::atomic::Ordering::Release);
-                    self.fade = None;
-                    self.controls.mashup_active.store(false, Relaxed);
-                    self.controls.fading.store(false, Relaxed);
+                    if self.controls.pair_indices().contains(&d) {
+                        self.fade = None;
+                        self.controls.mashup_active.store(false, Relaxed);
+                        self.controls.fading.store(false, Relaxed);
+                    }
+                }
+                Command::Play(d) => {
+                    self.controls.play[d].store(true, Relaxed);
+                }
+                Command::Pause(d) => {
+                    self.launches[d] = None;
+                    self.sections[d] = None;
+                    self.levels[d] = None;
+                    self.controls.section_state[d].store(0, Relaxed);
+                    self.controls.play[d].store(false, Relaxed);
+                    self.controls.scratching[d].store(false, Relaxed);
+                    if self.controls.pair_indices().contains(&d) {
+                        self.fade = None;
+                        self.controls.fading.store(false, Relaxed);
+                        self.controls.mashup_active.store(false, Relaxed);
+                    }
                 }
                 Command::Stop(d) => {
+                    self.launches[d] = None;
                     self.sections[d] = None;
                     self.controls.section_state[d].store(0, Relaxed);
                     self.levels[d] = None;
-                    self.levels[2] = None;
+
                     self.voices[d] = Voice::default();
                     self.controls.play[d].store(false, Relaxed);
                     self.controls.loaded[d].store(false, Relaxed);
                     self.controls.ready[d].store(false, Relaxed);
+                    self.controls.stems_loaded[d].store(false, Relaxed);
+                    self.controls.stem_processing_ready[d].store(false, Relaxed);
                     self.controls.looping[d].store(false, Relaxed);
-                    self.fade = None;
-                    self.controls.mashup_active.store(false, Relaxed);
-                    self.controls.fading.store(false, Relaxed);
+                    if self.controls.pair_indices().contains(&d) {
+                        self.fade = None;
+                        self.controls.mashup_active.store(false, Relaxed);
+                        self.controls.fading.store(false, Relaxed);
+                    }
                 }
                 Command::Fader(x) => {
                     set(&self.controls.crossfader, x.clamp(0., 1.));
@@ -431,21 +823,24 @@ impl Mixer {
                 Command::Fade { to, seconds } => {
                     set(&self.controls.fade_progress, 0.);
                     self.fade = Some(Fade {
+                        handoff_mode: std::mem::take(&mut self.pending_handoff),
+                        drum_start: None,
                         from: get(&self.controls.crossfader),
                         to,
                         total: (seconds * self.rate as f32).max(1.) as u64,
                         elapsed: 0,
-                        incoming: usize::from(to > 0.5),
+                        incoming: self.controls.pair_indices()[usize::from(to > 0.5)],
                         started: false,
                         grid: None,
                         boundary: None,
                         mashup: None,
+                        scratch: None,
                     });
                     self.controls.fading.store(true, Relaxed);
                 }
                 Command::Cancel => {
-                    self.sections = Default::default();
-                    for d in 0..2 {
+                    for d in self.controls.pair_indices() {
+                        self.sections[d] = None;
                         self.controls.section_state[d].store(0, Relaxed);
                     }
                     self.fade = None;
@@ -472,31 +867,132 @@ impl Mixer {
                     {
                         source.position = old.origin + old.frames.len() as f64 * old.rate as f64;
                     }
+                    self.voices[d].pending_loop = None;
+                    let frames = if self.controls.synced[d].load(Relaxed)
+                        && self.controls.quantization.load(Relaxed) > 0
+                    {
+                        if let Some(frames) = frames {
+                            let clock = self.controls.rendered.load(Relaxed);
+                            let beat = self.controls.beat_at(clock, self.rate);
+                            let q = self.controls.quantization.load(Relaxed) as f64;
+                            let delay = ((beat / q).floor().mul_add(q, q) - beat) * 60.
+                                / get(&self.controls.master_bpm) as f64
+                                * self.rate as f64;
+                            self.voices[d].pending_loop =
+                                Some((clock + delay.round().max(0.) as u64, frames));
+                        }
+                        None
+                    } else {
+                        frames
+                    };
                     self.voices[d].looped = frames.map(|frames| Loop {
                         length: frames.capacity(),
                         frames,
                         phase: 0.,
                         origin: self.voices[d].source.as_ref().map_or(0., |s| s.position),
-                        rate: get(&self.controls.rate[d]),
+                        rate: self.controls.effective_rate(d),
                         capturing: true,
                     });
-                    self.controls.looping[d].store(self.voices[d].looped.is_some(), Relaxed);
+                    self.controls.looping[d].store(
+                        self.voices[d].looped.is_some() || self.voices[d].pending_loop.is_some(),
+                        Relaxed,
+                    );
                 }
             }
         }
     }
     fn render(&mut self, frames: usize, mut output: impl FnMut(usize, Frame)) {
+        let gate = self.controls.output_gate.clone();
+        let admission = gate.render();
         self.process_commands();
+        if admission.is_none() {
+            self.controls.pause_for_receiver();
+            // Discard limiter lookahead tails, without allocation or source advance.
+            for _ in 0..self.master_limiter.latency() {
+                self.master_limiter.process([0., 0.]);
+            }
+            for _ in 0..self.player_limiter.latency() {
+                self.player_limiter.process([0., 0.]);
+            }
+            for _ in 0..self.cue_limiter.latency() {
+                self.cue_limiter.process([0., 0.]);
+            }
+            self.fade = None;
+            self.sections = Default::default();
+            self.launches = Default::default();
+            self.levels = Default::default();
+            for voice in &mut self.samples {
+                voice.playing = false;
+            }
+            for index in 0..frames {
+                output(index, [0., 0.]);
+            }
+            return;
+        }
         let c = &self.controls;
-        let rates = std::array::from_fn::<_, 2, _>(|d| {
-            if c.scratching[d].load(Relaxed) {
+        let scratch_active = std::array::from_fn::<_, 6, _>(|d| {
+            c.scratching[d].load(std::sync::atomic::Ordering::Acquire)
+        });
+        let manual_vinyl_block = std::array::from_fn::<_, 6, _>(|d| {
+            scratch_active[d] && c.vinyl_follow[d].load(std::sync::atomic::Ordering::Acquire)
+        });
+        let rates = std::array::from_fn::<_, 6, _>(|d| {
+            if c.tempo_recovery[d].load(Relaxed) {
+                if !c.key_lock[d].load(Relaxed)
+                    || !c.key_lock_available[d].load(Relaxed)
+                    || c.scratching[d].load(Relaxed)
+                    || c.synced[d].load(Relaxed)
+                    || !c.play[d].load(Relaxed)
+                {
+                    c.tempo_recovery[d].store(false, Relaxed);
+                } else if self.fade.is_none() {
+                    let rate = get(&c.rate[d]);
+                    let delta = 0.0025 * frames as f32 / self.rate as f32;
+                    let next = rate + (1. - rate).clamp(-delta, delta);
+                    // A concurrent manual pitch edit wins and cancels the next block.
+                    let _ = c.rate[d].compare_exchange(
+                        rate.to_bits(),
+                        next.to_bits(),
+                        Relaxed,
+                        Relaxed,
+                    );
+                    if next == 1. {
+                        c.tempo_recovery[d].store(false, Relaxed);
+                    }
+                }
+            }
+            let normal_rate = {
+                if c.synced[d].load(Relaxed) && get(&c.bpm[d]) > 0. {
+                    let tempo = get(&c.master_bpm) / get(&c.bpm[d]);
+                    let seconds = (self.voices[d]
+                        .source
+                        .as_ref()
+                        .map_or(0., |s| s.position / self.rate as f64)
+                        + f64::from_bits(c.source_origin[d].load(Relaxed))
+                        - f64::from_bits(c.beat_offset[d].load(Relaxed)))
+                        * get(&c.bpm[d]) as f64
+                        / 60.;
+                    let master = c.beat_at(c.rendered.load(Relaxed), self.rate);
+                    let phase = (seconds - master + 0.5).rem_euclid(1.) - 0.5;
+                    (tempo * (1. - phase as f32 * 0.003)).clamp(0.5, 2.)
+                } else {
+                    get(&c.rate[d]).clamp(0.5, 2.)
+                }
+            };
+            // Gesture changes are applied once per block. A release must use
+            // normal rate even if the UI's separate scratch flags are mid-update.
+            if !manual_vinyl_block[d]
+                && (self.voices[d].manual_vinyl || self.voices[d].resume_fill > 0)
+            {
+                normal_rate
+            } else if scratch_active[d] {
                 get(&c.scratch_rate[d]).clamp(-4., 4.)
             } else {
-                get(&c.rate[d]).clamp(0.5, 2.)
+                normal_rate
             }
         });
 
-        let eq = std::array::from_fn::<_, 2, _>(|d| {
+        let eq = std::array::from_fn::<_, 6, _>(|d| {
             std::array::from_fn::<_, 3, _>(|b| {
                 if c.eq_kill[d][b].load(Relaxed) {
                     0.
@@ -505,11 +1001,11 @@ impl Mixer {
                 }
             })
         });
-        let trims = std::array::from_fn::<_, 2, _>(|d| {
-            10f32.powf(get(&c.trim_db[d]).clamp(-12., 12.) / 20.)
+        let trims = std::array::from_fn::<_, 6, _>(|d| {
+            10f32.powf((get(&c.trim_db[d]).clamp(-12., 12.) + get(&c.auto_gain_db[d])) / 20.)
         });
-        let sweeps = std::array::from_fn::<_, 2, _>(|d| get(&c.sweep[d]).clamp(-1., 1.));
-        let sweep_alpha = std::array::from_fn::<_, 2, _>(|d| {
+        let sweeps = std::array::from_fn::<_, 6, _>(|d| get(&c.sweep[d]).clamp(-1., 1.));
+        let sweep_alpha = std::array::from_fn::<_, 6, _>(|d| {
             let hz = if sweeps[d] < 0. {
                 20000. * (30_f32 / 20000.).powf(-sweeps[d])
             } else {
@@ -519,15 +1015,15 @@ impl Mixer {
         });
         let alpha_low = 1. - (-std::f32::consts::TAU * 200. / self.rate as f32).exp();
         let alpha_high = 1. - (-std::f32::consts::TAU * 2000. / self.rate as f32).exp();
-        let filter = std::array::from_fn::<_, 2, _>(|d| {
+        let filter = std::array::from_fn::<_, 6, _>(|d| {
             1. - (-std::f32::consts::TAU * get(&c.cutoff[d]).min(self.rate as f32 * 0.45)
                 / self.rate as f32)
                 .exp()
         });
 
-        let mut peaks = [0f32; 2];
-        let mut waves = [[0f32; 96]; 2];
-        for d in 0..2 {
+        let mut peaks = [0f32; 6];
+        let mut waves = [[0f32; 96]; 6];
+        for d in 0..6 {
             if let Some(source) = &mut self.voices[d].source {
                 c.duration_frames[d].store(source.duration.load(Relaxed), Relaxed);
                 if !source.primed && source.buffered(self.rate) {
@@ -544,12 +1040,40 @@ impl Mixer {
             }
         }
         for i in 0..frames {
-            for slot in 0..3 {
+            self.player_envelope += (get(&c.player_envelope).clamp(0., 1.) - self.player_envelope)
+                * (1. / (self.rate as f32 * 0.01)).min(1.);
+            let clock = c.rendered.load(Relaxed) + i as u64;
+            for d in 0..DECKS {
+                if let Some(at) = self.launches[d] {
+                    if c.ready[d].load(Relaxed) {
+                        if at == u64::MAX {
+                            let beats = c.quantization.load(Relaxed);
+                            let beat = c.beat_at(clock, self.rate);
+                            let next = if beats == 0 {
+                                beat
+                            } else {
+                                (beat / beats as f64)
+                                    .floor()
+                                    .mul_add(beats as f64, beats as f64)
+                            };
+                            let delay =
+                                (next - beat) * 60. / get(&c.master_bpm) as f64 * self.rate as f64;
+                            self.launches[d] = Some(clock + delay.max(0.).round() as u64);
+                        } else if clock >= at {
+                            c.play[d].store(true, Relaxed);
+                            self.launches[d] = None;
+                        }
+                    } else {
+                        self.launches[d] = Some(u64::MAX);
+                    }
+                }
+            }
+            for slot in 0..7 {
                 if let Some(fade) = &mut self.levels[slot] {
                     fade.elapsed = (fade.elapsed + 1).min(fade.total);
                     let progress = fade.elapsed as f32 / fade.total as f32;
                     let value = fade.from + (fade.to - fade.from) * progress;
-                    if slot == 2 {
+                    if slot == MASTER {
                         set(&c.master, value);
                     } else {
                         set(&c.gain[slot], value);
@@ -557,8 +1081,8 @@ impl Mixer {
                     set(&c.fade_progress, progress);
                     if fade.elapsed == fade.total {
                         if fade.stop {
-                            for d in 0..2 {
-                                if slot == 2 || slot == d {
+                            for d in 0..6 {
+                                if slot == MASTER || slot == d {
                                     c.play[d].store(false, Relaxed);
                                     c.loaded[d].store(false, Relaxed);
                                     c.ready[d].store(false, Relaxed);
@@ -567,7 +1091,7 @@ impl Mixer {
                                     self.voices[d] = Voice::default();
                                 }
                             }
-                            if slot == 2 {
+                            if slot == MASTER {
                                 for (pad, v) in self.samples.iter_mut().enumerate() {
                                     v.playing = false;
                                     c.sample_playing[pad].store(false, Relaxed);
@@ -587,14 +1111,17 @@ impl Mixer {
                 .is_some_and(|fade| c.finished[fade.incoming].load(Relaxed))
             {
                 if let Some(fade) = &self.fade {
-                    set(&c.crossfader, (1 - fade.incoming) as f32);
+                    set(&c.crossfader, (1 - fade.incoming % 2) as f32);
                 }
                 self.fade = None;
                 c.fading.store(false, Relaxed);
             }
             let mut mashup_mix = None;
+            let mut handoff_masks = None;
+            let mut eq_masks = [[1.; 3]; 2];
+            let mut scratch_read: Option<(usize, f64)> = None;
             if let Some(fade) = &mut self.fade {
-                let outgoing = 1 - fade.incoming;
+                let outgoing = c.other(fade.incoming);
                 let position = self.voices[outgoing]
                     .source
                     .as_ref()
@@ -610,8 +1137,55 @@ impl Mixer {
                 if !fade.started && due && c.ready[fade.incoming].load(Relaxed) {
                     c.play[fade.incoming].store(true, Relaxed);
                     fade.started = true;
+                    let bpm = get(&c.bpm[outgoing]) as f64;
+                    let rate = c.effective_rate(outgoing) as f64;
+                    if bpm > 0. && rate > 0. {
+                        let origin = f64::from_bits(c.source_origin[outgoing].load(Relaxed));
+                        let anchor = f64::from_bits(c.beat_offset[outgoing].load(Relaxed));
+                        let mid =
+                            position + origin + fade.total as f64 * 0.5 / self.rate as f64 * rate;
+                        let boundary = anchor + ((mid - anchor) * bpm / 60.).floor() * 60. / bpm;
+                        fade.drum_start = Some(
+                            ((boundary - position - origin) / rate * self.rate as f64)
+                                .round()
+                                .max(0.) as u64,
+                        );
+                    }
+                    if let Some(intro) = &mut fade.scratch {
+                        intro.origin = self.voices[fade.incoming]
+                            .source
+                            .as_ref()
+                            .map_or(0., |s| s.position);
+                    }
                 }
-                if fade.started {
+                let mut preview = false;
+                if fade.started
+                    && let Some(intro) = &mut fade.scratch
+                {
+                    if intro.elapsed < intro.beat * 4 {
+                        let (offset, gain) = scratch_motion(intro.elapsed, intro.beat);
+                        scratch_read = Some((
+                            fade.incoming,
+                            intro.origin
+                                + offset
+                                    * intro.beat as f64
+                                    * c.effective_rate(fade.incoming) as f64,
+                        ));
+                        let mut levels = [1.; 2];
+                        levels[fade.incoming % 2] = gain;
+                        let mut masks = [[1.; 3]; 2];
+                        masks[fade.incoming % 2] = [0., 0., 1.];
+                        mashup_mix = Some((levels, masks));
+                        intro.elapsed += 1;
+                        preview = true;
+                    } else {
+                        if let Some(source) = &mut self.voices[fade.incoming].source {
+                            source.position = intro.origin;
+                        }
+                        fade.scratch = None;
+                    }
+                }
+                if fade.started && !preview {
                     if let Some((ramp, _)) = fade.mashup
                         && c.finished[outgoing].load(Relaxed)
                     {
@@ -622,27 +1196,67 @@ impl Mixer {
                             fade.elapsed,
                             ramp,
                             hold,
-                            fade.incoming,
+                            fade.incoming % 2,
                         ));
                     }
                     let t = (fade.elapsed as f32 / fade.total as f32).clamp(0., 1.);
+                    if fade.handoff_mode == 3 {
+                        eq_masks[outgoing % 2][1] = 10f32.powf(-4. / 20.);
+                    }
+                    if matches!(fade.handoff_mode, 1 | 2) && fade.mashup.is_none() {
+                        let bpm = get(&c.bpm[outgoing]) * c.effective_rate(outgoing);
+                        if bpm.is_finite() && bpm > 0. {
+                            let beat = (60. * self.rate as f32 / bpm).round().max(1.) as u64;
+                            let mut masks = amp_core::transition_plan::stem_handoff(
+                                fade.elapsed,
+                                fade.total,
+                                beat,
+                            );
+                            if let Some(start) = fade.drum_start {
+                                let drums = (fade.elapsed.saturating_sub(start) as f32
+                                    / beat as f32)
+                                    .clamp(0., 1.);
+                                masks[0][2] = 1. - drums;
+                                masks[1][2] = drums;
+                            }
+                            if fade.handoff_mode == 2 {
+                                let mut ordered = [[1.; 3]; 2];
+                                ordered[outgoing % 2] = masks[0];
+                                ordered[fade.incoming % 2] = masks[1];
+                                handoff_masks = Some(ordered);
+                            } else {
+                                let highs = (t / 0.4).clamp(0., 1.);
+                                let mids = ((t - 0.4) / 0.5).clamp(0., 1.);
+                                let cuts = [
+                                    [24. * masks[1][2], 12. * mids, 9. * highs],
+                                    [24. * masks[0][2], 9. * (1. - mids), 6. * (1. - highs)],
+                                ];
+                                for (side, deck) in
+                                    [outgoing, fade.incoming].into_iter().enumerate()
+                                {
+                                    eq_masks[deck % 2] = cuts[side].map(|db| 10f32.powf(-db / 20.));
+                                }
+                            }
+                        }
+                    }
                     set(&c.fade_progress, t);
                     set(&c.crossfader, fade.from + (fade.to - fade.from) * t);
                     fade.elapsed += 1;
                     if fade.elapsed > fade.total {
                         set(&c.crossfader, fade.to);
-                        c.play[1 - fade.incoming].store(false, Relaxed);
+                        c.play[c.other(fade.incoming)].store(false, Relaxed);
                         c.fading.store(false, Relaxed);
                         self.fade = None;
                         self.controls.mashup_active.store(false, Relaxed);
                     }
                 }
             }
-            for d in 0..2 {
+            for (d, scratch) in scratch_active.iter().enumerate() {
                 let Some(pending) = &mut self.sections[d] else {
                     continue;
                 };
                 if pending.expected != c.deck_generation[d].load(Relaxed)
+                    || *scratch
                     || c.scratching[d].load(Relaxed)
                     || c.looping[d].load(Relaxed)
                 {
@@ -687,6 +1301,13 @@ impl Mixer {
                         pending.previous_origin = f64::from_bits(c.source_origin[d].load(Relaxed));
                         pending.old =
                             std::mem::replace(&mut self.voices[d].source, pending.source.take());
+                        // Keep one output-delay/pitch history across section jumps.
+                        if let (Some(incoming), Some(previous)) =
+                            (&mut self.voices[d].source, &mut pending.old)
+                        {
+                            incoming.key_lock = previous.key_lock.take();
+                        }
+                        self.voices[d].tail_frames = 0;
                         c.source_origin[d].store(pending.origin.to_bits(), Relaxed);
                         c.section_epoch[d].fetch_add(1, Relaxed);
                         c.section_state[d].store(2, Relaxed);
@@ -694,20 +1315,53 @@ impl Mixer {
                 }
             }
             let x = get(&c.crossfader);
-            let mut weights = amp_core::show::crossfade_weights(x);
+            let mut buses = amp_core::show::crossfade_weights(x);
             let mut stem_masks = [[1.; 3]; 2];
-            if let Some((buses, masks)) = mashup_mix {
-                weights = buses;
+            if let Some((buses_override, masks)) = mashup_mix {
+                buses = buses_override;
                 stem_masks = masks;
             }
+            if let Some(masks) = handoff_masks {
+                stem_masks = masks;
+            }
+            let pair = c.pair_indices();
+            for (deck, weight) in self.route_weights.iter_mut().enumerate() {
+                let target = if deck == pair[0] {
+                    buses[0]
+                } else if deck == pair[1] {
+                    buses[1]
+                } else {
+                    1.
+                };
+                if self.route_frames > 0 {
+                    *weight += (target - *weight) / self.route_frames as f32;
+                } else {
+                    *weight = target;
+                }
+            }
+            self.route_frames = self.route_frames.saturating_sub(1);
             c.mashup_active.store(
                 self.fade.as_ref().is_some_and(|f| f.mashup.is_some()),
                 Relaxed,
             );
             let mut mix = [0.; 2];
+            let mut player_mix = [0.; 2];
             let mut cue_mix = [0.; 2];
-            for d in 0..2 {
+            for d in 0..6 {
                 let v = &mut self.voices[d];
+                if v.pending_loop.as_ref().is_some_and(|(at, _)| clock >= *at)
+                    && c.play[d].load(Relaxed)
+                {
+                    let (_, frames) = v.pending_loop.take().unwrap();
+                    v.looped = Some(Loop {
+                        length: frames.capacity(),
+                        frames,
+                        phase: 0.,
+                        origin: v.source.as_ref().map_or(0., |s| s.position),
+                        rate: c.effective_rate(d),
+                        capturing: true,
+                    });
+                }
                 if !c.play[d].load(Relaxed) {
                     continue;
                 }
@@ -715,6 +1369,77 @@ impl Mixer {
                     continue;
                 };
                 if !source.primed {
+                    continue;
+                }
+                let manual_vinyl = manual_vinyl_block[d];
+                // The UI publishes the audible cursor, not the look-ahead readhead.
+                // Align once, silently: chasing it backwards would play an unwanted rewind.
+                if manual_vinyl && !v.manual_vinyl {
+                    source.position = f64::from_bits(c.vinyl_anchor[d].load(Relaxed))
+                        .max(source.history_start as f64);
+                    v.manual_vinyl = true;
+                    v.vinyl_motion.reset(source.position);
+                    v.resume_fill = 0;
+                    v.tail_frames = 0;
+                    if let Some(processor) = &mut source.key_lock {
+                        processor.reset_vinyl_delay();
+                    }
+                } else if !manual_vinyl && v.manual_vinyl {
+                    v.manual_vinyl = false;
+                    v.resume_origin = source.position;
+                    v.tail_frames = 0;
+                    if let Some(processor) = &mut source.key_lock {
+                        processor.reset_vinyl_delay();
+                        v.resume_fill = processor.latency;
+                    }
+                }
+                for stem in 0..3 {
+                    v.stem_mix[stem] +=
+                        (get(&c.stem_level[d][stem]).clamp(0., 1.) - v.stem_mix[stem]) * 0.004;
+                }
+                let degraded = source.stem_degraded.load(Relaxed);
+                if c.lazy_stems[d].load(Relaxed) {
+                    c.stems_loaded[d].store(
+                        c.stem_processing_ready[d].load(Relaxed) && !degraded,
+                        Relaxed,
+                    );
+                }
+                if degraded {
+                    c.stems_loaded[d].store(false, Relaxed);
+                }
+                let stem_gain: [f32; 3] = std::array::from_fn(|stem| {
+                    if degraded {
+                        return 1.;
+                    }
+
+                    (if get(&c.stem_level[d][stem]) == 0. {
+                        0.
+                    } else {
+                        v.stem_mix[stem]
+                    }) * if c.pair_indices().contains(&d) {
+                        stem_masks[d % 2][stem]
+                    } else {
+                        1.
+                    }
+                });
+                // Rebuild only the dry look-ahead with NEW forward frames. No old
+                // reversed tail, full-DSP burst, allocation, or duplicate voice.
+                while v.resume_fill > 0 {
+                    let next = match source.next(rates[d]) {
+                        Some(frame) => stereo_frame(frame, source.separated, stem_gain, false),
+                        None if source.done.load(std::sync::atomic::Ordering::Acquire) => {
+                            v.tail_frames += 1;
+                            [0.; 2]
+                        }
+                        None => break,
+                    };
+                    if let Some(processor) = &mut source.key_lock {
+                        processor.prime_vinyl_release(next);
+                    }
+                    v.resume_fill -= 1;
+                }
+                if v.resume_fill > 0 {
+                    c.underruns[d].fetch_add(1, Relaxed);
                     continue;
                 }
                 let repeating = v.looped.as_ref().is_some_and(|l| !l.capturing);
@@ -730,25 +1455,41 @@ impl Mixer {
                     source.position = l.origin + l.phase * l.rate as f64;
                     Some(frame)
                 } else {
-                    let rate = if c.vinyl_follow[d].load(Relaxed) && c.scratching[d].load(Relaxed) {
-                        let target = (f64::from_bits(c.vinyl_target[d].load(Relaxed)))
-                            .max(source.history_start as f64);
-                        ((target - source.position) * 0.025).clamp(-4., 4.) as f32
-                    } else {
-                        rates[d]
-                    };
+                    let rate =
+                        if let Some((_, target)) = scratch_read.filter(|(deck, _)| *deck == d) {
+                            (target - source.position).clamp(-4., 4.) as f32
+                        } else if c.vinyl_follow[d].load(Relaxed) && c.scratching[d].load(Relaxed) {
+                            let target = (f64::from_bits(c.vinyl_target[d].load(Relaxed)))
+                                .max(source.history_start as f64);
+                            v.vinyl_motion.rate(target, source.position, self.rate)
+                        } else {
+                            rates[d]
+                        };
                     source.next(rate)
                 };
                 if frame.is_none()
                     && let Some(pending) = &mut self.sections[d]
                     && let Some(old) = pending.old.take()
                 {
+                    let processor = source.key_lock.take();
                     *source = old;
+                    source.key_lock = processor;
                     frame = source.next(rates[d]);
                     c.source_origin[d].store(pending.previous_origin.to_bits(), Relaxed);
                     c.section_epoch[d].fetch_sub(1, Relaxed);
                     c.section_state[d].store(3, Relaxed);
                     self.sections[d] = None;
+                }
+                if frame.is_some() {
+                    v.tail_frames = 0;
+                } else if source.done.load(std::sync::atomic::Ordering::Acquire)
+                    && source
+                        .key_lock
+                        .as_ref()
+                        .is_some_and(|processor| v.tail_frames < processor.latency)
+                {
+                    v.tail_frames += 1;
+                    frame = Some([0.; 8]);
                 }
                 let Some(mut frame) = frame else {
                     if source.done.load(std::sync::atomic::Ordering::Acquire) {
@@ -765,7 +1506,7 @@ impl Mixer {
                 {
                     if let Some(previous) = old.next(rates[d]) {
                         let t = (pending.elapsed as f32 / pending.total.max(1) as f32).min(1.);
-                        for ch in 0..6 {
+                        for ch in 0..8 {
                             frame[ch] = previous[ch] * (1. - t) + frame[ch] * t;
                         }
                     }
@@ -783,29 +1524,35 @@ impl Mixer {
                         l.capturing = false;
                     }
                 }
-                for (stem, mask) in stem_masks[d].iter().enumerate() {
-                    v.stem_mix[stem] += (get(&c.stem_level[d][stem]).clamp(0., 1.) * mask
-                        - v.stem_mix[stem])
-                        * 0.004;
+                let mut frame = stereo_frame(
+                    frame,
+                    source.separated,
+                    stem_gain,
+                    scratch_read.is_some_and(|(deck, _)| deck == d),
+                );
+                if !manual_vinyl && let Some(key_lock) = &mut source.key_lock {
+                    frame = key_lock.frame(
+                        frame,
+                        rates[d],
+                        c.key_lock[d].load(Relaxed),
+                        c.scratching[d].load(Relaxed)
+                            || scratch_read.is_some_and(|(deck, _)| deck == d),
+                    );
                 }
-                let mut frame: Frame = if source.separated {
-                    std::array::from_fn(|ch| {
-                        frame[ch] * v.stem_mix[0]
-                            + frame[ch + 2] * v.stem_mix[1]
-                            + frame[ch + 4] * v.stem_mix[2]
-                    })
-                } else {
-                    [frame[0], frame[1]]
-                };
                 v.gain += (get(&c.gain[d]).clamp(0., 1.) - v.gain) * 0.004;
                 v.trim += (trims[d] - v.trim) * 0.004;
                 for ch in 0..2 {
                     frame[ch] *= v.trim;
                     v.low[ch] += alpha_low * (frame[ch] - v.low[ch]);
                     v.high[ch] += alpha_high * (frame[ch] - v.high[ch]);
-                    let value = v.low[ch] * eq[d][0]
-                        + (v.high[ch] - v.low[ch]) * eq[d][1]
-                        + (frame[ch] - v.high[ch]) * eq[d][2];
+                    let mask = if c.pair_indices().contains(&d) {
+                        eq_masks[d % 2]
+                    } else {
+                        [1.; 3]
+                    };
+                    let value = v.low[ch] * eq[d][0] * mask[0]
+                        + (v.high[ch] - v.low[ch]) * eq[d][1] * mask[1]
+                        + (frame[ch] - v.high[ch]) * eq[d][2] * mask[2];
                     v.filter[ch] += filter[d] * (value - v.filter[ch]);
                     frame[ch] = if get(&c.cutoff[d]) >= 20000. {
                         value
@@ -818,12 +1565,21 @@ impl Mixer {
                     } else if sweeps[d] > 0.001 {
                         frame[ch] -= v.sweep_state[ch];
                     }
-                    if c.cue[d].load(Relaxed) {
+                    if c.cue[d].load(Relaxed) || c.phones_only[d].load(Relaxed) {
                         cue_mix[ch] += frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
                     }
                     frame[ch] *= v.gain;
+                    if c.phones_only[d].load(Relaxed) {
+                        frame[ch] = 0.;
+                    }
+                    if d == 0 {
+                        frame[ch] *= self.player_envelope;
+                    }
+                    if d == 0 {
+                        player_mix[ch] = frame[ch] * std::f32::consts::FRAC_1_SQRT_2;
+                    }
                     peaks[d] = peaks[d].max(frame[ch].abs());
-                    mix[ch] += frame[ch] * weights[d] * std::f32::consts::FRAC_1_SQRT_2;
+                    mix[ch] += frame[ch] * self.route_weights[d] * std::f32::consts::FRAC_1_SQRT_2;
                 }
                 let bin = i * 96 / frames.max(1);
                 waves[d][bin] = waves[d][bin].max((frame[0] + frame[1]).abs() * 0.5);
@@ -858,31 +1614,322 @@ impl Mixer {
                 let blend = get(&c.cue_blend).clamp(0., 1.);
                 let volume = get(&c.cue_volume).clamp(0., 1.);
                 let frame = std::array::from_fn(|ch| {
-                    ((cue_mix[ch] * (1. - blend) + mix[ch] * get(&c.master) * blend) * volume)
-                        .clamp(-0.98, 0.98)
+                    (cue_mix[ch] * (1. - blend) + mix[ch] * get(&c.master) * blend) * volume
                 });
-                let _ = monitor.push(frame);
+                let _ = monitor.push(self.cue_limiter.process(frame));
             }
-            let master = [
-                (mix[0] * get(&c.master)).clamp(-0.98, 0.98),
-                (mix[1] * get(&c.master)).clamp(-0.98, 0.98),
-            ];
+            let master = self.master_limiter.process(mix.map(|v| v * get(&c.master)));
+            let player_master = self
+                .player_limiter
+                .process(player_mix.map(|v| v * get(&c.master)));
             if let Some(tap) = &mut self.broadcast {
-                let _ = tap.push(master);
+                let output = if c.broadcast_player_only.load(Relaxed) {
+                    player_master
+                } else {
+                    master
+                };
+                let _ = tap.push(output);
             }
             output(i, master);
         }
-        for d in 0..2 {
+        for d in 0..6 {
             set(&c.peak[d], peaks[d]);
             for (i, value) in waves[d].iter().enumerate() {
                 set(&c.scope[d][i], *value);
             }
             if let Some(s) = &self.voices[d].source {
-                c.position[d].store(s.position as u64, Relaxed);
+                let voice = &self.voices[d];
+                let remaining_delay = if voice.manual_vinyl {
+                    0
+                } else {
+                    s.key_lock.as_ref().map_or(0, |processor| {
+                        processor.latency.saturating_sub(voice.tail_frames)
+                    })
+                };
+                let audible = if voice.resume_fill > 0 {
+                    voice.resume_origin
+                } else {
+                    (s.position - remaining_delay as f64 * c.effective_rate(d) as f64).max(0.)
+                };
+                c.position[d].store(audible as u64, Relaxed);
             }
         }
         c.rendered.fetch_add(frames as u64, Relaxed);
     }
+}
+
+#[cfg(test)]
+mod vinyl_tests {
+    use super::*;
+    fn locked_source(frames: usize) -> Source {
+        let (mut producer, consumer) = RingBuffer::new(frames + 1);
+        for i in 0..frames {
+            let value = 0.1 + (i % 2000) as f32 / 20000.;
+            producer
+                .push([value, value, 0., 0., 0., 0., 0., 0.])
+                .unwrap();
+        }
+        Source {
+            key_lock: Some(Box::new(crate::key_lock::Processor::new(48000).unwrap())),
+            ring: consumer,
+            duration: Arc::new(AtomicU64::new(frames as u64)),
+            done: Arc::new(AtomicBool::new(true)),
+            failed: Arc::new(AtomicBool::new(false)),
+            history: VecDeque::with_capacity(frames),
+            history_start: 0,
+            position: 0.,
+            primed: true,
+            separated: false,
+            stem_degraded: Arc::new(AtomicBool::new(false)),
+            stem_knobs: [0.; 3],
+        }
+    }
+    fn touch(c: &Controls, deck: usize, anchor: u64) {
+        c.vinyl_anchor[deck].store((anchor as f64).to_bits(), Relaxed);
+        c.vinyl_target[deck].store((anchor as f64).to_bits(), Relaxed);
+        c.vinyl_follow[deck].store(true, Relaxed);
+        c.scratching[deck].store(true, Relaxed);
+    }
+    #[test]
+    fn real_delay_touch_holds_without_ghost_rewind_and_release_resumes_once() {
+        for enabled in [false, true] {
+            let c = Arc::new(Controls::default());
+            c.key_lock[0].store(enabled, Relaxed);
+            let (tx, rx) = mpsc::channel();
+            let mut m = Mixer::new(48000, rx, c.clone());
+            tx.send(Command::Load(0, locked_source(100000), true, 1))
+                .unwrap();
+            tx.send(Command::Load(1, locked_source(100000), true, 1))
+                .unwrap();
+            m.render(16000, |_, _| {});
+            let anchor = c.position[0].load(Relaxed);
+            let other = c.position[1].load(Relaxed);
+            let latency = m.voices[0]
+                .source
+                .as_ref()
+                .unwrap()
+                .key_lock
+                .as_ref()
+                .unwrap()
+                .latency;
+            assert!(latency > 512);
+            touch(&c, 0, anchor);
+            m.render(1, |_, _| {});
+            assert_eq!(
+                m.voices[0].source.as_ref().unwrap().position,
+                anchor as f64,
+                "a stationary touch must align silently, never audibly rewind"
+            );
+            assert_eq!(c.position[0].load(Relaxed), anchor);
+            let mut peak = 0f32;
+            m.render(latency + 512, |i, frame| {
+                if i > 512 {
+                    peak = peak.max(frame[0].abs());
+                }
+            });
+            assert!(
+                peak < 0.00001,
+                "queued forward audio leaked into held vinyl: {peak}"
+            );
+            let target = anchor - 480;
+            c.vinyl_target[0].store((target as f64).to_bits(), Relaxed);
+            m.render(1000, |_, _| {});
+            assert!((c.position[0].load(Relaxed) as i64 - target as i64).abs() <= 1);
+            assert_eq!(
+                c.position[1].load(Relaxed),
+                other + 1 + latency as u64 + 512 + 1000
+            );
+            let held = m.voices[0].source.as_ref().unwrap().position;
+            c.vinyl_follow[0].store(false, Relaxed);
+            c.scratching[0].store(false, Relaxed);
+            m.render(1, |_, _| {});
+            assert!(
+                (c.position[0].load(Relaxed) as f64 - (held + 1.)).abs() <= 1.,
+                "release must resume the audible cursor, not replay scratch history"
+            );
+            assert_eq!(m.voices[0].resume_fill, 0);
+            let mut resumed = 0f32;
+            m.render(512, |i, frame| {
+                if i > 400 {
+                    resumed = resumed.max(frame[0].abs());
+                }
+            });
+            assert!(
+                resumed > 0.03,
+                "forward release must not wait through an empty delay"
+            );
+            // A second grab also aligns to the audible cursor after recovery.
+            let again = c.position[0].load(Relaxed);
+            touch(&c, 0, again);
+            m.render(1, |_, _| {});
+            assert_eq!(c.position[0].load(Relaxed), again);
+        }
+    }
+    #[test]
+    fn paused_vinyl_release_keeps_cursor_and_eof_drains_only_remaining_audio() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(48000, rx, c.clone());
+        tx.send(Command::Load(0, locked_source(48000), true, 1))
+            .unwrap();
+        m.render(40000, |_, _| {});
+        let anchor = c.position[0].load(Relaxed);
+        touch(&c, 0, anchor);
+        m.render(512, |_, _| {});
+        c.play[0].store(false, Relaxed);
+        c.scratching[0].store(false, Relaxed);
+        c.vinyl_follow[0].store(false, Relaxed);
+        m.render(512, |_, _| {});
+        assert_eq!(c.position[0].load(Relaxed), anchor);
+        c.play[0].store(true, Relaxed);
+        m.render(1, |_, _| {});
+        assert!((c.position[0].load(Relaxed) as i64 - anchor as i64 - 1).abs() <= 1);
+        let next = c.position[0].load(Relaxed);
+        touch(&c, 0, next);
+        m.render(1, |_, _| {});
+        c.vinyl_target[0].store(47900f64.to_bits(), Relaxed);
+        m.render(4000, |_, _| {});
+        let end = c.position[0].load(Relaxed);
+        assert!((end as i64 - 47900).abs() <= 1);
+        c.scratching[0].store(false, Relaxed);
+        c.vinyl_follow[0].store(false, Relaxed);
+        m.render(1, |_, _| {});
+        assert!(
+            (c.position[0].load(Relaxed) as i64 - end as i64 - 1).abs() <= 1,
+            "EOF zero padding must compensate published position"
+        );
+        m.render(500, |_, _| {});
+        assert!(!c.play[0].load(Relaxed));
+        assert!(c.finished[0].load(Relaxed));
+    }
+    #[test]
+    fn release_underrun_freezes_cursor_until_fresh_forward_delay_is_complete() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(48000, rx, c.clone());
+        let (mut producer, consumer) = RingBuffer::new(14001);
+        for _ in 0..14000 {
+            producer.push([0.2, 0.2, 0., 0., 0., 0., 0., 0.]).unwrap();
+        }
+        let done = Arc::new(AtomicBool::new(false));
+        let source = Source {
+            key_lock: Some(Box::new(crate::key_lock::Processor::new(48000).unwrap())),
+            ring: consumer,
+            duration: Arc::new(AtomicU64::new(24000)),
+            done: done.clone(),
+            failed: Arc::new(AtomicBool::new(false)),
+            history: VecDeque::with_capacity(30000),
+            history_start: 0,
+            position: 0.,
+            primed: true,
+            separated: false,
+            stem_degraded: Arc::new(AtomicBool::new(false)),
+            stem_knobs: [0.; 3],
+        };
+        tx.send(Command::Load(0, source, true, 1)).unwrap();
+        tx.send(Command::Load(1, locked_source(100000), true, 1))
+            .unwrap();
+        m.render(13000, |_, _| {});
+        let anchor = c.position[0].load(Relaxed);
+        touch(&c, 0, anchor);
+        m.render(1, |_, _| {});
+        c.vinyl_target[0].store(13900f64.to_bits(), Relaxed);
+        m.render(3000, |_, _| {});
+        let cursor = c.position[0].load(Relaxed);
+        let other = c.position[1].load(Relaxed);
+        c.scratching[0].store(false, Relaxed);
+        c.vinyl_follow[0].store(false, Relaxed);
+        m.render(128, |_, _| {});
+        assert!(m.voices[0].resume_fill > 0);
+        assert_eq!(c.position[0].load(Relaxed), cursor);
+        assert_eq!(c.position[1].load(Relaxed), other + 128);
+        assert!(c.play[0].load(Relaxed));
+        for _ in 0..10000 {
+            producer.push([0.2, 0.2, 0., 0., 0., 0., 0., 0.]).unwrap();
+        }
+        done.store(true, Relaxed);
+        m.render(1, |_, _| {});
+        assert_eq!(m.voices[0].resume_fill, 0);
+        assert!((c.position[0].load(Relaxed) as i64 - cursor as i64 - 1).abs() <= 1);
+    }
+    #[test]
+    fn mid_block_release_and_split_flags_never_prefill_at_scratch_rate() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(48000, rx, c.clone());
+        tx.send(Command::Load(0, locked_source(100000), true, 1))
+            .unwrap();
+        m.render(16000, |_, _| {});
+        let anchor = c.position[0].load(Relaxed);
+        touch(&c, 0, anchor);
+        m.render(1, |_, _| {});
+        m.render(64, |i, _| {
+            if i == 2 {
+                c.scratching[0].store(false, Relaxed);
+                c.vinyl_follow[0].store(false, Relaxed);
+            }
+        });
+        assert_eq!(
+            c.position[0].load(Relaxed),
+            anchor,
+            "gesture phase is stable throughout one callback"
+        );
+        m.render(1, |_, _| {});
+        assert_eq!(c.position[0].load(Relaxed), anchor + 1);
+        let again = c.position[0].load(Relaxed);
+        touch(&c, 0, again);
+        m.render(1, |_, _| {});
+        // Even a split-state old caller must not prime using stale negative rate.
+        c.vinyl_follow[0].store(false, Relaxed);
+        set(&c.scratch_rate[0], -1.);
+        m.render(1, |_, _| {});
+        assert_eq!(c.position[0].load(Relaxed), again + 1);
+        assert_eq!(m.voices[0].resume_fill, 0);
+        c.scratching[0].store(false, Relaxed);
+    }
+    #[test]
+    fn manual_vinyl_drops_active_section_old_voice_without_muting_other_deck() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(48000, rx, c.clone());
+        tx.send(Command::Load(0, locked_source(100000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(1, locked_source(100000), true, 1))
+            .unwrap();
+        m.render(16000, |_, _| {});
+        m.sections[0] = Some(SectionChange {
+            source: None,
+            origin: 0.,
+            previous_origin: 0.,
+            grid: None,
+            at: None,
+            expected: 1,
+            total: 48000,
+            elapsed: 0,
+            old: Some(locked_source(100000)),
+        });
+        c.section_state[0].store(2, Relaxed);
+        let anchor = c.position[0].load(Relaxed);
+        let other = c.position[1].load(Relaxed);
+        touch(&c, 0, anchor);
+        let mut peak = 0f32;
+        m.render(1000, |i, f| {
+            if i > 512 {
+                peak = peak.max(f[0].abs());
+            }
+        });
+        assert!(m.sections[0].is_none());
+        assert_eq!(c.section_state[0].load(Relaxed), 0);
+        assert!(peak < 0.00001);
+        assert_eq!(c.position[1].load(Relaxed), other + 1000);
+    }
+}
+
+#[derive(Default)]
+struct DecodeOptions {
+    hold_stem_filters: bool,
+    section: Option<(Option<crate::mix_schedule::Grid>, f32)>,
+    original: bool,
 }
 pub struct Engine {
     _stream: cpal::Stream,
@@ -891,13 +1938,25 @@ pub struct Engine {
     pub controls: Arc<Controls>,
     pub sample_rate: u32,
     pub device: String,
-    cancel: [Option<Arc<AtomicBool>>; 2],
-    section_cancel: [Option<Arc<AtomicBool>>; 2],
-    observed_epoch: [u64; 2],
-    requested_generation: [u64; 2],
+    cancel: [Option<Arc<AtomicBool>>; 6],
+    section_cancel: [Option<Arc<AtomicBool>>; 6],
+    observed_epoch: [u64; 6],
+    requested_generation: [u64; 6],
+    loaded_on_demand: [bool; 6],
     sample_buffers: [Option<Arc<[Frame]>>; 9],
     sample_retired: Vec<(usize, u64, Arc<[Frame]>)>,
     sample_generation: u64,
+}
+fn reset_library_stem_modes(loaded: &mut [bool; 6], controls: &Controls) {
+    loaded.fill(false);
+    for (intent, prepared) in controls
+        .on_demand_stems
+        .iter()
+        .zip(&controls.prepared_stems)
+    {
+        intent.store(false, Relaxed);
+        prepared.store(false, Relaxed);
+    }
 }
 impl Engine {
     pub fn new() -> Result<Self, String> {
@@ -941,6 +2000,8 @@ impl Engine {
             .map(|d| d.name().to_owned())
             .unwrap_or_else(|_| "Default output".into());
         let controls = Arc::new(Controls::default());
+        controls.output_gate.local_allowed()?;
+        controls.output_gate.register(&controls);
         let (tx, rx) = mpsc::sync_channel(64);
         let mixer = Mixer::new(rate, rx, controls.clone());
         let stream = match config.sample_format() {
@@ -959,15 +2020,129 @@ impl Engine {
             device: name,
             cancel: Default::default(),
             section_cancel: Default::default(),
-            observed_epoch: [0; 2],
-            requested_generation: [0; 2],
+            observed_epoch: [0; 6],
+            requested_generation: [0; 6],
+            loaded_on_demand: [false; 6],
             sample_buffers: Default::default(),
             sample_retired: Vec::new(),
             sample_generation: 0,
         })
     }
+    pub fn restore_stems(&self, deck: usize, levels: [f32; 3]) -> Result<(), String> {
+        if deck >= DECKS
+            || levels
+                .iter()
+                .any(|v| !v.is_finite() || !(0. ..=1.).contains(v))
+        {
+            return Err("Invalid restored stem levels".into());
+        }
+        self.send(Command::StemLevels(deck, levels))
+    }
+    pub fn launch(&self, deck: usize) -> Result<(), String> {
+        if deck >= DECKS || !self.loaded(deck) {
+            return Err("Load the deck before launching".into());
+        }
+        self.send(Command::Launch(deck))
+    }
+    pub fn set_clock(&self, bpm: f32, quantization: u32) -> Result<(), String> {
+        if !bpm.is_finite()
+            || !(40. ..=240.).contains(&bpm)
+            || ![0, 1, 4, 8, 16, 32].contains(&quantization)
+        {
+            return Err("Invalid master tempo or quantization".into());
+        }
+        self.send(Command::Clock(bpm, quantization))
+    }
+    pub fn sync(&self, deck: usize, enabled: bool) -> Result<(), String> {
+        if deck < DECKS {
+            self.controls.tempo_recovery[deck].store(false, Relaxed);
+        }
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        let bpm = get(&self.controls.bpm[deck]);
+        let ratio = get(&self.controls.master_bpm) / bpm;
+        if enabled && (!self.loaded(deck) || bpm <= 0. || !(0.5..=2.).contains(&ratio)) {
+            return Err(
+                "Prepare BPM before synchronizing; supported tempo range is 50–200%".into(),
+            );
+        }
+        if !enabled {
+            set(
+                &self.controls.rate[deck],
+                self.controls.effective_rate(deck),
+            );
+        }
+        self.controls.synced[deck].store(enabled, Relaxed);
+        Ok(())
+    }
+    pub fn restore_sync(&self, deck: usize, enabled: bool) -> Result<(), String> {
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        // Ordered after queued Load and Clock, unlike interactive sync validation.
+        self.send(Command::RestoreSync(deck, enabled))
+    }
+    pub fn assign_pair(&self, pair: [usize; 2]) -> Result<(), String> {
+        if pair[0] >= DECKS || pair[1] >= DECKS || !pair[0].is_multiple_of(2) || pair[1] % 2 != 1 {
+            return Err("Choose one A-side and one B-side deck".into());
+        }
+        if self.fading()
+            || pair
+                .iter()
+                .chain(self.controls.pair_indices().iter())
+                .any(|d| self.playing(*d))
+        {
+            return Err(
+                "Pause the current and requested pair before reassigning the crossfader".into(),
+            );
+        }
+        self.send(Command::Pair(pair))
+    }
+    /// Make this deck its side's live crossfader channel without pausing,
+    /// seeking or replacing any deck. Other playing decks remain independent.
+    pub fn select_live(&self, deck: usize) -> Result<(), String> {
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        self.send(Command::SelectLive(deck, LiveTakeoverCleanup::default()))
+    }
+    pub fn select_live_with_cleanup(
+        &self,
+        deck: usize,
+        cleanup: LiveTakeoverCleanup,
+    ) -> Result<(), String> {
+        cleanup.validate()?;
+        if cleanup == LiveTakeoverCleanup::default() {
+            return self.select_live(deck);
+        }
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        self.send(Command::SelectLive(deck, cleanup))
+    }
+    pub fn fade_deck(
+        &self,
+        deck: usize,
+        target: f32,
+        seconds: f32,
+        stop: bool,
+    ) -> Result<(), String> {
+        if deck >= DECKS
+            || !target.is_finite()
+            || !(0. ..=1.).contains(&target)
+            || !seconds.is_finite()
+            || !(0.01..=120.).contains(&seconds)
+        {
+            return Err("Invalid deck fade".into());
+        }
+        self.send(Command::Level(deck, target, seconds, stop))
+    }
     pub fn configure_monitor(&mut self, name: Option<&str>) -> Result<(), String> {
         if let Some(name) = name {
+            if name == self.device {
+                return Err("Choose a headphone output different from the speaker output".into());
+            }
             let (producer, consumer) = RingBuffer::new(self.sample_rate as usize / 2);
             let stream =
                 crate::monitor::open(name, self.sample_rate, consumer, self.controls.clone())?;
@@ -980,13 +2155,21 @@ impl Engine {
         Ok(())
     }
     pub fn broadcast_tap(&self) -> Result<rtrb::Consumer<Frame>, String> {
+        self.broadcast_source_tap(false)
+    }
+    pub fn broadcast_source_tap(&self, player_only: bool) -> Result<rtrb::Consumer<Frame>, String> {
+        self.controls.set_broadcast_source(player_only);
         let (producer, consumer) = RingBuffer::new(self.sample_rate as usize);
         self.send(Command::Broadcast(Some(producer)))?;
         Ok(consumer)
     }
+    pub fn set_handoff_mode(&self, mode: u32) {
+        let _ = self.send(Command::HandoffMode(mode));
+    }
     pub fn stop_broadcast_tap(&self) {
         let _ = self.send(Command::Broadcast(None));
     }
+    /// DJ loads require explicit per-deck live intent. Original mode never consults legacy caches.
     pub fn load(
         &mut self,
         deck: usize,
@@ -994,9 +2177,93 @@ impl Engine {
         track: &amp_core::Track,
         play: bool,
     ) -> Result<(), String> {
-        let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
-        self.load_with_stems(deck, root, track, play, crate::stems::ready(&path))
+        self.load_dj(deck, root, track, play, false)
     }
+    /// Auto Mix changes songs while the physical deck's user filters stay put.
+    pub fn load_automix(
+        &mut self,
+        deck: usize,
+        root: &Path,
+        track: &amp_core::Track,
+        play: bool,
+    ) -> Result<(), String> {
+        self.load_dj(deck, root, track, play, true)
+    }
+    fn load_dj(
+        &mut self,
+        deck: usize,
+        root: &Path,
+        track: &amp_core::Track,
+        play: bool,
+        hold_stem_filters: bool,
+    ) -> Result<(), String> {
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        // DJ stems are armed whenever the installed worker is available. Player
+        // playback still calls load_original and stays independent of separation.
+        if crate::onnx_stem_worker::configured() {
+            self.controls.on_demand_stems[deck].store(true, Relaxed);
+        }
+        if !self.controls.on_demand_stems[deck].load(Relaxed)
+            || track
+                .preparation
+                .extensions
+                .contains_key("podcast_stream_url")
+        {
+            return self.load_original(deck, root, track, play);
+        }
+        let result = self.load_decoded(
+            deck,
+            root,
+            track,
+            play,
+            None,
+            DecodeOptions {
+                hold_stem_filters,
+                ..Default::default()
+            },
+        );
+        if result.is_err() {
+            self.restore_stem_mode_request(deck);
+        }
+        result
+    }
+    /// Playback-only override: saved stem edits stay intact in the song and on disk.
+    pub fn load_original(
+        &mut self,
+        deck: usize,
+        root: &Path,
+        track: &amp_core::Track,
+        play: bool,
+    ) -> Result<(), String> {
+        if deck >= DECKS {
+            return Err("Unknown deck".into());
+        }
+        let result = self.load_decoded(
+            deck,
+            root,
+            track,
+            play,
+            None,
+            DecodeOptions {
+                original: true,
+                ..Default::default()
+            },
+        );
+        if result.is_ok() {
+            self.controls.on_demand_stems[deck].store(false, Relaxed);
+        } else {
+            self.restore_stem_mode_request(deck);
+        }
+        result
+    }
+    pub fn restore_stem_mode_request(&self, deck: usize) {
+        if deck < DECKS {
+            self.controls.on_demand_stems[deck].store(self.loaded_on_demand[deck], Relaxed);
+        }
+    }
+    #[cfg(test)]
     fn load_with_stems(
         &mut self,
         deck: usize,
@@ -1005,7 +2272,7 @@ impl Engine {
         play: bool,
         stems: Option<[std::path::PathBuf; 3]>,
     ) -> Result<(), String> {
-        self.load_decoded(deck, root, track, play, stems, None)
+        self.load_decoded(deck, root, track, play, stems, DecodeOptions::default())
     }
     fn load_decoded(
         &mut self,
@@ -1014,22 +2281,73 @@ impl Engine {
         track: &amp_core::Track,
         play: bool,
         stems: Option<[std::path::PathBuf; 3]>,
-        section: Option<(Option<crate::mix_schedule::Grid>, f32)>,
+        options: DecodeOptions,
     ) -> Result<(), String> {
+        let DecodeOptions {
+            section,
+            original,
+            hold_stem_filters,
+        } = options;
         track.preparation.validate()?;
-        let stem_knobs = amp_core::stem_mix::knobs(&track.preparation)?;
-        if amp_core::stem_mix::changed(stem_knobs) && stems.is_none() {
+        let stem_knobs = runtime_stem_knobs(&track.preparation, original)?;
+        let stem_mode = !original
+            && self.controls.on_demand_stems[deck].load(Relaxed)
+            && !track
+                .preparation
+                .extensions
+                .contains_key("podcast_stream_url");
+        let stream = track
+            .preparation
+            .extensions
+            .get("podcast_stream_url")
+            .and_then(|v| v.as_str());
+        let network = stream.is_some();
+        let path = if let Some(url) = stream {
+            crate::media_lookup::http_url(url)?;
+            std::path::PathBuf::from(url)
+        } else {
+            amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?
+        };
+
+        let cached = stem_mode && crate::prepared_stem_playback::candidate(&path);
+        let onnx = stem_mode && !cached;
+        if onnx {
+            // Neutral decks do not reserve separation slots. The lazy stream
+            // acquires the hardware-limited slot only for a non-neutral request.
+            if !crate::onnx_stem_worker::configured() {
+                return Err("On-demand stem worker/model is not configured".into());
+            }
+            if self.sample_rate > 48000 {
+                return Err("Live stems currently support output rates up to48kHz".into());
+            }
+        }
+        let stems = if stem_mode { None } else { stems };
+        if amp_core::stem_mix::changed(stem_knobs) && stems.is_none() && !stem_mode {
             return Err(
-                "This song has a saved stem mix. Prepare its stems in Library before playback."
+                "This song has a saved stem mix. Enable live or prepared stems before playback."
                     .into(),
             );
         }
         if section.is_none() {
             self.cancel_section(deck);
+            set(
+                &self.controls.auto_gain_db[deck],
+                amp_core::loudness::auto_gain_db(&track.preparation),
+            );
             self.controls.source_origin[deck].store(track.preparation.cue_in.to_bits(), Relaxed);
+            set(
+                &self.controls.bpm[deck],
+                track.preparation.bpm.unwrap_or(0.) as f32,
+            );
+            self.controls.synced[deck].store(false, Relaxed);
+            self.controls.beat_offset[deck].store(
+                track.preparation.beat_offset.unwrap_or(0.).to_bits(),
+                Relaxed,
+            );
         }
-        let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
-        let separated = stems.is_some();
+        let separated = stems.is_some() || stem_mode;
+        let stem_degraded = Arc::new(AtomicBool::new(false));
+        let worker_degraded = stem_degraded.clone();
         if section.is_none()
             && let Some(cancel) = self.cancel[deck].take()
         {
@@ -1040,7 +2358,8 @@ impl Engine {
         }
         let cancel = Arc::new(AtomicBool::new(false));
         let done = Arc::new(AtomicBool::new(false));
-        let (mut producer, consumer) = RingBuffer::<DeckFrame>::new(self.sample_rate as usize * 4);
+        let (mut producer, consumer) =
+            RingBuffer::<DeckFrame>::new(self.sample_rate as usize * if onnx { 16 } else { 4 });
         let rate = self.sample_rate;
         let prep = track.preparation.clone();
         let duration = Arc::new(AtomicU64::new(
@@ -1061,7 +2380,8 @@ impl Engine {
         let worker_failed = failed.clone();
         std::thread::spawn(move || {
             let result = (|| {
-                if duration_worker.load(Relaxed) == 0
+                if !network
+                    && duration_worker.load(Relaxed) == 0
                     && let Ok(probe) = amp_core::command("ffprobe")
                         .args([
                             "-v",
@@ -1083,15 +2403,57 @@ impl Engine {
                         Relaxed,
                     );
                 }
+                if cached {
+                    return crate::prepared_stem_playback::decode(
+                        &path,
+                        &prep,
+                        rate,
+                        &mut producer,
+                        crate::onnx_stem_stream::Context {
+                            stop: stopped.clone(),
+                            controls: errors.clone(),
+                            deck,
+                            degraded_flag: worker_degraded,
+                            generation,
+                        },
+                    );
+                }
+                if onnx {
+                    return crate::onnx_stem_stream::decode_lazy(
+                        &path,
+                        &prep,
+                        rate,
+                        &mut producer,
+                        crate::onnx_stem_stream::Context {
+                            stop: stopped.clone(),
+                            controls: errors.clone(),
+                            deck,
+                            degraded_flag: worker_degraded,
+                            generation,
+                        },
+                    );
+                }
                 let mut command = amp_core::command("ffmpeg");
                 command.args(["-v", "error"]);
+                if network {
+                    command.args(["-protocol_whitelist", "pipe"]);
+                }
                 if let Some([vocals, instruments, drums]) = stems {
                     command.args(amp_core::cue_args(&prep)?).arg("-i").arg(vocals)
                         .args(amp_core::cue_args(&prep)?).arg("-i").arg(instruments)
                         .args(amp_core::cue_args(&prep)?).arg("-i").arg(drums)
                         .args(["-filter_complex", "[0:a][1:a][2:a]join=inputs=3:channel_layout=5.1:map=0.0-FL|0.1-FR|1.0-FC|1.1-LFE|2.0-BL|2.1-BR[out]", "-map", "[out]"]);
                 } else {
-                    command.args(amp_core::cue_args(&prep)?).arg("-i").arg(path);
+                    if network {
+                        command
+                            .args(["-i", "pipe:0"])
+                            .args(amp_core::cue_args(&prep)?);
+                    } else {
+                        command
+                            .args(amp_core::cue_args(&prep)?)
+                            .arg("-i")
+                            .arg(path.clone());
+                    }
                 }
                 let mut child = command
                     .args([
@@ -1104,11 +2466,65 @@ impl Engine {
                         "f32le",
                         "pipe:1",
                     ])
-                    .stdin(Stdio::null())
+                    .stdin(if network {
+                        Stdio::piped()
+                    } else {
+                        Stdio::null()
+                    })
                     .stdout(Stdio::piped())
                     .stderr(Stdio::null())
                     .spawn()
                     .map_err(|e| e.to_string())?;
+                let network_worker = if network {
+                    let mut input = child.stdin.take().ok_or("Decoder input missing")?;
+                    let stopped = stopped.clone();
+                    let url = path.to_string_lossy().into_owned();
+                    Some(std::thread::spawn(move || -> Result<(), String> {
+                        use std::io::Write;
+                        let agent: ureq::Agent = ureq::Agent::config_builder()
+                            .timeout_connect(Some(std::time::Duration::from_secs(10)))
+                            .timeout_per_read(Some(std::time::Duration::from_secs(5)))
+                            .timeout_recv_response(Some(std::time::Duration::from_secs(20)))
+                            .max_redirects(8)
+                            .build()
+                            .into();
+                        let mut response = agent
+                            .get(&url)
+                            .header("User-Agent", crate::media_lookup::USER_AGENT)
+                            .call()
+                            .map_err(|e| format!("Publisher audio unavailable: {e}"))?;
+                        if response
+                            .headers()
+                            .get("content-type")
+                            .and_then(|v| v.to_str().ok())
+                            .is_some_and(|t| t.starts_with("text/") || t.starts_with("video/"))
+                        {
+                            return Err(
+                                "Publisher returned a page or video instead of podcast audio"
+                                    .into(),
+                            );
+                        }
+                        let mut reader = response.body_mut().as_reader();
+                        let mut buffer = [0u8; 65536];
+                        loop {
+                            if stopped.load(Relaxed) {
+                                return Ok(());
+                            }
+                            let n = reader
+                                .read(&mut buffer)
+                                .map_err(|e| format!("Podcast connection interrupted: {e}"))?;
+                            if n == 0 {
+                                break;
+                            }
+                            if input.write_all(&buffer[..n]).is_err() {
+                                break;
+                            }
+                        }
+                        Ok(())
+                    }))
+                } else {
+                    None
+                };
                 let decoded: Result<(), String> = (|| {
                     let mut input = std::io::BufReader::new(
                         child.stdout.take().ok_or("Decoder output missing")?,
@@ -1167,6 +2583,11 @@ impl Engine {
                     let _ = child.kill();
                 }
                 let status = child.wait().map_err(|e| e.to_string())?;
+                if let Some(worker) = network_worker {
+                    worker
+                        .join()
+                        .map_err(|_| "Podcast connection worker stopped")??;
+                }
                 decoded?;
                 if !status.success() && !stopped.load(Relaxed) && !producer.is_abandoned() {
                     return Err("Audio decoder failed".into());
@@ -1185,6 +2606,7 @@ impl Engine {
             eof.store(true, std::sync::atomic::Ordering::Release);
         });
         let source = Source {
+            key_lock: crate::key_lock::Processor::new(self.sample_rate).map(Box::new),
             ring: consumer,
             duration,
             done,
@@ -1194,6 +2616,7 @@ impl Engine {
             position: 0.,
             primed: false,
             separated,
+            stem_degraded,
             stem_knobs,
         };
         if let Some((grid, seconds)) = section {
@@ -1215,8 +2638,16 @@ impl Engine {
             return Ok(());
         }
         self.cancel[deck] = Some(cancel);
-        self.send(Command::Load(deck, source, play, generation))?;
+        self.controls.lazy_stems[deck].store(onnx, Relaxed);
+        self.controls.stem_processing_ready[deck].store(false, Relaxed);
+        self.send(if hold_stem_filters {
+            Command::LoadHoldingStemFilters(deck, source, play, generation)
+        } else {
+            Command::Load(deck, source, play, generation)
+        })?;
         self.requested_generation[deck] = generation;
+        self.loaded_on_demand[deck] = stem_mode;
+        self.controls.prepared_stems[deck].store(cached, Relaxed);
         self.controls.play[deck].store(play, Relaxed);
         Ok(())
     }
@@ -1245,7 +2676,12 @@ impl Engine {
         {
             return Err("Invalid fade target or duration".into());
         }
-        self.send(Command::Level(slot, target, seconds, stop))
+        self.send(Command::Level(
+            if slot == 2 { MASTER } else { slot },
+            target,
+            seconds,
+            stop,
+        ))
     }
     pub fn sample_maintenance(&mut self) {
         self.sample_retired.retain(|(pad, generation, _)| {
@@ -1289,9 +2725,18 @@ impl Engine {
         }
     }
     fn send(&self, command: Command) -> Result<(), String> {
+        if command.starts_audio() {
+            self.controls.output_gate.local_allowed()?;
+        }
+        let epoch = self.controls.output_gate.epoch();
         self.commands
-            .try_send(command)
+            .try_send(Command::Admitted(epoch, Box::new(command)))
             .map_err(|_| "Audio command queue is busy".into())
+    }
+    /// Only for a library switch that discards all loaded song snapshots.
+    /// Ordinary Stop deliberately retains the requested mode for resume/reload.
+    pub fn discard_library_stem_modes(&mut self) {
+        reset_library_stem_modes(&mut self.loaded_on_demand, &self.controls);
     }
     pub fn stop(&mut self, deck: usize) {
         self.cancel_section(deck);
@@ -1306,9 +2751,14 @@ impl Engine {
     pub fn loaded(&self, deck: usize) -> bool {
         self.controls.loaded[deck].load(Relaxed)
     }
+    #[cfg(test)]
     pub fn toggle(&self, deck: usize) {
         let c = &self.controls.play[deck];
         c.store(!c.load(Relaxed), Relaxed);
+    }
+    #[cfg(test)]
+    pub(super) fn simulate_source_origin(&self, deck: usize, seconds: f64) {
+        self.controls.source_origin[deck].store(seconds.to_bits(), Relaxed);
     }
     pub fn source_position(&self, deck: usize) -> f64 {
         f64::from_bits(self.controls.source_origin[deck].load(Relaxed)) + self.position(deck)
@@ -1322,6 +2772,22 @@ impl Engine {
     pub fn set_fader(&self, x: f32) {
         let _ = self.send(Command::Fader(x));
     }
+    pub fn pause(&mut self, deck: usize) {
+        if deck >= 6 {
+            return;
+        }
+        self.cancel_section(deck);
+        self.controls.play[deck].store(false, Relaxed);
+        let _ = self.send(Command::Pause(deck));
+    }
+    pub fn play(&self, deck: usize) -> Result<(), String> {
+        if deck >= 6 {
+            return Err("Choose a valid deck".into());
+        }
+        self.send(Command::Play(deck))?;
+        self.controls.play[deck].store(true, Relaxed);
+        Ok(())
+    }
     pub fn fading(&self) -> bool {
         self.controls.fading.load(Relaxed)
     }
@@ -1333,23 +2799,36 @@ impl Engine {
         Some(
             (frames.saturating_sub(self.controls.position[deck].load(Relaxed)) as f32
                 / self.sample_rate as f32
-                / get(&self.controls.rate[deck]))
+                / self.controls.effective_rate(deck))
             .max(0.),
         )
+    }
+    pub fn settle_pair(&self, active: usize, seconds: f32) -> Result<(), String> {
+        if !self.controls.pair_indices().contains(&active)
+            || !self.playing(active)
+            || !seconds.is_finite()
+            || !(0.05..=30.).contains(&seconds)
+        {
+            return Err("Cannot settle the current pair".into());
+        }
+        self.send(Command::Fade {
+            to: (active % 2) as f32,
+            seconds,
+        })
     }
     pub fn crossfade(&self, seconds: f32) -> Result<(), String> {
         if self.fading() {
             return self.send(Command::Cancel);
         }
-        let incoming = if self.fader() < 0.5 { 1 } else { 0 };
+        let incoming = self.controls.pair_indices()[if self.fader() < 0.5 { 1 } else { 0 }];
         if !self.loaded(incoming) || self.controls.finished[incoming].load(Relaxed) {
             return Err("Load or cue the incoming deck before crossfading".into());
         }
-        if !self.playing(1 - incoming) {
+        if !self.playing(self.controls.other(incoming)) {
             return Err("Start the outgoing deck before Auto Crossfade".into());
         }
         let mut duration = seconds.clamp(0.05, 30.);
-        for deck in 0..2 {
+        for deck in self.controls.pair_indices() {
             if self.controls.looping[deck].load(Relaxed) {
                 continue;
             }
@@ -1362,7 +2841,7 @@ impl Engine {
             duration = duration.min(remaining - 0.05);
         }
         self.send(Command::Fade {
-            to: incoming as f32,
+            to: (incoming % 2) as f32,
             seconds: duration,
         })
     }
@@ -1371,7 +2850,8 @@ impl Engine {
             None
         } else {
             Some(Vec::with_capacity(
-                (seconds.clamp(0.1, 30.) * self.sample_rate as f32) as usize,
+                (seconds.clamp(0.1, 30.) * self.sample_rate as f32
+                    / self.controls.effective_rate(deck)) as usize,
             ))
         };
         self.send(Command::Loop(deck, frames))
@@ -1401,8 +2881,27 @@ impl Engine {
     pub fn set_gain(&self, deck: usize, value: f32) {
         let _ = self.send(Command::LevelSet(deck, value.clamp(0., 1.)));
     }
+    pub fn set_player_envelope(&self, value: f32) {
+        set(
+            &self.controls.player_envelope,
+            if value.is_finite() {
+                value.clamp(0., 1.)
+            } else {
+                1.
+            },
+        );
+    }
     pub fn scratch(&self, deck: usize, active: bool, rate: f32) {
-        self.controls.vinyl_follow[deck].store(false, Relaxed);
+        if deck >= DECKS {
+            return;
+        }
+        self.controls.tempo_recovery[deck].store(false, Relaxed);
+        // Publish release before clearing its manual-mode marker, never expose
+        // a released manual deck with an old zero/negative scratch rate.
+        if !active {
+            self.controls.scratching[deck].store(false, std::sync::atomic::Ordering::Release);
+        }
+        self.controls.vinyl_follow[deck].store(false, std::sync::atomic::Ordering::Release);
         set(
             &self.controls.scratch_rate[deck],
             if rate.is_finite() {
@@ -1411,18 +2910,22 @@ impl Engine {
                 0.
             },
         );
-        self.controls.scratching[deck].store(active, Relaxed);
+        self.controls.scratching[deck].store(active, std::sync::atomic::Ordering::Release);
     }
     pub fn vinyl_target(&self, deck: usize, seconds: f64) {
-        if !seconds.is_finite() {
+        if deck >= DECKS || !seconds.is_finite() {
             return;
         }
-        self.controls.vinyl_target[deck].store(
-            (seconds.max(0.) * self.sample_rate as f64).to_bits(),
-            Relaxed,
-        );
-        self.controls.vinyl_follow[deck].store(true, Relaxed);
-        self.controls.scratching[deck].store(true, Relaxed);
+        self.controls.tempo_recovery[deck].store(false, Relaxed);
+        let target = (seconds.max(0.) * self.sample_rate as f64).to_bits();
+        if !self.controls.vinyl_follow[deck].load(Relaxed)
+            || !self.controls.scratching[deck].load(Relaxed)
+        {
+            self.controls.vinyl_anchor[deck].store(target, Relaxed);
+        }
+        self.controls.vinyl_target[deck].store(target, Relaxed);
+        self.controls.vinyl_follow[deck].store(true, std::sync::atomic::Ordering::Release);
+        self.controls.scratching[deck].store(true, std::sync::atomic::Ordering::Release);
     }
     pub fn schedule_section(
         &mut self,
@@ -1436,13 +2939,29 @@ impl Engine {
             return Err("Load a deck and choose a fade between 0.05 and 30 seconds".into());
         }
         let path = amp_core::resolve(root, &track.path).map_err(|e| e.to_string())?;
-        let stems = crate::stems::ready(&path);
-        if self.controls.stems_loaded[deck].load(Relaxed) != stems.is_some() {
+        let live = self.loaded_on_demand[deck];
+        let stems = if live || !self.controls.stems_loaded[deck].load(Relaxed) {
+            None
+        } else {
+            crate::stems::ready(&path)
+        };
+        if !live && self.controls.stems_loaded[deck].load(Relaxed) != stems.is_some() {
             return Err(
                 "Stem sources changed; reload this track before selecting a section".into(),
             );
         }
-        self.load_decoded(deck, root, track, false, stems, Some((grid, seconds)))
+        self.load_decoded(
+            deck,
+            root,
+            track,
+            false,
+            stems,
+            DecodeOptions {
+                section: Some((grid, seconds)),
+                original: !live && !self.controls.stems_loaded[deck].load(Relaxed),
+                ..Default::default()
+            },
+        )
     }
     pub fn cancel_section(&mut self, deck: usize) {
         // A committed section's decoder is now the current voice; retain it until load/stop.
@@ -1464,7 +2983,7 @@ impl Engine {
         hold: f32,
         grid: crate::mix_schedule::Grid,
     ) -> Result<(), String> {
-        let incoming = usize::from(self.fader() < 0.5);
+        let incoming = self.controls.pair_indices()[usize::from(self.fader() < 0.5)];
         if !seconds.is_finite()
             || !hold.is_finite()
             || !(0.05..=30.).contains(&seconds)
@@ -1472,8 +2991,12 @@ impl Engine {
         {
             return Err("Invalid mashup timing".into());
         }
-        if !self.controls.stems_loaded.iter().all(|v| v.load(Relaxed))
-            || !self.playing(1 - incoming)
+        if !self
+            .controls
+            .pair_indices()
+            .iter()
+            .all(|d| self.controls.stems_loaded[*d].load(Relaxed))
+            || !self.playing(self.controls.other(incoming))
             || self.playing(incoming)
             || self.fading()
         {
@@ -1481,16 +3004,24 @@ impl Engine {
                 "Mashup needs two prepared stem decks, with the incoming deck paused".into(),
             );
         }
-        if self.controls.looping.iter().any(|v| v.load(Relaxed))
-            || self.controls.scratching.iter().any(|v| v.load(Relaxed))
+        if self
+            .controls
+            .pair_indices()
+            .iter()
+            .any(|d| self.controls.looping[*d].load(Relaxed))
+            || self
+                .controls
+                .pair_indices()
+                .iter()
+                .any(|d| self.controls.scratching[*d].load(Relaxed))
         {
             return Err("Release loops and scratching before a mashup".into());
         }
-        let delay = (grid.next(self.position(1 - incoming) + 0.1) - self.position(1 - incoming))
-            as f32
-            / get(&self.controls.rate[1 - incoming]);
+        let delay = (grid.next(self.position(self.controls.other(incoming)) + 0.1)
+            - self.position(self.controls.other(incoming))) as f32
+            / get(&self.controls.rate[self.controls.other(incoming)]);
         if self
-            .remaining(1 - incoming)
+            .remaining(self.controls.other(incoming))
             .is_none_or(|r| r < seconds * 2. + hold + delay + 0.2)
             || self
                 .remaining(incoming)
@@ -1498,17 +3029,73 @@ impl Engine {
         {
             return Err("Not enough prepared audio remains for this mashup".into());
         }
-        if get(&self.controls.stem_level[1 - incoming][0]) < 0.05
-            || get(&self.controls.stem_level[incoming][1])
-                + get(&self.controls.stem_level[incoming][2])
+        if get(&self.controls.stem_level[incoming][0]) < 0.05
+            || get(&self.controls.stem_level[self.controls.other(incoming)][1])
+                + get(&self.controls.stem_level[self.controls.other(incoming)][2])
                 < 0.05
         {
             return Err("The selected vocal or backing is muted by your stem settings".into());
         }
         self.send(Command::Mashup {
-            to: incoming as f32,
+            to: (incoming % 2) as f32,
             fade: seconds,
             hold,
+            grid,
+        })
+    }
+    pub fn scratch_crossfade(
+        &self,
+        seconds: f32,
+        mut grid: crate::mix_schedule::Grid,
+        beat: f32,
+    ) -> Result<(), String> {
+        let incoming = self.controls.pair_indices()[usize::from(self.fader() < 0.5)];
+        let outgoing = self.controls.other(incoming);
+        if !seconds.is_finite()
+            || !(0.05..=30.).contains(&seconds)
+            || !beat.is_finite()
+            || !(0.2..=1.5).contains(&beat)
+            || !grid.period.is_finite()
+            || grid.period <= 0.
+            || !grid.anchor.is_finite()
+        {
+            return Err("Invalid scratch-in timing".into());
+        }
+        if !self.controls.stems_loaded[incoming].load(Relaxed)
+            || get(&self.controls.stem_level[incoming][2]) < 0.05
+            || !self.playing(outgoing)
+            || self.playing(incoming)
+            || self.fading()
+            || self.controls.pair_indices().iter().any(|d| {
+                self.controls.scratching[*d].load(Relaxed)
+                    || self.controls.looping[*d].load(Relaxed)
+            })
+        {
+            return Err(
+                "Scratch-in needs an idle prepared drum stem and a playing outgoing deck".into(),
+            );
+        }
+        // A scratch-in is a fast cut, independent of the saved ordinary blend duration.
+        let seconds = seconds.min(beat);
+        // The normal incoming entry still lands on the original grid, after one bar of preview.
+        let out_rate = self.controls.effective_rate(outgoing);
+        grid.anchor -= 4. * beat as f64 * out_rate as f64;
+        let delay = ((grid.next(self.position(outgoing) + 0.001) - self.position(outgoing))
+            / out_rate as f64)
+            .max(0.) as f32;
+        if self
+            .remaining(outgoing)
+            .is_none_or(|r| r < delay + 4. * beat + seconds + 0.2)
+            || self
+                .remaining(incoming)
+                .is_none_or(|r| r < seconds + beat + 0.2)
+        {
+            return Err("Not enough audio for a scratch-in".into());
+        }
+        self.send(Command::ScratchFade {
+            to: (incoming % 2) as f32,
+            seconds,
+            beat,
             grid,
         })
     }
@@ -1517,24 +3104,54 @@ impl Engine {
         seconds: f32,
         grid: crate::mix_schedule::Grid,
     ) -> Result<(), String> {
-        let incoming = usize::from(self.fader() < 0.5);
-        if !self.loaded(incoming) || !self.playing(1 - incoming) {
+        let incoming = self.controls.pair_indices()[usize::from(self.fader() < 0.5)];
+        if !self.loaded(incoming) || !self.playing(self.controls.other(incoming)) {
             return Err("Prepare the incoming deck and start the outgoing deck".into());
         }
-        if self.controls.looping[1 - incoming].load(Relaxed) || self.playing(incoming) {
+        if self.controls.looping[self.controls.other(incoming)].load(Relaxed)
+            || self.playing(incoming)
+        {
             return self.crossfade(seconds);
         }
         self.send(Command::ScheduledFade {
-            to: incoming as f32,
+            at: None,
+            to: (incoming % 2) as f32,
+            seconds: seconds.clamp(0.05, 30.),
+            grid,
+        })
+    }
+    /// A fixed source-clock deadline cannot roll into another phrase if the UI is late.
+    pub fn crossfade_at(
+        &self,
+        seconds: f32,
+        grid: crate::mix_schedule::Grid,
+        at: f64,
+    ) -> Result<(), String> {
+        let incoming = self.controls.pair_indices()[usize::from(self.fader() < 0.5)];
+        if !at.is_finite() || !self.loaded(incoming) || !self.playing(self.controls.other(incoming))
+        {
+            return Err("Prepare both decks before scheduling a blend".into());
+        }
+        if self.controls.looping[self.controls.other(incoming)].load(Relaxed)
+            || self.playing(incoming)
+        {
+            return self.crossfade(seconds);
+        }
+        self.send(Command::ScheduledFade {
+            at: Some(at),
+            to: (incoming % 2) as f32,
             seconds: seconds.clamp(0.05, 30.),
             grid,
         })
     }
     pub fn set_rate(&self, deck: usize, value: f32) {
+        if deck < DECKS {
+            self.controls.tempo_recovery[deck].store(false, Relaxed);
+        }
         set(&self.controls.rate[deck], value);
     }
     pub fn set_master(&self, value: f32) {
-        let _ = self.send(Command::LevelSet(2, value.clamp(0., 1.)));
+        let _ = self.send(Command::LevelSet(MASTER, value.clamp(0., 1.)));
     }
     pub fn set_eq(&self, deck: usize, band: usize, db: f32) {
         set(&self.controls.eq[deck][band], db);
@@ -1554,6 +3171,19 @@ impl Engine {
                     .drain(..)
                     .filter(|(deck, generation, _)| self.requested_generation[*deck] == *generation)
                     .map(|(deck, _, error)| (deck, error))
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+    pub fn take_stem_warnings(&self) -> Vec<(usize, String)> {
+        self.controls
+            .stem_warnings
+            .lock()
+            .map(|mut messages| {
+                messages
+                    .drain(..)
+                    .filter(|(d, g, _)| self.requested_generation[*d] == *g)
+                    .map(|(d, _, m)| (d, m))
                     .collect()
             })
             .unwrap_or_default()
@@ -1614,12 +3244,189 @@ fn stream<T: cpal::SizedSample + cpal::FromSample<f32>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn buildup_handoff_reaches_the_new_drop_on_the_audio_clock() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(32);
+        let mut mixer = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.2, 16000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(1, source(0.4, 16000), false, 1))
+            .unwrap();
+        mixer.render(1000, |_, _| {});
+        // Old drop at source second 10. New entry is second 12, new drop 20:
+        // begin at old second 2 and hand over after sixteen 120-BPM beats.
+        tx.send(Command::ScheduledFade {
+            at: None,
+            to: 1.,
+            seconds: 8.,
+            grid: crate::mix_schedule::Grid {
+                period: 8.,
+                anchor: 2.,
+            },
+        })
+        .unwrap();
+        mixer.render(8999, |_, _| {});
+        assert!(c.fading.load(Relaxed));
+        assert!(c.play[0].load(Relaxed));
+        mixer.render(3, |_, _| {});
+        assert!(!c.fading.load(Relaxed));
+        assert!(!c.play[0].load(Relaxed));
+        assert!(c.play[1].load(Relaxed));
+        assert!(
+            (12. + mixer.voices[1].source.as_ref().unwrap().position / 1000. - 20.).abs() < 0.004
+        );
+        assert_eq!(c.underruns[1].load(Relaxed), 0);
+    }
+    #[test]
+    fn scratch_in_is_block_invariant_drum_only_and_returns_to_exact_entry() {
+        let run = |block: usize| {
+            let c = Arc::new(Controls::default());
+            let (tx, rx) = mpsc::sync_channel(32);
+            let mut mixer = Mixer::new(1000, rx, c.clone());
+            tx.send(Command::Load(0, source(0.01, 12000), true, 1))
+                .unwrap();
+            tx.send(Command::Load(
+                1,
+                layered_source([0.7, 0.3, 0.1], 12000),
+                false,
+                1,
+            ))
+            .unwrap();
+            mixer.render(1000, |_, _| {});
+            tx.send(Command::ScratchFade {
+                to: 1.,
+                seconds: 0.5,
+                beat: 0.5,
+                grid: crate::mix_schedule::Grid {
+                    period: 1.,
+                    anchor: 0.,
+                },
+            })
+            .unwrap();
+            let mut samples = Vec::new();
+            let mut left = 5000;
+            while left > 0 {
+                let count = left.min(block);
+                mixer.render(count, |_, f| samples.push(f[0]));
+                left -= count;
+            }
+            assert!(!c.play[0].load(Relaxed));
+            assert!(c.play[1].load(Relaxed));
+            assert!(!c.fading.load(Relaxed));
+            // Preview rewinds instead of stealing beats from the incoming song.
+            assert!((mixer.voices[1].source.as_ref().unwrap().position - 2000.).abs() <= 2.);
+            assert_eq!(c.underruns[1].load(Relaxed), 0);
+            // During the preview, loud incoming vocals/instruments cannot leak into the mix.
+            assert!(samples[1050..1400].iter().all(|v| v.abs() < 0.04));
+            samples
+        };
+        let sample = run(1);
+        for block in [64, 257, 1024] {
+            let other = run(block);
+            assert!(sample.iter().zip(other).all(|(a, b)| (a - b).abs() < 1e-6));
+        }
+    }
+    include!("../../../tests/sag65/audio_helpers.rs");
+    #[test]
+    #[ignore = "requires generated SAG65 fixtures and ffmpeg true-peak meter"]
+    fn f10_actual_mixer_hot_crossfade_true_peak() {
+        let a = fixture("f10_hot_outgoing.wav");
+        let b = fixture("f10_hot_incoming.wav");
+        let frames = a.len().min(b.len());
+        let make = |data: Vec<[f32; 2]>| {
+            let mut s = source(0., data.len());
+            let (mut producer, consumer) = RingBuffer::new(data.len() + 1);
+            for f in data {
+                producer.push([f[0], f[1], 0., 0., 0., 0., 0., 0.]).unwrap();
+            }
+            s.ring = consumer;
+            s
+        };
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(44100, rx, c.clone());
+        set(&c.trim_db[0], 3.);
+        set(&c.trim_db[1], 3.);
+        tx.send(Command::Load(0, make(a), true, 1)).unwrap();
+        tx.send(Command::Load(1, make(b), false, 1)).unwrap();
+        tx.send(Command::Fade {
+            to: 1.,
+            seconds: frames as f32 / 44100.,
+        })
+        .unwrap();
+        let mut audio = Vec::with_capacity(frames + 221);
+        for _ in 0..(frames + 221).div_ceil(256) {
+            m.render(256, |_, f| audio.push(f));
+        }
+        verify_peak("desktop F10", &audio);
+        assert_eq!(
+            c.underruns[0].load(Relaxed) + c.underruns[1].load(Relaxed),
+            0
+        );
+    }
+    #[test]
+    fn f09_recovery_is_bounded_and_manual_rate_cancellation_is_respected() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.01, 40000), true, 1))
+            .unwrap();
+        m.process_commands();
+        set(&c.rate[0], 118. / 126.);
+        c.key_lock[0].store(true, Relaxed);
+        c.key_lock_available[0].store(true, Relaxed);
+        c.tempo_recovery[0].store(true, Relaxed);
+        for _ in 0..20 {
+            let before = get(&c.rate[0]);
+            m.render(1000, |_, _| {});
+            let after = get(&c.rate[0]);
+            assert!(after >= before && after - before <= 0.002501);
+        }
+        c.tempo_recovery[0].store(false, Relaxed);
+        set(&c.rate[0], 0.97);
+        m.render(1000, |_, _| {});
+        assert_eq!(get(&c.rate[0]), 0.97);
+    }
+    #[test]
+    fn sixty_second_multi_handoff_soak_has_no_underruns() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::channel();
+        let mut m = Mixer::new(44100, rx, c.clone());
+        tx.send(Command::Load(0, source(0.1, 44100 * 12), true, 1))
+            .unwrap();
+        for turn in 0..6 {
+            let incoming = (turn + 1) % 2;
+            tx.send(Command::Load(
+                incoming,
+                source(0.1, 44100 * 12),
+                false,
+                turn as u64 + 2,
+            ))
+            .unwrap();
+            tx.send(Command::Fade {
+                to: incoming as f32,
+                seconds: 3.,
+            })
+            .unwrap();
+            for _ in 0..(44100 * 10) / 100 {
+                m.render(100, |_, f| {
+                    assert!(f.iter().all(|v| v.is_finite() && v.abs() < 1.))
+                });
+            }
+        }
+        assert_eq!(
+            c.underruns[0].load(Relaxed) + c.underruns[1].load(Relaxed),
+            0
+        );
+    }
     fn source(value: f32, frames: usize) -> Source {
         let (mut p, c) = RingBuffer::new(frames + 1);
         for _ in 0..frames {
-            p.push([value, value, 0., 0., 0., 0.]).unwrap();
+            p.push([value, value, 0., 0., 0., 0., 0., 0.]).unwrap();
         }
         Source {
+            key_lock: None,
             ring: c,
             duration: Arc::new(AtomicU64::new(frames as u64)),
             done: Arc::new(AtomicBool::new(true)),
@@ -1629,6 +3436,7 @@ mod tests {
             position: 0.,
             primed: false,
             separated: false,
+            stem_degraded: Arc::new(AtomicBool::new(false)),
             stem_knobs: [0.; 3],
         }
     }
@@ -1638,11 +3446,12 @@ mod tests {
         for _ in 0..frames {
             producer
                 .push([
-                    values[0], values[0], values[1], values[1], values[2], values[2],
+                    values[0], values[0], values[1], values[1], values[2], values[2], 0., 0.,
                 ])
                 .unwrap();
         }
         Source {
+            key_lock: None,
             ring: consumer,
             duration: Arc::new(AtomicU64::new(frames as u64)),
             done: Arc::new(AtomicBool::new(true)),
@@ -1652,10 +3461,69 @@ mod tests {
             position: 0.,
             primed: false,
             separated: true,
+            stem_degraded: Arc::new(AtomicBool::new(false)),
             stem_knobs: [0.; 3],
         }
     }
 
+    #[test]
+    #[ignore = "Requires FFmpeg and native audio; generated HTTP fixture, master muted"]
+    fn podcast_http_stream_uses_existing_decoder() {
+        use std::io::{Read, Write};
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("episode.wav");
+        assert!(
+            amp_core::command("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=220:duration=3"
+                ])
+                .arg(&file)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let data = std::fs::read(file).unwrap();
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}/episode.wav", listener.local_addr().unwrap());
+        let worker = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0; 4096];
+            let _ = stream.read(&mut request);
+            let _ = write!(
+                stream,
+                "HTTP/1.1 200 OK\r\nContent-Type: audio/wav\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                data.len()
+            );
+            let _ = stream.write_all(&data);
+        });
+        let mut engine = Engine::new().unwrap();
+        engine.set_master(0.);
+        let mut prep = amp_core::Preparation::default();
+        prep.extensions
+            .insert("podcast_stream_url".into(), serde_json::json!(url));
+        let track = amp_core::Track {
+            path: "episode.wav".into(),
+            title: "Podcast fixture".into(),
+            preparation: prep,
+        };
+        engine.load(0, dir.path(), &track, true).unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(8);
+        while engine.source_position(0) < 0.25 && std::time::Instant::now() < deadline {
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        assert!(
+            engine.source_position(0) > 0.2,
+            "stream did not decode: {:?}",
+            engine.take_decode_errors()
+        );
+        engine.stop(0);
+        worker.join().unwrap();
+    }
     #[test]
     #[ignore = "requires FFmpeg and native output; generated stem fixtures, master muted"]
     fn native_phrase_mashup_launches_two_stem_decoders_and_completes() {
@@ -1713,7 +3581,10 @@ mod tests {
             }
         };
         wait(&engine, &|e| {
-            e.controls.ready.iter().all(|v| v.load(Relaxed))
+            e.controls
+                .pair_indices()
+                .iter()
+                .all(|d| e.controls.ready[*d].load(Relaxed))
         });
         set(&engine.controls.stem_level[0][1], 0.4);
         let saved: [[u32; 3]; 2] = std::array::from_fn(|d| {
@@ -1735,6 +3606,32 @@ mod tests {
                 |s| engine.controls.stem_level[d][s].load(Relaxed)
             ))
         );
+        engine.stop(0);
+        engine.stop(1);
+        for (deck, paths) in sets.iter().enumerate() {
+            let t = amp_core::Track {
+                path: paths[0].file_name().unwrap().into(),
+                title: "Scratch fixture".into(),
+                preparation: p.clone(),
+            };
+            engine
+                .load_with_stems(deck, dir.path(), &t, false, Some(paths.clone()))
+                .unwrap();
+        }
+        wait(&engine, &|e| {
+            e.controls
+                .pair_indices()
+                .iter()
+                .all(|d| e.controls.ready[*d].load(Relaxed))
+        });
+        engine.set_fader(0.);
+        wait(&engine, &|e| e.fader() == 0.);
+        engine.controls.play[0].store(true, Relaxed);
+        engine.scratch_crossfade(0.2, grid, 0.25).unwrap();
+        wait(&engine, &|e| e.fading());
+        wait(&engine, &|e| !e.fading() && !e.playing(0) && e.playing(1));
+        assert!(engine.take_decode_errors().is_empty());
+        assert_eq!(engine.controls.underruns[1].load(Relaxed), 0);
         engine.stop(0);
         engine.stop(1);
     }
@@ -1810,7 +3707,7 @@ mod tests {
         m.render(2050, |_, _| {});
         let mut sum = 0.;
         m.render(100, |_, f| sum += f[0]);
-        let expected = (0.10 + 0.05 + 0.02) * std::f32::consts::FRAC_1_SQRT_2 * 0.75;
+        let expected = (0.40 + 0.20 + 0.30) * std::f32::consts::FRAC_1_SQRT_2 * 0.75;
         assert!(
             (sum / 100. - expected).abs() < 0.002,
             "hold {} expected {}",
@@ -1956,6 +3853,7 @@ mod tests {
         tx.send(Command::Load(1, source(0.3, 6000), false, 1))
             .unwrap();
         tx.send(Command::ScheduledFade {
+            at: None,
             to: 1.,
             seconds: 0.3,
             grid: crate::mix_schedule::Grid {
@@ -1974,6 +3872,95 @@ mod tests {
         assert!(!controls.fading.load(Relaxed));
         assert_eq!(get(&controls.crossfader), 1.);
         assert!(!controls.play[0].load(Relaxed));
+    }
+    #[test]
+    fn committed_deadline_does_not_roll_a_full_phrase_when_received_near_boundary() {
+        for at in [0.49, 0.5] {
+            let controls = Arc::new(Controls::default());
+            let (tx, rx) = mpsc::sync_channel(32);
+            let mut mixer = Mixer::new(1000, rx, controls.clone());
+            tx.send(Command::Load(0, source(0.2, 6000), true, 1))
+                .unwrap();
+            tx.send(Command::Load(1, source(0.3, 6000), false, 1))
+                .unwrap();
+            mixer.render(490, |_, _| {});
+            tx.send(Command::ScheduledFade {
+                at: Some(at),
+                to: 1.,
+                seconds: 0.3,
+                grid: crate::mix_schedule::Grid {
+                    period: 8.,
+                    anchor: 0.5,
+                },
+            })
+            .unwrap();
+            mixer.render(11, |_, _| {});
+            assert!(controls.play[1].load(Relaxed));
+            mixer.render(301, |_, _| {});
+            assert!(!controls.fading.load(Relaxed));
+            assert!(!controls.play[0].load(Relaxed));
+            assert_eq!(get(&controls.crossfader), 1.);
+        }
+    }
+    #[test]
+    fn rendered_preroll_drop_lands_after_exact_three_second_phrase_blend() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(32);
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        let mut incoming = source(0.02, 10000);
+        let (mut producer, consumer) = RingBuffer::new(10001);
+        for frame in 0..10000 {
+            let value = if frame < 3000 { 0.02 } else { 0.2 };
+            let value = value * (frame as f32 * std::f32::consts::TAU / 10.).sin();
+            producer
+                .push([value, value, 0., 0., 0., 0., 0., 0.])
+                .unwrap();
+        }
+        incoming.ring = consumer;
+        let mut outgoing = source(0.2, 12000);
+        let (mut producer, consumer) = RingBuffer::new(12001);
+        for frame in 0..12000 {
+            let value = 0.2 * (frame as f32 * std::f32::consts::TAU / 10.).sin();
+            producer
+                .push([value, value, 0., 0., 0., 0., 0., 0.])
+                .unwrap();
+        }
+        outgoing.ring = consumer;
+        tx.send(Command::Load(0, outgoing, true, 1)).unwrap();
+        tx.send(Command::Load(1, incoming, false, 1)).unwrap();
+        // The selected section at source second 20 is prepared from second 17.
+        // Launch at outgoing second 5; its drop lands on the phrase at second 8.
+        tx.send(Command::ScheduledFade {
+            at: None,
+            to: 1.,
+            seconds: 3.,
+            grid: crate::mix_schedule::Grid {
+                period: 8.,
+                anchor: 5.,
+            },
+        })
+        .unwrap();
+        let mut rendered = Vec::new();
+        mixer.render(5000, |_, frame| rendered.push(frame[0]));
+        assert!(!controls.play[1].load(Relaxed));
+        mixer.render(3000, |_, frame| rendered.push(frame[0]));
+        assert!(controls.position[1].load(Relaxed) >= 2999);
+        mixer.render(200, |_, frame| rendered.push(frame[0]));
+        assert!(!controls.fading.load(Relaxed));
+        assert_eq!(get(&controls.crossfader), 1.);
+        assert!(!controls.play[0].load(Relaxed));
+        assert!(rendered.iter().all(|sample| sample.is_finite()));
+        let rms = |samples: &[f32]| {
+            (samples.iter().map(|v| v * v).sum::<f32>() / samples.len() as f32).sqrt()
+        };
+        assert!(
+            rendered
+                .as_chunks::<100>()
+                .0
+                .iter()
+                .all(|chunk| rms(chunk) > 0.001)
+        );
+        assert!(rms(&rendered[8100..8200]) > rms(&rendered[7800..7900]) * 2.);
     }
     fn section(source: Source, expected: u64) -> SectionChange {
         SectionChange {
@@ -2109,10 +4096,11 @@ mod tests {
         let (mut producer, consumer) = RingBuffer::new(65);
         for frame in 0..64 {
             producer
-                .push([frame as f32, -(frame as f32), 0., 0., 0., 0.])
+                .push([frame as f32, -(frame as f32), 0., 0., 0., 0., 0., 0.])
                 .unwrap();
         }
         let mut source = Source {
+            key_lock: None,
             ring: consumer,
             duration: Arc::new(AtomicU64::new(64)),
             done: Arc::new(AtomicBool::new(true)),
@@ -2122,15 +4110,25 @@ mod tests {
             position: 0.,
             primed: true,
             separated: false,
+            stem_degraded: Arc::new(AtomicBool::new(false)),
             stem_knobs: [0.; 3],
         };
         for expected in 0..12 {
             assert_eq!(source.next(1.).unwrap()[0], expected as f32);
         }
-        assert_eq!(source.next(-1.).unwrap(), [12., -12., 0., 0., 0., 0.]);
-        assert_eq!(source.next(-1.).unwrap(), [11., -11., 0., 0., 0., 0.]);
-        assert_eq!(source.next(-1.).unwrap(), [10., -10., 0., 0., 0., 0.]);
-        assert_eq!(source.next(0.), Some([0.; 6]));
+        assert_eq!(
+            source.next(-1.).unwrap(),
+            [12., -12., 0., 0., 0., 0., 0., 0.]
+        );
+        assert_eq!(
+            source.next(-1.).unwrap(),
+            [11., -11., 0., 0., 0., 0., 0., 0.]
+        );
+        assert_eq!(
+            source.next(-1.).unwrap(),
+            [10., -10., 0., 0., 0., 0., 0., 0.]
+        );
+        assert_eq!(source.next(0.), Some([0.; 8]));
         assert_eq!(source.position, 9.);
         assert_eq!(source.next(0.5).unwrap()[0], 9.);
         assert_eq!(source.next(0.5).unwrap()[0], 9.5);
@@ -2181,16 +4179,16 @@ mod tests {
         tx.send(Command::Load(0, source(0.2, 4000), true, 1))
             .unwrap();
         m.render(1000, |_, _| {});
-        tx.send(Command::Level(2, 0.2, 0.1, false)).unwrap();
+        tx.send(Command::Level(MASTER, 0.2, 0.1, false)).unwrap();
         let mut values = Vec::new();
         m.render(100, |_, f| values.push(f[0]));
         assert!(values.windows(2).all(|w| w[1] <= w[0] + 0.0001));
         assert!((get(&controls.master) - 0.2).abs() < 0.001);
         assert!(controls.play[0].load(Relaxed));
-        tx.send(Command::Level(2, 0.75, 0.1, false)).unwrap();
+        tx.send(Command::Level(MASTER, 0.75, 0.1, false)).unwrap();
         m.render(100, |_, _| {});
         assert!((get(&controls.master) - 0.75).abs() < 0.001);
-        tx.send(Command::Level(2, 0., 0.1, true)).unwrap();
+        tx.send(Command::Level(MASTER, 0., 0.1, true)).unwrap();
         m.render(100, |_, _| {});
         assert!(!controls.play[0].load(Relaxed));
         assert!(!controls.loaded[0].load(Relaxed));
@@ -2226,11 +4224,14 @@ mod tests {
         assert!(controls.sample_playing[0].load(Relaxed));
         tx.send(Command::SampleStop(None)).unwrap();
         tx.send(Command::SampleTrigger(0)).unwrap();
+        // Drain exactly the documented lookahead before checking the retrigger.
+        mixer.render(mixer.master_limiter.latency(), |_, _| {});
         let mut restarted = Vec::new();
         mixer.render(2, |_, f| restarted.push(f));
         assert_eq!(restarted[0], [0., 0.]);
         assert!(restarted[1][0] > 0.);
         set(&controls.master, 0.);
+        mixer.render(mixer.master_limiter.latency(), |_, _| {});
         mixer.render(10, |_, f| assert_eq!(f, [0., 0.]));
         set(&controls.master, 1.);
         mixer.render(120, |_, _| {});
@@ -2261,14 +4262,14 @@ mod tests {
         }
         let mut with = 0.;
         mixer.render(200, |_, f| with = f[0]);
-        assert!(controls.play.iter().all(|p| p.load(Relaxed)));
+        assert!(controls.play.iter().take(2).all(|p| p.load(Relaxed)));
         assert!(controls.sample_playing.iter().all(|p| p.load(Relaxed)));
         tx.send(Command::SampleStop(None)).unwrap();
         let mut without = 0.;
-        mixer.render(1, |_, f| without = f[0]);
+        mixer.render(mixer.master_limiter.latency() + 1, |_, f| without = f[0]);
         assert!(without > 0.);
         assert!(with - without > 0.06);
-        assert!(controls.play.iter().all(|p| p.load(Relaxed)));
+        assert!(controls.play.iter().take(2).all(|p| p.load(Relaxed)));
     }
     #[test]
     fn replacement_acknowledges_after_callback_releases_old_buffer() {
@@ -2363,13 +4364,85 @@ mod tests {
         assert!(engine.take_error().is_none());
     }
     #[test]
+    fn original_runtime_mix_ignores_saved_gains_without_mutating_metadata() {
+        let mut prep = amp_core::Preparation::default();
+        prep.extensions
+            .insert("default_stem_mix".into(), serde_json::json!([1., -1., 0.]));
+        let before = serde_json::to_value(&prep).unwrap();
+        assert_eq!(runtime_stem_knobs(&prep, true).unwrap(), [0.; 3]);
+        assert_eq!(runtime_stem_knobs(&prep, false).unwrap(), [1., -1., 0.]);
+        assert_eq!(serde_json::to_value(&prep).unwrap(), before);
+    }
+    #[test]
+    fn degraded_live_source_plays_original_even_with_saved_vocal_removal() {
+        let controls = Arc::new(Controls::default());
+        set(&controls.master, 1.);
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut original = source(0.2, 4000);
+        original.separated = true;
+        original.stem_knobs = [-1., 0., 0.];
+        original.stem_degraded.store(true, Relaxed);
+        tx.send(Command::Load(0, original, true, 1)).unwrap();
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        let mut frame = [0.; 2];
+        mixer.render(1500, |_, value| frame = value);
+        assert!((frame[0] / std::f32::consts::FRAC_1_SQRT_2 - 0.2).abs() < 0.001);
+        assert!(!controls.stems_loaded[0].load(Relaxed));
+        assert_eq!(
+            get(&controls.stem_knobs[0][0]),
+            -1.,
+            "saved/runtime edit is not destructively reset on fallback"
+        );
+    }
+    #[test]
+    fn automix_retains_each_decks_latest_stem_filters_across_track_loads() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        for deck in 0..6 {
+            let mut next = source(0.2, 4000);
+            next.separated = true;
+            next.stem_knobs = [1., 0., 0.]; // Incoming song disagrees with deck.
+            tx.send(Command::LoadHoldingStemFilters(deck, next, false, 1))
+                .unwrap();
+            // Simulate a knob edit after the replacement was queued.
+            let knobs = [-1., deck as f32 / 10., 0.];
+            for (i, knob) in knobs.into_iter().enumerate() {
+                set(&controls.stem_knobs[deck][i], knob);
+            }
+            mixer.process_commands();
+            assert_eq!(
+                std::array::from_fn::<_, 3, _>(|i| get(&controls.stem_knobs[deck][i])),
+                knobs
+            );
+            assert_eq!(
+                std::array::from_fn::<_, 3, _>(|i| get(&controls.stem_level[deck][i])),
+                amp_core::stem_mix::gains(knobs)
+            );
+            assert!(!controls.play[deck].load(Relaxed));
+            assert_eq!(
+                get(&controls.stem_knobs[0][0]),
+                -1.,
+                "Other decks keep their cuts"
+            );
+        }
+        // Manual loads retain their existing song-default behavior.
+        tx.send(Command::Load(0, source(0.2, 4000), false, 2))
+            .unwrap();
+        mixer.process_commands();
+        assert_eq!(get(&controls.stem_knobs[0][0]), 0.);
+        assert_eq!(get(&controls.stem_knobs[1][0]), -1.);
+    }
+    #[test]
     fn song_stem_defaults_apply_at_load_and_reset_for_the_next_song() {
         let controls = Arc::new(Controls::default());
         set(&controls.master, 1.);
         let (tx, rx) = mpsc::sync_channel(8);
         let (mut producer, consumer) = RingBuffer::new(3000);
         for _ in 0..2500 {
-            producer.push([0.2, 0.2, 0.1, 0.1, 0.05, 0.05]).unwrap();
+            producer
+                .push([0.2, 0.2, 0.1, 0.1, 0.05, 0.05, 0., 0.])
+                .unwrap();
         }
         let mut separated = source(0., 2);
         separated.ring = consumer;
@@ -2395,7 +4468,9 @@ mod tests {
         let (tx, rx) = mpsc::sync_channel(8);
         let (mut producer, consumer) = RingBuffer::new(12000);
         for _ in 0..11000 {
-            producer.push([0.2, 0.1, -0.05, 0.1, 0.03, -0.02]).unwrap();
+            producer
+                .push([0.2, 0.1, -0.05, 0.1, 0.03, -0.02, 0., 0.])
+                .unwrap();
         }
         let mut voice = source(0., 2);
         voice.ring = consumer;
@@ -2505,6 +4580,30 @@ mod tests {
         engine.stop(0);
     }
     #[test]
+    fn headphones_only_excludes_speakers_and_broadcast_but_keeps_monitor() {
+        let controls = Arc::new(Controls::default());
+        set(&controls.master, 1.);
+        set(&controls.gain[0], 1.);
+        set(&controls.crossfader, 0.);
+        set(&controls.cue_volume, 1.);
+        controls.phones_only[0].store(true, Relaxed);
+        let (tx, rx) = mpsc::sync_channel(8);
+        let (producer, mut monitor) = RingBuffer::new(10000);
+        let (tap, mut broadcast) = RingBuffer::new(10000);
+        tx.send(Command::Monitor(Some(producer))).unwrap();
+        tx.send(Command::Broadcast(Some(tap))).unwrap();
+        tx.send(Command::Load(0, source(0.2, 20000), true, 0))
+            .unwrap();
+        let mut mixer = Mixer::new(1000, rx, controls.clone());
+        mixer.render(2000, |_, frame| assert_eq!(frame, [0.; 2]));
+        assert!(std::iter::from_fn(|| monitor.pop().ok()).any(|f| f[0].abs() > 0.1));
+        assert!(std::iter::from_fn(|| broadcast.pop().ok()).all(|f| f == [0.; 2]));
+        controls.phones_only[0].store(false, Relaxed);
+        let mut peak = 0_f32;
+        mixer.render(1000, |_, frame| peak = peak.max(frame[0].abs()));
+        assert!(peak > 0.1);
+    }
+    #[test]
     fn headphone_cue_is_pre_fader_and_trim_and_kills_affect_both_buses() {
         let controls = Arc::new(Controls::default());
         set(&controls.master, 0.);
@@ -2548,6 +4647,9 @@ mod tests {
             kill.store(true, Relaxed);
         }
         mixer.render(1000, |_, _| {});
+        for _ in 0..mixer.cue_limiter.latency() {
+            consumer.pop().unwrap();
+        }
         while let Ok(frame) = consumer.pop() {
             assert_eq!(frame, [0.; 2]);
         }
@@ -2556,6 +4658,9 @@ mod tests {
         }
         controls.cue[0].store(false, Relaxed);
         mixer.render(1000, |_, _| {});
+        for _ in 0..mixer.cue_limiter.latency() {
+            consumer.pop().unwrap();
+        }
         while let Ok(frame) = consumer.pop() {
             assert_eq!(frame, [0.; 2]);
         }
@@ -2580,7 +4685,9 @@ mod tests {
             let (mut producer, consumer) = RingBuffer::new(10000);
             for i in 0..8000 {
                 let value = (std::f32::consts::TAU * frequency * i as f32 / 48000.).sin() * 0.2;
-                producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+                producer
+                    .push([value, value, 0., 0., 0., 0., 0., 0.])
+                    .unwrap();
             }
             let mut voice = source(0., 2);
             voice.ring = consumer;
@@ -2608,7 +4715,9 @@ mod tests {
             let (mut producer, consumer) = RingBuffer::new(10000);
             for i in 0..8000 {
                 let value = (std::f32::consts::TAU * 8000. * i as f32 / 48000.).sin() * 0.2;
-                producer.push([value, value, 0., 0., 0., 0.]).unwrap();
+                producer
+                    .push([value, value, 0., 0., 0., 0., 0., 0.])
+                    .unwrap();
             }
             let mut voice = source(0., 2);
             voice.ring = consumer;
@@ -2713,6 +4822,7 @@ mod tests {
         tx.send(Command::Load(
             1,
             Source {
+                key_lock: crate::key_lock::Processor::new(48000).map(Box::new),
                 ring: r,
                 duration: Arc::new(AtomicU64::new(0)),
                 done: Arc::new(AtomicBool::new(false)),
@@ -2722,6 +4832,7 @@ mod tests {
                 position: 0.,
                 primed: false,
                 separated: false,
+                stem_degraded: Arc::new(AtomicBool::new(false)),
                 stem_knobs: [0.; 3],
             },
             false,
@@ -2738,5 +4849,857 @@ mod tests {
         assert_eq!(get(&c.crossfader), 0.);
         assert!(c.play[0].load(Relaxed));
         assert!(!c.play[1].load(Relaxed));
+    }
+    #[test]
+    fn six_voices_crossfade_pair_and_background_fade_are_isolated() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(32);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        for d in 0..6 {
+            tx.send(Command::Load(d, source(0.03, 20000), true, 1))
+                .unwrap();
+        }
+        m.render(1000, |_, _| {});
+        assert!(c.play.iter().all(|p| p.load(Relaxed)));
+        assert!(c.position.iter().all(|p| p.load(Relaxed) == 1000));
+        tx.send(Command::Loop(4, Some(vec![[0.03; 8]; 100])))
+            .unwrap();
+        tx.send(Command::Fade {
+            to: 1.,
+            seconds: 1.,
+        })
+        .unwrap();
+        m.render(100, |_, _| {});
+        assert!(c.fading.load(Relaxed));
+        tx.send(Command::Load(2, source(0.02, 20000), true, 2))
+            .unwrap();
+        tx.send(Command::Level(3, 0., 0.2, true)).unwrap();
+        m.render(100, |_, _| {});
+        assert!(
+            c.fading.load(Relaxed),
+            "Background load/fade canceled the pair handoff"
+        );
+        m.render(1000, |_, _| {});
+        assert!(!c.play[0].load(Relaxed));
+        assert!(c.play[1].load(Relaxed));
+        assert!(c.play[2].load(Relaxed));
+        assert!(!c.play[3].load(Relaxed));
+        assert!(c.play[4].load(Relaxed) && c.looping[4].load(Relaxed));
+        assert!(c.play[5].load(Relaxed));
+        assert_eq!(get(&c.gain[2]), 1.);
+        assert_eq!(c.pair_indices(), [0, 1]);
+    }
+    #[test]
+    fn pair_reassignment_requires_both_pairs_paused() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.03, 10000), true, 1))
+            .unwrap();
+        tx.send(Command::Pair([2, 5])).unwrap();
+        m.render(10, |_, _| {});
+        assert_eq!(c.pair_indices(), [0, 1]);
+        c.play[0].store(false, Relaxed);
+        tx.send(Command::Pair([2, 5])).unwrap();
+        m.render(10, |_, _| {});
+        assert_eq!(c.pair_indices(), [2, 5]);
+        tx.send(Command::Load(2, source(0.03, 10000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(5, source(0.03, 10000), false, 1))
+            .unwrap();
+        tx.send(Command::Fade {
+            to: 1.,
+            seconds: 0.1,
+        })
+        .unwrap();
+        m.render(500, |_, _| {});
+        assert!(!c.play[2].load(Relaxed));
+        assert!(c.play[5].load(Relaxed));
+    }
+    #[test]
+    fn direct_live_reassignment_preserves_playing_sources_and_ramps_only_routing() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        for deck in 0..DECKS {
+            tx.send(Command::Load(deck, source(0.02, 10000), true, 7))
+                .unwrap();
+        }
+        tx.send(Command::Fader(0.75)).unwrap();
+        m.render(100, |_, _| {});
+        let before = m.route_weights;
+        let generations: Vec<_> = c.deck_generation.iter().map(|g| g.load(Relaxed)).collect();
+        tx.send(Command::SelectLive(2, Default::default())).unwrap();
+        m.render(1, |_, _| {});
+        assert_eq!(c.pair_indices(), [2, 1]);
+        assert_eq!(get(&c.crossfader), 0.75);
+        assert!(m.route_weights[0] > before[0] && m.route_weights[0] < 1.);
+        assert!(m.route_weights[2] < 1. && m.route_weights[2] > before[0]);
+        for deck in [1, 3, 4, 5] {
+            assert_eq!(
+                m.route_weights[deck], before[deck],
+                "unrelated routing changed"
+            );
+        }
+        m.render(9, |_, _| {});
+        assert!((m.route_weights[0] - 1.).abs() < 1e-6);
+        assert!((m.route_weights[2] - before[0]).abs() < 1e-6);
+        assert!(c.play.iter().all(|p| p.load(Relaxed)));
+        assert!(c.position.iter().all(|p| p.load(Relaxed) == 110));
+        assert_eq!(
+            generations,
+            c.deck_generation
+                .iter()
+                .map(|g| g.load(Relaxed))
+                .collect::<Vec<_>>()
+        );
+        assert!(c.gain.iter().all(|g| get(g) == 1.));
+        // B-side selection is independent; no pause or reload after A's takeover.
+        tx.send(Command::SelectLive(5, Default::default())).unwrap();
+        m.render(10, |_, _| {});
+        assert_eq!(c.pair_indices(), [2, 5]);
+        assert!(c.play.iter().all(|p| p.load(Relaxed)));
+        assert!(c.position.iter().all(|p| p.load(Relaxed) == 120));
+    }
+    #[test]
+    fn direct_live_takeover_cancels_handoff_without_stopping_its_sources() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        for deck in 0..3 {
+            tx.send(Command::Load(deck, source(0.02, 10000), true, 1))
+                .unwrap();
+        }
+        tx.send(Command::Fade {
+            to: 1.,
+            seconds: 1.,
+        })
+        .unwrap();
+        m.render(200, |_, _| {});
+        let fader = get(&c.crossfader);
+        assert!(c.fading.load(Relaxed));
+        tx.send(Command::SelectLive(2, Default::default())).unwrap();
+        m.render(1500, |_, _| {});
+        assert!(!c.fading.load(Relaxed));
+        assert!(!c.mashup_active.load(Relaxed));
+        assert_eq!(get(&c.crossfader), fader);
+        assert_eq!(c.pair_indices(), [2, 1]);
+        for deck in 0..3 {
+            assert!(
+                c.play[deck].load(Relaxed),
+                "manual takeover stopped a source"
+            );
+            assert_eq!(c.position[deck].load(Relaxed), 1700);
+        }
+    }
+    #[test]
+    fn direct_live_routing_changes_rendered_audio_gradually() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.1, 10000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(2, source(0.02, 10000), true, 1))
+            .unwrap();
+        tx.send(Command::Fader(0.75)).unwrap();
+        let mut previous = 0.;
+        m.render(2000, |_, frame| previous = frame[0]);
+        let before = previous;
+        tx.send(Command::SelectLive(2, Default::default())).unwrap();
+        let mut maximum_step = 0_f32;
+        m.render(100, |_, frame| {
+            maximum_step = maximum_step.max((frame[0] - previous).abs());
+            previous = frame[0];
+        });
+        assert!(
+            previous - before > 0.02,
+            "retiring deck must return to the independent unity bus"
+        );
+        assert!(
+            maximum_step < 0.01,
+            "routing jumped instead of ramping: {maximum_step}"
+        );
+        assert_eq!(
+            c.underruns[0].load(Relaxed) + c.underruns[2].load(Relaxed),
+            0
+        );
+        assert!(c.play[0].load(Relaxed) && c.play[2].load(Relaxed));
+    }
+    #[test]
+    fn direct_live_same_pair_smooths_mashup_bus_takeover() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        for deck in 0..2 {
+            tx.send(Command::Load(deck, source(0.02, 10000), true, 1))
+                .unwrap();
+        }
+        tx.send(Command::Mashup {
+            to: 1.,
+            fade: 0.1,
+            hold: 2.,
+            grid: crate::mix_schedule::Grid {
+                period: 0.5,
+                anchor: 0.,
+            },
+        })
+        .unwrap();
+        m.render(700, |_, _| {});
+        assert!(c.mashup_active.load(Relaxed));
+        assert_eq!(
+            m.route_weights[1], 1.,
+            "mashup must override the manual bus"
+        );
+        let fader = get(&c.crossfader);
+        let target = amp_core::show::crossfade_weights(fader)[1];
+        assert!(target < 0.5);
+        tx.send(Command::SelectLive(1, Default::default())).unwrap();
+        m.render(1, |_, _| {});
+        assert_eq!(c.pair_indices(), [0, 1]);
+        assert_eq!(get(&c.crossfader), fader);
+        assert!(!c.fading.load(Relaxed));
+        assert!(m.route_weights[1] < 1. && m.route_weights[1] > target);
+        m.render(9, |_, _| {});
+        assert!((m.route_weights[1] - target).abs() < 1e-6);
+        assert!(c.play[0].load(Relaxed) && c.play[1].load(Relaxed));
+        assert_eq!(c.position[0].load(Relaxed), 710);
+        assert_eq!(c.position[1].load(Relaxed), 710);
+    }
+    #[test]
+    fn direct_live_cleanup_is_one_command_and_preserves_owned_loop_cursor_and_manual_effects() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        for deck in 0..4 {
+            tx.send(Command::Load(deck, source(0.02, 10000), true, 1))
+                .unwrap();
+        }
+        m.render(100, |_, _| {});
+        tx.send(Command::Loop(0, Some(Vec::with_capacity(40))))
+            .unwrap();
+        tx.send(Command::Loop(1, Some(Vec::with_capacity(30))))
+            .unwrap();
+        m.render(45, |_, _| {});
+        let cursor = m.voices[0].source.as_ref().unwrap().position;
+        let old = m.voices[0].looped.as_ref().unwrap();
+        assert!(!old.capturing);
+        assert!(
+            cursor < old.origin + old.frames.len() as f64 * old.rate as f64,
+            "Fixture must be inside its loop, where ordinary loop_stop would seek"
+        );
+        m.voices[0].pending_loop = Some((u64::MAX, Vec::with_capacity(20)));
+        m.voices[2].pending_loop = Some((u64::MAX, Vec::with_capacity(20)));
+        c.looping[2].store(true, Relaxed);
+        for deck in [2, 3] {
+            c.scratching[deck].store(true, Relaxed);
+            set(&c.scratch_rate[deck], 0.2);
+        }
+        set(&c.cutoff[0], 180.);
+        set(&c.cutoff[1], 321.);
+        let cleanup = LiveTakeoverCleanup {
+            auto_loop_deck: Some(0),
+            scratch_decks: 1 << 2,
+            restore_cutoff: Some((0, 10000.)),
+        };
+        cleanup.validate().unwrap();
+        tx.send(Command::SelectLive(2, cleanup)).unwrap();
+        m.process_commands();
+        assert_eq!(c.pair_indices(), [2, 1]);
+        assert_eq!(
+            m.voices[0].source.as_ref().unwrap().position,
+            cursor,
+            "Owned loop removal must not perform ordinary loop-end seek"
+        );
+        assert!(m.voices[0].looped.is_none() && m.voices[0].pending_loop.is_none());
+        assert!(!c.looping[0].load(Relaxed));
+        assert!(m.voices[1].looped.is_some(), "Manual loop was removed");
+        assert!(
+            m.voices[2].pending_loop.is_some(),
+            "Unowned pending loop was removed"
+        );
+        assert!(!c.scratching[2].load(Relaxed));
+        assert_eq!(get(&c.scratch_rate[2]), 1.);
+        assert!(c.scratching[3].load(Relaxed), "Manual scratch was cleared");
+        assert_eq!(get(&c.scratch_rate[3]), 0.2);
+        assert_eq!(get(&c.cutoff[0]), 10000.);
+        assert_eq!(get(&c.cutoff[1]), 321., "Manual filter was reset");
+        assert!(c.play[..4].iter().all(|play| play.load(Relaxed)));
+        m.render(1, |_, _| {});
+        assert_eq!(m.voices[0].source.as_ref().unwrap().position, cursor + 1.);
+    }
+    #[test]
+    fn direct_live_cleanup_rejects_unbounded_or_invalid_effect_targets() {
+        for cleanup in [
+            LiveTakeoverCleanup {
+                auto_loop_deck: Some(DECKS),
+                ..Default::default()
+            },
+            LiveTakeoverCleanup {
+                scratch_decks: 1 << DECKS,
+                ..Default::default()
+            },
+            LiveTakeoverCleanup {
+                restore_cutoff: Some((DECKS, 1000.)),
+                ..Default::default()
+            },
+            LiveTakeoverCleanup {
+                restore_cutoff: Some((0, f32::NAN)),
+                ..Default::default()
+            },
+        ] {
+            assert!(cleanup.validate().is_err());
+        }
+    }
+    #[test]
+    fn quantized_background_launch_uses_audio_clock_not_ui_ticks() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(4, source(0.03, 10000), false, 1))
+            .unwrap();
+        tx.send(Command::Launch(4)).unwrap();
+        m.render(1999, |_, _| {});
+        assert!(!c.play[4].load(Relaxed));
+        m.render(1, |_, _| {});
+        assert!(!c.play[4].load(Relaxed));
+        m.render(1, |_, _| {});
+        assert!(c.play[4].load(Relaxed));
+        assert_eq!(c.position[4].load(Relaxed), 1);
+    }
+    #[test]
+    fn ownership_pause_cancels_future_launch_and_retains_loaded_position() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(4, source(0.03, 10000), false, 1))
+            .unwrap();
+        tx.send(Command::Launch(4)).unwrap();
+        tx.send(Command::Pause(4)).unwrap();
+        m.render(3000, |_, _| {});
+        assert!(!c.play[4].load(Relaxed));
+        assert!(c.loaded[4].load(Relaxed));
+        assert_eq!(c.position[4].load(Relaxed), 0);
+        c.play[4].store(true, Relaxed);
+        m.render(100, |_, _| {});
+        let before = c.position[4].load(Relaxed);
+        tx.send(Command::Pause(4)).unwrap();
+        m.render(3000, |_, _| {});
+        assert_eq!(c.position[4].load(Relaxed), before);
+        assert!(before > 0);
+        tx.send(Command::Play(4)).unwrap();
+        m.render(100, |_, _| {});
+        assert!(c.play[4].load(Relaxed));
+        assert!(c.position[4].load(Relaxed) > before);
+    }
+    #[test]
+    fn player_envelope_attenuates_audio_without_rewriting_mixer_gain() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(0, source(0.1, 10000), true, 1))
+            .unwrap();
+        let gain = get(&c.gain[0]);
+        set(&c.player_envelope, 0.);
+        let mut quiet = 1.;
+        m.render(300, |_, frame| quiet = frame[0].abs());
+        assert!(quiet < 0.00001);
+        set(&c.player_envelope, 1.);
+        let mut loud = 0.;
+        m.render(300, |_, frame| loud = frame[0].abs());
+        assert!(loud > 0.001);
+        assert_eq!(get(&c.gain[0]), gain);
+    }
+    #[test]
+    fn synced_loop_capture_waits_for_master_grid_without_stopping_other_voice() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(1000, rx, c.clone());
+        tx.send(Command::Load(2, source(0.03, 10000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(5, source(0.04, 10000), true, 1))
+            .unwrap();
+        m.render(100, |_, _| {});
+        set(&c.bpm[2], 120.);
+        c.synced[2].store(true, Relaxed);
+        tx.send(Command::Loop(2, Some(Vec::with_capacity(500))))
+            .unwrap();
+        m.render(1900, |_, _| {});
+        assert!(m.voices[2].looped.is_none());
+        assert!(m.voices[2].pending_loop.is_some());
+        m.render(1, |_, _| {});
+        assert!(m.voices[2].looped.is_some());
+        assert!(c.play[5].load(Relaxed));
+        tx.send(Command::Loop(2, None)).unwrap();
+        m.render(1, |_, _| {});
+        assert!(m.voices[2].pending_loop.is_none());
+        assert!(!c.looping[2].load(Relaxed));
+    }
+    #[test]
+    fn current_cast_owner_ignores_classic_window_and_switches_actual_pcm_on_one_tap() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut mixer = Mixer::new(48000, rx, controls.clone());
+        let (producer, mut consumer) = RingBuffer::new(2048);
+        tx.send(Command::Broadcast(Some(producer))).unwrap();
+        tx.send(Command::Load(0, source(0.01, 4000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(1, source(0.03, 4000), true, 1))
+            .unwrap();
+        set(&controls.crossfader, 1.);
+        let mut player = crate::Player {
+            playback_owner: crate::playback_owner::Owner::Dj,
+            ..Default::default()
+        };
+        player.workspace.enabled = false; // The classic Player window can remain open while DJ owns playback.
+        let mode = AtomicBool::new(true);
+        let mut render = |player: &crate::Player| {
+            crate::live_mix::set_source_mode(&controls, &mode, player.current_cast_player_only());
+            let mut local = 0.;
+            mixer.render(1000, |_, frame| local = frame[0]);
+            let mut broadcast = 0.;
+            while let Ok(frame) = consumer.pop() {
+                broadcast = frame[0];
+            }
+            (local, broadcast)
+        };
+        let (local, dj) = render(&player);
+        assert!(!mode.load(Relaxed));
+        assert!(
+            dj > 0.004 && (local - dj).abs() < 1e-7,
+            "classic window must cast the actual DJ program"
+        );
+        player.playback_owner = crate::playback_owner::Owner::Player;
+        let (local, player_audio) = render(&player);
+        assert!(mode.load(Relaxed));
+        assert!((local / player_audio - 3.).abs() < 0.01);
+        player.playback_owner = crate::playback_owner::Owner::Dj;
+        let (local, switched_dj) = render(&player);
+        assert!(!mode.load(Relaxed));
+        assert!(
+            (local - switched_dj).abs() < 1e-7,
+            "an active Player tap must follow a switch to the DJ program"
+        );
+        assert!(switched_dj > player_audio * 2.9);
+        assert!(controls.play[0].load(Relaxed) && controls.play[1].load(Relaxed));
+        // No Broadcast replacement command or encoder/session restart occurred.
+    }
+    #[test]
+    fn player_broadcast_tap_excludes_other_decks_and_preserves_local_mix() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut mixer = Mixer::new(48000, rx, c.clone());
+        let (producer, mut consumer) = RingBuffer::new(2048);
+        tx.send(Command::Broadcast(Some(producer))).unwrap();
+        tx.send(Command::Load(0, source(0.01, 4000), true, 1))
+            .unwrap();
+        tx.send(Command::Load(1, source(0.03, 4000), true, 1))
+            .unwrap();
+        c.broadcast_player_only.store(true, Relaxed);
+        set(&c.crossfader, 1.);
+        let mut local = 0.;
+        mixer.render(1000, |_, f| local = f[0]);
+        let mut broadcast = 0.;
+        while let Ok(f) = consumer.pop() {
+            broadcast = f[0];
+        }
+        assert!((local / broadcast - 3.).abs() < 0.01);
+        assert!(broadcast > 0.004);
+        assert!(c.play[0].load(Relaxed) && c.play[1].load(Relaxed));
+    }
+    #[test]
+    fn section_handoff_preserves_pitch_history_without_a_silent_gap() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut mixer = Mixer::new(48000, rx, controls.clone());
+        let mut prepared = source(0.03, 48000);
+        prepared.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+        tx.send(Command::Load(0, prepared, true, 1)).unwrap();
+        mixer.render(6000, |_, _| {});
+        let mut jump = section(source(0.03, 48000), 1);
+        jump.grid = None;
+        tx.send(Command::Section(0, jump)).unwrap();
+        mixer.render(6000, |_, frame| {
+            assert!(frame[0] > 0.01, "A section handoff inserted silence")
+        });
+        assert!(mixer.voices[0].source.as_ref().unwrap().key_lock.is_some());
+    }
+    #[test]
+    fn restored_sync_uses_the_queued_clock_and_loaded_paused_deck() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(8);
+        let mut mixer = Mixer::new(48000, rx, c.clone());
+        set(&c.bpm[4], 40.);
+        // The previous 120 BPM clock would reject this ratio before restoration.
+        tx.send(Command::Load(4, source(0.03, 48000), false, 1))
+            .unwrap();
+        tx.send(Command::Clock(40., 4)).unwrap();
+        tx.send(Command::RestoreSync(4, true)).unwrap();
+        mixer.render(1, |_, _| {});
+        assert!(c.synced[4].load(Relaxed));
+        assert!(!c.play[4].load(Relaxed));
+        assert_eq!(c.effective_rate(4), 1.);
+    }
+    #[test]
+    fn pitch_backend_drains_the_delayed_tail_before_finishing() {
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(4);
+        let mut mixer = Mixer::new(48000, rx, controls.clone());
+        let mut prepared = source(0.03, 10000);
+        prepared.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+        let latency = prepared.key_lock.as_ref().unwrap().latency;
+        tx.send(Command::Load(0, prepared, true, 1)).unwrap();
+        let mut first = None;
+        let mut last = 0;
+        mixer.render(15000, |i, frame| {
+            if frame[0] > 0.0001 {
+                first.get_or_insert(i);
+                last = i;
+            }
+        });
+        assert_eq!(first, Some(latency + mixer.master_limiter.latency()));
+        assert!(last > 10000 + latency + mixer.master_limiter.latency() - 5);
+        assert!(controls.finished[0].load(Relaxed));
+    }
+    #[test]
+    #[ignore = "Synthetic DSP performance matrix; no hardware output"]
+    fn benchmark_dsp_matrix() {
+        for mode in [
+            "two-dry",
+            "six-dry",
+            "six-sync-keylock",
+            "six-stems",
+            "six-loops",
+            "six-effects",
+            "pair-auto-fade-with-four-layers",
+        ] {
+            let c = Arc::new(Controls::default());
+            let (tx, rx) = mpsc::sync_channel(64);
+            let mut mixer = Mixer::new(48000, rx, c.clone());
+            let decks = if mode == "two-dry" { 2 } else { 6 };
+            for d in 0..decks {
+                let mut voice = if mode == "six-stems" {
+                    layered_source([0.005, 0.003, 0.002], 48000 * 3)
+                } else {
+                    source(0.01, 48000 * 3)
+                };
+                let (mut pcm, ring) = RingBuffer::new(48000 * 3 + 1);
+                for frame in 0..48000 * 3 {
+                    let tone = (frame as f32 * std::f32::consts::TAU * 440. / 48000.).sin();
+                    pcm.push(if mode == "six-stems" {
+                        [
+                            tone * 0.005,
+                            tone * 0.005,
+                            tone * 0.003,
+                            tone * 0.003,
+                            tone * 0.002,
+                            tone * 0.002,
+                            0.,
+                            0.,
+                        ]
+                    } else {
+                        [tone * 0.01, tone * 0.01, 0., 0., 0., 0., 0., 0.]
+                    })
+                    .unwrap();
+                }
+                voice.ring = ring;
+                if mode == "six-sync-keylock" {
+                    voice.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+                    set(&c.bpm[d], 120.);
+                    c.synced[d].store(true, Relaxed);
+                    c.key_lock[d].store(true, Relaxed);
+                }
+                tx.send(Command::Load(d, voice, true, 1)).unwrap();
+                if mode == "six-loops" {
+                    tx.send(Command::Loop(d, Some(Vec::with_capacity(12000))))
+                        .unwrap();
+                }
+                if mode == "six-effects" {
+                    set(&c.eq[d][0], -6.);
+                    set(&c.sweep[d], -0.35);
+                }
+            }
+            if mode == "six-sync-keylock" {
+                tx.send(Command::Clock(126., 4)).unwrap();
+            }
+            if mode == "pair-auto-fade-with-four-layers" {
+                tx.send(Command::Fade {
+                    to: 1.,
+                    seconds: 0.5,
+                })
+                .unwrap();
+            }
+            let started = std::time::Instant::now();
+            let mut energy = 0.;
+            for _ in 0..200 {
+                mixer.render(480, |_, f| {
+                    assert!(f.iter().all(|v| v.is_finite()));
+                    energy += f[0].abs();
+                });
+            }
+            let elapsed = started.elapsed();
+            let underruns: Vec<_> = c.underruns.iter().map(|u| u.load(Relaxed)).collect();
+            eprintln!(
+                "{mode}: 2 s rendered in {elapsed:?}; underruns {underruns:?}; signal {energy:.1}"
+            );
+            assert!(elapsed.as_secs_f32() < 2. && energy > 1.);
+            assert!(underruns.iter().all(|n| *n == 0));
+            if mode == "pair-auto-fade-with-four-layers" {
+                assert!(!c.play[0].load(Relaxed));
+                assert!((2..6).all(|d| c.play[d].load(Relaxed)));
+            }
+        }
+    }
+    #[test]
+    #[ignore = "CPU benchmark: generated six-stream PCM, no hardware output"]
+    fn benchmark_six_keylocked_layers() {
+        let c = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut m = Mixer::new(48000, rx, c.clone());
+        for d in 0..6 {
+            let mut prepared = source(0.03, 48000 * 6);
+            prepared.key_lock = crate::key_lock::Processor::new(48000).map(Box::new);
+            tx.send(Command::Load(d, prepared, true, 1)).unwrap();
+            c.key_lock[d].store(true, Relaxed);
+            set(&c.rate[d], 1.08);
+        }
+        let started = std::time::Instant::now();
+        for _ in 0..500 {
+            m.render(480, |_, _| {});
+        }
+        let elapsed = started.elapsed();
+        eprintln!(
+            "Six streams + Key Lock: 5 seconds rendered in {elapsed:?}; underruns {:?}",
+            c.underruns
+                .iter()
+                .map(|u| u.load(Relaxed))
+                .collect::<Vec<_>>()
+        );
+        assert!(c.underruns.iter().all(|u| u.load(Relaxed) == 0));
+        assert!(elapsed.as_secs_f64() < 5.);
+    }
+    #[test]
+    fn receiver_lease_freezes_pcm_positions_and_rejects_stale_resume() {
+        let gate = Arc::new(crate::output_admission::Gate::default());
+        let scope = crate::output_admission::scope(gate.clone());
+        let controls = Arc::new(Controls::default());
+        gate.register(&controls);
+        drop(scope);
+        let (tx, rx) = mpsc::sync_channel(16);
+        let mut mixer = Mixer::new(48000, rx, controls.clone());
+        tx.send(Command::Load(0, source(0.25, 48000), true, 1))
+            .unwrap();
+        mixer.render(512, |_, _| {});
+        let position = controls.position[0].load(Relaxed);
+        assert!(position > 0);
+        mixer.sections[0] = Some(SectionChange {
+            source: None,
+            origin: 0.,
+            previous_origin: 0.,
+            grid: None,
+            at: None,
+            expected: 1,
+            total: 100,
+            elapsed: 0,
+            old: None,
+        });
+        mixer.launches[0] = Some(u64::MAX);
+        controls.mashup_active.store(true, Relaxed);
+        controls.scratching[0].store(true, Relaxed);
+        controls.section_state[0].store(1, Relaxed);
+        let old = gate.epoch();
+        let lease = gate.acquire(&AtomicBool::new(false)).unwrap();
+        assert!(gate.local_allowed().unwrap_err().contains("Stop listening"));
+        tx.send(Command::Admitted(old, Box::new(Command::Play(0))))
+            .unwrap();
+        controls.play[0].store(true, Relaxed); // Legacy direct-admission paths.
+        mixer.render(512, |_, frame| assert_eq!(frame, [0., 0.]));
+        assert_eq!(controls.position[0].load(Relaxed), position);
+        assert!(!controls.play[0].load(Relaxed));
+        assert!(!controls.mashup_active.load(Relaxed));
+        assert!(!controls.scratching[0].load(Relaxed));
+        assert_eq!(controls.section_state[0].load(Relaxed), 0);
+        assert!(mixer.sections.iter().all(Option::is_none));
+        drop(lease);
+        // A pre-lease command arriving late cannot restart a deck after release.
+        tx.send(Command::Admitted(old, Box::new(Command::Play(0))))
+            .unwrap();
+        mixer.render(512, |_, frame| assert_eq!(frame, [0., 0.]));
+        assert_eq!(controls.position[0].load(Relaxed), position);
+        assert!(!controls.play[0].load(Relaxed));
+        assert!(gate.local_allowed().is_ok());
+        tx.send(Command::Admitted(gate.epoch(), Box::new(Command::Play(0))))
+            .unwrap();
+        mixer.render(512, |_, _| {});
+        assert!(controls.position[0].load(Relaxed) > position);
+        assert!(
+            !Controls::default().output_gate.leased(),
+            "Independent offline/test mixer is not globally muted"
+        );
+    }
+}
+
+#[cfg(test)]
+#[path = "mixer/live_stem_acceptance.rs"]
+mod live_stem_acceptance;
+
+#[cfg(test)]
+mod live_admission_tests {
+    use super::*;
+    #[test]
+    fn discarding_library_clears_ghost_modes_without_changing_channel_settings() {
+        let controls = Controls::default();
+        let mut loaded = [true; 6];
+        for (live, prepared) in controls
+            .on_demand_stems
+            .iter()
+            .zip(&controls.prepared_stems)
+        {
+            live.store(true, Relaxed);
+            prepared.store(true, Relaxed);
+        }
+        set(&controls.gain[0], 0.7);
+        reset_library_stem_modes(&mut loaded, &controls);
+        assert_eq!(loaded, [false; 6]);
+        assert!(controls.on_demand_stems.iter().all(|v| !v.load(Relaxed)));
+        assert!(controls.prepared_stems.iter().all(|v| !v.load(Relaxed)));
+        assert!((get(&controls.gain[0]) - 0.7).abs() < 1e-6);
+    }
+}
+
+#[cfg(test)]
+mod prepared_playback_tests {
+    use super::*;
+    #[test]
+    fn six_prepared_rings_apply_filters_without_live_slots_and_cancel_independently() {
+        let fixture = crate::prepared_stem_playback::tests::fixture();
+        let (frames, degraded) =
+            crate::prepared_stem_playback::tests::frames(&fixture, Default::default());
+        assert!(!degraded);
+        let controls = Arc::new(Controls::default());
+        let (tx, rx) = mpsc::sync_channel(64);
+        let mut mixer = Mixer::new(44100, rx, controls.clone());
+        set(&controls.master, 0.5);
+        for (deck, prepared_flag) in controls.prepared_stems.iter().enumerate() {
+            let (mut producer, ring) = RingBuffer::new(frames.len() + 1);
+            for frame in &frames {
+                producer.push(*frame).unwrap();
+            }
+            let source = Source {
+                key_lock: None,
+                ring,
+                duration: Arc::new(AtomicU64::new(frames.len() as u64)),
+                done: Arc::new(AtomicBool::new(true)),
+                failed: Arc::new(AtomicBool::new(false)),
+                history: VecDeque::with_capacity(44100 * 8),
+                history_start: 0,
+                position: 0.,
+                primed: false,
+                separated: true,
+                stem_degraded: Arc::new(AtomicBool::new(false)),
+                stem_knobs: [0.; 3],
+            };
+            prepared_flag.store(true, Relaxed);
+            set(&controls.gain[deck], 0.1);
+            tx.send(Command::Load(deck, source, false, 1)).unwrap();
+            tx.send(Command::StemLevels(
+                deck,
+                if deck.is_multiple_of(2) {
+                    [0., 1., 0.]
+                } else {
+                    [1., 0., 0.]
+                },
+            ))
+            .unwrap();
+        }
+        tx.send(Command::Fader(0.5)).unwrap();
+        mixer.process_commands();
+        for (deck, _) in controls.play.iter().enumerate() {
+            tx.send(Command::Play(deck)).unwrap();
+        }
+        let mut energy = 0.;
+        mixer.render(44100, |_, frame| {
+            energy += frame[0] as f64 * frame[0] as f64;
+        });
+        eprintln!(
+            "Prepared fixture master energy={energy}; positions={:?}; peaks={:?}",
+            std::array::from_fn::<_, 6, _>(|d| controls.position[d].load(Relaxed)),
+            std::array::from_fn::<_, 6, _>(|d| get(&controls.peak[d]))
+        );
+        // Reference the decoded fixture, actual channel gains and crossfader law,
+        // rather than assuming an arbitrary loudness for compressed source audio.
+        let pair = controls.pair_indices();
+        let buses = amp_core::show::crossfade_weights(0.5);
+        let reference_energy = |dry: bool| -> f64 {
+            frames
+                .iter()
+                .take(44100)
+                .map(|frame| {
+                    let sum = (0usize..6)
+                        .map(|deck| {
+                            let levels = if dry {
+                                [1.; 3]
+                            } else if deck.is_multiple_of(2) {
+                                [0., 1., 0.]
+                            } else {
+                                [1., 0., 0.]
+                            };
+                            let weight = if deck == pair[0] {
+                                buses[0]
+                            } else if deck == pair[1] {
+                                buses[1]
+                            } else {
+                                1.
+                            };
+                            stereo_frame(*frame, true, levels, false)[0]
+                                * 0.1
+                                * weight
+                                * std::f32::consts::FRAC_1_SQRT_2
+                                * 0.5
+                        })
+                        .sum::<f32>();
+                    f64::from(sum).powi(2)
+                })
+                .sum()
+        };
+        let expected = reference_energy(false);
+        let dry = reference_energy(true);
+        eprintln!(
+            "Decoded fixture filtered-reference energy={expected}; dry-reference energy={dry}"
+        );
+        assert!(
+            expected > 1e-6 && expected < dry * 0.5,
+            "independent filters must change the decoded dry reference"
+        );
+        // The production limiter's initial lookahead and channel gain smoothing
+        // remove a small leading transient; steady reference remains independent.
+        assert!(
+            (energy - expected).abs() < expected * 0.08,
+            "actual energy {energy} vs fixture reference {expected}; dry {dry}"
+        );
+        for (deck, voice) in mixer.voices.iter().take(6).enumerate() {
+            assert!(controls.position[deck].load(Relaxed) >= 44000);
+            assert!(
+                get(&controls.peak[deck]) > 1e-6,
+                "deck {deck} must contribute real filtered audio"
+            );
+            let desired = if deck.is_multiple_of(2) {
+                [0., 1., 0.]
+            } else {
+                [1., 0., 0.]
+            };
+            for (actual, wanted) in voice.stem_mix.iter().zip(desired) {
+                assert!(
+                    (actual - wanted).abs() < 1e-4,
+                    "smoothed prepared filter did not reach requested level"
+                );
+            }
+            assert_eq!(controls.underruns[deck].load(Relaxed), 0);
+        }
+        let before = controls.position[1].load(Relaxed);
+        tx.send(Command::Stop(0)).unwrap();
+        mixer.render(4410, |_, _| {});
+        assert!(!controls.play[0].load(Relaxed));
+        assert!(controls.position[1].load(Relaxed) > before);
+        assert!(controls.play.iter().skip(1).all(|v| v.load(Relaxed)));
     }
 }

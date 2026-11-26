@@ -2,50 +2,53 @@
 use crate::Preparation;
 pub fn energy(p: &Preparation) -> Option<f64> {
     p.extensions
-        .get("energy")
+        .get("perceptual_energy")
+        .or_else(|| p.extensions.get("energy"))
         .and_then(|v| v.as_f64())
         .filter(|v| v.is_finite() && (0. ..=1.).contains(v))
 }
-fn harmonic(s: &str) -> Option<(i32, u8)> {
-    let s = s.trim().to_ascii_uppercase();
-    let mode = *s.as_bytes().last()?;
-    if mode != b'A' && mode != b'B' {
-        return None;
-    }
-    let n = s[..s.len() - 1].parse::<i32>().ok()?;
-    (1..=12).contains(&n).then_some((n, mode))
-}
+use amp_dj_policy::harmonic;
 pub(crate) fn cost(a: &Preparation, b: &Preparation, target: Option<f64>) -> f64 {
-    let tempo = match (a.bpm, b.bpm) {
-        (Some(a), Some(b)) if a > 0. && b > 0. => ((a / b).ln().abs() * 12.).min(4.),
-        _ => 2.,
-    };
-    let key = match (
-        a.harmonic_key.as_deref().and_then(harmonic),
-        b.harmonic_key.as_deref().and_then(harmonic),
-    ) {
-        (Some((a, m)), Some((b, n))) => {
-            let d = (a - b).abs();
-            let d = d.min(12 - d);
-            if d == 0 {
-                if m == n { 0. } else { 0.25 }
-            } else if d == 1 && m == n {
-                0.4
-            } else {
-                2. + d as f64 * 0.2
-            }
+    let confidence = |p: &Preparation| {
+        if p.manual_override || p.analysis.as_ref().is_some_and(|a| a.reviewed) {
+            1.
+        } else {
+            p.analysis.as_ref().map_or(0., |a| a.key_confidence)
         }
-        _ => 1.5,
     };
-    let continuity = match (energy(a), energy(b)) {
-        (Some(a), Some(b)) => (a - b).abs() * 4.,
-        _ => 1.,
-    };
-    let drift = match (target, energy(b)) {
-        (Some(a), Some(b)) => (a - b).abs() * 6.,
-        _ => 1.,
-    };
-    tempo + key + continuity + drift
+    let rate = a
+        .extensions
+        .get("runtime_rank_rate")
+        .and_then(|v| v.as_f64())
+        .filter(|r| r.is_finite() && (0.5..=2.).contains(r));
+    let in_rate = rate
+        .and_then(|r| amp_dj_policy::tempo_match(a.bpm?, r, b.bpm?, 0.16))
+        .map_or(1., |m| m.rate);
+    let out_locked = a
+        .extensions
+        .get("runtime_rank_key_lock")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    let in_locked = a
+        .extensions
+        .get("runtime_rank_next_key_lock")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    amp_dj_policy::pair_cost_with_context(
+        a.bpm.unwrap_or(f64::NAN),
+        b.bpm.unwrap_or(f64::NAN),
+        energy(a).unwrap_or(f64::NAN),
+        energy(b).unwrap_or(f64::NAN),
+        target.unwrap_or(f64::NAN),
+        amp_dj_policy::key_code(a.harmonic_key.as_deref().unwrap_or("")),
+        amp_dj_policy::key_code(b.harmonic_key.as_deref().unwrap_or("")),
+        confidence(a),
+        confidence(b),
+        rate.unwrap_or(1.),
+        in_rate,
+        out_locked,
+        in_locked,
+    )
 }
 /// Keeps the first song as the anchor. Returns an exact permutation, including repeats.
 /// Greedy ordering is a recommendation; it is not beat synchronization or a guarantee of a mix.
@@ -74,6 +77,14 @@ pub fn order(songs: &[&Preparation]) -> Vec<usize> {
 /// Expands seed songs with prepared neighbors, preserving the first seed as anchor.
 /// Unknown candidates are excluded rather than assigned fictional measurements.
 pub fn curate(songs: &[&Preparation], seeds: &[usize], limit: usize) -> Result<Vec<usize>, String> {
+    curate_with_soft_keys(songs, seeds, limit, true)
+}
+pub fn curate_with_soft_keys(
+    songs: &[&Preparation],
+    seeds: &[usize],
+    limit: usize,
+    allow_soft_key_fallback: bool,
+) -> Result<Vec<usize>, String> {
     let &anchor = seeds
         .first()
         .ok_or("Add a seed song to the playlist first")?;
@@ -84,7 +95,7 @@ pub fn curate(songs: &[&Preparation], seeds: &[usize], limit: usize) -> Result<V
     let target =
         energy(a).ok_or("Analyze or set the first song's energy before finding similar songs")?;
     let bpm = a.bpm.ok_or("Analyze or set the first song's BPM")?;
-    if a.harmonic_key.as_deref().and_then(harmonic).is_none() {
+    if !allow_soft_key_fallback && a.harmonic_key.as_deref().and_then(harmonic).is_none() {
         return Err("Set a valid harmonic code (1A–12B) for the first song".into());
     }
     let mut chosen = Vec::new();
@@ -110,10 +121,11 @@ pub fn curate(songs: &[&Preparation], seeds: &[usize], limit: usize) -> Result<V
                     }
                     _ => false,
                 };
-                compatible
+                (allow_soft_key_fallback || compatible)
                     && energy(p).is_some_and(|e| (e - target).abs() <= 0.2)
                     && p.bpm.is_some_and(|b| (b / bpm - 1.).abs() <= 0.06)
-                    && p.harmonic_key.as_deref().and_then(harmonic).is_some()
+                    && (allow_soft_key_fallback
+                        || p.harmonic_key.as_deref().and_then(harmonic).is_some())
             })
             .min_by(|&i, &j| {
                 cost(previous, songs[i], Some(target)).total_cmp(&cost(
@@ -126,7 +138,7 @@ pub fn curate(songs: &[&Preparation], seeds: &[usize], limit: usize) -> Result<V
             break;
         };
         // Reject large harmonic jumps even when the rest of the library is incompatible.
-        if cost(previous, songs[i], Some(target)) > 3. {
+        if !allow_soft_key_fallback && cost(previous, songs[i], Some(target)) > 3. {
             break;
         }
         chosen.push(i);
@@ -141,6 +153,7 @@ mod tests {
         let mut p = Preparation {
             bpm: Some(bpm),
             harmonic_key: Some(key.into()),
+            manual_override: true,
             ..Default::default()
         };
         p.extensions.insert("energy".into(), serde_json::json!(e));
@@ -176,7 +189,7 @@ mod tests {
         assert_eq!(harmonic("13A"), None);
         assert_eq!(
             cost(&song(120., "12A", 0.5), &song(120., "1A", 0.5), Some(0.5)),
-            0.4
+            0.35
         );
     }
 }

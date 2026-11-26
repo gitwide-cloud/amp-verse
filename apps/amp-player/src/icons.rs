@@ -1,6 +1,12 @@
 use super::*;
 #[derive(Clone, Copy)]
 pub enum Icon {
+    Microphone,
+    Headphones,
+    Flask,
+    Cast,
+    Puzzle,
+    Settings,
     Folder,
     Layers,
     Play,
@@ -23,6 +29,99 @@ pub fn draw(ui: &egui::Ui, rect: egui::Rect, icon: Icon, color: egui::Color32) {
         p.line_segment([point(a.0, a.1), point(b.0, b.1)], stroke);
     };
     match icon {
+        Icon::Microphone => {
+            p.rect_stroke(
+                egui::Rect::from_min_max(point(0.33, 0.), point(0.67, 0.6)),
+                5.,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            p.add(egui::Shape::line(
+                vec![
+                    point(0.17, 0.35),
+                    point(0.17, 0.6),
+                    point(0.3, 0.78),
+                    point(0.7, 0.78),
+                    point(0.83, 0.6),
+                    point(0.83, 0.35),
+                ],
+                stroke,
+            ));
+            line((0.5, 0.78), (0.5, 1.));
+            line((0.3, 1.), (0.7, 1.));
+        }
+        Icon::Headphones => {
+            p.add(egui::Shape::line(
+                (0..=16)
+                    .map(|i| {
+                        let a = std::f32::consts::PI * (i as f32 / 16.);
+                        point(0.5 + 0.43 * a.cos(), 0.5 - 0.43 * a.sin())
+                    })
+                    .collect(),
+                stroke,
+            ));
+            for x in [0.05, 0.75] {
+                p.rect_stroke(
+                    egui::Rect::from_min_max(point(x, 0.45), point(x + 0.2, 0.95)),
+                    3.,
+                    stroke,
+                    egui::StrokeKind::Inside,
+                );
+            }
+        }
+        Icon::Flask => {
+            p.add(egui::Shape::closed_line(
+                vec![
+                    point(0.36, 0.),
+                    point(0.64, 0.),
+                    point(0.64, 0.35),
+                    point(0.95, 0.95),
+                    point(0.05, 0.95),
+                    point(0.36, 0.35),
+                ],
+                stroke,
+            ));
+            line((0.25, 0.65), (0.75, 0.65));
+        }
+        Icon::Cast => {
+            line((0., 0.), (1., 0.));
+            line((1., 0.), (1., 0.85));
+            line((1., 0.85), (0.65, 0.85));
+            for radius in [0.25, 0.5, 0.75] {
+                p.add(egui::Shape::line(
+                    (0..=12)
+                        .map(|i| {
+                            let a = std::f32::consts::FRAC_PI_2 * i as f32 / 12.;
+                            point(radius * a.sin(), 1. - radius * a.cos())
+                        })
+                        .collect(),
+                    stroke,
+                ));
+            }
+            p.circle_filled(point(0., 1.), 2., color);
+        }
+        Icon::Puzzle => {
+            p.rect_stroke(
+                egui::Rect::from_min_max(point(0.1, 0.25), point(0.9, 0.95)),
+                2.,
+                stroke,
+                egui::StrokeKind::Inside,
+            );
+            p.circle_stroke(point(0.5, 0.18), r.width() * 0.15, stroke);
+            line((0.35, 0.55), (0.65, 0.55));
+            line((0.5, 0.4), (0.5, 0.75));
+        }
+        Icon::Settings => {
+            p.circle_stroke(point(0.5, 0.5), r.width() * 0.28, stroke);
+            p.circle_stroke(point(0.5, 0.5), r.width() * 0.1, stroke);
+            for i in 0..8 {
+                let a = i as f32 * std::f32::consts::TAU / 8.;
+                line(
+                    (0.5 + 0.3 * a.cos(), 0.5 + 0.3 * a.sin()),
+                    (0.5 + 0.47 * a.cos(), 0.5 + 0.47 * a.sin()),
+                );
+            }
+        }
         Icon::Play => {
             p.add(egui::Shape::convex_polygon(
                 vec![point(0.2, 0.), point(1., 0.5), point(0.2, 1.)],
@@ -116,7 +215,7 @@ pub fn button(
 ) -> egui::Response {
     let (rect, response) = ui.allocate_exact_size(size, egui::Sense::click());
     let palette = theme::current(ui.ctx()).palette();
-    let primary = selected && label.is_empty();
+    let primary = selected;
     let mut fill = if primary {
         palette.accent
     } else if selected {
@@ -166,7 +265,12 @@ pub fn button(
                 rect.min + egui::vec2(43., rect.height() / 2.),
                 egui::Align2::LEFT_CENTER,
                 label,
-                egui::FontId::proportional(16.),
+                egui::FontId::new(
+                    18.,
+                    ui.style().text_styles[&egui::TextStyle::Button]
+                        .family
+                        .clone(),
+                ),
                 color,
             );
     }

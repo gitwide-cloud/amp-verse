@@ -7,12 +7,19 @@ use std::{
     time::Duration,
 };
 mod addons;
+mod app_update;
+mod audio_output;
 mod cast;
 mod control;
 mod controllers;
 mod crossfade_settings;
+mod deck_rack;
 mod dj_browser;
+#[path = "mixer.rs"]
+mod dj_engine;
 mod dj_mixer;
+mod dj_settings;
+mod dlna;
 mod docking;
 mod dragdrop;
 mod engine;
@@ -20,18 +27,52 @@ mod engine_download;
 mod google_cast;
 mod hot_cues;
 mod icons;
+mod key_lock;
 mod lab;
+mod lab_audio;
 mod lab_editor;
+mod lab_youtube;
 mod library_cache;
+mod library_organizer;
 mod live_mix;
+mod manual_load;
 mod mashup;
+mod media_lookup;
 mod mix_schedule;
-mod mixer;
+mod mode_reload;
+mod onnx_stem_stream;
+mod onnx_stem_worker;
+mod output_admission;
+mod playlist_stem_prep;
+mod prepared_stem_cache;
+mod prepared_stem_playback;
+mod receiver_process;
+mod startup_index;
+mod station_receiver;
+mod stem_capability;
+use dj_engine as mixer;
+#[path = "performance.rs"]
+mod dj_logic;
+mod mini_player;
+mod module_runtime;
 mod monitor;
+mod music_scenes;
 mod organized_library;
-mod performance;
+use dj_logic as performance;
+mod playback_owner;
+mod player_sequence;
+mod playlist_sync;
+mod playlist_sync_secret;
+mod podcast_cache;
+mod podcast_plugin;
+mod podcasts;
+mod preparation_speed;
 mod preparer;
+mod remote_access;
+mod remote_catalog;
+mod resources;
 mod sample_editor;
+mod sample_library;
 mod sampler;
 mod section_controls;
 mod session;
@@ -39,14 +80,22 @@ mod show_editor;
 mod side_deck;
 mod skin;
 mod smart_actions;
+mod smart_filter_ui;
 mod smart_preview;
 mod station_download;
-mod stems;
+mod transcription;
+use dj_engine::stems;
 mod theme;
+mod track_columns;
+mod track_sort;
 mod transition_controls;
 mod transition_styles;
+#[allow(dead_code)] // Shared implementation also used by the standalone installer binary.
+mod update_package;
+mod v1_profile;
 mod waveform;
 mod window_layout;
+mod workspace;
 use skin::{CYAN, GOLD, ORANGE};
 
 fn player_on_top_path() -> Option<PathBuf> {
@@ -112,62 +161,85 @@ fn capture(ctx: &egui::Context, path: PathBuf) {
 }
 
 struct Player {
+    output_admission: std::sync::Arc<output_admission::Gate>,
+    workspace: workspace::Workspace,
+    mini: mini_player::State,
+    playback_owner: playback_owner::Owner,
+    player_sequence: player_sequence::Sequence,
+    rack: deck_rack::Rack,
     recovery: session::Recovery,
     root: PathBuf,
     library: Option<Library>,
+    library_generation: u64,
+    source_roots: Vec<amp_core::music_sources::Source>,
+    organizer: library_organizer::Organizer,
+    outputs: module_runtime::Module<audio_output::Panel>,
+    lookup: module_runtime::Module<media_lookup::Lookup>,
+    podcasts: module_runtime::Module<podcasts::Podcasts>,
+    transcription: module_runtime::Module<transcription::Panel>,
+    auto_dj_controls: bool,
     scan: Option<mpsc::Receiver<Result<library_cache::Snapshot, String>>>,
     last_scan: std::time::Instant,
+    analyze_after_scan: bool,
+    analysis_scan: Option<mpsc::Receiver<Result<Library, String>>>,
     selected: Option<usize>,
     folder: PathBuf,
     search: String,
+    library_builder: organized_library::LibraryBuilder,
     audio: Option<mixer::Engine>,
     sampler: sampler::Sampler,
+    sample_library: sample_library::Browser,
     live_mix: Option<live_mix::Broadcast>,
     right_sampler: sampler::Sampler,
     right_sample_audio: Option<mixer::Engine>,
     sides: [side_deck::SideDeck; 2],
-    pending_load: [Option<(PathBuf, Option<f64>)>; 2],
-    loaded_origin: [Option<PathBuf>; 2],
+    pending_load: [Option<(PathBuf, Option<f64>)>; 6],
+    loaded_origin: [Option<PathBuf>; 6],
     dj_browser: dj_browser::Browser,
     dj_tab: usize,
     dj_library_hidden: bool,
-    dj_cues: [bool; 2],
+    dj_cues: [bool; 6],
     player_mode: u8,
     player_on_top: bool,
     run: performance::Run,
     show_editor: show_editor::Editor,
+    playlist_sync: playlist_sync::Client,
     smart_preview: smart_preview::Preview,
     control: Option<control::Control>,
     control_attempted: bool,
+    control_start: Option<mpsc::Receiver<remote_catalog::Startup>>,
     control_restart: Option<std::time::Instant>,
     control_status: String,
     control_bind: String,
     control_password: String,
     catalog_updated: std::time::Instant,
+    remote_catalog: remote_catalog::Cache,
+    control_published: std::time::Instant,
     last_master: u8,
-    waveforms: [waveform::Lane; 2],
+    waveforms: [waveform::Lane; 6],
     wave_span: f64,
-    pitch: [f32; 2],
-    channel_gain: [f32; 2],
+    pitch: [f32; 6],
+    channel_gain: [f32; 6],
     fader: f32,
     fade_seconds: f32,
-    jog_resume: [Option<(bool, egui::ViewportId)>; 2],
-    jog_angle: [f32; 2],
-    jog_target: [f64; 2],
-    jog_auto: [bool; 2],
+    jog_resume: [Option<(bool, egui::ViewportId)>; 6],
+    jog_angle: [f32; 6],
+    jog_target: [f64; 6],
+    jog_auto: [bool; 6],
     mixer_panel: dj_mixer::Panel,
-    controllers: controllers::Panel,
+    controllers: module_runtime::Module<controllers::Panel>,
     stem_panel: stems::Panel,
     eq_open: bool,
     fx_open: bool,
-    eq: [[f32; 3]; 2],
-    filter: [f32; 2],
-    loaded: [Option<usize>; 2],
-    loaded_snapshot: [Option<amp_core::Track>; 2],
-    playing: [bool; 2],
+    eq: [[f32; 3]; 6],
+    filter: [f32; 6],
+    loaded: [Option<usize>; 6],
+    loaded_snapshot: [Option<amp_core::Track>; 6],
+    playing: [bool; 6],
     volume: u8,
     new_playlist_name: Option<String>,
     playlist_snapshot: Option<(PathBuf, Playlist)>,
+    playlist_preview: organized_library::PlaylistPreview,
     queue: Vec<usize>,
     queue_selected: Option<usize>,
     auto: bool,
@@ -180,11 +252,11 @@ struct Player {
     preview_wave: waveform::Lane,
     dj_open: bool,
     lab_open: bool,
-    lab: lab::Arrangement,
+    lab: module_runtime::Module<lab::Arrangement>,
     preparer: preparer::Preparer,
     addons_open: bool,
     cast_open: bool,
-    cast: cast::Dashboard,
+    cast: module_runtime::Module<cast::Dashboard>,
     addons: addons::Manager,
     status: String,
     screenshot_frames: u32,
@@ -193,25 +265,46 @@ struct Player {
 }
 impl Default for Player {
     fn default() -> Self {
+        let root = std::env::args_os()
+            .nth(1)
+            .map(PathBuf::from)
+            .or_else(startup_index::main_root)
+            .or_else(|| {
+                std::fs::read_to_string(library_preference())
+                    .ok()
+                    .map(|s| PathBuf::from(s.trim()))
+            })
+            .unwrap_or_default();
+        let source_roots = startup_index::sources(&root);
         Self {
+            output_admission: Default::default(),
+            workspace: Default::default(),
+            mini: Default::default(),
+            playback_owner: Default::default(),
+            player_sequence: Default::default(),
+            rack: Default::default(),
             recovery: Default::default(),
-            root: std::env::args_os()
-                .nth(1)
-                .map(PathBuf::from)
-                .or_else(|| {
-                    std::fs::read_to_string(library_preference())
-                        .ok()
-                        .map(|s| PathBuf::from(s.trim()))
-                })
-                .unwrap_or_default(),
+            root,
             library: None,
+            library_generation: 0,
+            source_roots,
+            organizer: Default::default(),
+            outputs: Default::default(),
+            lookup: Default::default(),
+            podcasts: Default::default(),
+            transcription: Default::default(),
+            auto_dj_controls: false,
             scan: None,
             last_scan: std::time::Instant::now(),
+            analyze_after_scan: false,
+            analysis_scan: None,
             selected: None,
             folder: PathBuf::new(),
             search: String::new(),
+            library_builder: Default::default(),
             audio: None,
             sampler: Default::default(),
+            sample_library: Default::default(),
             live_mix: None,
             right_sampler: sampler::Sampler::separate_bank("sampler-right.json"),
             right_sample_audio: None,
@@ -221,44 +314,49 @@ impl Default for Player {
             dj_browser: Default::default(),
             dj_tab: 0,
             dj_library_hidden: false,
-            dj_cues: [false; 2],
+            dj_cues: [false; 6],
             player_mode: 0,
             player_on_top: load_player_on_top(),
             run: Default::default(),
             show_editor: Default::default(),
+            playlist_sync: Default::default(),
             smart_preview: Default::default(),
             control: None,
             control_attempted: false,
+            control_start: None,
             control_restart: None,
             control_status: "Show control starting…".into(),
             control_bind: std::env::var("AMP_CONTROL_BIND")
                 .unwrap_or_else(|_| "0.0.0.0:8790".into()),
             control_password: std::env::var("AMP_CONTROL_PASSWORD").unwrap_or_default(),
             catalog_updated: std::time::Instant::now() - std::time::Duration::from_secs(3),
+            remote_catalog: Default::default(),
+            control_published: std::time::Instant::now() - Duration::from_secs(1),
             last_master: 75,
             waveforms: Default::default(),
             wave_span: 16.,
-            pitch: [0.; 2],
-            channel_gain: [1.; 2],
+            pitch: [0.; 6],
+            channel_gain: [1.; 6],
             fader: 0.,
             fade_seconds: crossfade_settings::load(),
-            jog_resume: [None; 2],
-            jog_angle: [0.; 2],
-            jog_target: [0.; 2],
-            jog_auto: [false; 2],
+            jog_resume: [None; 6],
+            jog_angle: [0.; 6],
+            jog_target: [0.; 6],
+            jog_auto: [false; 6],
             mixer_panel: Default::default(),
             controllers: Default::default(),
             stem_panel: Default::default(),
             eq_open: false,
             fx_open: false,
-            eq: [[0.; 3]; 2],
-            filter: [22000.; 2],
-            loaded: [None; 2],
-            loaded_snapshot: [None, None],
-            playing: [false; 2],
+            eq: [[0.; 3]; 6],
+            filter: [22000.; 6],
+            loaded: [None; 6],
+            loaded_snapshot: Default::default(),
+            playing: [false; 6],
             volume: 75,
             new_playlist_name: None,
             playlist_snapshot: None,
+            playlist_preview: Default::default(),
             queue: vec![],
             queue_selected: None,
             auto: false,
@@ -277,11 +375,11 @@ impl Default for Player {
                 || std::env::var("AMP_SCREENSHOT_VIEW").is_ok_and(|s| s == "combined"),
             dj_open: false,
             lab_open: false,
-            lab: lab::Arrangement::default(),
+            lab: Default::default(),
             preparer: preparer::Preparer::default(),
             addons_open: false,
             cast_open: false,
-            cast: cast::Dashboard::default(),
+            cast: Default::default(),
             addons: addons::Manager::default(),
             status: "Choose your music folder in Library".into(),
             screenshot_frames: 0,
@@ -290,12 +388,78 @@ impl Default for Player {
         }
     }
 }
+fn player_window_size(current: Option<egui::Vec2>, expanded: bool) -> egui::Vec2 {
+    let current = current.unwrap_or(egui::vec2(1100., 170.));
+    if expanded {
+        if current.y >= 300. {
+            current.max(egui::vec2(400., 300.))
+        } else {
+            egui::vec2(current.x.max(400.), 900.)
+        }
+    } else {
+        egui::vec2(current.x.max(400.), 170.)
+    }
+}
 impl Player {
     fn header(&mut self, ui: &mut egui::Ui, title: &str, purple: bool) {
+        if self.workspace.rendering {
+            return;
+        }
         let action = skin::heading(ui, title, purple);
         self.activate(ui, action);
+        self.remote_access_window(ui.ctx());
+        if ui
+            .ctx()
+            .data_mut(|d| d.remove_temp::<bool>(egui::Id::unique("quick-cast-click")))
+            .unwrap_or(false)
+        {
+            self.follow_live_broadcast_owner();
+            let player_only = self.current_cast_player_only();
+            self.cast.request_live(player_only);
+            let _ = self.cast.google.remote(google_cast::Operation::Discover);
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(egui::Id::unique("quick-cast-open"), true));
+            ui.ctx().data_mut(|d| {
+                d.insert_temp(
+                    egui::Id::unique("quick-cast-pane"),
+                    if self.current_cast_player_only() {
+                        0usize
+                    } else {
+                        2usize
+                    },
+                )
+            });
+        }
     }
     fn activate(&mut self, ui: &mut egui::Ui, module: Option<skin::Module>) {
+        if matches!(module, Some(skin::Module::Podcasts)) {
+            self.workspace.enabled = true;
+            self.workspace.pane = 6;
+            return;
+        }
+        if matches!(module, Some(skin::Module::Workspace)) {
+            self.workspace.enabled = true;
+            ui.ctx()
+                .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(760., 540.)));
+            self.player_mode = 0;
+            return;
+        }
+        if self.workspace.enabled {
+            if let Some(module) = module {
+                self.workspace.pane = match module {
+                    skin::Module::Verse => 0,
+                    skin::Module::Library => 1,
+                    skin::Module::Dj => 2,
+                    skin::Module::LabSetup => 3,
+                    skin::Module::Cast => 4,
+                    skin::Module::Addons => 5,
+                    skin::Module::Workspace => 1,
+                    skin::Module::Podcasts => 6,
+                };
+                self.lab_open = self.workspace.pane == 3;
+            }
+            return;
+        }
         let pane = match &module {
             Some(skin::Module::Library) => Some(1),
             Some(skin::Module::Dj) => Some(2),
@@ -328,14 +492,7 @@ impl Player {
             Some(skin::Module::Library) => {
                 self.library_open = true;
                 if self.layout.parent[1] == Some(0) {
-                    ui.ctx().send_viewport_cmd_to(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportCommand::MinInnerSize(egui::vec2(740., 480.)),
-                    );
-                    ui.ctx().send_viewport_cmd_to(
-                        egui::ViewportId::ROOT,
-                        egui::ViewportCommand::InnerSize(egui::vec2(1100., 900.)),
-                    );
+                    self.resize_player(ui.ctx(), true);
                 } else {
                     ui.ctx().send_viewport_cmd_to(
                         egui::ViewportId::from_hash_of("amp-library"),
@@ -367,7 +524,7 @@ impl Player {
             Some(skin::Module::LabSetup) => {
                 self.lab_open = true;
             }
-            None => (),
+            Some(skin::Module::Workspace) | Some(skin::Module::Podcasts) | None => (),
         }
         if pane.is_some() && self.player_mode != 0 {
             self.set_player_mode(ui.ctx(), 0);
@@ -410,9 +567,105 @@ impl Player {
             let _ = tx.send(result);
         });
     }
+    fn request_library_analysis(&mut self) {
+        if self.root.as_os_str().is_empty() {
+            self.preparer.status =
+                "Add a music folder using Add music folder above, then analyze it.".into();
+            return;
+        }
+        if crate::engine::path().is_none() {
+            self.preparer.status = "Install the optional analysis engine in Plugin Manager, then retry. No library scan was started.".into();
+            self.addons.selected = 5;
+            self.addons_open = true;
+            return;
+        }
+        if self.analyze_after_scan {
+            return;
+        }
+        if let Some(library) = &self.library {
+            self.preparer
+                .resume_cached(self.root.clone(), &library.tracks);
+        }
+        self.analyze_after_scan = true;
+        let root = self.root.clone();
+        let (tx, rx) = mpsc::channel();
+        self.analysis_scan = Some(rx);
+        std::thread::spawn(move || {
+            let _ = tx.send(amp_core::scan_job_inputs(&root).map_err(|e| e.to_string()));
+        });
+        self.preparer.status =
+            "Queue running; checking folders for new songs in the background…".into();
+    }
+    fn poll_analysis_scan(&mut self) {
+        let result = self
+            .analysis_scan
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(result) => Some(result),
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    Some(Err("Music source scan interrupted".into()))
+                }
+                Err(mpsc::TryRecvError::Empty) => None,
+            });
+        if let Some(result) = result {
+            self.analysis_scan = None;
+            self.analyze_after_scan = false;
+            match result {
+                Ok(mut library) => {
+                    self.last_scan = std::time::Instant::now();
+                    self.preparer.batch_ref(self.root.clone(), &library.tracks);
+                    if let Some(current) = &self.library {
+                        let known: std::collections::HashMap<_, _> = current
+                            .tracks
+                            .iter()
+                            .map(|track| (&track.path, track))
+                            .collect();
+                        for track in &mut library.tracks {
+                            if let Some(old) = known.get(&track.path) {
+                                let detected = track
+                                    .preparation
+                                    .extensions
+                                    .get("media_kind_detected")
+                                    .cloned();
+                                track.preparation = old.preparation.clone();
+                                if !track.preparation.extensions.contains_key("media_kind")
+                                    && let Some(detected) = detected
+                                {
+                                    track
+                                        .preparation
+                                        .extensions
+                                        .insert("media_kind_detected".into(), detected);
+                                }
+                                track.title = old.title.clone();
+                            }
+                        }
+                    }
+                    for track in &mut library.tracks {
+                        track.preparation.extensions.remove("scan_source_stat");
+                    }
+                    self.accept_library_scan(library);
+                }
+                Err(error) => {
+                    self.preparer.status = format!(
+                        "Could not refresh music sources: {error}. Analysis was not started; retry when the folders are available."
+                    )
+                }
+            }
+        }
+    }
     fn accept_scan(&mut self, snapshot: library_cache::Snapshot) {
+        if let Err(error) = startup_index::remember(
+            &self.root,
+            (!snapshot.sources.is_empty()).then_some(snapshot.sources.as_slice()),
+        ) {
+            self.status =
+                format!("Library loaded, but its startup index could not be saved: {error}");
+        }
+        self.source_roots = snapshot.sources;
         self.accept_library_scan(snapshot.library);
-        if let Some(settings) = snapshot.settings {
+        if let Some(settings) = snapshot.settings
+            && library_cache::accept_settings(&self.run.settings, &settings)
+        {
             self.run.settings = settings;
         }
         for (path, playlist) in snapshot.playlists {
@@ -428,7 +681,23 @@ impl Player {
             }
         }
     }
-    fn accept_library_scan(&mut self, lib: Library) {
+    fn accept_library_scan(&mut self, mut lib: Library) {
+        if let Some(current) = &self.library {
+            let known: std::collections::HashMap<_, _> = current
+                .tracks
+                .iter()
+                .map(|track| (&track.path, track))
+                .collect();
+            for track in &mut lib.tracks {
+                if let Some(old) = known.get(&track.path)
+                    && library_cache::keep_current_preparation(&old.preparation, &track.preparation)
+                {
+                    track.preparation = old.preparation.clone();
+                    track.title = old.title.clone();
+                }
+            }
+        }
+        self.library_generation = self.library_generation.wrapping_add(1);
         let lookup: std::collections::HashMap<_, _> = lib
             .tracks
             .iter()
@@ -495,19 +764,23 @@ impl Player {
                     .any(|voice| voice.load(std::sync::atomic::Ordering::Relaxed))
             })
     }
+    fn library_preview_blocked(&self) -> bool {
+        self.run.auto
+            || self.auxiliary_playing()
+            || self.audio.as_ref().is_some_and(|audio| {
+                (0..6).any(|deck| audio.playing(deck))
+                    || audio
+                        .controls
+                        .sample_playing
+                        .iter()
+                        .any(|p| p.load(std::sync::atomic::Ordering::Relaxed))
+            })
+    }
     fn poll(&mut self) {
         self.preparer.guard_preview(
-            !self.library_open
-                || self.run.auto
-                || self.run.locked
-                || self.smart_preview.active()
-                || self.auxiliary_playing()
-                || self
-                    .audio
-                    .as_ref()
-                    .is_some_and(|a| a.playing(0) || a.playing(1)),
+            !self.library_open || self.smart_preview.active() || self.library_preview_blocked(),
         );
-        if let Some(sample) = self.lab.take_sample() {
+        if let Some(sample) = self.lab.get_mut().and_then(lab::Arrangement::take_sample) {
             let result = self.ensure_audio();
             if let Err(error) = result {
                 self.status = error;
@@ -525,12 +798,24 @@ impl Player {
         if !self.root.as_os_str().is_empty()
             && self.scan.is_none()
             && self.last_scan.elapsed() >= Duration::from_secs(120)
+            && (self.preparer.queue_enabled
+                || if self.workspace.enabled {
+                    self.workspace.pane == 1
+                } else {
+                    self.library_open
+                })
         {
-            self.scan();
+            if self.preparer.queue_enabled {
+                if self.analysis_scan.is_none() {
+                    self.request_library_analysis();
+                    self.last_scan = std::time::Instant::now();
+                }
+            } else {
+                self.scan();
+            }
         }
         if self.smart_preview.active()
             && (self.auxiliary_playing()
-                || self.run.locked
                 || self.run.auto
                 || self.audio.as_ref().is_some_and(|audio| {
                     audio.playing(0)
@@ -555,7 +840,15 @@ impl Player {
         if let Some(engine) = &mut self.audio {
             self.sampler.poll(engine);
         }
+        let analysis_progress = self.preparer.progress();
         self.preparer.poll(&self.root, self.library.as_mut());
+        if let Some(transcription) = self.transcription.get_mut() {
+            transcription.poll();
+        }
+        if self.preparer.progress() != analysis_progress {
+            self.library_generation = self.library_generation.wrapping_add(1);
+        }
+        self.poll_analysis_scan();
         if let Some(rx) = &self.scan {
             match rx.try_recv() {
                 Ok(result) => {
@@ -576,8 +869,16 @@ impl Player {
                             if std::env::var_os("AMP_WAVEFORM_SMOKE").is_some() {
                                 self.selected = Some(0);
                                 self.volume = 0;
-                                self.load_deck(0, 0, false);
-                                self.load_deck(1, 0, false);
+                                for d in 0..if self.rack.six { 6 } else { 2 } {
+                                    self.load_deck(
+                                        d,
+                                        d % self
+                                            .library
+                                            .as_ref()
+                                            .map_or(1, |l| l.tracks.len().max(1)),
+                                        false,
+                                    );
+                                }
                             }
 
                             if self.screenshot_view == "preparation"
@@ -587,7 +888,9 @@ impl Player {
                                 self.preparer.edit(&self.root, t);
                             }
                         }
-                        Err(e) => self.status = e,
+                        Err(e) => {
+                            self.status = e;
+                        }
                     }
                     self.scan = None;
                     self.last_scan = std::time::Instant::now();
@@ -601,7 +904,7 @@ impl Player {
             }
         }
         if let Some(audio) = &self.audio {
-            self.playing = [audio.playing(0), audio.playing(1)];
+            self.playing = std::array::from_fn(|d| audio.playing(d));
             self.fader = audio.fader();
             if self.volume != self.last_master {
                 audio.set_master(self.volume as f32 / 100.);
@@ -609,13 +912,13 @@ impl Player {
                 self.volume = (audio.master_level() * 100.).round().clamp(0., 100.) as u8;
             }
             self.last_master = self.volume;
-            self.channel_gain = [audio.channel_level(0), audio.channel_level(1)];
+            self.channel_gain = std::array::from_fn(|d| audio.channel_level(d));
             if let Some(error) = audio.take_error() {
                 self.run.cancel_automation();
                 self.status = error;
             }
         } else {
-            self.playing = [false; 2];
+            self.playing = [false; 6];
         }
         let decode_errors = self
             .audio
@@ -623,10 +926,23 @@ impl Player {
             .map(|audio| audio.take_decode_errors())
             .unwrap_or_default();
         for (deck, error) in decode_errors {
-            self.recover_failed_song(deck, &error);
+            if deck == 0 && self.podcasts.is_active() {
+                self.status = format!("Podcast playback: {error}");
+                self.podcasts.report(self.status.clone());
+            } else {
+                self.recover_failed_song(deck, &error);
+            }
         }
-        if self.auto
+        if let Some(audio) = &self.audio {
+            for (deck, message) in audio.take_stem_warnings() {
+                self.status = format!("{}: {message}", crate::deck_rack::NAMES[deck]);
+            }
+        }
+        self.player_sequence_tick();
+        if self.playback_owner == playback_owner::Owner::Player
+            && self.auto
             && (self.loaded[0].is_none()
+                || self.player_sequence.advance
                 || self.audio.as_ref().is_some_and(|a| {
                     a.controls.finished[0].load(std::sync::atomic::Ordering::Relaxed)
                 }))
@@ -635,14 +951,18 @@ impl Player {
         }
     }
     fn ensure_audio(&mut self) -> Result<(), String> {
+        self.output_admission.local_allowed()?;
+        if self.podcasts.get().is_some_and(|p| p.cache.purging()) {
+            return Err("Podcast cleanup is finishing; try playback again in a moment.".into());
+        }
         if self.audio.is_none() {
-            let audio = mixer::Engine::new()?;
+            let audio = mixer::Engine::with_output(self.outputs.selected.as_deref())?;
             audio.set_master(self.volume as f32 / 100.);
-            for d in 0..2 {
+            for d in 0..6 {
                 audio.set_gain(d, self.channel_gain[d]);
                 audio.set_rate(d, 1. + self.pitch[d] / 100.);
-                for b in 0..3 {
-                    audio.set_eq(d, b, self.eq[d][b]);
+                for (band, value) in self.eq[d].iter().copied().enumerate() {
+                    audio.set_eq(d, band, value);
                 }
                 audio.set_filter(d, self.filter[d]);
             }
@@ -652,9 +972,18 @@ impl Player {
         Ok(())
     }
     fn load_deck(&mut self, deck: usize, index: usize, play: bool) {
-        self.run.cancel_automation();
-        if deck == 0 && !play {
-            self.auto = false;
+        self.load_deck_owned(deck, index, play, playback_owner::Owner::Dj);
+    }
+    fn load_deck_owned(
+        &mut self,
+        deck: usize,
+        index: usize,
+        play: bool,
+        owner: playback_owner::Owner,
+    ) {
+        if deck >= 6 {
+            self.status = "Choose a valid deck".into();
+            return;
         }
         if let Some(_track) = self
             .library
@@ -669,17 +998,39 @@ impl Player {
                     return;
                 }
             };
+            // Keep analysis/hot-cue guidance in the snapshot; normalize only the playback copy.
+            let mut runtime = track.clone();
+            manual_load::full_track(&mut runtime.preparation);
             let result = self.ensure_audio().and_then(|_| {
-                self.audio
-                    .as_mut()
-                    .unwrap()
-                    .load(deck, &self.root, &track, play)
+                let audio = self.audio.as_mut().unwrap();
+                if owner == playback_owner::Owner::Player {
+                    audio.load_original(deck, &self.root, &runtime, play)
+                } else if self.run.auto || self.auto {
+                    audio.load_automix(deck, &self.root, &runtime, play)
+                } else {
+                    audio.load(deck, &self.root, &runtime, play)
+                }
             });
             if result.is_ok() {
                 self.loaded_origin[deck] = Some(self.root.clone());
             }
             match result {
                 Ok(()) => {
+                    if play {
+                        self.claim_playback(owner, deck, false);
+                    }
+                    self.run.regular_deck_replaced(deck);
+                    self.cancel_deck_automation(deck);
+                    if deck == 0 && !play {
+                        self.auto = false;
+                    }
+                    if owner == playback_owner::Owner::Player {
+                        self.pitch[deck] = 0.;
+                        if let Some(audio) = &self.audio {
+                            let _ = audio.sync(deck, false);
+                            audio.set_rate(deck, 1.);
+                        }
+                    }
                     if let Some(rate) = track
                         .preparation
                         .extensions
@@ -691,7 +1042,7 @@ impl Player {
                             a.set_rate(deck, 1. + self.pitch[deck] / 100.);
                         }
                     }
-                    if !play {
+                    if !play && self.pair().contains(&deck) {
                         self.run.preloaded = Some((deck, index));
                     }
                     if play {
@@ -704,6 +1055,9 @@ impl Player {
                     self.loaded_origin[deck] = Some(self.root.clone());
                     self.loaded[deck] = Some(index);
                     self.playing[deck] = play;
+                    if play && owner == playback_owner::Owner::Player {
+                        self.player_song_started();
+                    }
                     self.status = format!("Deck {} / {}", deck + 1, track.title);
                 }
                 Err(e) => self.status = e,
@@ -711,46 +1065,59 @@ impl Player {
         }
     }
     fn play(&mut self, deck: usize, index: usize) {
-        self.load_deck(deck, index, true);
+        self.flush_podcast_progress();
+        self.podcasts.leave_playback();
+        self.load_deck_owned(deck, index, true, playback_owner::Owner::Player);
     }
     fn play_cue(&mut self, deck: usize, index: usize, seconds: f64) {
-        self.run.cancel_automation();
+        if deck >= 6 || !seconds.is_finite() || seconds < 0. {
+            self.status = "Choose a valid cue and deck".into();
+            return;
+        }
         if let Some(_track) = self
             .library
             .as_ref()
             .and_then(|l| l.tracks.get(index))
             .cloned()
         {
-            let mut track = match self.fresh_track(index) {
+            let track = match self.fresh_track(index) {
                 Ok(track) => track,
                 Err(e) => {
                     self.status = e;
                     return;
                 }
             };
-            track.preparation.cue_in = seconds;
-            if track.preparation.cue_out.is_some_and(|out| out <= seconds) {
+            let mut runtime = track.clone();
+            if let Err(error) = manual_load::seek(&mut runtime.preparation, seconds) {
+                self.status = error;
                 return;
             }
             let result = self.ensure_audio().and_then(|_| {
                 self.audio
                     .as_mut()
                     .unwrap()
-                    .load(deck, &self.root, &track, true)
+                    .load_original(deck, &self.root, &runtime, true)
             });
             match result {
                 Ok(()) => {
+                    self.cancel_deck_automation(deck);
                     self.loaded_snapshot[deck] = Some(track.clone());
                     self.loaded_origin[deck] = Some(self.root.clone());
                     self.loaded[deck] = Some(index);
                     self.status = format!("Deck {} cue {:.2}s", deck + 1, seconds);
+                    self.claim_playback(playback_owner::Owner::Player, deck, false);
                 }
                 Err(e) => self.status = e,
             }
         }
     }
+    fn cancel_deck_automation(&mut self, deck: usize) {
+        if self.pair().contains(&deck) {
+            self.run.cancel_automation();
+        }
+    }
     fn stop(&mut self, deck: usize) {
-        self.run.cancel_automation();
+        self.cancel_deck_automation(deck);
         if let Some(audio) = &mut self.audio {
             audio.stop(deck);
         }
@@ -760,45 +1127,50 @@ impl Player {
         }
         self.status = format!("Deck {} stopped", deck + 1);
     }
-    fn toggle_deck(&mut self, deck: usize) {
-        self.run.cancel_automation();
-        if let Some(audio) = &self.audio
-            && audio.loaded(deck)
-            && !audio.controls.finished[deck].load(std::sync::atomic::Ordering::Relaxed)
-        {
-            audio.toggle(deck);
-        } else if let Some(track) = self.loaded_snapshot[deck].clone() {
-            let root = self.loaded_origin[deck].as_deref().unwrap_or(&self.root);
-            if let Some(audio) = &mut self.audio
-                && let Err(error) = audio.load(deck, root, &track, true)
-            {
-                self.status = error;
-            }
-        } else if let Some(i) = self.loaded[deck].or(self.selected) {
-            self.play(deck, i);
+    /// Explicit unload: stop this voice and forget its track, not the library file.
+    fn clear_deck(&mut self, deck: usize) {
+        if deck >= 6 {
+            return;
         }
+        self.run.regular_deck_replaced(deck);
+        self.cancel_deck_automation(deck);
+        if self.pair().contains(&deck) {
+            self.auto = false;
+        }
+        if let Some(audio) = &mut self.audio {
+            audio.stop(deck);
+        }
+        self.loaded[deck] = None;
+        self.loaded_snapshot[deck] = None;
+        self.loaded_origin[deck] = None;
+        self.pending_load[deck] = None;
+        self.playing[deck] = false;
+        self.jog_resume[deck] = None;
+        self.jog_auto[deck] = false;
+        self.jog_target[deck] = 0.;
+        self.jog_angle[deck] = 0.;
+        self.waveforms[deck] = Default::default();
+        self.status = format!("{} cleared", deck_rack::NAMES[deck]);
+    }
+    fn toggle_deck(&mut self, deck: usize) {
+        self.toggle_owned_deck(playback_owner::Owner::Dj, deck);
     }
     fn sync_deck(&mut self, deck: usize) {
-        let bpm = |d: usize| self.loaded_track(d).and_then(|t| t.preparation.bpm);
-        if let (Some(own), Some(other)) = (bpm(deck), bpm(1 - deck)) {
-            let target = other * (1. + self.pitch[1 - deck] as f64 / 100.);
-            let requested = ((target / own - 1.) * 100.) as f32;
-            self.pitch[deck] = requested.clamp(-16., 16.);
-            if let Some(audio) = &self.audio {
-                audio.set_rate(deck, 1. + self.pitch[deck] / 100.);
-            }
-            self.status = if requested.abs() > 16. {
-                "Tempo request exceeds pitch range; limited to +/-16%."
-            } else {
-                "Tempo matched. Beat phase and key lock are not implemented."
-            }
-            .into();
-        } else {
-            self.status = "Prepare both tracks with BPM metadata before tempo matching.".into();
+        if let Some(a) = &self.audio {
+            let enabled = !a.controls.synced[deck].load(std::sync::atomic::Ordering::Relaxed);
+            self.status = match a.sync(deck, enabled) {
+                Ok(()) => if enabled {
+                    "Master clock sync enabled; optional Key Lock is under Advanced"
+                } else {
+                    "Deck sync disabled"
+                }
+                .into(),
+                Err(e) => e,
+            };
         }
     }
     fn auto_crossfade(&mut self) {
-        if self.run.profile.is_some() {
+        if self.run.profile.is_some() || self.run.has_regular_playlist() {
             if let Err(error) = self.execute_control(control::Action::MixNext { immediate: true }) {
                 self.status = error;
             }
@@ -826,10 +1198,34 @@ impl Player {
         }
     }
     fn next(&mut self) {
+        if self.podcasts.next_episode() {
+            return;
+        }
+        self.player_sequence.advance = false;
         if self.repeat_one
             && let Some(i) = self.loaded[0]
         {
             self.play(0, i);
+            return;
+        }
+        if self.player_sequence.smart.is_some() {
+            if let Some(index) = self.next_player_smart() {
+                if let Some(at) = self.queue.iter().position(|candidate| *candidate == index) {
+                    self.queue.remove(at);
+                }
+                self.play(0, index);
+                if self.loaded[0] != Some(index) {
+                    if let Some(track) = self.library.as_ref().and_then(|l| l.tracks.get(index)) {
+                        self.player_sequence
+                            .failed
+                            .push(amp_core::show::song_id(track));
+                    }
+                    self.player_sequence.advance = true;
+                }
+            } else {
+                self.auto = false;
+                self.status = "No more matching Smart Playlist songs".into();
+            }
             return;
         }
         if !self.queue.is_empty() {
@@ -885,25 +1281,36 @@ impl Player {
         }
     }
     fn connect_music_root(&mut self, root: PathBuf) {
+        if !root.is_dir() {
+            self.status = "That music folder is unavailable. Existing library and playback were kept. Choose a connected folder.".into();
+            return;
+        }
         self.checkpoint(true);
         let recover = self.recovery.enabled();
         if let Some(audio) = &mut self.audio {
-            audio.stop(0);
-            audio.stop(1);
+            for deck in 0..6 {
+                audio.stop(deck);
+            }
+            audio.discard_library_stem_modes();
         }
         self.auto = false;
-        self.loaded = [None; 2];
-        self.loaded_snapshot = [None, None];
+        self.loaded = [None; 6];
+        self.loaded_snapshot = Default::default();
+        self.player_sequence = Default::default();
         self.waveforms = Default::default();
         self.preview_wave = Default::default();
         self.run.cancel_automation();
-        self.playing = [false; 2];
+        self.playing = [false; 6];
         self.selected = None;
         self.queue.clear();
         self.queue_selected = None;
         self.library = None;
+        self.library_generation = self.library_generation.wrapping_add(1);
+        self.source_roots.clear();
         self.show_editor.open = false;
         self.scan = None; // Discard any previous root's in-flight result.
+        self.analyze_after_scan = false;
+        self.analysis_scan = None;
         self.root = root;
         if recover {
             self.recovery = session::Recovery::open(&self.root);
@@ -913,31 +1320,65 @@ impl Player {
             let _ = std::fs::create_dir_all(parent);
         }
         let _ = std::fs::write(pref, self.root.to_string_lossy().as_bytes());
+        if let Err(error) = startup_index::remember(&self.root, None) {
+            self.status =
+                format!("Music folder selected, but its startup index could not be saved: {error}");
+        }
         self.scan();
+    }
+    fn create_named_playlist(&mut self, name: &str) -> Result<(), String> {
+        if self.root.as_os_str().is_empty() {
+            return Err("Add a music folder first, then create a playlist.".into());
+        }
+        if name.trim().is_empty() {
+            return Err("Enter a playlist name".into());
+        }
+        let directory = self.root.join("ampdj/playlists");
+        std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+        self.create_playlist_at(
+            directory.join(format!("playlist-{}.json", amp_core::coordination::token())),
+            name,
+        )
     }
     fn create_playlist_at(&mut self, path: PathBuf, name: &str) -> Result<(), String> {
         let name = name.trim();
         if name.is_empty() {
             return Err("Enter a playlist name".into());
         }
-        if path.exists() {
+        if path.exists() || amp_core::catalog_db::read(&path)?.is_some() {
             return Err("A playlist already exists there. Choose a different filename.".into());
         }
+        let tracks: Option<Vec<_>> = self
+            .queue
+            .iter()
+            .map(|index| {
+                self.library
+                    .as_ref()?
+                    .tracks
+                    .get(*index)
+                    .map(|t| t.path.clone())
+            })
+            .collect();
+        let tracks = tracks
+            .ok_or("Some queued songs are not indexed. Refresh the library before saving.")?;
         let list = Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: name.into(),
-            tracks: Vec::new(),
+            tracks,
         };
         list.save_in_library(&path, &self.root)
             .map_err(|error| error.to_string())?;
         let saved = Playlist::load(&path, &self.root).map_err(|error| error.to_string())?;
-        self.queue.clear();
         self.queue_selected = None;
         self.playlist_snapshot = Some((path.clone(), saved.clone()));
         self.dj_browser.playlists.push((path, saved));
         self.new_playlist_name = None;
-        self.status = "Playlist created. Add songs from Library, then Save.".into();
+        self.status = format!(
+            "Playlist created with {} songs. Add songs from Library, then Save.",
+            self.queue.len()
+        );
         Ok(())
     }
     fn save_playlist(&mut self) {
@@ -970,6 +1411,10 @@ impl Player {
             return;
         };
         let list = Playlist {
+            companion_available: self
+                .playlist_snapshot
+                .as_ref()
+                .is_some_and(|(_, p)| p.companion_available),
             sync: self
                 .playlist_snapshot
                 .as_ref()
@@ -1025,6 +1470,9 @@ impl Player {
                             .collect();
                         if let Some(indices) = indices {
                             self.queue = indices;
+                            self.run.load_regular_playlist(list.name.clone());
+                            self.player_sequence.smart = None;
+                            self.player_sequence.explicit_regular = true;
                             self.queue_selected = None;
                             self.status = "Playlist loaded".into();
                             self.playlist_snapshot = Some((path.clone(), list.clone()));
@@ -1038,8 +1486,11 @@ impl Player {
         }
     }
     fn folder_tree(ui: &mut egui::Ui, folder: &Folder, path: &Path, selected: &mut PathBuf) {
+        if !folder.has_tracks() {
+            return;
+        }
         let mut label = egui::text::LayoutJob::simple_singleline(
-            folder.name.clone(),
+            amp_core::music_sources::display_name(&folder.name).to_owned(),
             egui::TextStyle::Body.resolve(ui.style()),
             skin::accent(ui),
         );
@@ -1077,13 +1528,35 @@ impl Player {
         match pane {
             0 => self.player_ui(ui),
             1 => self.library_ui(ui),
-            2 => self.dj_ui(ui),
+            2 => {
+                self.dj_ui(ui);
+                self.dj_settings_window(ui.ctx());
+            }
             3 => {
                 let action = self.lab.show(ui, &self.root, self.library.as_ref());
                 self.activate(ui, action);
             }
             4 => self.cast_ui(ui),
+            6 => self.podcasts.show(ui),
             _ => self.addons_ui(ui),
+        }
+        let id = egui::Id::unique("quick-cast-open");
+        let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+        if open
+            && !self.workspace.enabled
+            && ui
+                .ctx()
+                .data(|d| d.get_temp::<usize>(egui::Id::unique("quick-cast-pane")))
+                == Some(pane)
+        {
+            egui::Window::new("Cast current audio")
+                .id(egui::Id::unique("quick-cast-window"))
+                .open(&mut open)
+                .default_width(480.)
+                .resizable(true)
+                .vscroll(true)
+                .show(ui.ctx(), |ui| self.cast.quick_cast(ui));
+            ui.ctx().data_mut(|d| d.insert_temp(id, open));
         }
     }
     fn group_ui(&mut self, ui: &mut egui::Ui, host: usize) {
@@ -1116,12 +1589,6 @@ impl Player {
                     false
                 })
                 .collect();
-            let expanded_dj = window_layout::dj_pads_below(
-                ui.ctx().viewport_rect().size(),
-                ui.input(|i| {
-                    i.viewport().maximized == Some(true) || i.viewport().fullscreen == Some(true)
-                }),
-            );
             let wave_height = ui
                 .ctx()
                 .data_mut(|d| d.get_persisted::<f32>(egui::Id::unique("dj-wave-height")))
@@ -1131,23 +1598,14 @@ impl Player {
                 if p == 0 {
                     135.
                 } else if p == 2 {
-                    (if expanded_dj { 1100. } else { 920. }) + (wave_height - 72.).max(0.) * 2.
+                    (if self.rack.six { 700. } else { 850. }) + (wave_height - 72.).max(0.) * 2.
                 } else {
                     680.
                 }
             };
             let minimum_height: f32 = panes.iter().map(|&p| preferred(p) + 8.).sum();
             let available = ui.available_size().max(egui::vec2(1., 1.));
-            let minimum_width = if panes.contains(&2) {
-                900. + self
-                    .sides
-                    .iter()
-                    .filter(|side| !side.config.collapsed)
-                    .count() as f32
-                    * 250.
-            } else {
-                900.
-            };
+            let minimum_width = if panes.contains(&2) { 980. } else { 900. };
             let scale = (available.x / minimum_width)
                 .min(available.y / minimum_height)
                 .min(1.);
@@ -1230,18 +1688,39 @@ impl Player {
         }
     }
     fn player_ui(&mut self, ui: &mut egui::Ui) {
+        if self.workspace.rendering {
+            let short = ui.available_height() < 600.;
+            self.workspace_player_transport(ui);
+            ui.add_space(if short { 0. } else { 8. });
+            skin::panel(ui, false, |ui| {
+                ui.set_min_width(ui.available_width());
+                self.player_toolbar(ui);
+            });
+            return;
+        }
         skin::panel(ui, true, |ui| {
             self.header(ui, "AMP VERSE", true);
-            ui.horizontal(|ui| {
+            ui.horizontal_wrapped(|ui| {
                 for (caption, action) in [
                     ("|<", 0),
-                    (if self.playing[0] { "PAUSE" } else { "PLAY" }, 1),
+                    (
+                        if self.playback_owner == playback_owner::Owner::Player && self.playing[0] {
+                            "PAUSE"
+                        } else {
+                            "PLAY"
+                        },
+                        1,
+                    ),
                     ("STOP", 2),
                     (">|", 3),
                 ] {
                     let icon = match action {
                         0 => icons::Icon::Previous,
-                        1 if self.playing[0] => icons::Icon::Pause,
+                        1 if self.playback_owner == playback_owner::Owner::Player
+                            && self.playing[0] =>
+                        {
+                            icons::Icon::Pause
+                        }
                         1 => icons::Icon::Play,
                         2 => icons::Icon::Stop,
                         _ => icons::Icon::Next,
@@ -1257,27 +1736,47 @@ impl Player {
                                 }
                             }
                             1 => {
-                                if let Some(i) =
+                                if self.podcasts.is_active() {
+                                    self.toggle_player();
+                                } else if let Some(i) =
                                     self.selected.filter(|i| Some(*i) != self.loaded[0])
                                 {
                                     self.play(0, i);
                                 } else {
-                                    self.toggle_deck(0);
-                                }
-                                if let Some(a) = &self.audio {
-                                    a.set_fader(0.);
+                                    self.toggle_player();
                                 }
                             }
-                            2 => self.stop(0),
+                            2 => self.stop_player(),
                             _ => self.next(),
                         }
                     }
                 }
+                if self.workspace.rendering {
+                    let (rect, _) =
+                        ui.allocate_exact_size(egui::vec2(62., 62.), egui::Sense::hover());
+                    organized_library::artwork(
+                        ui,
+                        rect,
+                        self.loaded_origin[0].as_deref().unwrap_or(&self.root),
+                        self.loaded_track(0),
+                        self.title(0),
+                    );
+                }
                 skin::display(ui, |ui| {
                     let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
-                    let duration = self
-                        .loaded_track(0)
-                        .and_then(|t| t.preparation.analysis.as_ref().map(|a| a.duration));
+                    let duration = self.loaded_track(0).and_then(|t| {
+                        t.preparation
+                            .analysis
+                            .as_ref()
+                            .map(|a| a.duration)
+                            .or_else(|| {
+                                t.preparation
+                                    .extensions
+                                    .get("duration_seconds")
+                                    .and_then(|v| v.as_f64())
+                                    .filter(|d| *d > 0.)
+                            })
+                    });
                     ui.horizontal(|ui| {
                         ui.label(
                             RichText::new(format!(
@@ -1369,46 +1868,296 @@ impl Player {
                     );
                 }
             });
-            ui.horizontal(|ui| {
-                self.player_view_menu(ui);
-                if ui
-                    .button(if self.library_open && (self.layout.parent[1] == Some(0)) {
+            self.player_toolbar(ui);
+        });
+    }
+    fn player_toolbar(&mut self, ui: &mut egui::Ui) {
+        let workspace = self.workspace.rendering;
+        let controls = |ui: &mut egui::Ui| {
+            self.player_view_menu(ui);
+            if ui
+                .button(
+                    if if workspace {
+                        self.workspace.player_library_open
+                    } else {
+                        self.library_open && self.layout.parent[1] == Some(0)
+                    } {
                         "Collapse Library"
                     } else {
                         "Expand Library"
-                    })
-                    .clicked()
-                {
-                    if self.library_open && self.layout.parent[1] == Some(0) {
-                        self.library_open = false;
-                        self.resize_player(ui.ctx(), false);
-                    } else {
-                        self.library_open = true;
-                        self.layout.parent[1] = Some(0);
-                        self.resize_player(ui.ctx(), true);
-                    }
-                }
-                if ui.checkbox(&mut self.auto, "Play queue").changed() && self.auto {
-                    self.run.cancel_automation();
-                }
-                ui.toggle_value(&mut self.shuffle, "Shuffle");
-                ui.toggle_value(&mut self.repeat_one, "Repeat one");
-                if ui
-                    .button("EQ")
-                    .on_hover_text("Open expanded EQ in Library")
-                    .clicked()
-                {
-                    self.library_page = 7;
+                    },
+                )
+                .clicked()
+            {
+                if workspace {
+                    self.workspace.player_library_open = !self.workspace.player_library_open;
+                } else if self.library_open && self.layout.parent[1] == Some(0) {
+                    self.library_open = false;
+                    self.resize_player(ui.ctx(), false);
+                } else {
                     self.library_open = true;
                     self.layout.parent[1] = Some(0);
                     self.resize_player(ui.ctx(), true);
                 }
+            }
+            ui.checkbox(&mut self.auto, "Play queue");
+            ui.toggle_value(&mut self.shuffle, "Shuffle");
+            ui.toggle_value(&mut self.repeat_one, "Repeat one");
+            if ui
+                .button("EQ")
+                .on_hover_text("Open expanded EQ in Library")
+                .clicked()
+            {
+                self.library_page = 7;
+                if self.workspace.enabled {
+                    self.workspace.pane = 1;
+                }
+                self.library_open = true;
+                self.layout.parent[1] = Some(0);
+                self.resize_player(ui.ctx(), true);
+            }
 
+            if workspace {
+                ui.add(egui::Label::new(RichText::new(&self.status).weak()).truncate());
+            } else {
                 ui.weak(&self.status);
-            });
+            }
+        };
+        if workspace && ui.available_width() < 650. {
+            ui.horizontal_wrapped(controls);
+        } else {
+            ui.horizontal(controls);
+        }
+    }
+    fn workspace_player_transport(&mut self, ui: &mut egui::Ui) {
+        skin::panel(ui, true, |ui| {
+            ui.set_min_width(ui.available_width());
+            let wide = ui.available_width() >= 1050.;
+            let short = ui.available_height() < 600.;
+            let row_height = if wide { 72. } else { 62. };
+            ui.allocate_ui_with_layout(
+                egui::vec2(ui.available_width(), row_height),
+                egui::Layout::left_to_right(egui::Align::Center),
+                |ui| {
+                    ui.set_min_height(row_height);
+                    self.workspace_player_buttons(ui);
+                    let art_size = if wide { 72. } else { 62. };
+                    let (rect, _) = ui
+                        .allocate_exact_size(egui::vec2(art_size, art_size), egui::Sense::hover());
+                    organized_library::artwork(
+                        ui,
+                        rect,
+                        self.loaded_origin[0].as_deref().unwrap_or(&self.root),
+                        self.loaded_track(0),
+                        self.title(0),
+                    );
+                    let fixed = if wide {
+                        140. + 180. + 180. + ui.spacing().item_spacing.x * 5. + 2.
+                    } else {
+                        0.
+                    };
+                    let width = (ui.available_width() - fixed).max(120.);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width, art_size),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            ui.set_min_width(width);
+                            ui.set_max_width(width);
+                            if short {
+                                ui.spacing_mut().item_spacing.y = 2.;
+                            }
+                            self.workspace_player_track_display(ui);
+                        },
+                    );
+                    if wide {
+                        self.workspace_player_scope(ui, 140.);
+                        self.workspace_player_volume(ui);
+                        self.workspace_player_eq(ui);
+                    }
+                },
+            );
+            if !wide {
+                if !short {
+                    ui.add_space(8.);
+                }
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), 60.),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        ui.set_min_height(60.);
+                        let scope_width =
+                            (ui.available_width() - 360. - ui.spacing().item_spacing.x * 4. - 2.)
+                                .max(90.);
+                        self.workspace_player_scope(ui, scope_width);
+                        self.workspace_player_volume(ui);
+                        self.workspace_player_eq(ui);
+                    },
+                );
+            }
         });
     }
+    fn workspace_player_buttons(&mut self, ui: &mut egui::Ui) {
+        for action in 0..4 {
+            let playing = self.playback_owner == playback_owner::Owner::Player && self.playing[0];
+            let (icon, label) = match action {
+                0 => (icons::Icon::Previous, "Previous"),
+                1 if playing => (icons::Icon::Pause, "Pause"),
+                1 => (icons::Icon::Play, "Play"),
+                2 => (icons::Icon::Stop, "Stop"),
+                _ => (icons::Icon::Next, "Next"),
+            };
+            if icons::button(ui, icon, "", action == 1, egui::vec2(58., 48.))
+                .on_hover_text(label)
+                .clicked()
+            {
+                match action {
+                    0 => {
+                        if let Some(index) = self.loaded[0] {
+                            self.play(0, index.saturating_sub(1));
+                        }
+                    }
+                    1 => {
+                        if self.podcasts.is_active() {
+                            self.toggle_player();
+                        } else if self.loaded[0].is_none() && !self.queue.is_empty() {
+                            let index = self.queue.remove(0);
+                            self.play(0, index);
+                        } else if self.loaded[0].is_none()
+                            && let Some(index) = self.selected
+                        {
+                            self.play(0, index);
+                        } else {
+                            self.toggle_player();
+                        }
+                    }
+                    2 => self.stop_player(),
+                    _ => self.next(),
+                }
+            }
+        }
+    }
+    fn workspace_player_track_display(&self, ui: &mut egui::Ui) {
+        let position = self
+            .audio
+            .as_ref()
+            .map_or(0., |audio| audio.source_position(0));
+        let duration = self.loaded_track(0).and_then(|track| {
+            track
+                .preparation
+                .analysis
+                .as_ref()
+                .map(|analysis| analysis.duration)
+                .or_else(|| {
+                    track
+                        .preparation
+                        .extensions
+                        .get("duration_seconds")
+                        .and_then(|value| value.as_f64())
+                        .filter(|duration| *duration > 0.)
+                })
+        });
+        ui.label(
+            RichText::new(format!(
+                "{:02}:{:02} / {}",
+                position as u64 / 60,
+                position as u64 % 60,
+                duration
+                    .map(|duration| format!(
+                        "{:02}:{:02}",
+                        duration as u64 / 60,
+                        duration as u64 % 60
+                    ))
+                    .unwrap_or_else(|| "--:--".into())
+            ))
+            .monospace()
+            .size(23.)
+            .color(skin::accent(ui)),
+        );
+        ui.add(egui::Label::new(RichText::new(self.title(0)).strong()).truncate());
+        let metadata = self
+            .loaded_track(0)
+            .map(|track| {
+                format!(
+                    "{} · {} BPM · {}",
+                    track
+                        .path
+                        .extension()
+                        .unwrap_or_default()
+                        .to_string_lossy()
+                        .to_uppercase(),
+                    track
+                        .preparation
+                        .bpm
+                        .map(|bpm| format!("{bpm:.1}"))
+                        .unwrap_or_else(|| "--".into()),
+                    track.preparation.harmonic_key.as_deref().unwrap_or("--")
+                )
+            })
+            .unwrap_or_else(|| "Local / network library".into());
+        ui.add(egui::Label::new(RichText::new(metadata).weak()).truncate());
+    }
+    fn workspace_player_scope(&self, ui: &mut egui::Ui, width: f32) {
+        let (rect, response) = ui.allocate_exact_size(egui::vec2(width, 48.), egui::Sense::hover());
+        ui.painter().rect_filled(rect, 2., egui::Color32::BLACK);
+        if let Some(audio) = &self.audio {
+            for index in 0..48 {
+                let value = f32::from_bits(
+                    audio.controls.scope[0][index * 2].load(std::sync::atomic::Ordering::Relaxed),
+                )
+                .clamp(0., 1.);
+                let x = rect.left() + index as f32 * rect.width() / 48.;
+                ui.painter().line_segment(
+                    [
+                        egui::pos2(x, rect.bottom() - 3.),
+                        egui::pos2(x, rect.bottom() - 3. - value * 42.),
+                    ],
+                    egui::Stroke::new(1.5, GOLD),
+                );
+            }
+        }
+        response.on_hover_text("Live measured output amplitude history");
+    }
+    fn workspace_player_volume(&mut self, ui: &mut egui::Ui) {
+        ui.allocate_ui_with_layout(
+            egui::vec2(180., 54.),
+            egui::Layout::top_down(egui::Align::Center),
+            |ui| {
+                ui.set_min_width(180.);
+                ui.spacing_mut().slider_width = 100.;
+                ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Vol"));
+            },
+        );
+    }
+    fn workspace_player_eq(&mut self, ui: &mut egui::Ui) {
+        ui.allocate_ui_with_layout(
+            egui::vec2(180., 54.),
+            egui::Layout::top_down(egui::Align::Min),
+            |ui| {
+                ui.set_min_width(180.);
+                ui.spacing_mut().item_spacing.y = 0.;
+                ui.spacing_mut().interact_size.y = 18.;
+                ui.spacing_mut().slider_width = 115.;
+                for (band, label) in ["Low", "Mid", "High"].iter().enumerate() {
+                    if ui
+                        .add(
+                            egui::Slider::new(&mut self.eq[0][band], -12. ..=12.)
+                                .text(*label)
+                                .show_value(false),
+                        )
+                        .on_hover_text("Player EQ · -12 to +12 dB")
+                        .changed()
+                        && let Some(audio) = &self.audio
+                    {
+                        audio.set_eq(0, band, self.eq[0][band]);
+                    }
+                }
+            },
+        );
+    }
     fn set_player_mode(&mut self, ctx: &egui::Context, mode: u8) {
+        if mode != 0 {
+            self.workspace.enabled = false;
+        }
         self.player_mode = mode;
         if mode == 0 {
             ctx.send_viewport_cmd_to(
@@ -1480,6 +2229,7 @@ impl Player {
                             }),
                         );
                     }
+                    self.player_fade_controls(ui);
                 });
         });
     }
@@ -1546,7 +2296,16 @@ impl Player {
                 ui.horizontal(|ui| {
                     for (label, action) in [
                         ("|<", 0),
-                        (if self.playing[0] { "Pause" } else { "Play" }, 1),
+                        (
+                            if self.playback_owner == playback_owner::Owner::Player
+                                && self.playing[0]
+                            {
+                                "Pause"
+                            } else {
+                                "Play"
+                            },
+                            1,
+                        ),
                         ("Stop", 2),
                         (">|", 3),
                     ] {
@@ -1565,13 +2324,10 @@ impl Player {
                                             self.play(0, i);
                                         }
                                     } else {
-                                        self.toggle_deck(0);
-                                    }
-                                    if let Some(a) = &self.audio {
-                                        a.set_fader(0.);
+                                        self.toggle_player();
                                     }
                                 }
-                                2 => self.stop(0),
+                                2 => self.stop_player(),
                                 _ => self.next(),
                             }
                         }
@@ -1596,43 +2352,27 @@ impl Player {
         });
     }
     fn resize_player(&self, ctx: &egui::Context, expanded: bool) {
+        if self.workspace.enabled {
+            return;
+        }
         ctx.send_viewport_cmd_to(
             egui::ViewportId::ROOT,
             egui::ViewportCommand::MinInnerSize(if expanded {
-                egui::vec2(740., 480.)
+                egui::vec2(400., 300.)
             } else {
-                egui::vec2(740., 160.)
+                egui::vec2(400., 150.)
             }),
         );
         ctx.send_viewport_cmd_to(
             egui::ViewportId::ROOT,
-            egui::ViewportCommand::InnerSize(if expanded {
-                egui::vec2(1100., 900.)
-            } else {
-                egui::vec2(1100., 170.)
-            }),
+            egui::ViewportCommand::InnerSize(player_window_size(
+                ctx.input(|i| i.viewport().inner_rect.map(|r| r.size())),
+                expanded,
+            )),
         );
     }
     fn expand_smart_list(&mut self) {
-        if self.queue.len() > 1000 {
-            self.status = "Smart Lists support up to 1,000 songs at a time".into();
-            return;
-        }
-        if let Some(lib) = &self.library {
-            let songs: Vec<_> = lib.tracks.iter().map(|t| &t.preparation).collect();
-            match amp_core::smart::curate(&songs, &self.queue, self.queue.len().saturating_add(20))
-            {
-                Ok(queue) => {
-                    let added = queue.len().saturating_sub(self.queue.len());
-                    self.queue = queue;
-                    self.queue_selected = None;
-                    self.status = format!(
-                        "Smart List added {added} prepared neighbors within ±6% BPM and ±20% energy; review and Save the playlist"
-                    );
-                }
-                Err(e) => self.status = e,
-            }
-        }
+        self.find_suggestions(self.queue.clone(), true);
     }
     fn curate_playlist(&mut self) {
         if self.queue.len() > 1000 {
@@ -1668,23 +2408,59 @@ impl Player {
             self.control_status = "Restarting show control; audio continues".into();
             return;
         }
+        if self.control_start.is_some() {
+            return;
+        }
         self.control_restart = None;
-        self.control = None;
-        match control::Control::start(
-            ctx,
-            &self.control_bind,
-            if self.control_password.is_empty() {
-                None
-            } else {
-                Some(self.control_password.clone())
-            },
-        ) {
+        let input = remote_catalog::Input {
+            library: self.library.clone(),
+            settings: self.run.settings.clone(),
+            playlists: self.dj_browser.playlists.clone(),
+        };
+        let key = self.control_catalog_key();
+        let address = self.control_bind.clone();
+        let password = (!self.control_password.is_empty()).then(|| self.control_password.clone());
+        let (tx, rx) = mpsc::channel();
+        self.control_start = Some(rx);
+        self.control_status = "Preparing Remote / Web UI library... Playback continues.".into();
+        let context = ctx.clone();
+        std::thread::spawn(move || {
+            let value =
+                remote_catalog::build(input.library.as_ref(), &input.settings, &input.playlists);
+            let _ = tx.send(remote_catalog::Startup {
+                key,
+                value,
+                address,
+                password,
+            });
+            context.request_repaint();
+        });
+    }
+    fn poll_control_start(&mut self, ctx: &egui::Context) {
+        let Some(rx) = &self.control_start else {
+            return;
+        };
+        let startup = match rx.try_recv() {
+            Ok(value) => value,
+            Err(mpsc::TryRecvError::Empty) => return,
+            Err(mpsc::TryRecvError::Disconnected) => {
+                self.control_start = None;
+                self.control_status =
+                    "Remote library preparation stopped. Try Start remote service again.".into();
+                return;
+            }
+        };
+        self.control_start = None;
+        match control::Control::start(ctx, &startup.address, startup.password) {
             Ok(c) => {
-                self.control_status = format!("Companion HTTP / WebSocket · {}", c.address);
-                c.catalog(self.control_catalog());
+                c.catalog(startup.value);
+                self.remote_catalog = Default::default();
+                self.remote_catalog.ready(startup.key);
+                self.control_status = format!("Companion HTTP / WebSocket - {}", c.address);
+                self.catalog_updated = std::time::Instant::now() - Duration::from_secs(3);
                 self.control = Some(c);
             }
-            Err(e) => self.control_status = format!("Show control unavailable: {e}"),
+            Err(error) => self.control_status = format!("Remote unavailable: {error}"),
         }
     }
     fn poll_control(&mut self) {
@@ -1730,124 +2506,87 @@ impl Player {
             Err(error) => self.status = format!("Could not open Smart Playlist: {error}"),
         }
     }
+    fn loaded_auto_playlist_info(&self) -> Option<(&str, &str)> {
+        if let Some(profile) = &self.run.profile {
+            Some((
+                "Smart",
+                dj_browser::smart_playlist_name(profile, &self.run.settings),
+            ))
+        } else if self.run.has_regular_playlist() {
+            self.run.playlist.as_deref().map(|name| ("Regular", name))
+        } else {
+            None
+        }
+    }
     fn performance_controls(&mut self, ui: &mut egui::Ui) {
-        let original_style = ui.style().clone();
-        ui.style_mut()
-            .text_styles
-            .insert(egui::TextStyle::Button, egui::FontId::proportional(16.));
-        ui.style_mut()
-            .text_styles
-            .insert(egui::TextStyle::Body, egui::FontId::proportional(16.));
-        ui.spacing_mut().button_padding = egui::vec2(12., 10.);
-
-        let mut selected = self.run.choice.clone();
-        let mut context_edit = None;
+        let loaded = self.loaded_auto_playlist_info().is_some();
+        let mut enabled = self.run.auto;
+        let old = enabled;
+        skin::switch(ui, &mut enabled, "Auto Mix");
+        if enabled != old {
+            self.run.failure = None;
+            let result = if enabled && !loaded {
+                Err("Load a playlist for Auto Mix from the DJ Library first.".into())
+            } else {
+                self.execute_control(control::Action::AutoDj { enabled })
+            };
+            if let Err(error) = result {
+                self.status = error.clone();
+                self.run.failure = Some(error);
+            }
+            self.auto_dj_controls = self.run.auto;
+        }
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::unique("auto-dj-menu-visible"), loaded);
+        });
+        if let Some((kind, name)) = self.loaded_auto_playlist_info() {
+            ui.separator();
+            ui.label("Playlist");
+            ui.weak("|");
+            ui.label(kind);
+            ui.weak("|");
+            let width = (ui.available_width() - 190.).clamp(80., 360.);
+            ui.scope(|ui| {
+                ui.set_max_width(width);
+                ui.add(egui::Label::new(egui::RichText::new(name).strong()).truncate())
+            })
+            .inner
+            .on_hover_text(name);
+        }
+        ui.separator();
+        let settings = icons::button(
+            ui,
+            icons::Icon::Settings,
+            "DJ Settings",
+            false,
+            egui::vec2(158., 36.),
+        );
+        #[cfg(test)]
+        ui.ctx().data_mut(|data| {
+            data.insert_temp(egui::Id::unique("dj-status-settings-button"), settings.rect);
+        });
+        if settings.clicked() {
+            self.open_dj_settings(ui.ctx());
+        }
+    }
+    fn performance_mix_options(&mut self, ui: &mut egui::Ui) {
+        ui.weak("Auto Mix ON uses the engine. OFF leaves the decks under manual control.");
+        let mut style = self.run.style;
         ui.horizontal_wrapped(|ui| {
-            let selector = egui::ComboBox::from_id_salt("performance-playlist")
-                .width(180.)
-                .truncate()
-                .selected_text(
-                    self.run
-                        .settings
-                        .playlists
-                        .iter()
-                        .find(|p| p.id == selected)
-                        .map_or("Select Smart Playlist", |p| p.name.as_str()),
-                )
-                .show_ui(ui, |ui| {
-                    for p in &self.run.settings.playlists {
-                        let row = ui.selectable_value(&mut selected, p.id.clone(), &p.name);
-                        if let Some(action) = show_editor::playlist_menu(&row) {
-                            context_edit = Some((p.id.clone(), action));
-                        }
-                    }
-                });
-            if !selected.is_empty()
-                && let Some(action) = show_editor::playlist_menu(&selector.response)
-            {
-                context_edit = Some((selected.clone(), action));
-            }
-            if ui.button("Load").clicked()
-                && let Err(e) = self.execute_control(control::Action::LoadSmartPlaylist {
-                    playlist: selected.clone(),
-                    execution: control::Execution::LoadOnly,
-                    style: None,
-                    energy: None,
-                })
-            {
-                self.status = e;
-            }
-            if ui
-                .add(
-                    egui::Button::selectable(
-                        self.run.auto,
-                        if self.run.auto {
-                            "Stop Auto DJ"
-                        } else {
-                            "Start Auto DJ"
-                        },
-                    )
-                    .frame(true),
-                )
-                .clicked()
-            {
-                let result = if self.run.auto {
-                    self.execute_control(control::Action::AutoDj { enabled: false })
-                } else {
-                    self.execute_control(control::Action::LoadSmartPlaylist {
-                        playlist: selected.clone(),
-                        execution: control::Execution::LoadOnly,
-                        style: None,
-                        energy: None,
-                    })
-                    .and_then(|()| self.execute_control(control::Action::AutoDj { enabled: true }))
-                };
-                if let Err(e) = result {
-                    self.status = e;
-                }
-            }
-            if ui.button("Mix Next").clicked()
-                && let Err(e) = self.execute_control(control::Action::MixNext { immediate: true })
-            {
-                self.status = e;
-            }
-            skin::switch(ui, &mut self.run.crossfade, "Auto Crossfade");
-            if ui
-                .checkbox(&mut self.run.locked, "Manual DJ Lock")
-                .changed()
-                && self.run.locked
-            {
-                self.run.cancel_automation();
-            }
-            if self.run.locked {
-                ui.weak("Unlock Manual DJ Lock to enable Auto Mix");
-            }
-            let mut style = self.run.style;
-            egui::ComboBox::from_id_salt("dj-mixing-style")
-                .width(180.)
-                .selected_text(format!("{:?}", style))
-                .show_ui(ui, |ui| {
-                    for value in [
-                        amp_core::show::Style::Hype,
-                        amp_core::show::Style::Steady,
-                        amp_core::show::Style::Chill,
-                    ] {
-                        ui.selectable_value(&mut style, value, format!("{:?}", value));
-                    }
-                });
-            if style != self.run.style
-                && let Err(error) = self.execute_control(control::Action::SetStyle { style })
-            {
-                self.status = error;
+            for value in [
+                amp_core::show::Style::Hype,
+                amp_core::show::Style::Steady,
+                amp_core::show::Style::Chill,
+            ] {
+                ui.selectable_value(&mut style, value, format!("{value:?}"));
             }
         });
-        ui.set_style(original_style);
-        if self.run.choice != selected {
-            self.dj_browser.select_smart(&selected);
-        }
-        self.run.choice = selected;
-        if let Some((id, action)) = context_edit {
-            self.smart_playlist_action(ui, &id, action);
+        ui.weak("Hype favours more active mixes; Steady keeps energy similar; Chill favours calmer choices.");
+        if style != self.run.style
+            && let Err(error) = self.execute_control(control::Action::SetStyle { style })
+        {
+            self.status = error;
         }
     }
     fn sampler_ui(&mut self, ui: &mut egui::Ui) {
@@ -1862,12 +2601,20 @@ impl Player {
         }
         let actions = self.sampler.show(ui, self.audio.as_ref());
         for action in actions {
+            if let sampler::Action::Browse(pad) = action {
+                self.sample_library.open = true;
+                self.sample_library.side = 0;
+                self.sample_library.pad = pad;
+                continue;
+            }
             if let Err(e) = self.ensure_audio() {
                 self.sampler.status = e;
                 continue;
             }
+            let triggered = matches!(&action, sampler::Action::Trigger(_));
             let engine = self.audio.as_mut().unwrap();
             let result = match action {
+                sampler::Action::Browse(_) => Ok(()),
                 sampler::Action::Load(pad) => {
                     if let Some(path) = rfd::FileDialog::new()
                         .add_filter(
@@ -1887,6 +2634,8 @@ impl Player {
             };
             if let Err(e) = result {
                 self.sampler.status = e;
+            } else if triggered {
+                self.claim_playback(playback_owner::Owner::Dj, usize::MAX, false);
             }
         }
     }
@@ -1913,351 +2662,7 @@ impl Player {
                 }
             }
         }
-        skin::panel(ui, true, |ui| {
-            ui.set_min_width(ui.available_width());
-            self.header(ui, "AMP DJ", true);
-            self.performance_controls(ui);
-            ui.add_space(12.);
-            let wave_id = egui::Id::unique("dj-wave-height");
-            let mut wave_height = ui
-                .ctx()
-                .data_mut(|d| d.get_persisted::<f32>(wave_id))
-                .unwrap_or(72.)
-                .clamp(56., 140.);
-            for d in 0..2 {
-                let track = self.loaded_track(d).cloned();
-                let position = self.audio.as_ref().map_or(0., |a| a.source_position(d));
-                self.waveforms[d].height = Some(wave_height);
-                self.waveforms[d].show(
-                    ui,
-                    self.loaded_origin[d].as_deref().unwrap_or(&self.root),
-                    track.as_ref(),
-                    position,
-                    self.wave_span,
-                    d,
-                );
-                self.deck_sections(ui, d);
-            }
-            window_layout::splitter(
-                ui,
-                "dj-wave-divider",
-                &mut wave_height,
-                56. ..=140.,
-                false,
-                0.5,
-                10.,
-            );
-            ui.ctx()
-                .data_mut(|d| d.insert_persisted(wave_id, wave_height));
-            ui.horizontal_wrapped(|ui| {
-                let previous = self.run.transitions;
-                if transition_controls::show(
-                    ui,
-                    &mut self.run.transitions,
-                    &mut self.wave_span,
-                    self.run.pending.is_none() && !self.audio.as_ref().is_some_and(|a| a.fading()),
-                ) {
-                    self.run.force_mashup = true;
-                    if let Err(error) = self.execute_control(control::Action::AutoFade) {
-                        self.run.force_mashup = false;
-                        self.status = error;
-                    }
-                }
-                self.run.scratch_assist = self.run.transitions.enabled;
-                if previous != self.run.transitions
-                    && let Err(error) = transition_styles::save(self.run.transitions)
-                {
-                    self.status = error;
-                }
-                ui.weak(format!(
-                    "{} · {}",
-                    self.run.transitions.timing.label(),
-                    if self.run.transitions.enabled {
-                        self.run.transitions.style.label()
-                    } else {
-                        "Effects off"
-                    }
-                ));
-            });
-            ui.add_space(8.);
-            let pads_below = window_layout::dj_pads_below(
-                ui.ctx().viewport_rect().size(),
-                ui.input(|i| {
-                    i.viewport().maximized == Some(true) || i.viewport().fullscreen == Some(true)
-                }),
-            );
-            let bank_height = if pads_below { 230. } else { 0. };
-            let library_id = egui::Id::unique("dj-library-height");
-            let library_max = (ui.available_height() - 70. - 300.).max(180.);
-            let mut browser_height = ui
-                .ctx()
-                .data_mut(|d| d.get_persisted::<f32>(library_id))
-                .unwrap_or((ui.available_height() * 0.32).max(250.))
-                .clamp(180., library_max);
-            let height = (ui.available_height()
-                - if self.dj_library_hidden {
-                    35.
-                } else {
-                    browser_height + 70.
-                })
-            .max(300.);
-            let side_widths = std::array::from_fn::<_, 2, _>(|side| {
-                if pads_below {
-                    0.
-                } else if self.sides[side].config.collapsed {
-                    30.
-                } else {
-                    230.
-                }
-            });
-            let deck_width =
-                ((ui.available_width() - 298. - side_widths.iter().sum::<f32>() - 36.) / 2.)
-                    .max(250.);
-            egui::ScrollArea::vertical()
-                .id_salt("dj-resizable-mixer")
-                .scroll_bar_visibility(egui::scroll_area::ScrollBarVisibility::AlwaysVisible)
-                .max_height(height)
-                .min_scrolled_height(height)
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    ui.horizontal_top(|ui| {
-                        if !pads_below {
-                            self.side_panel(ui, 0, side_widths[0], height, false);
-                        }
-                        ui.vertical(|ui| {
-                            self.deck_ui(ui, 0, deck_width, (height - bank_height).max(230.));
-                            if pads_below {
-                                self.side_panel(ui, 0, deck_width, bank_height, true);
-                            }
-                        });
-                        ui.allocate_ui_with_layout(
-                            egui::vec2(280., height),
-                            egui::Layout::top_down(egui::Align::Center),
-                            |ui| {
-                                let scale = (height / 780.).min(1.);
-                                let logical = egui::vec2(280. / scale, height / scale);
-                                window_layout::fitted_content(
-                                    ui,
-                                    "dj-center-mixer",
-                                    logical,
-                                    scale,
-                                    |ui| {
-                                        skin::panel(ui, true, |ui| {
-                                            ui.set_width(logical.x - 18.);
-                                            ui.set_min_height(logical.y - 18.);
-                                            ui.spacing_mut().interact_size.y =
-                                                ((logical.y - 700.) / 14. + 24.).clamp(24., 32.);
-                                            egui::ScrollArea::vertical()
-                                                .id_salt("dj-channel-controls")
-                                                .max_height((logical.y - 320.).max(400.))
-                                                .auto_shrink([false, true])
-                                                .show(ui, |ui| self.inline_mixer(ui, logical.y));
-                                            let fading =
-                                                self.audio.as_ref().is_some_and(|a| a.fading());
-                                            let fade = ui.add_sized(
-                                                [240., 36.],
-                                                egui::Button::new(
-                                                    RichText::new(
-                                                        if fading && self.run.profile.is_some() {
-                                                            "Mixing…"
-                                                        } else if fading {
-                                                            "Cancel mix"
-                                                        } else {
-                                                            "Auto crossfade"
-                                                        },
-                                                    )
-                                                    .size(16.)
-                                                    .color(GOLD),
-                                                )
-                                                .fill(skin::accent(ui).gamma_multiply(0.16))
-                                                .stroke(egui::Stroke::new(1., skin::accent(ui)))
-                                                .wrap(),
-                                            );
-                                            ui.ctx().data_mut(|d| {
-                                                d.insert_temp(
-                                                    egui::Id::unique("dj-auto-fade-bounds"),
-                                                    fade.rect,
-                                                );
-                                                d.insert_temp(
-                                                    egui::Id::unique("dj-auto-fade-bounds")
-                                                        .with("screen"),
-                                                    (fade.rect, ui.layer_id()),
-                                                )
-                                            });
-                                            if fade.clicked() {
-                                                self.auto = false;
-                                                self.auto_crossfade();
-                                            }
-                                            ui.horizontal(|ui| {
-                                                ui.label("A");
-                                                ui.spacing_mut().slider_width = 88.;
-                                                if ui
-                                                    .add(
-                                                        egui::Slider::new(
-                                                            &mut self.fader,
-                                                            0. ..=1.,
-                                                        )
-                                                        .show_value(false),
-                                                    )
-                                                    .changed()
-                                                    && let Some(a) = &self.audio
-                                                {
-                                                    self.run.cancel_automation();
-                                                    a.set_fader(self.fader);
-                                                }
-                                                ui.label("B");
-                                            });
-                                            let previous = self.fade_seconds;
-                                            ui.horizontal(|ui| {
-                                                ui.label("Mix time");
-                                                if ui
-                                                    .button("−")
-                                                    .on_hover_text("Shorten by 0.5 seconds")
-                                                    .clicked()
-                                                {
-                                                    self.fade_seconds -= 0.5;
-                                                }
-                                                ui.add(
-                                                    egui::DragValue::new(&mut self.fade_seconds)
-                                                        .range(0.5..=30.)
-                                                        .speed(0.1)
-                                                        .fixed_decimals(1)
-                                                        .suffix(" s"),
-                                                );
-                                                if ui
-                                                    .button("+")
-                                                    .on_hover_text("Lengthen by 0.5 seconds")
-                                                    .clicked()
-                                                {
-                                                    self.fade_seconds += 0.5;
-                                                }
-                                            });
-                                            ui.add(
-                                                egui::Slider::new(
-                                                    &mut self.fade_seconds,
-                                                    0.5..=30.,
-                                                )
-                                                .show_value(false),
-                                            );
-                                            self.fade_seconds = self.fade_seconds.clamp(0.5, 30.);
-                                            if previous != self.fade_seconds
-                                                && let Err(error) =
-                                                    crossfade_settings::save(self.fade_seconds)
-                                            {
-                                                self.status =
-                                                    format!("Could not save mix time: {error}");
-                                            }
-                                            ui.separator();
-                                            ui.columns(2, |columns| {
-                                                for (deck, column) in columns.iter_mut().enumerate()
-                                                {
-                                                    let stem_path =
-                                                        self.loaded_track(deck).map(|track| {
-                                                            self.loaded_origin[deck]
-                                                                .as_deref()
-                                                                .unwrap_or(&self.root)
-                                                                .join(&track.path)
-                                                        });
-                                                    if self.stem_panel.show(
-                                                        column,
-                                                        deck,
-                                                        stem_path.as_deref(),
-                                                        self.audio.as_ref(),
-                                                        !self.run.auto && !self.playing[deck],
-                                                    ) && let Some(path) = stem_path
-                                                        && let Err(error) =
-                                                            self.safe_load_path(deck, path, None)
-                                                    {
-                                                        self.status = error;
-                                                    }
-                                                }
-                                            });
-                                            if let Some((deck, knobs)) =
-                                                self.stem_panel.manual_change.take()
-                                                && let Some(audio) = &self.audio
-                                            {
-                                                self.run.cancel_effects(audio);
-                                                for (stem, gain) in
-                                                    stems::remix_gains(knobs).iter().enumerate()
-                                                {
-                                                    audio.controls.stem_level[deck][stem].store(
-                                                        gain.to_bits(),
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                    audio.controls.stem_knobs[deck][stem].store(
-                                                        knobs[stem].to_bits(),
-                                                        std::sync::atomic::Ordering::Relaxed,
-                                                    );
-                                                }
-                                            }
-                                        });
-                                    },
-                                );
-                            },
-                        );
-                        ui.vertical(|ui| {
-                            self.deck_ui(ui, 1, deck_width, (height - bank_height).max(230.));
-                            if pads_below {
-                                self.side_panel(ui, 1, deck_width, bank_height, true);
-                            }
-                        });
-                        if !pads_below {
-                            self.side_panel(ui, 1, side_widths[1], height, false);
-                        }
-                    });
-                });
-            ui.horizontal(|ui| {
-                if ui
-                    .button(if self.dj_library_hidden {
-                        "Show Library"
-                    } else {
-                        "Hide Library"
-                    })
-                    .clicked()
-                {
-                    self.dj_library_hidden = !self.dj_library_hidden;
-                }
-                ui.add(egui::Slider::new(&mut self.volume, 0..=100).text("Master"))
-                    .on_hover_text(
-                        self.audio
-                            .as_ref()
-                            .map(|a| a.device.as_str())
-                            .unwrap_or("Audio output"),
-                    );
-                ui.add(egui::Label::new(&self.status).truncate());
-            });
-            if self.dj_library_hidden {
-                return;
-            }
-            window_layout::splitter(
-                ui,
-                "dj-library-divider",
-                &mut browser_height,
-                180. ..=library_max,
-                false,
-                -1.,
-                22.,
-            );
-            ui.ctx()
-                .data_mut(|d| d.insert_persisted(library_id, browser_height));
-            // Decks stop growing once their controls reach a useful size. Give all
-            // remaining space to the song list rather than leaving an unused strip.
-            let remaining_height = (ui.available_height() - 12.).max(160.);
-            ui.allocate_ui_with_layout(
-                egui::vec2(ui.available_width(), remaining_height),
-                egui::Layout::top_down(egui::Align::Min),
-                |ui| {
-                    ui.set_min_height(remaining_height);
-                    self.dj_library_ui(ui);
-                    ui.ctx().data_mut(|d| {
-                        d.insert_temp(
-                            egui::Id::unique("dj-browser-screen").with("screen"),
-                            (ui.min_rect(), ui.layer_id()),
-                        )
-                    });
-                },
-            );
-        });
+        self.deck_workspace_ui(ui);
     }
     fn add_dropped_to_queue(&mut self, path: PathBuf) {
         let result = (|| -> Result<usize, String> {
@@ -2316,9 +2721,13 @@ impl Player {
                     .as_ref()
                     .and_then(|library| library.tracks.get(index))
                     .ok_or("Track unavailable")?;
-                self.sides[side].load(self.root.join(&track.path))?;
+                self.sides[side]
+                    .load(amp_core::music_sources::audio_path(&self.root, &track.path))?;
             }
-            side_deck::Operation::Play => self.sides[side].play()?,
+            side_deck::Operation::Play => {
+                self.sides[side].play()?;
+                self.claim_playback(playback_owner::Owner::Dj, usize::MAX, false);
+            }
             side_deck::Operation::Pause => self.sides[side].pause(),
             side_deck::Operation::Stop => self.sides[side].stop(),
             side_deck::Operation::Seek { seconds } => self.sides[side].seek(seconds)?,
@@ -2338,17 +2747,7 @@ impl Player {
                 self.sides[side].seek(cue)?;
             }
             side_deck::Operation::Send { deck } => {
-                let target = match deck {
-                    control::Deck::A => 0,
-                    control::Deck::B => 1,
-                    control::Deck::Auto => {
-                        if !self.playing[0] {
-                            0
-                        } else {
-                            1
-                        }
-                    }
-                };
+                let target = self.requested_deck(deck, true);
                 let path = self.sides[side]
                     .config
                     .path
@@ -2365,23 +2764,56 @@ impl Player {
         path: PathBuf,
         cue: Option<f64>,
     ) -> Result<(), String> {
-        if deck > 1 {
-            return Err("Deck must be A or B".into());
+        self.safe_load_path_mode(deck, path, cue, false)
+    }
+    fn safe_load_original_path(
+        &mut self,
+        deck: usize,
+        path: PathBuf,
+        cue: Option<f64>,
+    ) -> Result<(), String> {
+        self.safe_load_path_mode(deck, path, cue, true)
+    }
+    fn safe_load_path_mode(
+        &mut self,
+        deck: usize,
+        path: PathBuf,
+        cue: Option<f64>,
+        original: bool,
+    ) -> Result<(), String> {
+        let result = self.try_safe_load_path(deck, path, cue, original);
+        if result.is_err()
+            && let Some(audio) = &self.audio
+        {
+            audio.restore_stem_mode_request(deck);
         }
-        if self
-            .audio
-            .as_ref()
-            .is_some_and(|audio| audio.playing(deck) || audio.fading())
-            || (self.run.auto
-                && self
-                    .run
-                    .preloaded
-                    .is_some_and(|(reserved, _)| reserved == deck))
+        result
+    }
+    fn try_safe_load_path(
+        &mut self,
+        deck: usize,
+        path: PathBuf,
+        cue: Option<f64>,
+        original: bool,
+    ) -> Result<(), String> {
+        if deck >= deck_rack::NAMES.len() {
+            return Err("Choose a deck from A1–A3 or B1–B3".into());
+        }
+        if self.audio.as_ref().is_some_and(|audio| {
+            audio.playing(deck) || (self.pair().contains(&deck) && audio.fading())
+        }) || (self.run.auto
+            && self
+                .run
+                .preloaded
+                .is_some_and(|(reserved, _)| reserved == deck))
         {
             self.pending_load[deck] = Some((path, cue));
+            if let Some(audio) = &self.audio {
+                audio.restore_stem_mode_request(deck);
+            }
             self.status = format!(
                 "Deck {} replacement staged. Stop it, then Apply staged track.",
-                if deck == 0 { "A" } else { "B" }
+                deck_rack::NAMES[deck]
             );
             return Ok(());
         }
@@ -2391,12 +2823,10 @@ impl Player {
             .ok_or("Audio file folder missing")?
             .to_path_buf();
         let mut preparation = amp_core::preparation::load(&path)?;
+        let saved_preparation = preparation.clone();
+        manual_load::full_track(&mut preparation);
         if let Some(cue) = cue {
-            let end = preparation.cue_out.or(preparation
-                .analysis
-                .as_ref()
-                .map(|analysis| analysis.duration));
-            preparation.cue_in = end.map_or(cue.max(0.), |end| cue.clamp(0., (end - 0.02).max(0.)));
+            manual_load::seek(&mut preparation, cue)?;
         }
         let track = amp_core::Track {
             path: path.file_name().ok_or("Audio filename missing")?.into(),
@@ -2414,38 +2844,100 @@ impl Player {
             preparation,
         };
         self.ensure_audio()?;
-        self.audio
-            .as_mut()
-            .unwrap()
-            .load(deck, &root, &track, false)?;
-        self.run.cancel_automation();
-        self.auto = false;
-        self.loaded[deck] = path.strip_prefix(&self.root).ok().and_then(|relative| {
-            self.library
-                .as_ref()?
-                .tracks
-                .iter()
-                .position(|track| track.path == relative)
+        let audio = self.audio.as_mut().unwrap();
+        if original {
+            audio.load_original(deck, &root, &track, false)?;
+        } else {
+            audio.load(deck, &root, &track, false)?;
+        }
+        self.cancel_deck_automation(deck);
+        if deck == 0 {
+            self.auto = false;
+        }
+        let file_key = playlist_sync::root_key(&path);
+        self.loaded[deck] = self.library.as_ref().and_then(|library| {
+            library.tracks.iter().position(|track| {
+                playlist_sync::root_key(&amp_core::music_sources::audio_path(
+                    &self.root,
+                    &track.path,
+                )) == file_key
+            })
         });
-        self.loaded_snapshot[deck] = Some(track);
+        let mut snapshot = track;
+        snapshot.preparation = saved_preparation;
+        self.loaded_snapshot[deck] = Some(snapshot);
         self.loaded_origin[deck] = Some(root);
         self.pending_load[deck] = None;
         self.status = format!(
             "Deck {} prepared; playback unchanged",
-            if deck == 0 { "A" } else { "B" }
+            deck_rack::NAMES[deck]
+        );
+        Ok(())
+    }
+    /// Change only the loaded deck's audio representation, retaining its executed timeline.
+    fn reload_deck_audio_mode(&mut self, deck: usize) -> Result<(), String> {
+        let result = self.try_reload_deck_audio_mode(deck);
+        if result.is_err()
+            && let Some(audio) = &self.audio
+        {
+            audio.restore_stem_mode_request(deck);
+        }
+        result
+    }
+    fn try_reload_deck_audio_mode(&mut self, deck: usize) -> Result<(), String> {
+        if deck >= deck_rack::NAMES.len() {
+            return Err("Choose a deck from A1–A3 or B1–B3".into());
+        }
+        let mut track = self
+            .loaded_track(deck)
+            .cloned()
+            .ok_or("Load a local song first")?;
+        let root = self.loaded_origin[deck]
+            .clone()
+            .unwrap_or_else(|| self.root.clone());
+        let paired = self.pair().contains(&deck);
+        let audio = self.audio.as_mut().ok_or("Start the audio engine first")?;
+        if self.run.auto || audio.playing(deck) || (paired && audio.fading()) {
+            return Err(
+                "Turn AutoMix off and pause this deck before changing its audio mode.".into(),
+            );
+        }
+        if !audio.loaded(deck) || !audio.load_current(deck) {
+            return Err("Wait for this deck's current song to finish loading.".into());
+        }
+        let position = audio.source_position(deck);
+        let origin = position - audio.position(deck);
+        let (start, end) = mode_reload::range(
+            position,
+            origin,
+            audio.controls.duration_frames[deck].load(std::sync::atomic::Ordering::Relaxed),
+            audio.sample_rate,
+        )?;
+        track.preparation.cue_in = start;
+        track.preparation.cue_out = Some(end);
+        // No manual-load crop policy, queue mutation, song replacement or other-deck action.
+        audio.load(deck, &root, &track, false)?;
+        self.status = format!(
+            "Deck {} audio mode reloaded at its paused position",
+            deck_rack::NAMES[deck]
         );
         Ok(())
     }
     fn recue_deck(&mut self, deck: usize) {
-        if let Some(track) = self.loaded_track(deck).cloned()
+        if let Some(mut track) = self.loaded_track(deck).cloned()
             && let Some(audio) = &mut self.audio
         {
+            manual_load::full_track(&mut track.preparation);
             let root = self.loaded_origin[deck].as_deref().unwrap_or(&self.root);
-            if let Err(error) = audio.load(deck, root, &track, false) {
-                self.status = error;
+            match audio.load(deck, root, &track, false) {
+                Err(error) => self.status = error,
+                Ok(()) => {
+                    self.cancel_deck_automation(deck);
+                    if deck == 0 {
+                        self.auto = false;
+                    }
+                }
             }
-            self.run.cancel_automation();
-            self.auto = false;
         }
     }
     fn side_panel(&mut self, ui: &mut egui::Ui, side: usize, width: f32, height: f32, below: bool) {
@@ -2481,6 +2973,13 @@ impl Player {
                                             self.safe_load_path(deck, path, Some(cue))
                                     {
                                         self.status = error;
+                                    }
+                                    if self.sides[side].playing() {
+                                        self.claim_playback(
+                                            playback_owner::Owner::Dj,
+                                            usize::MAX,
+                                            false,
+                                        );
                                     }
                                 } else {
                                     if side == 0 {
@@ -2540,20 +3039,41 @@ impl Player {
         });
         ui.ctx().data_mut(|d| {
             d.insert_temp(
-                egui::Id::unique(("dj-side", side)).with("screen"),
+                egui::Id::unique(("dj-cue-pads", side)).with("screen"),
                 (panel.response.rect, ui.layer_id()),
             )
         });
     }
     fn ensure_right_samples(&mut self) -> Result<(), String> {
         if self.right_sample_audio.is_none() {
-            let audio = mixer::Engine::new()?;
+            let audio = mixer::Engine::with_output(self.outputs.selected.as_deref())?;
             audio.set_master(self.volume as f32 / 100.);
             self.right_sample_audio = Some(audio);
         }
         Ok(())
     }
     fn side_sample_action(&mut self, side: usize, action: sampler::Action) {
+        if let sampler::Action::Browse(pad) = action {
+            self.sample_library.open = true;
+            self.sample_library.side = side;
+            self.sample_library.pad = pad;
+            return;
+        }
+        if matches!(
+            &action,
+            sampler::Action::Load(_) | sampler::Action::Trigger(_) | sampler::Action::Clear(_)
+        ) {
+            let result = if side == 0 {
+                self.ensure_audio()
+            } else {
+                self.ensure_right_samples()
+            };
+            if let Err(error) = result {
+                self.status = error;
+                return;
+            }
+        }
+        let triggered = matches!(&action, sampler::Action::Trigger(_));
         let (sampler, audio) = if side == 0 {
             (&mut self.sampler, self.audio.as_mut())
         } else {
@@ -2563,6 +3083,7 @@ impl Player {
             return;
         };
         let result = match action {
+            sampler::Action::Browse(_) => Ok(()),
             sampler::Action::Load(pad) => {
                 if let Some(path) = rfd::FileDialog::new()
                     .add_filter(
@@ -2582,87 +3103,24 @@ impl Player {
         };
         if let Err(error) = result {
             sampler.status = error;
+        } else if triggered {
+            self.claim_playback(playback_owner::Owner::Dj, usize::MAX, false);
         }
     }
-    fn deck_ui(&mut self, ui: &mut egui::Ui, deck: usize, width: f32, height: f32) {
-        let accent = if deck == 0 { ORANGE } else { CYAN };
-        let platter_side = (height - 274.).clamp(64., 260.);
-        let area=ui.allocate_ui_with_layout(egui::vec2(width,0.),egui::Layout::top_down(egui::Align::Center),|ui|{
-            skin::panel(ui,true,|ui|{ui.set_width(width-18.);
-                ui.horizontal(|ui|{skin::label(ui,if deck==0{"DECK A"}else{"DECK B"});let position=self.audio.as_ref().map_or(0.,|a|a.position(deck));ui.label(RichText::new(format!("{:02}:{:02}",position as u64/60,position as u64%60)).monospace().color(skin::signal(ui)));});
-                ui.separator();
-                ui.add(egui::Label::new(RichText::new(self.title(deck)).strong().size(15.).color(skin::foreground(ui))).truncate());
-                let track=self.loaded_track(deck);
-                ui.label(track.map(|t|format!("{} BPM   {}",t.preparation.bpm.map(|b|format!("{:.1}",b*(1.+self.pitch[deck]as f64/100.))).unwrap_or_else(||"--".into()),t.preparation.harmonic_key.as_deref().unwrap_or("--"))).unwrap_or_else(||"Load a track from the library".into()));
-                ui.separator();
-                ui.add_space(4.);
-                if self.dj_cues[deck] {
-                    egui::ScrollArea::vertical().id_salt(("deck-cues", deck)).max_height(platter_side).show(ui, |ui| self.main_hot_cues(ui, deck, accent));
-                } else {
-                    ui.horizontal(|ui| {
-                        ui.vertical(|ui| {
-                            ui.label("PITCH");
-                            ui.spacing_mut().slider_width=platter_side;
-                            if ui.add(egui::Slider::new(&mut self.pitch[deck], -16. ..=16.).vertical().show_value(false)).changed() && let Some(a)=&self.audio { a.set_rate(deck,1.+self.pitch[deck]/100.); }
-                            ui.label(format!("{:+.1}%",self.pitch[deck]));
-                        });
-                        let phase=self.audio.as_ref().map_or(0.,|audio|audio.source_position(deck)) as f32;
-                        let wheel=skin::platter(ui,platter_side.min((width-85.).max(80.)),accent,self.playing[deck] || self.jog_resume[deck].is_some(),phase).on_hover_text("Drag around the wheel to scratch forward/backward. Scroll to seek; Shift = 5 seconds.");
-                        wheel.context_menu(|ui| {
-                            if ui.button("Seek back 1 second").clicked() { self.seek_deck_relative(deck, -1.); ui.close(); }
-                            if ui.button("Seek forward 1 second").clicked() { self.seek_deck_relative(deck, 1.); ui.close(); }
-                            if ui.button("Reset pitch").clicked() { self.pitch[deck] = 0.; if let Some(a)=&self.audio { a.set_rate(deck, 1.); } ui.close(); }
-                        });
-                        self.jog_wheel(ui, deck, &wheel);
-                    });
-                }
-                let transport_width=(ui.available_width()-ui.spacing().item_spacing.x*3.)/4.;
-                let transport=ui.horizontal(|ui|{
-                    if skin::deck_button(ui,"CUE",accent,transport_width,false).on_hover_text("Return to the prepared cue IN and pause").clicked(){self.recue_deck(deck);}
-                    if skin::deck_button(ui,if self.playing[deck]{"PAUSE"}else{"PLAY"},accent,transport_width,true).clicked(){if deck==0{self.auto=false;}self.toggle_deck(deck);}
-                    if skin::deck_button(ui,"SYNC",accent,transport_width,false).on_hover_text("Match prepared BPM to the other deck. Changes pitch with speed; beat-phase sync/key lock are not available.").clicked(){self.sync_deck(deck);}
-                    if skin::deck_button(ui,"STOP",accent,transport_width,false).clicked(){self.stop(deck);}
-                });
-                ui.ctx().data_mut(|d|{d.insert_temp(egui::Id::unique(("dj-transport",deck)),transport.response.rect);d.insert_temp(egui::Id::unique(("dj-transport",deck)).with("screen"),(transport.response.rect,ui.layer_id()));});
-                ui.horizontal(|ui| {
-                    let button_width = (ui.available_width() - ui.spacing().item_spacing.x) / 2.;
-                    let looping=self.audio.as_ref().is_some_and(|a|a.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed));
-                    if ui.add_sized([button_width, 36.], egui::Button::new(if looping { "Loop off" } else { "Loop" })).clicked() {
-                        let seconds=self.loaded_track(deck).and_then(|t|t.preparation.bpm).map_or(2.,|bpm|4.*60./(bpm*(1.+self.pitch[deck]as f64/100.)));
-                        if let Some(a)=&self.audio && let Err(e)=a.loop_toggle(deck,seconds as f32){self.status=e;}
-                    }
-                    ui.add_sized([button_width, 36.], egui::Button::selectable(self.dj_cues[deck], "Hot Cues").frame(true)).clicked().then(|| self.dj_cues[deck] = !self.dj_cues[deck]);
-                });
-
-            });
-        });
-        let response = ui
-            .interact(
-                area.response.rect,
-                ui.scope_id().with(("deck-drop", deck)),
-                egui::Sense::hover(),
-            )
-            .on_hover_text(
-                "Drop to preload. Playing decks stage the replacement without interrupting audio.",
-            );
-        if let Some(path) = dragdrop::target(&response, accent)
-            && let Err(error) = self.safe_load_path(deck, path, None)
-        {
-            self.status = error;
-        }
-        if self.pending_load[deck].is_some()
-            && ui
-                .add_enabled(!self.playing[deck], egui::Button::new("Apply staged track"))
-                .clicked()
-            && let Some((path, cue)) = self.pending_load[deck].take()
-            && let Err(error) = self.safe_load_path(deck, path, cue)
-        {
-            self.status = error;
-        }
-    }
-    fn main_hot_cues(&mut self, ui: &mut egui::Ui, deck: usize, accent: egui::Color32) {
+    fn main_hot_cues_count(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        accent: egui::Color32,
+        count: usize,
+    ) {
         let prep = self.loaded_track(deck).map(|t| t.preparation.clone());
-        if let Some(action) = hot_cues::pads(ui, prep.as_ref(), accent) {
+        let action = if self.rack.six {
+            hot_cues::pads_count_named(ui, prep.as_ref(), accent, count, false)
+        } else {
+            hot_cues::pads_count(ui, prep.as_ref(), accent, count)
+        };
+        if let Some(action) = action {
             let position = self.audio.as_ref().map_or(0., |a| a.source_position(deck));
             match action {
                 hot_cues::Action::Jump(seconds) => {
@@ -2694,6 +3152,10 @@ impl Player {
         }
     }
     fn seek_deck_relative(&mut self, deck: usize, delta: f64) {
+        if deck >= 6 || !delta.is_finite() {
+            self.status = "Choose a valid seek and deck".into();
+            return;
+        }
         let Some(mut track) = self.loaded_track(deck).cloned() else {
             self.status = "Load a track before seeking".into();
             return;
@@ -2702,6 +3164,7 @@ impl Player {
             return;
         };
         let was_playing = audio.playing(deck);
+        manual_load::full_track(&mut track.preparation);
         let end = track.preparation.cue_out.or(track
             .preparation
             .analysis
@@ -2709,17 +3172,22 @@ impl Player {
             .map(|a| a.duration));
         let position = (audio.source_position(deck) + delta).max(0.);
         track.preparation.cue_in = end.map_or(position, |end| position.min((end - 0.02).max(0.)));
-        self.run.cancel_automation();
-        self.auto = false;
-        if let Some(audio) = &mut self.audio
-            && let Err(error) = audio.load(
+        if let Some(audio) = &mut self.audio {
+            let result = audio.load(
                 deck,
                 self.loaded_origin[deck].as_deref().unwrap_or(&self.root),
                 &track,
                 was_playing,
-            )
-        {
-            self.status = error;
+            );
+            match result {
+                Err(error) => self.status = error,
+                Ok(()) => {
+                    self.cancel_deck_automation(deck);
+                    if deck == 0 {
+                        self.auto = false;
+                    }
+                }
+            }
         }
     }
     fn jog_wheel(&mut self, ui: &mut egui::Ui, deck: usize, wheel: &egui::Response) {
@@ -2757,24 +3225,9 @@ impl Player {
         if wheel.is_pointer_button_down_on()
             && ui.input(|i| i.pointer.primary_down())
             && self.jog_resume[deck].is_none()
-            && let Some(audio) = &self.audio
+            && self.audio.is_some()
         {
-            if !audio.loaded(deck) {
-                return;
-            }
-            self.jog_auto[deck] = self.run.auto;
-            self.jog_resume[deck] = Some((audio.playing(deck), ui.ctx().viewport_id()));
-            self.run.cancel_effects(audio);
-            self.jog_angle[deck] = angle;
-            self.jog_target[deck] = audio.position(deck);
-            self.run.cancel_automation();
-            self.auto = false;
-            if audio.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = audio.loop_toggle(deck, 2.);
-            }
-            audio.set_fader(audio.fader());
-            audio.vinyl_target(deck, self.jog_target[deck]);
-            audio.controls.play[deck].store(true, std::sync::atomic::Ordering::Relaxed);
+            self.begin_jog(deck, angle, ui.ctx().viewport_id());
             ui.ctx().request_repaint_after(Duration::from_millis(8));
             return;
         }
@@ -2796,14 +3249,95 @@ impl Player {
             ui.ctx().request_repaint_after(Duration::from_millis(8));
         }
     }
+    fn seek_waveform(&mut self, ctx: &egui::Context, deck: usize, at: f64) {
+        if ctx.input(|i| i.modifiers.alt) {
+            self.mix_to_waveform_section(ctx, deck, at);
+        } else if let Some(audio) = &self.audio {
+            self.seek_deck_relative(deck, at - audio.source_position(deck));
+        }
+    }
+    fn scrub_waveform(&mut self, ctx: &egui::Context, deck: usize, delta: f64, player: bool) {
+        if deck >= 6 || !delta.is_finite() {
+            return;
+        }
+        if self.jog_resume[deck].is_none() {
+            self.begin_jog_as(
+                deck,
+                0.,
+                ctx.viewport_id(),
+                if player {
+                    playback_owner::Owner::Player
+                } else {
+                    playback_owner::Owner::Dj
+                },
+            );
+        }
+        if self.jog_resume[deck].is_some() {
+            self.jog_target[deck] = (self.jog_target[deck] + delta).max(0.);
+            if let Some(audio) = &self.audio {
+                audio.vinyl_target(deck, self.jog_target[deck]);
+            }
+            ctx.request_repaint_after(Duration::from_millis(8));
+        }
+    }
+    fn begin_jog(&mut self, deck: usize, angle: f32, viewport: egui::ViewportId) {
+        self.begin_jog_as(deck, angle, viewport, playback_owner::Owner::Dj);
+    }
+    fn begin_jog_as(
+        &mut self,
+        deck: usize,
+        angle: f32,
+        viewport: egui::ViewportId,
+        owner: playback_owner::Owner,
+    ) {
+        if deck < 6
+            && self.audio.as_ref().is_some_and(|a| a.loaded(deck))
+            && (owner == playback_owner::Owner::Dj || self.playback_owner != owner)
+        {
+            self.claim_playback(owner, deck, false);
+        }
+        let Some(audio) = &self.audio else {
+            return;
+        };
+        if deck >= 6 || !audio.loaded(deck) {
+            return;
+        }
+        let paired =
+            owner == playback_owner::Owner::Dj && audio.controls.pair_indices().contains(&deck);
+        self.jog_auto[deck] = paired && self.run.auto;
+        self.jog_resume[deck] = Some((audio.playing(deck), viewport));
+        self.jog_angle[deck] = angle;
+        self.jog_target[deck] = audio.position(deck);
+        if paired {
+            self.run.cancel_effects(audio);
+            self.run.cancel_automation();
+            audio.set_fader(audio.fader());
+        }
+        if deck == 0 && owner == playback_owner::Owner::Dj {
+            self.auto = false;
+        }
+        if audio.controls.looping[deck].load(std::sync::atomic::Ordering::Relaxed) {
+            let _ = audio.loop_toggle(deck, 2.);
+        }
+        audio.vinyl_target(deck, self.jog_target[deck]);
+        if let Err(error) = audio.play(deck) {
+            self.status = error;
+        }
+    }
     fn release_jog_wheels(&mut self, ctx: &egui::Context) {
         if ctx.input(|i| i.pointer.primary_down() && i.viewport().focused.unwrap_or(true)) {
             return;
         }
-        for deck in 0..2 {
-            if self.jog_resume[deck].is_some_and(|(_, viewport)| viewport != ctx.viewport_id())
-                && self.dj_open
-            {
+        for deck in 0..6 {
+            if self.jog_resume[deck].is_some_and(|(_, viewport)| {
+                let owner_open =
+                    if viewport == egui::ViewportId::from_hash_of("amp-minimized-controls") {
+                        self.mini.minimized && !self.mini.dismissed
+                    } else {
+                        self.dj_open
+                    };
+                viewport != ctx.viewport_id() && owner_open
+            }) {
                 continue;
             }
             if let Some((resume, _)) = self.jog_resume[deck].take()
@@ -2811,7 +3345,10 @@ impl Player {
             {
                 audio.scratch(deck, false, 0.);
                 audio.controls.play[deck].store(resume, std::sync::atomic::Ordering::Relaxed);
-                if self.jog_auto[deck] && resume && self.run.profile.is_some() {
+                if self.jog_auto[deck]
+                    && resume
+                    && (self.run.profile.is_some() || self.run.has_regular_playlist())
+                {
                     self.run.auto = true;
                 }
                 self.jog_auto[deck] = false;
@@ -2976,10 +3513,25 @@ impl Player {
             );
         }
     }
+    fn current_cast_player_only(&self) -> bool {
+        self.playback_owner == playback_owner::Owner::Player
+    }
+    fn follow_live_broadcast_owner(&mut self) {
+        let player_only = self.current_cast_player_only();
+        if let (Some(broadcast), Some(audio)) = (&mut self.live_mix, &self.audio) {
+            broadcast.follow_source(audio, player_only);
+        }
+        self.cast.live_player_only = player_only;
+    }
     fn cast_ui(&mut self, ui: &mut egui::Ui) {
+        let local_active = self.library_preview_blocked() || self.smart_preview.active();
+        self.cast.local_playback_active = local_active;
+        self.cast.output_gate = self.output_admission.clone();
+        self.follow_live_broadcast_owner();
         self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
         if let Some(broadcast) = &self.live_mix {
             self.cast.live_status = broadcast.status.lock().unwrap().clone();
+            self.cast.live_player_only = broadcast.player_only;
         }
         skin::panel(ui, true, |ui| {
             ui.set_min_size(ui.available_size());
@@ -2988,38 +3540,67 @@ impl Player {
                 .id_salt("cast-content")
                 .max_height(ui.available_height())
                 .show(ui, |ui| {
-                    self.cast.show(
-                        ui,
-                        &self.root,
-                        self.library.is_some() && self.scan.is_none(),
-                    );
+                    self.cast.show(ui, &self.root, self.library.is_some());
+                    self.playlist_sync
+                        .show(ui, self.cast.sync_candidate(), &self.root);
                 });
         });
+    }
+    fn clear_live_broadcast(&mut self) {
+        self.live_mix = None;
+        self.cast.live_ended();
+        if let Some(audio) = &self.audio {
+            audio.stop_broadcast_tap();
+        }
+        if let Some(audio) = &self.right_sample_audio {
+            audio.stop_broadcast_tap();
+        }
+    }
+    fn update_live_broadcast(&mut self) {
+        if self.cast.get().is_none() {
+            return;
+        }
+        if let Some(broadcast) = &self.live_mix {
+            let running = broadcast.running();
+            let final_status = broadcast.status.lock().unwrap().clone();
+            if self.cast.finish_live_if_stopped(running, final_status) {
+                self.clear_live_broadcast();
+            }
+        }
+        self.follow_live_broadcast_owner();
+        self.cast.live_active = self.live_mix.as_ref().is_some_and(|b| b.running());
+        if let Some(broadcast) = &self.live_mix {
+            self.cast.live_status = broadcast.status.lock().unwrap().clone();
+        }
+        self.cast.prepare_live(&self.root);
         if let Some(start) = self.cast.live_action.take() {
             if start {
+                self.cast.live_player_only = self.current_cast_player_only();
                 let result = (|| {
                     self.ensure_audio()?;
                     self.ensure_right_samples()?;
                     let (address, password) = self.cast.endpoint();
-                    live_mix::Broadcast::start(
+                    live_mix::Broadcast::start_source_normalized(
                         self.audio.as_ref().unwrap(),
                         self.right_sample_audio.as_ref().unwrap(),
                         address,
                         password,
+                        self.cast.live_player_only,
+                        self.cast.normalize,
                     )
                 })();
                 match result {
-                    Ok(broadcast) => self.live_mix = Some(broadcast),
-                    Err(error) => self.cast.live_status = error,
+                    Ok(broadcast) => {
+                        self.cast.live_started();
+                        self.live_mix = Some(broadcast);
+                    }
+                    Err(error) => {
+                        self.cast.live_ended();
+                        self.cast.live_status = error;
+                    }
                 }
             } else {
-                self.live_mix = None;
-                if let Some(audio) = &self.audio {
-                    audio.stop_broadcast_tap();
-                }
-                if let Some(audio) = &self.right_sample_audio {
-                    audio.stop_broadcast_tap();
-                }
+                self.clear_live_broadcast();
                 self.cast.live_status = "Live DJ broadcast stopped".into();
             }
         }
@@ -3035,12 +3616,61 @@ impl Player {
 }
 impl eframe::App for Player {
     fn on_exit(&mut self, _: Option<&eframe::glow::Context>) {
+        self.stem_panel.shutdown_playlist_preparation();
+        if let Some(lab) = self.lab.get_mut() {
+            lab.shutdown();
+        }
+        let path = self.loaded_track(0).and_then(|t| {
+            self.loaded_origin[0]
+                .as_ref()
+                .map(|root| root.join(&t.path))
+        });
+        self.podcasts.flush_progress(
+            path.as_deref(),
+            self.audio.as_ref().map_or(0., |a| a.source_position(0)),
+        );
         self.checkpoint(true);
+        self.audio.take();
+        let _ = onnx_stem_worker::shutdown();
+    }
+    fn logic(&mut self, ctx: &egui::Context, _: &mut eframe::Frame) {
+        if mini_player::root_minimized(ctx) {
+            ctx.send_viewport_cmd_to(
+                egui::ViewportId::ROOT,
+                egui::ViewportCommand::RequestPaintWhileHidden,
+            );
+            ctx.request_repaint_after(Duration::from_millis(33));
+        }
     }
     fn ui(&mut self, ui: &mut egui::Ui, _: &mut eframe::Frame) {
+        let _output_scope = output_admission::scope(self.output_admission.clone());
+        self.minimized_controls(ui.ctx());
+        if self.output_admission.leased() {
+            self.run.auto = false;
+        }
+        let local_active = self.library_preview_blocked() || self.smart_preview.active();
+        if let Some(cast) = self.cast.get_mut() {
+            cast.local_playback_active = local_active;
+            cast.output_gate = self.output_admission.clone();
+        }
+        if self.organizer.moving() {
+            if let Some(destination) = self.organizer.show(ui, &self.root, false, || {}) {
+                self.connect_music_root(destination);
+            }
+            return;
+        }
+
+        if let Some(saved) = self.playlist_sync.poll(&self.root) {
+            self.dj_browser.refresh_sync_saved(
+                saved,
+                &mut self.run.settings,
+                &mut self.show_editor,
+            );
+        }
+
         if !self.control_attempted && self.screenshot_view.is_empty() {
             self.control_attempted = true;
-            if std::env::var_os("AMP_CONTROL_DISABLE").is_none() {
+            if std::env::var_os("AMP_CONTROL_DISABLE").is_none() && remote_access::autostart() {
                 self.start_control(ui.ctx());
             }
         }
@@ -3053,28 +3683,35 @@ impl eframe::App for Player {
         self.poll();
         self.try_automatic_recovery(ui.ctx());
         self.release_jog_wheels(ui.ctx());
+        self.poll_control_start(ui.ctx());
         self.poll_control();
         self.poll_controllers();
         self.performance_tick();
+        preparation_speed::set_playing(
+            self.library_preview_blocked() || self.live_mix.as_ref().is_some_and(|b| b.running()),
+        );
         if let Some(c) = &self.control {
-            c.publish(self.control_snapshot());
+            if self.control_published.elapsed() >= Duration::from_millis(100) {
+                c.publish(self.control_snapshot());
+                self.control_published = std::time::Instant::now();
+            }
+            self.remote_catalog.poll();
             if self.catalog_updated.elapsed() > Duration::from_secs(2) {
-                c.catalog(self.control_catalog());
+                let key = self.control_catalog_key();
+                if self.remote_catalog.needs_update(&key) {
+                    let input = remote_catalog::Input {
+                        library: self.library.clone(),
+                        settings: self.run.settings.clone(),
+                        playlists: self.dj_browser.playlists.clone(),
+                    };
+                    self.remote_catalog
+                        .start(key, input, c.catalog_sink(), ui.ctx().clone());
+                }
                 self.catalog_updated = std::time::Instant::now();
             }
         }
         if let Some((path, seconds)) = self.preparer.preview.take() {
-            if self.run.locked
-                || self.run.auto
-                || self.audio.as_ref().is_some_and(|a| {
-                    a.playing(0)
-                        || a.playing(1)
-                        || a.controls
-                            .sample_playing
-                            .iter()
-                            .any(|p| p.load(std::sync::atomic::Ordering::Relaxed))
-                })
-            {
+            if self.library_preview_blocked() {
                 self.status =
                     "Stop deck playback before auditioning a Library recommendation".into();
             } else if let Some(i) = self
@@ -3087,10 +3724,166 @@ impl eframe::App for Player {
                 self.play_cue(0, i, seconds);
             }
         }
-        if !self.lab_open {
-            self.lab.stop_preview();
+        if !self.lab_open
+            && let Some(lab) = self.lab.get_mut()
+        {
+            lab.stop_preview();
         }
-        self.cast.poll();
+        if let Some(lookup) = self.lookup.get_mut()
+            && lookup.poll(ui.ctx(), &self.root, self.library.as_mut())
+        {
+            self.library_generation = self.library_generation.wrapping_add(1);
+        }
+        if self.podcasts.get().is_some() || (self.workspace.enabled && self.workspace.pane == 6) {
+            self.podcasts
+                .poll(ui.ctx(), self.workspace.enabled && self.workspace.pane == 6);
+            if self.podcasts.open_player {
+                self.podcasts.open_player = false;
+                self.workspace.enabled = true;
+                self.workspace.pane = 0;
+            }
+
+            let mut protected: Vec<_> = self
+                .loaded_snapshot
+                .iter()
+                .zip(&self.loaded_origin)
+                .filter_map(|(track, root)| {
+                    Some(amp_core::music_sources::audio_path(
+                        root.as_ref()?,
+                        &track.as_ref()?.path,
+                    ))
+                })
+                .collect();
+            protected.extend(self.sides.iter().filter_map(|s| s.config.path.clone()));
+            protected.extend(self.sampler.protected_paths());
+            protected.extend(self.right_sampler.protected_paths());
+            let idle = self.scan.is_none()
+                && self.recovery.pending.is_none()
+                && !self.lab_open
+                && !self.preparer.busy()
+                && !self.stem_panel.busy()
+                && !self.run.auto
+                && !self.auxiliary_playing()
+                && !self
+                    .audio
+                    .as_ref()
+                    .is_some_and(|a| (0..6).any(|d| a.playing(d)));
+            self.podcasts.cache.tick(ui.ctx(), protected, idle);
+            if self.podcasts.cache.changed {
+                self.podcasts.cache.changed = false;
+                self.scan();
+            }
+            let podcast_path = self.loaded_track(0).and_then(|t| {
+                self.loaded_origin[0]
+                    .as_ref()
+                    .map(|root| root.join(&t.path))
+            });
+            let podcast_position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
+            let podcast_finished = self.podcasts.is_active()
+                && self.audio.as_ref().is_some_and(|a| {
+                    a.controls.finished[0].load(std::sync::atomic::Ordering::Relaxed)
+                });
+            self.podcasts.record_progress(
+                podcast_path.as_deref(),
+                podcast_position,
+                podcast_finished,
+            );
+            if podcast_finished {
+                self.podcasts.finished();
+            }
+            if let Some((path, id)) = self.podcasts.delete_request.take() {
+                let loaded = (0..6).any(|d| {
+                    self.loaded_track(d).is_some_and(|t| {
+                        self.loaded_origin[d]
+                            .as_ref()
+                            .is_some_and(|root| root.join(&t.path) == path)
+                    })
+                });
+                let result = if loaded {
+                    Err("Unload this episode from Player / DJ before deleting its download.".into())
+                } else {
+                    self.podcasts.cache.delete(&path, &id)
+                };
+                self.podcasts.report(result.map_or_else(
+                    |e| e,
+                    |_| "Downloaded audio removed; subscription kept.".into(),
+                ));
+            }
+            if let Some(episode) = self.podcasts.stream_request.take() {
+                let mut preparation = amp_core::Preparation {
+                    cue_in: self.podcasts.resume_position(),
+                    ..Default::default()
+                };
+                preparation
+                    .extensions
+                    .insert("podcast_stream_url".into(), serde_json::json!(episode.url));
+                preparation
+                    .extensions
+                    .insert("media_kind".into(), serde_json::json!("podcast"));
+                preparation.extensions.insert(
+                    "duration_seconds".into(),
+                    serde_json::json!(podcasts::duration_seconds(&episode.duration)),
+                );
+                let track = amp_core::Track {
+                    path: PathBuf::from(format!("{}.mp3", episode.id)),
+                    title: episode.title,
+                    preparation,
+                };
+                self.claim_playback(playback_owner::Owner::Player, 0, false);
+                self.auto = false;
+                self.player_sequence.resume_auto = false;
+                let root = podcasts::downloads().unwrap_or_default();
+                let result = self.ensure_audio().and_then(|()| {
+                    self.audio
+                        .as_mut()
+                        .unwrap()
+                        .load_original(0, &root, &track, true)
+                });
+                match result {
+                    Ok(()) => {
+                        self.loaded[0] = None;
+                        self.loaded_snapshot[0] = Some(track);
+                        self.loaded_origin[0] = Some(root);
+                        self.podcasts.report(
+                            "Episode ready in AMP Player. Use Player to pause or seek.".into(),
+                        );
+                    }
+                    Err(error) => {
+                        self.status = error;
+                        self.podcasts.report(self.status.clone());
+                    }
+                }
+            }
+            if let Some((path, play)) = self.podcasts.downloaded.take()
+                && play
+            {
+                self.claim_playback(playback_owner::Owner::Player, 0, false);
+                if let Some(audio) = &mut self.audio {
+                    audio.stop(0);
+                }
+                let position = self.podcasts.resume_position();
+                match self.safe_load_original_path(0, path, Some(position)) {
+                    Ok(()) => {
+                        if let Some(audio) = &self.audio
+                            && let Err(error) = audio.play(0)
+                        {
+                            self.status = error;
+                        }
+                    }
+                    Err(error) => self.status = error,
+                }
+            }
+            if self.podcasts.resume_music {
+                self.podcasts.resume_music = false;
+                if let Some(index) = self.queue.first().copied() {
+                    self.play(0, index);
+                }
+            }
+        }
+        if let Some(cast) = self.cast.get_mut() {
+            cast.poll();
+        }
+        self.update_live_broadcast();
         self.dj_effects(ui.ctx());
         let ctx = ui.ctx().clone();
         let mut active = vec![egui::ViewportId::ROOT];
@@ -3100,55 +3893,91 @@ impl eframe::App for Player {
             }
         }
         docking::retain(&ctx, &active);
-        match self.screenshot_view.as_str() {
-            "library" | "preparation" => self.library_ui(ui),
-            "playlists" => {
-                self.library_page = 2;
-                self.library_ui(ui);
+        if self.workspace.enabled {
+            self.workspace_ui(ui);
+        } else {
+            match self.screenshot_view.as_str() {
+                "library" | "preparation" => self.library_ui(ui),
+                "playlists" => {
+                    self.library_page = 2;
+                    self.library_ui(ui);
+                }
+                "organizer" => {
+                    self.library_page = 8;
+                    self.library_ui(ui);
+                }
+                "sources" => {
+                    self.library_page = 5;
+                    self.library_ui(ui);
+                }
+                "tags-artwork" => {
+                    self.library_page = 9;
+                    self.library_ui(ui);
+                }
+                "podcasts" => {
+                    self.library_page = 10;
+                    self.library_ui(ui);
+                }
+                "analysis" => {
+                    self.library_page = 6;
+                    self.library_ui(ui);
+                }
+                "devices" => {
+                    self.library_page = 3;
+                    self.library_ui(ui);
+                }
+                "rules" => {
+                    self.show_editor.open = true;
+                    self.library_page = 1;
+                    self.library_ui(ui);
+                }
+                "dj" => self.dj_ui(ui),
+                "dj-window" => self.group_ui(ui, 2),
+                "dj-settings" => {
+                    self.auto_dj_controls = true;
+                    self.open_dj_settings(ui.ctx());
+                    self.group_ui(ui, 2);
+                }
+                "dj-transitions" => {
+                    self.auto_dj_controls = true;
+                    ui.ctx().data_mut(|d| {
+                        d.insert_temp(egui::Id::unique("transitions-window-open"), true);
+                    });
+                    self.group_ui(ui, 2);
+                }
+                "dj-auto-setup" => {
+                    self.auto_dj_controls = true;
+                    self.group_ui(ui, 2);
+                }
+                "compact" => {
+                    self.player_mode = 1;
+                    self.group_ui(ui, 0);
+                }
+                "mini" => {
+                    self.player_mode = 2;
+                    self.group_ui(ui, 0);
+                }
+                "dj-library" => self.dj_library_ui(ui),
+                "sampler" => self.sampler_ui(ui),
+                "addons" => self.addons_ui(ui),
+                "cast" => self.cast_ui(ui),
+                "lab" => {
+                    let action = self.lab.show(ui, &self.root, self.library.as_ref());
+                    self.activate(ui, action);
+                }
+                _ => self.group_ui(ui, 0),
             }
-            "analysis" => {
-                self.library_page = 6;
-                self.library_ui(ui);
-            }
-            "devices" => {
-                self.library_page = 3;
-                self.library_ui(ui);
-            }
-            "rules" => {
-                self.show_editor.open = true;
-                self.library_page = 1;
-                self.library_ui(ui);
-            }
-            "dj" => self.dj_ui(ui),
-            "dj-window" => self.group_ui(ui, 2),
-            "compact" => {
-                self.player_mode = 1;
-                self.group_ui(ui, 0);
-            }
-            "mini" => {
-                self.player_mode = 2;
-                self.group_ui(ui, 0);
-            }
-            "dj-library" => self.dj_library_ui(ui),
-            "sampler" => self.sampler_ui(ui),
-            "addons" => self.addons_ui(ui),
-            "cast" => self.cast_ui(ui),
-            "lab" => {
-                let action = self.lab.show(ui, &self.root, self.library.as_ref());
-                self.activate(ui, action);
-            }
-            _ => self.group_ui(ui, 0),
         }
         let open = self.open_panes();
         for (pane, is_open) in open.iter().enumerate().skip(1) {
-            if !is_open || self.layout.parent[pane].is_some() {
+            if self.workspace.enabled || !is_open || self.layout.parent[pane].is_some() {
                 continue;
             }
             let size = self.recovered_window_size(pane, ctx.input(|i| i.viewport().monitor_size));
             ctx.show_viewport_immediate(
                 window_layout::viewport(pane),
                 egui::ViewportBuilder::default()
-                    .with_title(window_layout::NAMES[pane])
+                    .with_title("AMP Verse")
                     .with_decorations(false)
                     .with_icon(app_icon())
                     .with_inner_size(size)
@@ -3173,6 +4002,28 @@ impl eframe::App for Player {
             self.dock_frames += 1;
             docking::smoke(&ctx, self.dock_frames, &PathBuf::from(path));
         }
+        if let Some(directory) = std::env::var_os("AMP_UI_CAPTURE_DIR")
+            && ui.input(|i| i.key_pressed(egui::Key::F12))
+        {
+            let directory = PathBuf::from(directory);
+            let _ = std::fs::create_dir_all(&directory);
+            let path = directory.join(format!(
+                "podcasts-{}-{}.png",
+                self.podcasts.page_name(),
+                theme::current(&ctx).id()
+            ));
+            ctx.request_screenshot(move |image| {
+                use eframe::icon_data::IconDataExt;
+                let icon = egui::IconData {
+                    width: image.size[0] as u32,
+                    height: image.size[1] as u32,
+                    rgba: image.pixels.iter().flat_map(|c| c.to_array()).collect(),
+                };
+                if let Ok(data) = icon.to_png_bytes() {
+                    let _ = std::fs::write(path, data);
+                }
+            });
+        }
         if let Some(path) = std::env::var_os("AMP_SCREENSHOT")
             && self.scan.is_none()
         {
@@ -3189,29 +4040,82 @@ impl eframe::App for Player {
                 .anchor(egui::Align2::CENTER_TOP, [0., 48.])
                 .show(&ctx, |ui| self.recovery_ui(ui));
         }
+        let chosen = self.sample_library.show(
+            &ctx,
+            self.library.as_ref().map_or(&[], |l| l.tracks.as_slice()),
+        );
+        if let Some(index) = chosen {
+            let path = amp_core::music_sources::audio_path(
+                &self.root,
+                &self.library.as_ref().unwrap().tracks[index].path,
+            );
+            let result = if self.sample_library.side == 0 {
+                self.ensure_audio()
+            } else {
+                self.ensure_right_samples()
+            };
+            match result {
+                Ok(()) => {
+                    let sampler = if self.sample_library.side == 0 {
+                        &mut self.sampler
+                    } else {
+                        &mut self.right_sampler
+                    };
+                    sampler.request_load(self.sample_library.pad, path);
+                    self.sample_library.open = false;
+                }
+                Err(error) => self.status = error,
+            }
+        }
         self.capture_session_layout(&ctx);
         self.checkpoint(false);
-        ctx.request_repaint_after(Duration::from_millis(if self.playing.iter().any(|p| *p) {
-            33
-        } else {
-            120
-        }));
+        ctx.request_repaint_after(Duration::from_millis(
+            if self.playing.iter().any(|p| *p)
+                || self.auxiliary_playing()
+                || self.smart_preview.active()
+            {
+                33
+            } else {
+                1000
+            },
+        ));
     }
 }
 fn main() -> eframe::Result {
+    if let Err(error) = v1_profile::initialize() {
+        eprintln!("Could not initialize isolated V1 preview profile: {error}");
+        return Ok(());
+    }
     let mut player = Player::default();
+    if player.screenshot_view == "two-deck" {
+        player.rack.six = false;
+        player.workspace.enabled = true;
+        player.workspace.pane = 2;
+    }
+    if player.screenshot_view == "v1-analysis" {
+        player.library_page = 6;
+    }
+    if player.screenshot_view == "v1-playlists" {
+        player.library_page = 2;
+    }
     if player.screenshot_view.is_empty() {
         player.recovery = session::Recovery::open(&player.root);
     }
     if !player.root.as_os_str().is_empty() {
+        if let Err(error) = startup_index::remember(&player.root, None) {
+            player.status = format!("Could not save library startup index: {error}");
+        }
         player.scan();
     }
-    let size = match player.screenshot_view.as_str() {
+    if std::env::var_os("AMP_SCREENSHOT_EXPANDED").is_some() {
+        player.rack.expanded = true;
+    }
+    let mut size = match player.screenshot_view.as_str() {
         "combined" => [1100., 900.],
         "library" | "playlists" | "analysis" | "devices" => [1280., 860.],
         "preparation" | "rules" => [1200., 830.],
-        "dj" => [1000., 920.],
-        "dj-window" => [1440., 1000.],
+        "dj" => [1000., 1100.],
+        "dj-window" => [1440., 1100.],
         "compact" => [520., 210.],
         "mini" => [620., 100.],
         "dj-library" => [1100., 430.],
@@ -3220,10 +4124,18 @@ fn main() -> eframe::Result {
         "addons" => [1120., 760.],
         "cast" => [1120., 800.],
         "player" => [1100., 170.],
-        _ => [1280., 900.],
+        _ => [1280., 1100.],
     };
+    if let Ok(value) = std::env::var("AMP_SCREENSHOT_SIZE")
+        && let Some((w, h)) = value.split_once('x')
+        && let (Ok(w), Ok(h)) = (w.parse::<f32>(), h.parse::<f32>())
+        && (300. ..=3840.).contains(&w)
+        && (160. ..=2160.).contains(&h)
+    {
+        size = [w, h];
+    }
     eframe::run_native(
-        "AMP VERSE",
+        "AMP Verse",
         eframe::NativeOptions {
             viewport: egui::ViewportBuilder::default()
                 .with_decorations(false)
@@ -3234,13 +4146,23 @@ fn main() -> eframe::Result {
                 })
                 .with_icon(app_icon())
                 .with_inner_size(size)
-                .with_min_inner_size([size[0].min(740.), size[1].min(160.)])
+                .with_min_inner_size(if player.workspace.enabled {
+                    [760., 540.]
+                } else {
+                    [size[0].min(400.), size[1].min(150.)]
+                })
                 .with_resizable(true)
                 .with_clamp_size_to_monitor_size(true),
             ..Default::default()
         },
         Box::new(|cc| {
             skin::configure(&cc.egui_ctx);
+            if let Ok(scale) = std::env::var("AMP_SCREENSHOT_SCALE")
+                && let Ok(scale) = scale.parse::<f32>()
+                && (1. ..=2.).contains(&scale)
+            {
+                cc.egui_ctx.set_zoom_factor(scale);
+            }
             Ok(Box::new(player))
         }),
     )
@@ -3250,10 +4172,339 @@ fn main() -> eframe::Result {
 mod window_tests {
     use super::*;
     #[test]
+    #[ignore = "requires a real local audio output and ffmpeg; no stem model"]
+    fn audio_mode_reload_preserves_paused_absolute_position_end_and_other_deck() {
+        use std::sync::atomic::Ordering::Relaxed;
+        use std::time::{Duration, Instant};
+        fn wait(mut condition: impl FnMut() -> bool) {
+            let deadline = Instant::now() + Duration::from_secs(8);
+            while !condition() {
+                assert!(Instant::now() < deadline, "audio callback did not settle");
+                std::thread::sleep(Duration::from_millis(10));
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("mode-reload.wav");
+        assert!(
+            amp_core::command("ffmpeg")
+                .args([
+                    "-v",
+                    "error",
+                    "-f",
+                    "lavfi",
+                    "-i",
+                    "sine=frequency=220:duration=5"
+                ])
+                .arg(&path)
+                .status()
+                .unwrap()
+                .success()
+        );
+        let track = amp_core::Track {
+            path: "mode-reload.wav".into(),
+            title: "Mode reload fixture".into(),
+            preparation: amp_core::Preparation {
+                cue_in: 1.,
+                cue_out: Some(4.),
+                ..Default::default()
+            },
+        };
+        let mut engine = mixer::Engine::new().unwrap();
+        engine.set_master(0.);
+        engine.load_original(0, dir.path(), &track, true).unwrap();
+        engine.load_original(1, dir.path(), &track, true).unwrap();
+        wait(|| engine.source_position(0) > 1.15);
+        engine.pause(0);
+        wait(|| !engine.playing(0));
+        let before = engine.source_position(0);
+        let other_generation = engine.controls.deck_generation[1].load(Relaxed);
+        let mut player = Player::default();
+        player.loaded_snapshot[0] = Some(track.clone());
+        player.loaded_origin[0] = Some(dir.path().to_path_buf());
+        player.audio = Some(engine);
+        player.reload_deck_audio_mode(0).unwrap();
+        wait(|| player.audio.as_ref().unwrap().load_current(0));
+        let audio = player.audio.as_ref().unwrap();
+        assert!((audio.source_position(0) - before).abs() < 0.025);
+        assert!((audio.source_position(0) + audio.remaining(0).unwrap() as f64 - 4.).abs() < 0.025);
+        assert!(!audio.playing(0));
+        assert!(audio.playing(1));
+        assert_eq!(
+            audio.controls.deck_generation[1].load(Relaxed),
+            other_generation
+        );
+        assert_eq!(
+            player.loaded_snapshot[0].as_ref().unwrap().preparation,
+            track.preparation
+        );
+        // A rejected mode request must restore intent without replacing either source.
+        let generation = audio.controls.deck_generation[0].load(Relaxed);
+        audio.controls.on_demand_stems[0].store(true, Relaxed);
+        player.run.auto = true;
+        assert!(player.reload_deck_audio_mode(0).is_err());
+        let audio = player.audio.as_ref().unwrap();
+        assert!(!audio.controls.on_demand_stems[0].load(Relaxed));
+        assert_eq!(audio.controls.deck_generation[0].load(Relaxed), generation);
+        assert_eq!(
+            audio.controls.deck_generation[1].load(Relaxed),
+            other_generation
+        );
+        player.run.auto = false;
+        // A manual new-song load retains its independent full-track policy.
+        player.safe_load_path(0, path, None).unwrap();
+        wait(|| player.audio.as_ref().unwrap().load_current(0));
+        assert!(player.audio.as_ref().unwrap().source_position(0) < 0.025);
+    }
+
+    #[test]
+    fn remote_start_prepares_catalog_before_serving_and_can_be_cancelled() {
+        let ctx = egui::Context::default();
+        let directory = tempfile::tempdir().unwrap();
+        let mut library = amp_core::scan(directory.path()).unwrap();
+        library.tracks.push(amp_core::Track {
+            path: "song.mp3".into(),
+            title: "Fixture song".into(),
+            preparation: Default::default(),
+        });
+        let mut player = Player {
+            root: directory.path().into(),
+            library: Some(library),
+            control_bind: "127.0.0.1:0".into(),
+            ..Default::default()
+        };
+        player.start_control(&ctx);
+        assert!(
+            player.control.is_none(),
+            "Do not advertise an empty remote catalog during preparation"
+        );
+        assert!(player.control_start.is_some());
+        player.volume = 42;
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while player.control.is_none() {
+            player.poll_control_start(&ctx);
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let address = &player.control.as_ref().unwrap().address;
+        let value: serde_json::Value = ureq::get(format!("http://{address}/api/v1/catalog"))
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_json()
+            .unwrap();
+        assert_eq!(value["songs"][0]["title"], "Fixture song");
+        assert_eq!(player.volume, 42);
+        assert!(player.audio.is_none());
+        let key = player.control_catalog_key();
+        player.volume = 56;
+        assert_eq!(
+            key,
+            player.control_catalog_key(),
+            "Transport changes must not rebuild the catalog"
+        );
+        player.preparer.revision += 1;
+        assert_ne!(
+            key,
+            player.control_catalog_key(),
+            "Saved metadata must invalidate the catalog"
+        );
+        player.control = None;
+        player.start_control(&ctx);
+        player.control_start = None;
+        player.poll_control_start(&ctx);
+        assert!(
+            player.control.is_none(),
+            "Stopping pending setup must not start a server later"
+        );
+    }
+    #[test]
+    fn idle_player_and_remote_status_do_not_load_unused_modules() {
+        let mut player = Player {
+            root: PathBuf::new(),
+            ..Default::default()
+        };
+        for _ in 0..3 {
+            player.poll();
+            player.update_live_broadcast();
+            let snapshot = player.control_snapshot();
+            assert_eq!(snapshot["google_cast"]["discovering"], false);
+            assert!(!player.podcasts.is_active());
+            assert!(!player.podcasts.next_episode());
+        }
+        assert!(
+            player.cast.get().is_none(),
+            "Status must not start Cast workers"
+        );
+        assert!(player.lab.get().is_none(), "Polling must not open Lab");
+        assert!(
+            player.podcasts.get().is_none(),
+            "Music playback must not load Podcasts"
+        );
+        assert!(
+            player.audio.is_none(),
+            "Idle Player must not open an audio device"
+        );
+        assert!(player.right_sample_audio.is_none());
+        assert!(player.control.is_none());
+        assert!(player.lookup.get().is_none());
+        assert!(player.transcription.get().is_none());
+        assert!(player.controllers.get().is_none());
+        assert!(player.outputs.get().is_none());
+    }
+    #[test]
+    fn analysis_job_inputs_publish_added_subfolders_while_preserving_existing_metadata() {
+        let main = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        std::fs::write(main.path().join("old.mp3"), b"fixture").unwrap();
+        let mut old = amp_core::scan(main.path()).unwrap();
+        old.tracks[0].preparation.bpm = Some(123.);
+        old.tracks[0].preparation.manual_override = true;
+        std::fs::create_dir_all(extra.path().join("Artist/Album")).unwrap();
+        std::fs::write(extra.path().join("Artist/Album/new.mp3"), b"fixture").unwrap();
+        amp_core::music_sources::add(main.path(), extra.path()).unwrap();
+        let mut player = Player {
+            root: main.path().into(),
+            library: Some(old),
+            analyze_after_scan: true,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        player.analysis_scan = Some(rx);
+        let jobs = amp_core::scan_job_inputs(main.path()).unwrap();
+        assert_eq!(jobs.tracks.len(), 2);
+        let new = jobs.tracks.iter().find(|t| t.title == "new").unwrap();
+        let (owner, relative) = amp_core::music_sources::owner(main.path(), &new.path).unwrap();
+        assert_eq!(owner, extra.path().canonicalize().unwrap());
+        assert_eq!(relative, PathBuf::from("Artist/Album/new.mp3"));
+        tx.send(Ok(jobs)).unwrap();
+        player.poll_analysis_scan();
+        assert!(!player.analyze_after_scan);
+        assert_eq!(player.preparer.progress().1, 2);
+        assert_eq!(player.library.as_ref().unwrap().tracks.len(), 2);
+        let old = player
+            .library
+            .as_ref()
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|t| t.path == Path::new("old.mp3"))
+            .unwrap();
+        assert_eq!(old.preparation.bpm, Some(123.));
+        assert!(old.preparation.manual_override);
+    }
+    #[test]
+    fn unavailable_root_does_not_clear_existing_library_or_live_session() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("song.mp3"), b"fixture").unwrap();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            queue: vec![0],
+            loaded: [Some(0), None, None, None, None, None],
+            ..Default::default()
+        };
+        player.run.auto = true;
+        player.connect_music_root(root.path().join("not-connected"));
+        assert_eq!(player.root, root.path());
+        assert_eq!(player.queue, vec![0]);
+        assert_eq!(player.loaded[0], Some(0));
+        assert!(player.run.auto);
+        assert!(
+            player
+                .status
+                .contains("Existing library and playback were kept")
+        );
+    }
+    #[test]
+    fn failed_refresh_does_not_analyze_an_outdated_song_list() {
+        let root = tempfile::tempdir().unwrap();
+        let (tx, rx) = mpsc::channel();
+        let mut player = Player {
+            root: root.path().into(),
+            analysis_scan: Some(rx),
+            analyze_after_scan: true,
+            ..Default::default()
+        };
+        tx.send(Err("Music folder unavailable".into())).unwrap();
+        player.poll_analysis_scan();
+        assert!(!player.analyze_after_scan);
+        assert_eq!(player.preparer.progress(), (0, 0));
+        assert!(player.preparer.status.contains("Analysis was not started"));
+    }
+    #[test]
+    fn auto_mix_switch_never_claims_on_when_no_source_can_start() {
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        let mut frame = |events| {
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    events,
+                    ..Default::default()
+                },
+                |ui| player.performance_controls(ui),
+            );
+            output.textures_delta.clear();
+            ctx.data(|data| {
+                (
+                    data.get_temp::<egui::Rect>(egui::Id::unique("auto-dj-switch"))
+                        .unwrap(),
+                    data.get_temp::<bool>(egui::Id::unique("auto-dj-menu-visible"))
+                        .unwrap(),
+                )
+            })
+        };
+        let (rect, visible) = frame(vec![]);
+        assert!(!visible);
+        for expected in [false, false] {
+            let pos = rect.center();
+            frame(vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton {
+                    pos,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ]);
+            let (_, visible) = frame(vec![egui::Event::PointerButton {
+                pos,
+                button: egui::PointerButton::Primary,
+                pressed: false,
+                modifiers: Default::default(),
+            }]);
+            assert_eq!(visible, expected);
+        }
+        assert!(!player.run.auto);
+    }
+    #[test]
+    fn expanding_library_keeps_a_manually_resized_player() {
+        for size in [
+            egui::vec2(500., 350.),
+            egui::vec2(1400., 950.),
+            egui::vec2(2000., 1200.),
+        ] {
+            assert_eq!(player_window_size(Some(size), true), size);
+        }
+        assert_eq!(
+            player_window_size(Some(egui::vec2(1250., 170.)), true),
+            egui::vec2(1250., 900.)
+        );
+        assert_eq!(
+            player_window_size(Some(egui::vec2(1250., 900.)), false),
+            egui::vec2(1250., 170.)
+        );
+    }
+    #[test]
     fn appearance_choices_are_visible_and_clickable_inside_module_menu() {
         for selected in theme::Theme::ALL {
             let ctx = egui::Context::default();
-            let mut player = Player::default();
+            let mut player = Player {
+                rack: deck_rack::Rack {
+                    six: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            };
             let mut draw = |position: egui::Pos2, pressed: Option<bool>| {
                 let mut raw = egui::RawInput {
                     screen_rect: Some(egui::Rect::from_min_size(
@@ -3298,6 +4549,10 @@ mod window_tests {
     fn short_player_module_menu_is_visible_and_clickable() {
         let ctx = egui::Context::default();
         let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
             library_open: false,
             dj_open: false,
             ..Default::default()
@@ -3439,12 +4694,16 @@ mod window_tests {
             tree: tree(),
         };
         let mut player = Player {
-            loaded: [Some(1), None],
-            loaded_snapshot: [Some(old.tracks[1].clone()), None],
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            loaded: [Some(1), None, None, None, None, None],
+            loaded_snapshot: [Some(old.tracks[1].clone()), None, None, None, None, None],
             selected: Some(0),
             queue: vec![2, 1, 1, 0],
             queue_selected: Some(2),
-            playing: [true, false],
+            playing: [true, false, false, false, false, false],
             auto: true,
             library: Some(old),
             ..Default::default()
@@ -3460,7 +4719,7 @@ mod window_tests {
             ],
             tree: tree(),
         });
-        assert_eq!(player.loaded, [Some(2), None]);
+        assert_eq!(player.loaded, [Some(2), None, None, None, None, None]);
         assert_eq!(player.queue, vec![0, 2, 2, 1]);
         assert_eq!(player.queue_selected, Some(2));
         assert_eq!(player.selected, Some(1));
@@ -3476,8 +4735,12 @@ mod window_tests {
     fn small_player_modes_preserve_session_and_magnetic_layout() {
         let ctx = egui::Context::default();
         let mut player = Player {
-            loaded: [Some(4), Some(6)],
-            playing: [true, false],
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            loaded: [Some(4), Some(6), None, None, None, None],
+            playing: [true, false, false, false, false, false],
             queue: vec![4, 6],
             library_open: true,
             library_page: 0,
@@ -3487,18 +4750,24 @@ mod window_tests {
         let parent = player.layout.parent;
         for mode in [1, 2, 0] {
             player.set_player_mode(&ctx, mode);
-            assert_eq!(player.loaded, [Some(4), Some(6)]);
-            assert_eq!(player.playing, [true, false]);
+            assert_eq!(player.loaded, [Some(4), Some(6), None, None, None, None]);
+            assert_eq!(player.playing, [true, false, false, false, false, false]);
             assert_eq!(player.queue, vec![4, 6]);
             assert_eq!(player.layout.parent, parent);
             assert!(player.library_open);
         }
     }
     #[test]
-    fn expanded_dj_moves_banks_below_and_restore_returns_them_to_sides() {
+    fn two_deck_cue_pads_stay_below_their_decks_during_resize() {
         let ctx = egui::Context::default();
-        let mut player = Player::default();
-        for (size, expanded, below) in [
+        let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for (size, expanded, _below) in [
             (egui::vec2(1920., 1080.), true, true),
             (egui::vec2(1440., 900.), true, true),
             (egui::vec2(1000., 760.), false, false),
@@ -3522,22 +4791,16 @@ mod window_tests {
                 ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
             };
             for side in 0..2 {
-                let bank = bounds(egui::Id::unique(("dj-side", side)));
+                let bank = bounds(egui::Id::unique(("dj-cue-pads", side)));
                 let transport = bounds(egui::Id::unique(("dj-transport", side)));
                 assert!(
                     bank.right() <= size.x + 1. && bank.bottom() <= size.y + 1.,
                     "Bank escaped {size:?}: {bank:?}"
                 );
-                if below {
-                    assert!(
-                        bank.top() > transport.bottom(),
-                        "Pads must sit below their deck"
-                    );
-                } else if side == 0 {
-                    assert!(bank.right() < transport.left());
-                } else {
-                    assert!(bank.left() > transport.right());
-                }
+                assert!(
+                    bank.top() > transport.bottom(),
+                    "Cue pads must stay beneath their deck"
+                );
             }
             let browser = bounds(egui::Id::unique("dj-browser-screen"));
             assert!(
@@ -3550,38 +4813,54 @@ mod window_tests {
     #[test]
     fn resized_mixer_controls_stay_inside_the_viewport() {
         let ctx = egui::Context::default();
-        let mut player = Player::default();
+        let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let controls = [
+            egui::Id::unique(("dj-transport", 0usize)),
+            egui::Id::unique(("dj-transport", 1usize)),
+            egui::Id::unique("dj-auto-fade-bounds"),
+            egui::Id::unique(("rack-knobs", 0usize)),
+            egui::Id::unique(("rack-knobs", 1usize)),
+            egui::Id::unique("dj-browser-screen"),
+        ];
         for size in [
             egui::vec2(2560., 1550.),
             egui::vec2(1200., 900.),
-            egui::vec2(740., 480.),
+            egui::vec2(400., 300.),
             egui::vec2(540., 360.),
             egui::vec2(1000., 760.),
         ] {
+            // Each viewport must publish fresh bounds. Retaining an earlier tall
+            // layout's controls would incorrectly apply the new layer transform.
+            ctx.data_mut(|data| {
+                for id in controls {
+                    data.remove::<(egui::Rect, egui::LayerId)>(id.with("screen"));
+                }
+            });
             let raw = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
                 ..Default::default()
             };
             let mut output = ctx.run_ui(raw, |ui| player.group_ui(ui, 2));
             output.textures_delta.clear();
-            for id in [
-                egui::Id::unique(("dj-transport", 0usize)),
-                egui::Id::unique(("dj-transport", 1usize)),
-                egui::Id::unique("dj-auto-fade-bounds"),
-                egui::Id::unique(("dj-stems", 0usize)),
-                egui::Id::unique(("dj-stems", 1usize)),
-                egui::Id::unique("dj-browser-screen"),
-            ] {
+            for id in controls {
                 let (rect, layer) = ctx
                     .data(|d| d.get_temp::<(egui::Rect, egui::LayerId)>(id.with("screen")))
-                    .unwrap();
+                    .unwrap_or_else(|| {
+                        panic!("{size:?}: control {id:?} did not publish fresh bounds")
+                    });
                 let screen = ctx.layer_transform_to_global(layer).unwrap_or_default() * rect;
                 assert!(
                     screen.left() >= -1.
                         && screen.top() >= -1.
                         && screen.right() <= size.x + 1.
                         && screen.bottom() <= size.y + 1.,
-                    "{size:?}: control outside window {screen:?}"
+                    "{size:?}: control {id:?} outside window {screen:?}"
                 );
             }
         }
@@ -3607,6 +4886,10 @@ mod window_tests {
             },
         };
         let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
             library: Some(Library {
                 tracks: vec![track.clone()],
                 tree: Folder {
@@ -3619,14 +4902,14 @@ mod window_tests {
                     tracks: vec![],
                 },
             }),
-            loaded: [Some(0), Some(0)],
-            loaded_snapshot: [Some(track.clone()), Some(track)],
+            loaded: [Some(0), Some(0), None, None, None, None],
+            loaded_snapshot: [Some(track.clone()), Some(track), None, None, None, None],
             ..Default::default()
         };
         player.run.settings.playlists[0].name = "Long Smart Playlist name ".repeat(30);
         player.run.choice = player.run.settings.playlists[0].id.clone();
         for smart in [false, true] {
-            player.dj_cues = [smart; 2];
+            player.dj_cues = [smart; 6];
             player.dj_browser = Default::default();
             if smart {
                 player.dj_browser.select_smart(&player.run.choice);
@@ -3634,7 +4917,7 @@ mod window_tests {
             for size in [
                 egui::vec2(900., 600.),
                 egui::vec2(1000., 760.),
-                egui::vec2(740., 480.),
+                egui::vec2(400., 300.),
             ] {
                 for _ in 0..2 {
                     let mut output = ctx.run_ui(
@@ -3667,7 +4950,13 @@ mod window_tests {
     #[test]
     fn dj_library_drag_moves_boundary_and_fills_bottom_in_scaled_fullscreen() {
         let ctx = egui::Context::default();
-        let mut player = Player::default();
+        let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let size = egui::vec2(1920., 1080.);
         let bounds = |id: &str| {
             let (rect, layer) = ctx
@@ -3734,13 +5023,19 @@ mod window_tests {
     #[test]
     fn enlarged_waveforms_and_library_remain_inside_the_window() {
         let ctx = egui::Context::default();
-        let mut player = Player::default();
+        let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         ctx.data_mut(|d| {
             d.insert_persisted(egui::Id::unique("dj-wave-height"), 140_f32);
             d.insert_persisted(egui::Id::unique("dj-library-height"), 600_f32);
             d.insert_persisted(egui::Id::unique("dj-source-width"), 400_f32);
         });
-        for size in [egui::vec2(740., 480.), egui::vec2(1920., 1080.)] {
+        for size in [egui::vec2(400., 300.), egui::vec2(1920., 1080.)] {
             for _ in 0..2 {
                 let mut output = ctx.run_ui(
                     egui::RawInput {
@@ -3767,7 +5062,13 @@ mod window_tests {
     #[test]
     fn dj_container_fits_a_short_viewport() {
         let ctx = egui::Context::default();
-        let mut player = Player::default();
+        let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
         let raw = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(
                 egui::Pos2::ZERO,
@@ -3805,6 +5106,10 @@ mod window_tests {
     fn dj_below_attached_library_has_finite_reachable_bounds() {
         let ctx = egui::Context::default();
         let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
             library_open: true,
             library_page: 0,
             playback_history: Vec::new(),
@@ -3841,6 +5146,10 @@ mod window_tests {
     fn library_can_merge_into_dj_instead_of_player() {
         let ctx = egui::Context::default();
         let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
             library_open: true,
             library_page: 0,
             playback_history: Vec::new(),
@@ -3861,6 +5170,10 @@ mod window_tests {
     fn actual_magnet_and_detach_buttons_change_window_ownership() {
         let ctx = egui::Context::default();
         let mut player = Player {
+            rack: deck_rack::Rack {
+                six: false,
+                ..Default::default()
+            },
             library_open: true,
             library_page: 0,
             playback_history: Vec::new(),
@@ -3875,5 +5188,35 @@ mod window_tests {
             frame(&ctx, &mut player, press);
         }
         assert_eq!(player.layout.parent[1], None);
+    }
+    #[test]
+    fn local_ui_and_remote_engine_admission_reports_receiver_owner() {
+        let mut player = Player::default();
+        let _lease = player
+            .output_admission
+            .acquire(&std::sync::atomic::AtomicBool::new(false))
+            .unwrap();
+        assert!(
+            player
+                .ensure_audio()
+                .unwrap_err()
+                .contains("Stop listening")
+        );
+        assert!(
+            player
+                .execute_control(control::Action::Play {
+                    deck: control::Deck::default()
+                })
+                .unwrap_err()
+                .contains("Stop listening")
+        );
+        assert!(
+            player.audio.is_none(),
+            "Denied playback must not create another device engine"
+        );
+        assert!(
+            player.queue.is_empty(),
+            "Admission denial must not rewrite the queue"
+        );
     }
 }

@@ -1,0 +1,109 @@
+name: Verify Android card UI
+on:
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - 'android/**'
+      - 'crates/amp-dj-policy/**'
+      - 'tools/build_android_dj.py'
+      - '.github/workflows/android-card-ui.yml'
+permissions:
+  contents: read
+concurrency:
+  group: android-card-ui-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  emulator:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    env:
+      AMP_UI_TEST_X86: '1'
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.0.12077973
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android,x86_64-linux-android
+      - uses: Swatinem/rust-cache@v2
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build emulator-only debug APKs and all optional modules
+        run: |
+          test -z "$AMP_ANDROID_KEYSTORE"
+          python3 tools/test_build_android_dj.py
+          gradle -p android :app:assembleFullDebug :app:assembleFullDebugAndroidTest :app:testFullDebugUnitTest :app:lintFullDebug :amp-dj:assembleRelease :amp-lab:assembleRelease :amp-cast:assembleRelease :amp-podcasts:assembleRelease :amp-remote:assembleRelease
+          python3 - <<'PY'
+          import pathlib,zipfile
+          apk=next(pathlib.Path('android/app/build/outputs/apk/full/debug').glob('*.apk'))
+          with zipfile.ZipFile(apk) as z:
+              assert 'lib/x86_64/libamp_dj_policy.so' in z.namelist(), 'Missing actual emulator JNI library'
+          PY
+      - name: Enable KVM and prepare screenshot collection
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+          cat > "$RUNNER_TEMP/amp-card-ui.sh" <<'SCRIPT'
+          #!/usr/bin/env bash
+          set -e
+          adb shell settings put global window_animation_scale 0
+          adb shell settings put global transition_animation_scale 0
+          adb shell settings put global animator_duration_scale 0
+          adb wait-for-device
+          # The disposable Google API image's Pixel Launcher produced an ANR
+          # over the tested Activity. Stop that exact unrelated package before
+          # instrumentation; leave ANR detection and all application tests intact.
+          adb shell input keyevent KEYCODE_WAKEUP
+          adb shell wm dismiss-keyguard
+          adb shell am force-stop com.google.android.apps.nexuslauncher
+          sleep 10
+          set +e
+          gradle -p android :app:connectedFullDebugAndroidTest -Pandroid.testInstrumentationRunnerArguments.class=cloud.gitwide.ampverse.CardUiDeviceTest,cloud.gitwide.ampverse.CleanUiDeviceTest,cloud.gitwide.ampverse.RadioOfflineTest,cloud.gitwide.ampverse.IncrementalSyncDeviceTest,cloud.gitwide.ampverse.PhoneListeningDeviceTest,cloud.gitwide.ampverse.DjLoadPadsDeviceTest
+          result=$?
+          mkdir -p test-output/android-card-ui
+          adb logcat -d > test-output/android-card-ui/logcat.txt
+          adb pull /sdcard/Download/amp-verse-card-ui test-output/android-card-ui/screenshots
+          screenshot_result=$?
+          if [ "$result" -ne 0 ]; then exit "$result"; fi
+          if [ "$screenshot_result" -ne 0 ]; then exit "$screenshot_result"; fi
+          python3 - <<'PY'
+          from pathlib import Path
+          root=Path('test-output/android-card-ui/screenshots')
+          names={p.name for p in root.rglob('*.png')}
+          required={'card-library-playlists.png','card-dj-focused.png','clean-player.png','clean-library.png','clean-dj.png','clean-devices.png','clean-player-landscape.png','clean-dj-landscape.png','clean-large-text.png'}
+          assert required<=names, f'Missing real rendered screenshots: {required-names}'
+          print(f'Collected {len(names)} actual emulator screenshots')
+          PY
+          SCRIPT
+      - name: Exercise real cards, navigation, text scaling and landscape
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          profile: pixel_6
+          cores: 2
+          ram-size: 3072M
+          disk-size: 4096M
+          disable-animations: true
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
+          script: bash "$RUNNER_TEMP/amp-card-ui.sh"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-card-ui-${{ github.sha }}
+          path: |
+            test-output/android-card-ui/
+            android/app/build/reports/androidTests/
+            android/app/build/outputs/androidTest-results/

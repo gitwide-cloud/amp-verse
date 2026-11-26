@@ -442,6 +442,7 @@ pub struct Lease {
 pub enum Skip {
     Busy,
     Complete,
+    NonMusic,
 }
 pub enum Claimed {
     Owned(Lease),
@@ -456,6 +457,11 @@ impl Lease {
         device: &str,
         ttl: Duration,
     ) -> Result<Claimed, String> {
+        let (owner, path) =
+            crate::music_sources::owner(root, relative).map_err(|e| e.to_string())?;
+        if owner != root.canonicalize().map_err(|e| e.to_string())? {
+            return Self::claim(&owner, &path, analysis_type, device, ttl);
+        }
         crate::storage::enroll(root)?;
         let _migration = Lock::acquire(&root.join("ampdj/catalog-migration"))?;
         let library = library_id(root)?;
@@ -656,6 +662,11 @@ fn valid_engine(p: &crate::Preparation) -> bool {
 
 #[cfg(feature = "analysis")]
 pub fn analyze_shared(root: &Path, relative: &Path, force: bool) -> Result<AnalysisResult, String> {
+    let (owner, path) = crate::music_sources::owner(root, relative).map_err(|e| e.to_string())?;
+    if owner != root.canonicalize().map_err(|e| e.to_string())? {
+        return analyze_shared(&owner, &path, force);
+    }
+
     let audio = crate::resolve(root, relative).map_err(|e| e.to_string())?;
     let signature = source_stat(&audio)?;
     let cached = crate::preparation::load(&audio)?;
@@ -678,7 +689,22 @@ pub fn analyze_shared(root: &Path, relative: &Path, force: bool) -> Result<Analy
     };
     let _heartbeat = lease.keep_alive();
     let audio = crate::resolve(root, relative).map_err(|e| e.to_string())?;
-    let (before, bytes) = crate::preparation::load_with_revision(&audio)?;
+    let (mut before, bytes) = crate::preparation::load_with_revision(&audio)?;
+    if !force {
+        before.extensions.remove("media_kind_detected");
+        if !before.extensions.contains_key("media_kind") {
+            crate::genres::read_embedded(&audio, &mut before);
+        }
+        let kind = crate::media_kind::kind(&audio, &before);
+        if kind != crate::media_kind::Kind::Music {
+            before
+                .extensions
+                .insert("media_kind_detected".into(), serde_json::json!(kind.id()));
+            lease.stamp(&mut before);
+            crate::preparation::publish_claimed(root, relative, &before, bytes.as_deref(), &lease)?;
+            return Ok(AnalysisResult::Skipped(Skip::NonMusic));
+        }
+    }
     if (!force
         || completed_version(&before)
             .is_some_and(|v| v > engine_version(crate::engine_api::ENGINE_ID).unwrap()))
@@ -716,6 +742,10 @@ pub fn analyze_draft(
     relative: &Path,
     draft: &crate::Preparation,
 ) -> Result<crate::Preparation, String> {
+    let (owner, path) = crate::music_sources::owner(root, relative).map_err(|e| e.to_string())?;
+    if owner != root.canonicalize().map_err(|e| e.to_string())? {
+        return analyze_draft(&owner, &path, draft);
+    }
     let device = device_id()?;
     let lease = match Lease::claim(
         root,
@@ -745,6 +775,11 @@ pub fn analyze_draft(
 #[cfg(all(test, feature = "analysis"))]
 mod tests {
     use super::*;
+    // Publication/merge tests perform durable filesystem writes and may run in
+    // parallel on slow Windows CI disks. Their ownership must not depend on a
+    // three-second scheduling budget. Expiry tests use expire() or an explicit
+    // short subprocess lease instead of this ordinary work-lease duration.
+    const WORK_LEASE_TTL: Duration = Duration::from_secs(120);
     fn fixture() -> tempfile::TempDir {
         let root = tempfile::tempdir().unwrap();
         fs::write(root.path().join("song.wav"), b"audio-fixture").unwrap();
@@ -752,15 +787,7 @@ mod tests {
         root
     }
     fn claim(root: &Path, device: &str) -> Lease {
-        match Lease::claim(
-            root,
-            Path::new("song.wav"),
-            "test",
-            device,
-            Duration::from_secs(3),
-        )
-        .unwrap()
-        {
+        match Lease::claim(root, Path::new("song.wav"), "test", device, WORK_LEASE_TTL).unwrap() {
             Claimed::Owned(l) => l,
             _ => panic!("expected ownership"),
         }
@@ -770,6 +797,26 @@ mod tests {
         let mut c: Claim = read(&lease.path).unwrap().unwrap();
         c.expires_ms = 0;
         atomic_write(&lease.path, &c).unwrap();
+    }
+    #[cfg(feature = "analysis")]
+    #[test]
+    fn spoken_folder_is_classified_without_decoding_or_moving_audio() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::create_dir(root.path().join("Speeches")).unwrap();
+        let audio = root.path().join("Speeches/Talk.mp3");
+        std::fs::write(&audio, b"not an audio codec fixture").unwrap();
+        crate::catalog_db::compact(root.path()).unwrap();
+        assert!(matches!(
+            analyze_shared(root.path(), Path::new("Speeches/Talk.mp3"), false).unwrap(),
+            AnalysisResult::Skipped(Skip::NonMusic)
+        ));
+        let saved = crate::preparation::load(&audio).unwrap();
+        assert!(saved.analysis.is_none());
+        assert_eq!(
+            crate::media_kind::kind(Path::new("Speeches/Talk.mp3"), &saved),
+            crate::media_kind::Kind::Speech
+        );
+        assert_eq!(std::fs::read(audio).unwrap(), b"not an audio codec fixture");
     }
     #[test]
     fn short_record_contention_retries_without_bypassing_the_lock() {
@@ -862,6 +909,39 @@ mod tests {
             .unwrap(),
             Claimed::Owned(_)
         ));
+    }
+    #[test]
+    fn expired_matching_owner_cannot_publish_without_a_takeover() {
+        let root = fixture();
+        let audio = root.path().join("song.wav");
+        let lease = claim(root.path(), "expired-owner");
+        let previous = crate::preparation::revision(&audio);
+        expire(&lease);
+        let expired: Claim = read(&lease.path).unwrap().unwrap();
+        assert_eq!(expired.token, lease.token);
+        assert_eq!(expired.generation, lease.generation);
+        assert_eq!(expired.device_id, lease.device);
+        assert_eq!(expired.library_id, lease.library);
+        assert_eq!(expired.analysis_type, lease.analysis_type);
+        assert_eq!(expired.state, "active");
+        assert_eq!(expired.expires_ms, 0);
+        assert!(lease.renew().unwrap_err().contains("lease expired"));
+        let candidate = crate::Preparation {
+            cue_in: 2.,
+            manual_override: true,
+            ..Default::default()
+        };
+        let error = crate::preparation::publish_claimed(
+            root.path(),
+            Path::new("song.wav"),
+            &candidate,
+            None,
+            &lease,
+        )
+        .unwrap_err();
+        assert!(error.contains("lease expired"), "{error}");
+        assert_eq!(crate::preparation::revision(&audio), previous);
+        assert_eq!(fs::read(&audio).unwrap(), b"audio-fixture");
     }
     #[test]
     fn expired_worker_cannot_renew_or_publish_after_takeover() {
@@ -981,6 +1061,99 @@ mod tests {
         ));
     }
     #[test]
+    fn computed_recommendation_survives_publication_without_changing_approved_values() {
+        let root = fixture();
+        let relative = Path::new("song.wav");
+        let audio = root.path().join(relative);
+        let mut manual = crate::Preparation {
+            cue_in: 2.,
+            cue_out: Some(8.),
+            bpm: Some(127.),
+            manual_override: true,
+            ..Default::default()
+        };
+        manual.manual_cues.push(crate::preparation::Cue {
+            id: "my-drop".into(),
+            label: "My drop".into(),
+            seconds: 3.,
+            ..Default::default()
+        });
+        crate::preparation::save(root.path(), relative, &manual).unwrap();
+        let (mut automatic, bytes) = crate::preparation::load_with_revision(&audio).unwrap();
+        let suggestion = crate::Preparation {
+            cue_in: 1.,
+            cue_out: Some(9.),
+            bpm: Some(120.),
+            harmonic_key: Some("8B".into()),
+            analysis: Some(crate::preparation::AnalysisInfo {
+                engine: crate::engine_api::ENGINE_ID.into(),
+                duration: 10.,
+                tempo_confidence: 1.,
+                key_confidence: 1.,
+                reviewed: false,
+            }),
+            ..Default::default()
+        };
+        automatic.extensions.insert(
+            "analysis_recommendation".into(),
+            serde_json::to_value(suggestion).unwrap(),
+        );
+        automatic.extensions.insert(
+            "audio_properties".into(),
+            serde_json::json!({"duration":10.}),
+        );
+        automatic.source_sha256 = Some(crate::preparation::fingerprint(&audio).unwrap());
+        let lease = match Lease::claim(
+            root.path(),
+            relative,
+            crate::engine_api::JOB_TYPE,
+            "worker",
+            Duration::from_secs(30),
+        )
+        .unwrap()
+        {
+            Claimed::Owned(lease) => lease,
+            _ => panic!("expected primary analysis lease"),
+        };
+        lease.stamp(&mut automatic);
+        crate::preparation::publish_claimed(
+            root.path(),
+            relative,
+            &automatic,
+            bytes.as_deref(),
+            &lease,
+        )
+        .unwrap();
+        let saved = crate::preparation::load(&audio).unwrap();
+        assert_eq!(
+            (saved.cue_in, saved.cue_out, saved.bpm),
+            (2., Some(8.), Some(127.))
+        );
+        assert_eq!(saved.manual_cues[0].id, "my-drop");
+        assert!(saved.manual_override);
+        assert!(saved.analysis.is_none());
+        let suggested: crate::Preparation =
+            serde_json::from_value(saved.extensions["analysis_recommendation"].clone()).unwrap();
+        assert_eq!(
+            (suggested.cue_in, suggested.cue_out, suggested.bpm),
+            (1., Some(9.), Some(120.))
+        );
+        assert_eq!(
+            suggested.analysis.unwrap().engine,
+            crate::engine_api::ENGINE_ID
+        );
+        assert_eq!(suggested.source_sha256, saved.source_sha256);
+        assert!(!suggested.manual_override);
+        assert_eq!(
+            saved.extensions["analysis_proposals"]
+                .as_object()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(fs::read(audio).unwrap(), b"audio-fixture");
+    }
+    #[test]
     fn playlist_and_smart_rule_conflicts_preserve_both_versions() {
         let root = fixture();
         let path = root.path().join("playlist.json");
@@ -1017,26 +1190,14 @@ mod tests {
     fn different_analysis_types_merge_without_replacing_each_other() {
         let root = fixture();
         let rel = Path::new("song.wav");
-        let energy = match Lease::claim(
-            root.path(),
-            rel,
-            "energy",
-            "energy-device",
-            Duration::from_secs(3),
-        )
-        .unwrap()
+        let energy = match Lease::claim(root.path(), rel, "energy", "energy-device", WORK_LEASE_TTL)
+            .unwrap()
         {
             Claimed::Owned(l) => l,
             _ => panic!(),
         };
-        let wave = match Lease::claim(
-            root.path(),
-            rel,
-            "waveform",
-            "wave-device",
-            Duration::from_secs(3),
-        )
-        .unwrap()
+        let wave = match Lease::claim(root.path(), rel, "waveform", "wave-device", WORK_LEASE_TTL)
+            .unwrap()
         {
             Claimed::Owned(l) => l,
             _ => panic!(),
@@ -1059,13 +1220,12 @@ mod tests {
     fn cue_edit_waveform_and_energy_proposals_coexist() {
         let root = fixture();
         let rel = Path::new("song.wav");
-        let owner =
-            |kind: &str| match Lease::claim(root.path(), rel, kind, kind, Duration::from_secs(3))
-                .unwrap()
-            {
-                Claimed::Owned(l) => l,
-                _ => panic!(),
-            };
+        let owner = |kind: &str| match Lease::claim(root.path(), rel, kind, kind, WORK_LEASE_TTL)
+            .unwrap()
+        {
+            Claimed::Owned(l) => l,
+            _ => panic!(),
+        };
         let wave = owner("waveform");
         let energy = owner("energy");
         let mut manual = crate::Preparation {

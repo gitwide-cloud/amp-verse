@@ -1,0 +1,5 @@
+Signalsmith Stretch Rust wrapper release 0.1.3
+https://github.com/colinmarc/signalsmith-stretch-rs
+https://github.com/Signalsmith-Audio/signalsmith-stretch
+Crate SHA256: 51dae6f10b5532510f65c309c4d868babe3aecf6ce0782678081338311f176fd
+MIT licenses retained alongside each upstream source.

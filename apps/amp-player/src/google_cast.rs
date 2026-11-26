@@ -1,7 +1,7 @@
 //! Native Cast V2 output; no analysis engine or Python is required.
 use eframe::egui;
 use std::{
-    net::{IpAddr, UdpSocket},
+    net::{IpAddr, SocketAddr, ToSocketAddrs, UdpSocket},
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -9,8 +9,9 @@ use std::{
     },
     time::{Duration, Instant},
 };
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, serde::Serialize)]
 struct Device {
+    id: String,
     name: String,
     host: String,
     port: u16,
@@ -39,6 +40,10 @@ fn discover() -> Result<Vec<Device>, String> {
                 .any(|d: &Device| d.host == host.to_string() && d.port == info.get_port())
             {
                 devices.push(Device {
+                    id: info
+                        .get_property_val_str("id")
+                        .unwrap_or(info.get_fullname())
+                        .to_owned(),
                     name,
                     host: host.to_string(),
                     port: info.get_port(),
@@ -50,7 +55,7 @@ fn discover() -> Result<Vec<Device>, String> {
     devices.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(devices)
 }
-fn stream_url(address: &str, device: &str) -> Result<String, String> {
+pub(super) fn stream_url(address: &str, device: &str) -> Result<String, String> {
     let (host, port) = address
         .rsplit_once(':')
         .ok_or("Connect to an AMP Cast server first")?;
@@ -67,7 +72,48 @@ fn stream_url(address: &str, device: &str) -> Result<String, String> {
     };
     Ok(format!("http://{host}:{port}/listen.mp3"))
 }
+// A Windows-friendly short hostname may resolve on this PC but not on a
+// Google speaker. Resolve on the background Cast worker and advertise the actual
+// source address, never the receiver address or a hostname the receiver must guess.
+fn resolved_media_url(url: &str) -> Result<String, String> {
+    let uri: ureq::http::Uri = url.parse().map_err(|_| "Invalid station stream address")?;
+    if uri.scheme_str() != Some("http") || uri.path() != "/listen.mp3" || uri.query().is_some() {
+        return Err("Invalid station stream address".into());
+    }
+    let host = uri.host().ok_or("Missing station host")?;
+    let host = host.trim_start_matches('[').trim_end_matches(']');
+    let port = uri.port_u16().ok_or("Missing station port")?;
+    if let Ok(ip) = host.parse::<IpAddr>() {
+        if ip.is_loopback() || ip.is_unspecified() {
+            return Err("The station has no address reachable by this Google speaker.".into());
+        }
+        return Ok(url.into());
+    }
+    let addresses: Vec<_> = (host, port)
+        .to_socket_addrs()
+        .map_err(
+            |_| "Cannot find this AMP station on the network. Reconnect to the station and retry.",
+        )?
+        .collect();
+    media_url_from_addresses(&addresses)
+}
+fn media_url_from_addresses(addresses: &[SocketAddr]) -> Result<String, String> {
+    let usable =
+        |address: &&SocketAddr| !address.ip().is_loopback() && !address.ip().is_unspecified();
+    let address = addresses
+        .iter()
+        .filter(usable)
+        .find(|a| a.is_ipv4())
+        .or_else(|| addresses.iter().find(usable))
+        .ok_or("The station has no address reachable by this Google speaker.")?;
+    Ok(format!("http://{address}/listen.mp3"))
+}
+type ReceiverVolume = Arc<Mutex<Option<(Option<f32>, Option<bool>)>>>;
 struct Session {
+    device: Device,
+    playback: Arc<Mutex<Option<String>>>,
+    volume: ReceiverVolume,
+    commands: mpsc::Sender<(f32, bool)>,
     stop: Arc<AtomicBool>,
     status: Arc<Mutex<String>>,
     done: Arc<AtomicBool>,
@@ -85,8 +131,15 @@ fn cast(device: Device, url: String) -> Session {
     let message = status.clone();
     let done = Arc::new(AtomicBool::new(false));
     let ended = done.clone();
+    let receiver_device = device.clone();
+    let playback = Arc::new(Mutex::new(None));
+    let actual = playback.clone();
+    let volume = Arc::new(Mutex::new(None));
+    let actual_volume = volume.clone();
+    let (tx, rx) = mpsc::channel();
     std::thread::spawn(move || {
         let result = (|| -> Result<(), String> {
+            let url = resolved_media_url(&url)?;
             let ip = device
                 .host
                 .parse::<std::net::IpAddr>()
@@ -101,6 +154,9 @@ fn cast(device: Device, url: String) -> Session {
                 .connect("receiver-0")
                 .map_err(|e| e.to_string())?;
             cast.heartbeat.ping().map_err(|e| e.to_string())?;
+            if let Ok(status) = cast.receiver.get_status() {
+                *actual_volume.lock().unwrap() = Some((status.volume.level, status.volume.muted));
+            }
             *message.lock().unwrap() = "Launching Google Cast audio receiver…".into();
             let app = cast
                 .receiver
@@ -125,7 +181,23 @@ fn cast(device: Device, url: String) -> Session {
             *message.lock().unwrap() =
                 format!("{} accepted the stream; waiting for playback", device.name);
             while !cancel.load(Relaxed) {
+                while let Ok((level, muted)) = rx.try_recv() {
+                    let confirmed = cast
+                        .receiver
+                        .set_volume(rust_cast::channels::receiver::Volume {
+                            level: Some(level),
+                            muted: Some(muted),
+                        })
+                        .map_err(|e| e.to_string())?;
+                    *actual_volume.lock().unwrap() = Some((confirmed.level, confirmed.muted));
+                }
                 match cast.receive().map_err(|e| e.to_string())? {
+                    rust_cast::ChannelMessage::Receiver(
+                        rust_cast::channels::receiver::ReceiverResponse::Status(status),
+                    ) => {
+                        *actual_volume.lock().unwrap() =
+                            Some((status.volume.level, status.volume.muted));
+                    }
                     rust_cast::ChannelMessage::Connection(
                         rust_cast::channels::connection::ConnectionResponse::Close,
                     ) => return Err("Speaker closed the Cast session".into()),
@@ -136,6 +208,7 @@ fn cast(device: Device, url: String) -> Session {
                         rust_cast::channels::media::MediaResponse::Status(status),
                     ) => {
                         if let Some(entry) = status.entries.first() {
+                            *actual.lock().unwrap() = Some(entry.player_state.to_string());
                             *message.lock().unwrap() =
                                 format!("{} · {}", device.name, entry.player_state);
                             if entry.idle_reason.is_some() {
@@ -165,9 +238,33 @@ fn cast(device: Device, url: String) -> Session {
             |e| format!("Google Cast: {e}"),
             |()| "Google Cast stopped".into(),
         );
+        *actual.lock().unwrap() = None;
         ended.store(true, Relaxed);
     });
-    Session { stop, status, done }
+    Session {
+        device: receiver_device,
+        playback,
+        volume,
+        commands: tx,
+        stop,
+        status,
+        done,
+    }
+}
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+#[serde(tag = "operation", rename_all = "snake_case")]
+pub enum Operation {
+    Discover,
+    Start {
+        receiver: String,
+        address: String,
+    },
+    Stop,
+    Volume {
+        level: f32,
+        #[serde(default)]
+        muted: bool,
+    },
 }
 #[derive(Default)]
 pub struct Output {
@@ -178,7 +275,7 @@ pub struct Output {
     message: String,
 }
 impl Output {
-    pub fn show(&mut self, ui: &mut egui::Ui, address: &str, running: bool) {
+    pub fn poll(&mut self) {
         if let Some(rx) = &self.scan
             && let Ok(result) = rx.try_recv()
         {
@@ -191,6 +288,58 @@ impl Output {
             }
             self.scan = None;
         }
+    }
+    pub fn snapshot(&self) -> serde_json::Value {
+        use serde_json::json;
+        let session = self.session.as_ref();
+        json!({"receivers":self.devices,"discovering":self.scan.is_some(),"receiver":session.map(|s|&s.device),"playback_state":session.and_then(|s|s.playback.lock().ok()?.clone()),"volume":session.and_then(|s|*s.volume.lock().ok()?),"status":session.and_then(|s|s.status.lock().ok().map(|s|s.clone())).unwrap_or_else(||self.message.clone()),"stopping":session.is_some_and(|s|s.stop.load(Relaxed)&&!s.done.load(Relaxed))})
+    }
+    pub fn remote(&mut self, operation: Operation) -> Result<(), String> {
+        match operation {
+            Operation::Discover => {
+                if self.scan.is_none() {
+                    let (tx, rx) = mpsc::channel();
+                    self.scan = Some(rx);
+                    std::thread::spawn(move || {
+                        let _ = tx.send(discover());
+                    });
+                }
+            }
+            Operation::Start { receiver, address } => {
+                if self.session.as_ref().is_some_and(|s| !s.done.load(Relaxed)) {
+                    return Err("Stop the current receiver session before switching".into());
+                }
+                let device = self
+                    .devices
+                    .iter()
+                    .find(|d| d.id == receiver)
+                    .cloned()
+                    .ok_or("Receiver unavailable; discover receivers again")?;
+                let url = stream_url(&address, &device.host)?;
+                self.session = Some(cast(device, url));
+            }
+            Operation::Stop => {
+                if let Some(s) = &self.session {
+                    s.stop.store(true, Relaxed);
+                }
+            }
+            Operation::Volume { level, muted } => {
+                if !level.is_finite() || !(0. ..=1.).contains(&level) {
+                    return Err("Receiver level must be 0–1".into());
+                }
+                self.session
+                    .as_ref()
+                    .filter(|s| !s.done.load(Relaxed))
+                    .ok_or("No active Google Cast receiver")?
+                    .commands
+                    .send((level, muted))
+                    .map_err(|_| "Receiver session ended")?;
+            }
+        }
+        Ok(())
+    }
+    pub fn show(&mut self, ui: &mut egui::Ui, address: &str, running: bool) {
+        self.poll();
         ui.heading("Google Home / Chromecast");
         ui.weak("Play the connected station or live DJ broadcast on a speaker. The speaker must be able to reach this computer over Wi-Fi/LAN.");
         if ui
@@ -227,6 +376,7 @@ impl Output {
             {
                 if self.manual.parse::<std::net::Ipv4Addr>().is_ok() {
                     selected = Some(Device {
+                        id: format!("manual:{}", self.manual),
                         name: self.manual.clone(),
                         host: self.manual.clone(),
                         port: 8009,
@@ -272,6 +422,37 @@ mod tests {
         );
     }
     #[test]
+    fn station_hostname_is_resolved_to_source_ipv4_for_speaker_playback() {
+        let addresses = [
+            "[fd00::20]:8787".parse().unwrap(),
+            "127.0.0.1:8787".parse().unwrap(),
+            "192.168.1.178:8787".parse().unwrap(),
+        ];
+        assert_eq!(
+            media_url_from_addresses(&addresses).unwrap(),
+            "http://192.168.1.178:8787/listen.mp3"
+        );
+        assert_eq!(
+            media_url_from_addresses(&addresses[..1]).unwrap(),
+            "http://[fd00::20]:8787/listen.mp3"
+        );
+        assert!(media_url_from_addresses(&["127.0.0.1:8787".parse().unwrap()]).is_err());
+        assert!(media_url_from_addresses(&["0.0.0.0:8787".parse().unwrap()]).is_err());
+    }
+    #[test]
+    fn numeric_source_is_preserved_and_arbitrary_stream_urls_are_not_advertised() {
+        assert!(resolved_media_url("http://127.0.0.1:8787/listen.mp3").is_err());
+        assert!(resolved_media_url("http://0.0.0.0:8787/listen.mp3").is_err());
+        assert_eq!(
+            resolved_media_url("http://192.168.1.178:8787/listen.mp3").unwrap(),
+            "http://192.168.1.178:8787/listen.mp3"
+        );
+        assert!(
+            resolved_media_url("http://192.168.1.178:8787/listen.mp3?password=private").is_err()
+        );
+        assert!(resolved_media_url("https://example.invalid/private").is_err());
+    }
+    #[test]
     #[ignore = "LAN discovery"]
     fn discover_local_speakers() {
         eprintln!("{:?}", discover().unwrap());
@@ -283,6 +464,7 @@ mod tests {
         let url = stream_url("127.0.0.1:8787", &host).unwrap();
         let session = cast(
             Device {
+                id: "test-speaker".into(),
                 name: "Selected test speaker".into(),
                 host,
                 port: 8009,

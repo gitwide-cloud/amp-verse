@@ -11,6 +11,23 @@ fn error(e: impl std::fmt::Display) -> String {
 pub fn path(root: &Path) -> PathBuf {
     root.join("ampdj/catalog.ampdb")
 }
+/// Additional sources get their own portable catalog before automatic jobs write results.
+pub fn ensure(root: &Path) -> Result<(), String> {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        if path(root).is_file() {
+            return Ok(());
+        }
+        match compact(root) {
+            Ok(_) => return Ok(()),
+            Err(_) if path(root).is_file() => return Ok(()),
+            Err(e) if e.contains("busy") && std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(100))
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
 /// Older JSON-only clients reject identity version 2 instead of creating stale metadata.
 pub fn fence_legacy_clients(root: &Path) -> Result<(), String> {
     if !path(root).is_file() {
@@ -36,7 +53,9 @@ pub fn location(document: &Path) -> Option<(PathBuf, String)> {
     let root = crate::storage::root_for(document);
     let relative = document.strip_prefix(root.join("ampdj")).ok()?;
     let key = relative.to_string_lossy().replace('\\', "/");
-    ((key.starts_with("tracks/") || key.starts_with("playlists/") || key == "smart-playlists.json")
+    ((key.starts_with("tracks/")
+        || key.starts_with("playlists/")
+        || matches!(key.as_str(), "smart-playlists.json" | "music-sources.json"))
         && key.ends_with(".json"))
     .then_some((root, key))
 }
@@ -59,7 +78,7 @@ fn open_copy(root: &Path) -> Result<(tempfile::TempDir, Connection), String> {
         let version: i64 = db
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .map_err(error)?;
-        if version != 1 {
+        if !matches!(version, 1 | 2) {
             return Err("Unsupported catalog version".into());
         }
     } else {
@@ -68,6 +87,57 @@ fn open_copy(root: &Path) -> Result<(tempfile::TempDir, Connection), String> {
     db.execute_batch("PRAGMA journal_mode=DELETE; PRAGMA synchronous=FULL;")
         .map_err(error)?;
     Ok((dir, db))
+}
+/// Shared queue transactions edit only the small index snapshot, never a writable NAS DB.
+pub(crate) fn queue_access<T>(
+    root: &Path,
+    write: bool,
+    work: impl FnOnce(&mut Connection) -> Result<T, String>,
+) -> Result<T, String> {
+    let operation = (|| {
+        let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
+        if write {
+            crate::catalog_shards::migrate(root, true)?;
+            let (dir, mut db) = open_copy(root)?;
+            let value = work(&mut db)?;
+            publish(root, dir, db)?;
+            Ok(value)
+        } else {
+            let mut db = open_read(root)?;
+            work(&mut db)
+        }
+    })();
+    operation.map_err(|e: String| format!("Shared analysis queue {}: {e}", path(root).display()))
+}
+/// SMB/Windows readers can briefly deny atomic replacement. Retry the same rename,
+/// never delete the current catalog or fall back to an in-place write.
+pub(crate) fn replace_snapshot(source: &Path, target: &Path) -> Result<(), String> {
+    retry_replace(|| fs::rename(source, target)).map_err(|e| {
+        format!(
+            "Cannot publish shared catalog {}: {e}. Existing data was retained",
+            target.display()
+        )
+    })
+}
+fn retry_replace(mut operation: impl FnMut() -> std::io::Result<()>) -> std::io::Result<()> {
+    for attempt in 0..8 {
+        match operation() {
+            Ok(()) => return Ok(()),
+            Err(error)
+                if attempt < 7
+                    && matches!(
+                        error.kind(),
+                        std::io::ErrorKind::PermissionDenied | std::io::ErrorKind::WouldBlock
+                    ) =>
+            {
+                std::thread::sleep(std::time::Duration::from_millis(
+                    (20u64 << attempt).min(200),
+                ));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    unreachable!()
 }
 // Readers hold the publication lock and open only a fully committed immutable snapshot.
 // This reads indexed pages directly; it never creates a journal or writable NAS connection.
@@ -84,7 +154,7 @@ fn open_read(root: &Path) -> Result<Connection, String> {
     let version: i64 = db
         .query_row("PRAGMA user_version", [], |r| r.get(0))
         .map_err(error)?;
-    if version != 1 {
+    if !matches!(version, 1 | 2) {
         return Err("Unsupported catalog version".into());
     }
     Ok(db)
@@ -97,6 +167,9 @@ pub fn read(document: &Path) -> Result<Option<Vec<u8>>, String> {
         return Ok(None);
     }
     let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
+    if crate::catalog_shards::active(&root)? {
+        return crate::catalog_shards::read(&root, &key);
+    }
     let db = open_read(&root)?;
     db.query_row("SELECT document FROM records WHERE key=?1", [key], |r| {
         r.get::<_, String>(0)
@@ -121,6 +194,11 @@ pub fn write_guarded(
     }
     let value: serde_json::Value = serde_json::from_slice(bytes).map_err(error)?;
     let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
+    crate::catalog_shards::migrate(&root, false)?;
+    if crate::catalog_shards::active(&root)? {
+        crate::catalog_shards::write(&root, &key, &value.to_string(), verify)?;
+        return Ok(true);
+    }
     let (dir, db) = open_copy(&root)?;
     db.execute("INSERT INTO records(key,document) VALUES(?1,?2) ON CONFLICT(key) DO UPDATE SET document=excluded.document", params![key,value.to_string()]).map_err(error)?;
     verify()?;
@@ -134,6 +212,14 @@ pub fn preparations(
         return Ok(Default::default());
     }
     let _guard = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-publication"))?;
+    if crate::catalog_shards::active(root)? {
+        let mut preparations = crate::catalog_shards::preparations(root)?;
+        for preparation in preparations.values_mut() {
+            crate::cue_policy::repair_legacy_entry(preparation);
+            preparation.validate()?;
+        }
+        return Ok(preparations);
+    }
     let db = open_read(root)?;
     let mut query = db
         .prepare("SELECT key,document FROM records WHERE key LIKE 'tracks/%'")
@@ -144,7 +230,8 @@ pub fn preparations(
     let mut result = std::collections::BTreeMap::new();
     for row in rows {
         let (key, value) = row.map_err(error)?;
-        let prep: crate::Preparation = serde_json::from_str(&value).map_err(error)?;
+        let mut prep: crate::Preparation = serde_json::from_str(&value).map_err(error)?;
+        crate::cue_policy::repair_legacy_entry(&mut prep);
         prep.validate()?;
         result.insert(key, prep);
     }
@@ -228,7 +315,7 @@ fn publish(root: &Path, dir: tempfile::TempDir, db: Connection) -> Result<(), St
             .open(&pending)
             .and_then(|f| f.sync_all())
             .map_err(error)?;
-        fs::rename(&pending, path(root)).map_err(error)
+        replace_snapshot(&pending, &path(root))
     })();
     if result.is_err() {
         let _ = fs::remove_file(pending);
@@ -291,6 +378,12 @@ pub fn compact(root: &Path) -> Result<usize, String> {
         let value: serde_json::Value =
             serde_json::from_slice(&fs::read(rules).map_err(error)?).map_err(error)?;
         rows.push(("smart-playlists.json".into(), value.to_string()));
+    }
+    let sources = root.join("ampdj/music-sources.json");
+    if sources.is_file() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&fs::read(sources).map_err(error)?).map_err(error)?;
+        rows.push(("music-sources.json".into(), value.to_string()));
     }
     fn recovery_json(
         dir: &Path,
@@ -361,6 +454,10 @@ pub fn compact(root: &Path) -> Result<usize, String> {
     transaction.commit().map_err(error)?;
     publish(root, dir, db)?;
     fence_legacy_clients(root)?;
+    // New clients now use the catalog, and old JSON clients are fenced. Retiring
+    // imported loose files must not block new index reads/writes for the whole cleanup.
+    drop(_guard);
+    drop(_migration);
     // The immutable recovery table retains the imported values before retiring loose JSON.
     // Never remove lock/lease files, source music, or a file changed by an older client.
     for (key, document) in &rows {
@@ -441,5 +538,63 @@ mod tests {
         );
         assert_eq!(crate::preparation::load(&audio).unwrap().cue_in, 3.);
         assert_eq!(fs::read(audio).unwrap(), b"music");
+    }
+}
+
+#[cfg(test)]
+mod publication_retry_tests {
+    use super::*;
+    #[test]
+    fn temporary_denial_retries_without_deleting_the_previous_snapshot() {
+        let dir = tempfile::tempdir().unwrap();
+        let old = dir.path().join("catalog");
+        let pending = dir.path().join("pending");
+        fs::write(&old, b"old").unwrap();
+        fs::write(&pending, b"new").unwrap();
+        let mut attempts = 0;
+        retry_replace(|| {
+            attempts += 1;
+            if attempts < 3 {
+                assert_eq!(fs::read(&old).unwrap(), b"old");
+                return Err(std::io::ErrorKind::PermissionDenied.into());
+            }
+            fs::rename(&pending, &old)
+        })
+        .unwrap();
+        assert_eq!(attempts, 3);
+        assert_eq!(fs::read(&old).unwrap(), b"new");
+    }
+    #[test]
+    fn unrelated_errors_are_not_retried() {
+        let mut attempts = 0;
+        let error = retry_replace(|| {
+            attempts += 1;
+            Err(std::io::ErrorKind::NotFound.into())
+        })
+        .unwrap_err();
+        assert_eq!(attempts, 1);
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+    }
+    #[cfg(windows)]
+    #[test]
+    fn windows_reader_releases_share_denial_before_atomic_replace() {
+        use std::os::windows::fs::OpenOptionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("catalog");
+        let pending = dir.path().join("pending");
+        fs::write(&target, b"old").unwrap();
+        fs::write(&pending, b"new").unwrap();
+        let reader = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(3)
+            .open(&target)
+            .unwrap();
+        let release = std::thread::spawn(move || {
+            std::thread::sleep(std::time::Duration::from_millis(100));
+            drop(reader);
+        });
+        replace_snapshot(&pending, &target).unwrap();
+        release.join().unwrap();
+        assert_eq!(fs::read(&target).unwrap(), b"new");
     }
 }

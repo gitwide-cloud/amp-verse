@@ -1,5 +1,7 @@
 //! Optional background separation and device-local prepared audio cache.
 //! Never writes source audio, NAS preparation, or active deck snapshots.
+#[path = "stems/playlist_prep.rs"]
+mod playlist_prep;
 use eframe::egui;
 use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
@@ -7,7 +9,7 @@ use std::{
     fs,
     io::Read,
     path::{Path, PathBuf},
-    process::{Child, Stdio},
+    process::Stdio,
     sync::{
         Arc, Mutex,
         atomic::{AtomicBool, Ordering::Relaxed},
@@ -15,10 +17,34 @@ use std::{
     },
     time::{Duration, SystemTime},
 };
+pub(crate) fn playlist_preparing() -> bool {
+    playlist_prep::PREPARING.load(Relaxed)
+}
 fn cache_root() -> Option<PathBuf> {
     crate::theme::settings_path().and_then(|p| p.parent().map(|p| p.join("prepared-stems")))
 }
-pub(super) fn runtime() -> Option<PathBuf> {
+fn worker_process(command: std::process::Command) -> process_wrap::std::CommandWrap {
+    let mut wrapped = process_wrap::std::CommandWrap::from(command);
+    #[cfg(windows)]
+    wrapped
+        .wrap(process_wrap::std::CreationFlags(
+            windows::Win32::System::Threading::CREATE_NO_WINDOW
+                | windows::Win32::System::Threading::BELOW_NORMAL_PRIORITY_CLASS,
+        ))
+        .wrap(process_wrap::std::JobObject);
+    #[cfg(unix)]
+    wrapped.wrap(process_wrap::std::ProcessGroup::leader());
+    wrapped
+}
+// The legacy full-library WAV/archive implementation is withdrawn after a storage
+// incident. Do not re-enable it through an environment override or an installed
+// add-on. A bounded on-demand engine needs independent acceptance first.
+const STORAGE_DISABLED: &str = "Stem preparation is temporarily disabled: the legacy engine retained duplicate uncompressed audio. Original music and normal analysis are unaffected.";
+fn preparation_permitted() -> Result<(), String> {
+    Err(STORAGE_DISABLED.into())
+}
+pub(crate) fn runtime() -> Option<PathBuf> {
+    preparation_permitted().ok()?;
     if let Some(path) = std::env::var_os("AMP_STEM_PYTHON")
         .map(PathBuf::from)
         .filter(|p| p.is_file())
@@ -92,10 +118,42 @@ fn ready_in(cache: &Path, source: &Path) -> Option<[PathBuf; 3]> {
         dir.join("drums.wav"),
     ])
 }
+pub fn vocal_profile(source: &Path) -> Option<amp_core::vocal_profile::VocalProfile> {
+    let cache = cache_root()?;
+    let id = stamp(source).ok()?;
+    let manifest = amp_core::catalog_db::local_record(&cache.join("stems.ampdb"), &id).ok()??;
+    serde_json::from_value(manifest.get("vocal_profile")?.clone()).ok()
+}
 pub fn ready(source: &Path) -> Option<[PathBuf; 3]> {
     ready_in(&cache_root()?, source)
 }
+pub(crate) fn relocate_cached(source: &Path, destination: &Path) -> Result<(), String> {
+    if preparation_permitted().is_err() {
+        return Ok(());
+    }
+    let Some(cache) = cache_root() else {
+        return Ok(());
+    };
+    if ready_in(&cache, source).is_none() {
+        return Ok(());
+    }
+    // This branch only archives existing prepared audio; it never starts separation.
+    prepare(
+        &cache,
+        source,
+        Path::new(""),
+        &AtomicBool::new(false),
+        &Arc::new(Mutex::new(None)),
+    )?;
+    if !restore_cached(&cache, destination)? {
+        return Err(
+            "Prepared stems could not be restored at the new location; original retained.".into(),
+        );
+    }
+    Ok(())
+}
 fn restore_cached(cache: &Path, source: &Path) -> Result<bool, String> {
+    preparation_permitted()?;
     let archive = cache.join("stems.ampdb");
     if !archive.is_file() {
         return Ok(false);
@@ -138,17 +196,18 @@ fn restore_cached(cache: &Path, source: &Path) -> Result<bool, String> {
     amp_core::catalog_db::save_local_record(&archive, &id, &manifest)?;
     Ok(true)
 }
-type Process = Arc<Mutex<Option<Child>>>;
-pub(super) fn separate_clip(cache: &Path, source: &Path) -> Result<[PathBuf; 3], String> {
-    let python = runtime().ok_or("Install the stem separator add-on first")?;
-    prepare(
-        cache,
-        source,
-        &python,
-        &AtomicBool::new(false),
-        &Arc::new(Mutex::new(None)),
-    )?;
-    ready_in(cache, source).ok_or("Separated clip is incomplete".into())
+type Process = Arc<Mutex<Option<Box<dyn process_wrap::std::ChildWrapper>>>>;
+pub(crate) fn for_transcription(
+    source: &Path,
+    cancel: &AtomicBool,
+) -> Result<[PathBuf; 3], String> {
+    if let Some(paths) = ready(source) {
+        return Ok(paths);
+    }
+    let cache = cache_root().ok_or("Stem cache unavailable")?;
+    let python = runtime().ok_or("Stem separator is not installed")?;
+    prepare(&cache, source, &python, cancel, &Arc::new(Mutex::new(None)))?;
+    ready(source).ok_or("Vocal preparation incomplete".into())
 }
 fn prepare(
     cache: &Path,
@@ -157,12 +216,24 @@ fn prepare(
     cancel: &AtomicBool,
     process: &Process,
 ) -> Result<(), String> {
+    if cancel.load(Relaxed) {
+        return Err("Stem preparation canceled".into());
+    }
+    preparation_permitted()?;
     fs::create_dir_all(cache).map_err(|e| e.to_string())?;
+    if !crate::preparation_speed::wait(Some(cancel)) {
+        return Err("Stem preparation canceled".into());
+    }
     let id = stamp(source)?;
     let _lock = amp_core::coordination::Lock::acquire(&cache.join(&id))?;
     if let Some(paths) = ready_in(cache, source) {
         let archive = cache.join("stems.ampdb");
-        if !amp_core::stem_archive::contains(&archive, &id) {
+        let prior = amp_core::catalog_db::local_record(&archive, &id)?;
+        if !amp_core::stem_archive::contains(&archive, &id)
+            || prior
+                .as_ref()
+                .is_some_and(|v| v.get("vocal_profile").is_none_or(Value::is_null))
+        {
             let mut manifest = amp_core::catalog_db::local_record(&archive, &id)?.unwrap_or(
                 serde_json::from_slice(
                     &fs::read(paths[0].parent().unwrap().join("manifest.json")).unwrap_or_default(),
@@ -171,12 +242,23 @@ fn prepare(
             );
             manifest["source_name"] =
                 json!(source.file_name().unwrap_or_default().to_string_lossy());
-            amp_core::stem_archive::store(
+            if let Ok(profile) = amp_core::vocal_profile::measure(&paths[0], source) {
+                manifest["vocal_profile"] =
+                    serde_json::to_value(profile).map_err(|e| e.to_string())?;
+            }
+            amp_core::stem_archive::store_with_checkpoint(
                 &archive,
                 &id,
                 &manifest,
                 paths[0].parent().unwrap(),
                 cancel,
+                || {
+                    if crate::preparation_speed::wait(Some(cancel)) {
+                        Ok(())
+                    } else {
+                        Err("Stem preparation canceled".into())
+                    }
+                },
             )?;
         }
         return Ok(());
@@ -212,8 +294,10 @@ fn prepare(
     {
         command.env("AMP_STEM_FFMPEG", exe);
     }
+    crate::preparation_speed::configure(&mut command);
+    let mut wrapped = worker_process(command);
     *process.lock().map_err(|_| "Stem process unavailable")? =
-        Some(command.spawn().map_err(|e| e.to_string())?);
+        Some(wrapped.spawn().map_err(|e| e.to_string())?);
     let status = loop {
         let mut slot = process.lock().map_err(|_| "Stem process unavailable")?;
         let child = slot.as_mut().ok_or("Stem process stopped")?;
@@ -243,6 +327,9 @@ fn prepare(
                 .join(" ")
         ));
     }
+    if !crate::preparation_speed::wait(Some(cancel)) {
+        return Err("Stem preparation canceled".into());
+    }
     let audio: Value = serde_json::from_slice(
         &fs::read(stage.path().join("audio.json")).map_err(|e| e.to_string())?,
     )
@@ -263,13 +350,22 @@ fn prepare(
     if stamp(source)? != id || cancel.load(Relaxed) {
         return Err("Source changed or preparation canceled; result not published".into());
     }
-    let manifest = json!({"version":1,"source_stamp":id,"source_name":source.file_name().unwrap_or_default().to_string_lossy(),"source_sha256":source_hash,"audio":audio});
-    amp_core::stem_archive::store(
+    let vocal_profile =
+        amp_core::vocal_profile::measure(&stage.path().join("vocals.wav"), &input).ok();
+    let manifest = json!({"vocal_profile":vocal_profile,"version":1,"source_stamp":id,"source_name":source.file_name().unwrap_or_default().to_string_lossy(),"source_sha256":source_hash,"audio":audio});
+    amp_core::stem_archive::store_with_checkpoint(
         &cache.join("stems.ampdb"),
         &id,
         &manifest,
         stage.path(),
         cancel,
+        || {
+            if crate::preparation_speed::wait(Some(cancel)) {
+                Ok(())
+            } else {
+                Err("Stem preparation canceled".into())
+            }
+        },
     )?;
     fs::remove_file(input).map_err(|e| format!("Remove staged input: {e}"))?;
     // A previously corrupted generation is retained, never overwritten silently.
@@ -281,7 +377,7 @@ fn prepare(
         )
         .map_err(|e| e.to_string())?;
     }
-    drop(command);
+    drop(wrapped);
     for file in ["audio.json", "worker.py", "worker.log"] {
         let _ = fs::remove_file(stage.path().join(file));
     }
@@ -305,37 +401,76 @@ impl Drop for Job {
         }
     }
 }
+fn live_mode_action(
+    ui: &mut egui::Ui,
+    enabled: bool,
+    cached: bool,
+    can_reload: bool,
+    has_source: bool,
+    admitted: bool,
+) -> egui::Response {
+    let response = ui.add_enabled(
+        can_reload && has_source && (enabled || admitted),
+        egui::Button::new(if enabled {
+            "Use original audio"
+        } else if cached {
+            "Enable prepared stems"
+        } else {
+            "Enable live stems"
+        }),
+    );
+    if !can_reload {
+        ui.weak("Turn AutoMix off and pause this deck before changing its audio mode.");
+    } else if !has_source {
+        ui.weak("Load an available local song into this deck first.");
+    }
+    response
+}
+
 pub struct Panel {
+    playlist_prep: playlist_prep::State,
     pub manual_change: Option<(usize, [f32; 3])>,
     job: Option<Job>,
     batch: Option<Job>,
     batch_rx: Option<mpsc::Receiver<(usize, usize, String)>>,
     batch_progress: (usize, usize),
     batch_status: String,
-    status: [String; 2],
-    level: [[f32; 3]; 2],
-    generation: [u64; 2],
+    gpu_rx: Option<mpsc::Receiver<String>>,
+    gpu_status: String,
+    gpu_checked: bool,
+    status: [String; 6],
+    level: [[f32; 3]; 6],
+    generation: [u64; 6],
 }
 impl Default for Panel {
     fn default() -> Self {
         Self {
+            playlist_prep: Default::default(),
             job: None,
             manual_change: None,
             batch: None,
             batch_rx: None,
             batch_progress: (0, 0),
             batch_status: String::new(),
+            gpu_rx: None,
+            gpu_status: String::new(),
+            gpu_checked: false,
             status: Default::default(),
-            level: [[0.; 3]; 2],
-            generation: [0; 2],
+            level: [[0.; 3]; 6],
+            generation: [0; 6],
         }
     }
 }
 impl Panel {
     pub fn busy(&self) -> bool {
-        self.job.is_some() || self.batch.is_some()
+        self.job.is_some() || self.batch.is_some() || self.playlist_prep.busy()
     }
     pub fn prepare_song(&mut self, ui: &mut egui::Ui, source: &Path) -> bool {
+        if crate::onnx_stem_worker::configured() {
+            ui.label("On-demand stems are selected per DJ deck.");
+            ui.weak("Load this song into a paused DJ deck, then use its on-demand stem reload control. Separation stays in RAM; no stem audio is saved.");
+            return false;
+        }
         if let Some(job) = &self.job
             && let Ok(result) = job.rx.try_recv()
         {
@@ -405,12 +540,19 @@ impl Panel {
             ui.label("Prepared stems available");
         }
         if runtime().is_none() && !prepared {
-            ui.weak("Install the stem separator add-on to prepare this song.");
+            ui.weak(STORAGE_DISABLED);
         }
         ui.label(&self.status[0]);
         prepared
     }
-    pub fn library(&mut self, ui: &mut egui::Ui, root: &Path, tracks: &[amp_core::Track]) {
+    pub fn library(&mut self, ui: &mut egui::Ui, root: &Path) {
+        if crate::onnx_stem_worker::configured() {
+            ui.heading("On-demand DJ stems");
+            ui.label("Choose on-demand separation on a loaded, paused DJ deck. There is no library-wide batch operation.");
+            ui.weak("The current local worker uses CPU processing with a 3 GiB process RAM cap. Initial model startup can take several seconds. Stem audio stays in RAM and is not saved.");
+            return;
+        }
+        ui.label(STORAGE_DISABLED);
         if let Some(rx) = &self.batch_rx {
             while let Ok((done, total, title)) = rx.try_recv() {
                 self.batch_progress = (done, total);
@@ -424,9 +566,53 @@ impl Panel {
             self.batch = None;
             self.batch_rx = None;
         }
+        if !self.gpu_checked
+            && let Some(python) = runtime()
+        {
+            self.gpu_checked = true;
+            self.gpu_status = "Checking GPU support…".into();
+            let (tx, rx) = mpsc::channel();
+            self.gpu_rx = Some(rx);
+            std::thread::spawn(move || {
+                let result = (|| -> Result<String, String> {
+                    crate::preparation_speed::wait(None);
+                    let stage = tempfile::tempdir().map_err(|e| e.to_string())?;
+                    let worker = stage.path().join("probe.py");
+                    fs::write(&worker, include_str!("stem_worker.py"))
+                        .map_err(|e| e.to_string())?;
+                    let mut command = amp_core::command(python.to_string_lossy().as_ref());
+                    command.arg(worker).arg("--probe");
+                    crate::preparation_speed::configure(&mut command);
+                    let output = command.output().map_err(|e| e.to_string())?;
+                    if !output.status.success() {
+                        return Err(
+                            "Stem runtime could not be checked; reinstall the stem add-on".into(),
+                        );
+                    }
+                    let value: Value =
+                        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
+                    Ok(if value["device"] == "cuda" {
+                        format!(
+                            "GPU ready: {}",
+                            value["name"].as_str().unwrap_or("NVIDIA GPU")
+                        )
+                    } else {
+                        "CPU fallback — GPU runtime unavailable. Install the GPU stem add-on to accelerate compatible NVIDIA hardware.".into()
+                    })
+                })();
+                let _ = tx.send(result.unwrap_or_else(|error| error));
+            });
+        }
+        if let Some(rx) = &self.gpu_rx
+            && let Ok(status) = rx.try_recv()
+        {
+            self.gpu_status = status;
+            self.gpu_rx = None;
+        }
         ui.heading("Prepare Stems");
+        ui.label(&self.gpu_status);
         ui.label("Separate vocals, instruments and beat for the DJ stem knobs.");
-        ui.weak("Prepares this library one song at a time. Existing prepared stems are reused; active playback stays unchanged.");
+        ui.weak("Uses your GPU when available, with a safe CPU fallback. Completed stems are reused. Your playback setting chooses slower work or an automatic pause.");
         if let Some(job) = &self.batch {
             let (done, total) = self.batch_progress;
             ui.add(
@@ -440,17 +626,15 @@ impl Panel {
             ui.ctx().request_repaint_after(Duration::from_millis(150));
         } else if ui
             .add_enabled(
-                !tracks.is_empty() && self.job.is_none() && runtime().is_some(),
-                egui::Button::new("Prepare library stems"),
+                !root.as_os_str().is_empty() && self.job.is_none() && runtime().is_some(),
+                egui::Button::new("Library-wide stem preparation withdrawn"),
             )
             .clicked()
             && let (Some(cache), Some(python)) = (cache_root(), runtime())
         {
-            let sources: Vec<_> = tracks
-                .iter()
-                .map(|t| (root.join(&t.path), t.title.clone()))
-                .collect();
-            self.batch_progress = (0, sources.len());
+            let root = root.to_path_buf();
+            self.batch_progress = (0, 0);
+            self.batch_status = "Finding songs in all music sources and subfolders…".into();
             let cancel = Arc::new(AtomicBool::new(false));
             let process = Arc::new(Mutex::new(None));
             let (tx, rx) = mpsc::channel();
@@ -459,7 +643,21 @@ impl Panel {
             let child = process.clone();
             std::thread::spawn(move || {
                 let result = (|| {
+                    let library = amp_core::scan_job_inputs(&root).map_err(|e| e.to_string())?;
+                    let sources: Vec<_> = library
+                        .tracks
+                        .iter()
+                        .filter_map(|track| {
+                            let source = amp_core::music_sources::audio_path(&root, &track.path);
+                            let mut prep = amp_core::preparation::load(&source).unwrap_or_default();
+                            amp_core::media_kind::inspect_audio(&source, &mut prep);
+                            amp_core::media_kind::is_music(&source, &prep)
+                                .then(|| (source, track.title.clone()))
+                        })
+                        .collect();
                     let total = sources.len();
+                    let mut failed = 0;
+                    let mut last_error = String::new();
                     for (index, (source, title)) in sources.into_iter().enumerate() {
                         if stop.load(Relaxed) {
                             return Err(
@@ -467,8 +665,28 @@ impl Panel {
                             );
                         }
                         let _ = progress.send((index, total, format!("Preparing {title}")));
-                        prepare(&cache, &source, &python, &stop, &child)?;
-                        let _ = progress.send((index + 1, total, format!("Prepared {title}")));
+                        match prepare(&cache, &source, &python, &stop, &child) {
+                            Ok(()) => {
+                                let _ =
+                                    progress.send((index + 1, total, format!("Prepared {title}")));
+                            }
+                            Err(error) if stop.load(Relaxed) => return Err(error),
+                            Err(error) => {
+                                failed += 1;
+                                last_error = format!("{title}: {error}");
+                                let _ = progress.send((
+                                    index + 1,
+                                    total,
+                                    format!("Skipped failed song: {last_error}"),
+                                ));
+                            }
+                        }
+                    }
+                    if failed > 0 {
+                        return Err(format!(
+                            "Stem preparation finished: {} prepared/reused, {failed} failed. Last error: {last_error}",
+                            total - failed
+                        ));
                     }
                     Ok(())
                 })();
@@ -484,11 +702,86 @@ impl Panel {
         }
         if runtime().is_none() {
             ui.hyperlink_to(
-                "Install the stem separator add-on",
+                "Stem processing withdrawn — storage incident",
                 "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md",
             );
         }
         ui.label(&self.batch_status);
+    }
+    pub fn live_knobs(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        audio: Option<&crate::mixer::Engine>,
+    ) -> Option<[f32; 3]> {
+        self.live_knobs_layout(ui, deck, audio, false)
+    }
+    pub fn live_knobs_vertical(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        audio: Option<&crate::mixer::Engine>,
+    ) -> Option<[f32; 3]> {
+        self.live_knobs_layout(ui, deck, audio, true)
+    }
+    fn live_knobs_layout(
+        &mut self,
+        ui: &mut egui::Ui,
+        deck: usize,
+        audio: Option<&crate::mixer::Engine>,
+        vertical: bool,
+    ) -> Option<[f32; 3]> {
+        let active = audio.is_some_and(|a| a.controls.stem_controls_available(deck));
+        if let Some(a) = audio {
+            for i in 0..3 {
+                self.level[deck][i] = f32::from_bits(a.controls.stem_knobs[deck][i].load(Relaxed));
+            }
+        }
+        let previous = self.level[deck];
+        ui.add_enabled_ui(active, |ui| {
+            ui.with_layout(
+                if vertical {
+                    egui::Layout::top_down(egui::Align::Center)
+                } else {
+                    egui::Layout::left_to_right(egui::Align::Min)
+                },
+                |ui| {
+                    for (stem, label) in [(0, "VOC"), (2, "BEAT"), (1, "INST")] {
+                        ui.vertical(|ui| {
+                            crate::dj_mixer::dial(
+                                ui,
+                                label,
+                                &mut self.level[deck][stem],
+                                -1. ..=1.,
+                                if deck.is_multiple_of(2) {
+                                    crate::ORANGE
+                                } else {
+                                    crate::CYAN
+                                },
+                            );
+                            ui.small(label);
+                        });
+                    }
+                },
+            );
+        });
+        if active && !vertical {
+            ui.small(if !amp_core::stem_mix::changed(self.level[deck]) {
+                "Stems idle · move a knob to start"
+            } else if audio.is_some_and(|a| a.controls.stems_loaded[deck].load(Relaxed)) {
+                "Stems active · right-click to reset"
+            } else {
+                "Preparing stems · original audio continues"
+            });
+        }
+        if !active && !vertical {
+            ui.small(if crate::onnx_stem_worker::configured() {
+                "Stems are preparing or unavailable. Check the deck stem status."
+            } else {
+                "Stem processing disabled pending storage-safe replacement"
+            });
+        }
+        (previous != self.level[deck]).then_some(self.level[deck])
     }
     pub fn show(
         &mut self,
@@ -518,25 +811,69 @@ impl Panel {
             }
         }
         let previous_levels = self.level[deck];
+        let cached = source.is_some_and(crate::prepared_stem_playback::candidate);
+        let on_demand_configured = crate::onnx_stem_worker::configured() || cached;
         let mut reload = false;
         let response = ui.push_id(("deck-stems", deck), |ui| {
             ui.colored_label(
-                if deck == 0 {
+                if deck.is_multiple_of(2) {
                     crate::ORANGE
                 } else {
                     crate::CYAN
                 },
-                if deck == 0 {
+                if deck.is_multiple_of(2) {
                     "A · STEMS"
                 } else {
                     "B · STEMS"
                 },
             );
-            let prepared = source.is_some_and(|p| ready(p).is_some());
+            let prepared = !on_demand_configured && source.is_some_and(|p| ready(p).is_some());
             let active = audio.is_some_and(|a| {
                 a.load_current(deck) && a.controls.stems_loaded[deck].load(Relaxed)
             });
-            if let Some(job) = &self.job {
+            if on_demand_configured {
+                // Keep the deck action above diagnostics and tier preferences in short popups.
+                let policy = crate::stem_capability::current();
+                if let Some(audio) = audio {
+                    let enabled = audio.controls.on_demand_stems[deck].load(Relaxed);
+                    let has_source = source.is_some_and(|path| path.is_file());
+                    let reserved = std::array::from_fn(|d| audio.controls.on_demand_stems[d].load(Relaxed) && !audio.controls.prepared_stems[d].load(Relaxed));
+                    let admitted = cached || (!playlist_preparing() && policy.allows(&reserved,deck));
+                    if enabled {
+                        ui.label("Stems ready · turn a knob to start · all 0 stops separation");
+                    } else if live_mode_action(ui, enabled, cached, can_reload, has_source, admitted).clicked() {
+                        // Compatibility for a song loaded before automatic arming.
+                        audio.controls.on_demand_stems[deck].store(true, Relaxed);
+                        reload = true;
+                    }
+                    if !cached && playlist_preparing() {ui.weak("Cancel or finish playlist preparation before enabling live stems.");}
+                    if !enabled && !admitted { ui.weak(policy.error()); }
+                } else {
+                    ui.weak("Start the audio engine and load a local song to choose this deck's mode.");
+                }
+                ui.separator();
+                let mode_label = ui.label(if cached {"Prepared stems · local compressed cache"} else {"Live stems · memory only"});
+                if let Some((slots, per_worker_mib, live, _peak)) =
+                    crate::onnx_stem_worker::pool_status()
+                {
+                    mode_label.on_hover_text(format!(
+                        "Processing workers: {live}/{slots}\nWorker RAM budget: {} MiB total\nNo stem audio files are saved.",
+                        slots as u64 * u64::from(per_worker_mib)
+                    ));
+                }
+                if cached {ui.weak("Prepared playback uses no live separation slot. Cached audio is fully verified before playback.");}
+                ui.label(format!("Live stem limit: {} decks · {}", policy.limit, policy.reason));
+                ui.weak("Normal six-deck playback stays available. Live stem audio remains in memory; initial processing can take several seconds.");
+                let enabled_count = audio.map_or(0, |a| a.controls.on_demand_stems.iter().enumerate().filter(|(d,v)| a.loaded(*d) && v.load(Relaxed) && !a.controls.prepared_stems[*d].load(Relaxed) && amp_core::stem_mix::changed(std::array::from_fn(|i| f32::from_bits(a.controls.stem_knobs[*d][i].load(Relaxed))))).count());
+                let previous = crate::stem_capability::maximum();
+                let mut maximum = previous;
+                ui.horizontal_wrapped(|ui| {
+                    ui.label("Maximum live decks:");
+                    for count in [2,4,6] { ui.selectable_value(&mut maximum,count,count.to_string()); }
+                });
+                if maximum != previous && let Err(error) = crate::stem_capability::save_maximum(maximum,enabled_count) { self.status[deck] = error; }
+                if crate::stem_capability::maximum() > policy.hardware_limit { ui.weak("Your chosen maximum is limited by this engine's hardware qualification."); }
+            } else if let Some(job) = &self.job {
                 ui.horizontal(|ui| {
                     ui.spinner();
                     ui.label("Separating locally…");
@@ -572,9 +909,9 @@ impl Panel {
                     });
                 }
             }
-            if runtime().is_none() {
+            if !on_demand_configured && runtime().is_none() {
                 ui.hyperlink_to(
-                    "Install the stem separator add-on",
+                    "Stem processing withdrawn — storage incident",
                     "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md",
                 );
             }
@@ -584,7 +921,7 @@ impl Panel {
                     .clicked();
                 ui.weak("Active playback is kept unchanged until the deck is reloaded.");
             }
-            ui.add_enabled_ui(active, |ui| {
+            ui.add_enabled_ui(audio.is_some_and(|a| a.controls.stem_controls_available(deck)), |ui| {
                 for (stem, name) in [(0, "Vocals"), (1, "Instruments"), (2, "Beat")] {
                     ui.horizontal(|ui| {
                         crate::dj_mixer::dial(
@@ -592,7 +929,7 @@ impl Panel {
                             name,
                             &mut self.level[deck][stem],
                             -1. ..=1.,
-                            if deck == 0 {
+                            if deck.is_multiple_of(2) {
                                 crate::ORANGE
                             } else {
                                 crate::CYAN
@@ -625,6 +962,86 @@ pub fn remix_gains(knobs: [f32; 3]) -> [f32; 3] {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn live_mode_action_is_visible_in_short_popup_and_preserves_reload_safety() {
+        for (enabled, can_reload, has_source, admitted, expected) in [
+            (false, true, true, true, true),
+            (false, false, true, true, false),
+            (false, true, false, true, false),
+            (false, true, true, false, false),
+            (true, true, true, false, true),
+        ] {
+            let ctx = egui::Context::default();
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(
+                        egui::Pos2::ZERO,
+                        egui::vec2(380., 180.),
+                    )),
+                    ..Default::default()
+                },
+                |ui| {
+                    let action = super::live_mode_action(
+                        ui, enabled, false, can_reload, has_source, admitted,
+                    );
+                    assert_eq!(action.enabled(), expected);
+                    assert!(
+                        ui.clip_rect().contains_rect(action.rect),
+                        "mode action must be visible without scrolling"
+                    );
+                    assert!(
+                        !action.clicked(),
+                        "rendering never changes a deck's audio mode"
+                    );
+                },
+            );
+            output.textures_delta.clear();
+        }
+    }
+
+    #[test]
+    fn withdrawn_preparation_cannot_create_cache_or_launch_worker() {
+        let dir = tempfile::tempdir().unwrap();
+        let cache = dir.path().join("must-not-exist");
+        let cancel = AtomicBool::new(false);
+        let process = Arc::new(Mutex::new(None));
+        let error = prepare(
+            &cache,
+            Path::new("missing.wav"),
+            Path::new("missing-python"),
+            &cancel,
+            &process,
+        )
+        .unwrap_err();
+        assert_eq!(error, STORAGE_DISABLED);
+        assert!(!cache.exists());
+        assert!(process.lock().unwrap().is_none());
+        assert!(runtime().is_none());
+        assert_eq!(
+            restore_cached(&cache, Path::new("missing.wav")).unwrap_err(),
+            STORAGE_DISABLED
+        );
+    }
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires the installed Windows stem Python runtime"]
+    fn real_worker_job_keeps_python_console_hidden() {
+        let python = std::env::var("AMP_STEM_PYTHON").expect("stem Python fixture");
+        let folder = tempfile::tempdir().unwrap();
+        let result = folder.path().join("console.txt");
+        let script = folder.path().join("probe.py");
+        std::fs::write(&script, "import ctypes,sys\nfrom pathlib import Path\nk=ctypes.windll.kernel32\nk.GetCurrentProcess.restype=ctypes.c_void_p\nk.GetPriorityClass.argtypes=[ctypes.c_void_p]\nPath(sys.argv[1]).write_text(str(k.GetConsoleWindow())+','+str(k.GetPriorityClass(k.GetCurrentProcess())))\n").unwrap();
+        let mut command = amp_core::command(&python);
+        command
+            .arg(script)
+            .arg(&result)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        let mut child = super::worker_process(command).spawn().unwrap();
+        assert!(child.wait().unwrap().success());
+        assert_eq!(std::fs::read_to_string(result).unwrap().trim(), "0,16384");
+    }
     #[test]
     fn remix_knobs_mute_isolate_and_restore_each_component() {
         assert_eq!(super::remix_gains([0.; 3]), [1.; 3]);
@@ -733,12 +1150,8 @@ mod tests {
         assert!(result.unwrap_err().contains("canceled"));
         assert!(ready_in(&cache, &source).is_none());
         assert_eq!(digest(&source).unwrap(), before);
-        assert!(!fs::read_dir(&cache).unwrap().any(|p| {
-            p.unwrap()
-                .file_name()
-                .to_string_lossy()
-                .starts_with(".pending-")
-        }));
+        // Cancellation now returns before creating even an empty cache directory.
+        assert!(!cache.exists());
     }
     #[test]
     fn cache_invalidation_and_incomplete_outputs_fail_closed() {

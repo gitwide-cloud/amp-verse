@@ -1,9 +1,19 @@
 pub mod analysis_worker;
+mod browser_session;
 pub mod config;
+mod google_cast;
+mod hls;
+mod knowledge;
 mod live;
+mod player_control;
+mod playlist_sync;
+mod podcasts_web;
 mod radio;
+mod recovery;
+mod server_output;
 pub mod sharing;
 mod station_control;
+pub mod studio;
 use amp_core::{Library, Track};
 use axum::{
     Json, Router,
@@ -32,18 +42,30 @@ struct Station {
     #[serde(skip)]
     live_token: Option<String>,
     #[serde(skip)]
+    live_next_sequence: u64,
+    #[serde(skip)]
+    live_last_hash: Option<String>,
+    #[serde(skip)]
+    live_resume_from: Option<String>,
+    #[serde(skip)]
     live_seen: Option<std::time::Instant>,
     running: bool,
     now_playing: Option<String>,
     current_index: Option<usize>,
+    mix_revision: u64,
     error: Option<String>,
+    player_failures: usize,
+    player_last_issue: Option<String>,
     #[serde(skip)]
     worker: Option<JoinHandle<()>>,
 }
 pub struct Cast {
     operation: Mutex<()>,
+    google_cast: google_cast::Service,
+    player_intent: std::sync::atomic::AtomicU64,
     pub listen_address: std::sync::Mutex<Option<std::net::SocketAddr>>,
-    server_output: std::sync::Mutex<Option<std::process::Child>>,
+    server_output: std::sync::Mutex<Option<server_output::Output>>,
+    server_output_error: std::sync::Mutex<Option<String>>,
     server_id: String,
     library_id: Option<String>,
     pub config_dir: std::sync::Mutex<Option<PathBuf>>,
@@ -56,7 +78,10 @@ pub struct Cast {
     password: Option<String>,
     station: Mutex<Station>,
     audio: broadcast::Sender<Bytes>,
+    recovery: recovery::Recovery,
+    hls: hls::Hls,
     selection: std::sync::Mutex<Option<serde_json::Value>>,
+    mix: std::sync::Mutex<station_control::MixSettings>,
 }
 impl Cast {
     pub fn new(root: PathBuf, library: Library, password: Option<String>) -> Arc<Self> {
@@ -81,8 +106,11 @@ impl Cast {
         let (audio, _) = broadcast::channel(256);
         Arc::new(Self {
             operation: Mutex::new(()),
+            google_cast: Default::default(),
+            player_intent: std::sync::atomic::AtomicU64::new(0),
             listen_address: std::sync::Mutex::new(None),
             server_output: std::sync::Mutex::new(None),
+            server_output_error: std::sync::Mutex::new(None),
             library_id: amp_core::coordination::library_id(&root).ok(),
             config_dir: std::sync::Mutex::new(None),
             server_id,
@@ -95,7 +123,10 @@ impl Cast {
             password,
             station: Mutex::new(Station::default()),
             audio,
+            recovery: Default::default(),
+            hls: Default::default(),
             selection: std::sync::Mutex::new(None),
+            mix: std::sync::Mutex::new(Default::default()),
         })
     }
     pub async fn shutdown(&self) {
@@ -105,6 +136,7 @@ impl Cast {
             station.running = false;
             station.generation = station.generation.wrapping_add(1);
             station.live_token = None;
+            station.live_resume_from = None;
             station.now_playing = None;
             station.current_index = None;
             station.worker.take()
@@ -113,6 +145,8 @@ impl Cast {
             worker.abort();
             let _ = worker.await;
         }
+        self.recovery.reset();
+        self.hls.reset().await;
     }
     fn authorized(&self, headers: &HeaderMap) -> bool {
         if headers
@@ -136,23 +170,63 @@ impl Cast {
                 .get("host")
                 .and_then(|v| v.to_str().ok())
                 .unwrap_or("");
-            if origin.to_str().ok() != Some(&format!("http://{host}")) {
+            if ![format!("http://{host}"), format!("https://{host}")]
+                .iter()
+                .any(|allowed| origin.to_str().ok() == Some(allowed.as_str()))
+            {
                 return false;
             }
         }
         self.password.as_ref().is_none_or(|p| {
             headers.get("x-amp-password").and_then(|v| v.to_str().ok()) == Some(p.as_str())
+                || browser_session::authorized(self, headers)
         })
     }
 }
 pub fn router(cast: Arc<Cast>) -> Router {
     Router::new()
+        .merge(playlist_sync::routes())
+        .merge(player_control::routes())
+        .merge(google_cast::routes())
         .route(
             "/",
+            get(|| async { Html(include_str!("../web/studio.html")) }),
+        )
+        .route(
+            "/cast",
             get(|| async { Html(include_str!("../web/index.html")) }),
         )
+        .route(
+            "/studio.js",
+            get(|| async {
+                (
+                    [
+                        ("content-type", "text/javascript; charset=utf-8"),
+                        ("cache-control", "no-cache"),
+                    ],
+                    include_str!("../web/studio.js"),
+                )
+            }),
+        )
+        .route(
+            "/studio.css",
+            get(|| async {
+                (
+                    [
+                        ("content-type", "text/css; charset=utf-8"),
+                        ("cache-control", "no-cache"),
+                    ],
+                    include_str!("../web/studio.css"),
+                )
+            }),
+        )
+        .merge(studio::routes())
+        .merge(podcasts_web::routes())
         .merge(sharing::routes())
         .merge(live::routes())
+        .merge(recovery::routes())
+        .merge(hls::routes())
+        .merge(knowledge::routes())
         .merge(station_control::routes())
         .route("/api/status", get(status))
         .route(
@@ -178,6 +252,7 @@ pub fn router(cast: Arc<Cast>) -> Router {
 }
 async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
     let station = cast.station.lock().await;
+    let hls = cast.hls.snapshot();
     let mut analysis = cast.analysis.snapshot();
     analysis.paused_for_radio = analysis.enabled
         && station.running
@@ -186,7 +261,7 @@ async fn status(State(cast): State<Arc<Cast>>) -> Json<serde_json::Value> {
             .pause_for_radio
             .load(std::sync::atomic::Ordering::Relaxed);
     Json(
-        serde_json::json!({"library_id":cast.library_id,"source":station.source,"current_source":if station.source=="live_dj" {serde_json::json!("Player/DJ master")} else {cast.selection.lock().unwrap().as_ref().map_or(serde_json::Value::Null,|v|v["name"].clone())},"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"playlist_playback":true,"google_cast":false,"hls":false,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":station.name.as_ref().unwrap_or(&cast.station_name),"analysis":analysis,"running":station.running && (station.source!="live_dj" || station.audio_ready),"on_air":station.running && station.audio_ready,"preparing":station.running && !station.audio_ready,"server_output":station_control::output_running(&cast),"now_playing":station.now_playing,"current_index":station.current_index,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count(),"password_required":cast.password.is_some()}),
+        serde_json::json!({"build":{"version":env!("CARGO_PKG_VERSION"),"release_channel":if env!("CARGO_PKG_VERSION").contains('-') {"rc"} else {"stable"}},"hls":hls,"hls_url":"/api/audio/hls/master.m3u8","mix_requested":cast.mix.lock().unwrap().clone(),"mix_applied_revision":station.mix_revision,"library_id":cast.library_id,"source":station.source,"current_source":if station.source=="live_dj" {serde_json::json!("Player/DJ master")} else {cast.selection.lock().unwrap().as_ref().map_or(serde_json::Value::Null,|v|v["name"].clone())},"capabilities":{"coordination_version":1,"stations_per_server":1,"live_dj":true,"host_master_launch":true,"server_output_control":true,"live_upload_sequence":true,"live_guarded_resume":true,"playlist_playback":true,"player_queue":1,"player_track_refs":"library_path_v1","private_audio":"library_path_v1","playlist_snapshot":"library_path_v1","google_cast":true,"google_cast_server_owned":true,"hls":hls["ready"],"reliable_audio":1,"dual_path":true,"smart_sharing":cast.sharing.load(std::sync::atomic::Ordering::Relaxed)},"server_id":cast.server_id,"station_id":cast.station_id,"owner_server_id":cast.server_id,"station_name":station.name.as_ref().unwrap_or(&cast.station_name),"analysis":analysis,"running":station.running && (station.source!="live_dj" || station.audio_ready),"on_air":station.running && station.audio_ready,"preparing":station.running && !station.audio_ready,"server_output":station_control::output_running(&cast),"server_output_error":cast.server_output_error.lock().unwrap().clone(),"now_playing":station.now_playing,"current_index":station.current_index,"player_failures":station.player_failures,"player_last_issue":station.player_last_issue,"error":station.error,"tracks":cast.tracks.len(),"listeners":cast.audio.receiver_count()+cast.recovery.listeners(),"password_required":cast.password.is_some()}),
     )
 }
 async fn pause_analysis(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
@@ -248,8 +323,29 @@ async fn start_unlocked(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Re
     station.audio_ready = false;
     station.generation = station.generation.wrapping_add(1);
     let owner = station.generation;
-    station.source = "smart_radio".into();
+    station.source = if cast
+        .selection
+        .lock()
+        .unwrap()
+        .as_ref()
+        .is_some_and(|v| v["finite"] == true)
+    {
+        "player_queue"
+    } else {
+        "smart_radio"
+    }
+    .into();
     station.error = None;
+    station.player_failures = cast
+        .selection
+        .lock()
+        .unwrap()
+        .as_ref()
+        .and_then(|v| v["failed_occurrences"].as_u64())
+        .unwrap_or(0) as usize;
+    station.player_last_issue = (station.player_failures > 0).then(|| {
+        "Skipped unavailable playlist songs before starting; saved references were kept.".into()
+    });
     let worker_cast = cast.clone();
     let task = tokio::spawn(async move {
         let outcome = broadcast_tracks(worker_cast.clone(), owner).await;
@@ -262,6 +358,9 @@ async fn start_unlocked(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Re
         station.current_index = None;
         station.error = outcome.err();
         station.worker = None;
+        if station.source == "player_queue" {
+            station_control::stop_output(&worker_cast);
+        }
     });
     station.worker = Some(task);
     StatusCode::NO_CONTENT.into_response()
@@ -315,6 +414,43 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let library = amp_core::scan(root.path()).unwrap();
         router(Cast::new(root.path().into(), library, password))
+    }
+    #[tokio::test]
+    async fn station_mix_is_revision_checked_independent_and_does_not_restart_audio() {
+        let root = tempfile::tempdir().unwrap();
+        let cast = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        let other = Cast::new(
+            root.path().into(),
+            amp_core::scan(root.path()).unwrap(),
+            None,
+        );
+        {
+            let mut station = cast.station.lock().await;
+            station.running = true;
+            station.generation = 42;
+            station.current_index = Some(7);
+        }
+        let app = router(cast.clone());
+        let body =
+            serde_json::json!({"revision":0,"target":8,"style":"hype","transitions":4,"hold":true});
+        let update = || {
+            Request::post("/api/station/mix")
+                .header("content-type", "application/json")
+                .body(Body::from(body.to_string()))
+                .unwrap()
+        };
+        assert_eq!(app.clone().oneshot(update()).await.unwrap().status(), 200);
+        assert_eq!(app.oneshot(update()).await.unwrap().status(), 409);
+        assert_eq!(other.mix.lock().unwrap().revision, 0);
+        assert_eq!(cast.mix.lock().unwrap().revision, 1);
+        let station = cast.station.lock().await;
+        assert!(station.running);
+        assert_eq!(station.generation, 42);
+        assert_eq!(station.current_index, Some(7));
     }
     #[tokio::test]
     async fn password_control_and_public_listener() {

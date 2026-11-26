@@ -17,7 +17,7 @@ fn execute() -> Result<Response, String> {
     let preparation = if let Some(draft) = request.draft {
         amp_core::coordination::analyze_draft(&request.root, &request.relative, &draft)?
     } else {
-        match amp_core::coordination::analyze_shared(&request.root, &request.relative, false)? {
+        match amp_core::library_engine::analyze_job(&request.root, &request.relative, false)? {
             amp_core::coordination::AnalysisResult::Prepared(p) => *p,
             amp_core::coordination::AnalysisResult::Skipped(_) => {
                 return Ok(Response::Skipped { protocol: PROTOCOL });

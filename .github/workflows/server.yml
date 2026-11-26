@@ -1,4 +1,4 @@
-name: Headless Cast candidates
+name: Headless Cast beta
 on:
   push:
     branches: [main]

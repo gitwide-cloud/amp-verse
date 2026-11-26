@@ -14,6 +14,7 @@ struct Update {
 }
 #[derive(Default)]
 pub struct Preparer {
+    pub revision: u64,
     wave: crate::waveform::Lane,
     position: f64,
     zoom: Option<f64>,
@@ -30,11 +31,29 @@ pub struct Preparer {
     library_id: String,
     root: PathBuf,
     path: PathBuf,
+    selection_root: PathBuf,
+    selection_path: PathBuf,
     title: String,
     draft: Preparation,
     job: Option<mpsc::Receiver<Update>>,
+    queue: Option<amp_core::analysis_queue::Queue>,
+    queue_init: Option<
+        mpsc::Receiver<
+            Result<
+                (
+                    amp_core::analysis_queue::Queue,
+                    amp_core::analysis_queue::Stats,
+                ),
+                String,
+            >,
+        >,
+    >,
+    queue_discovery: Option<mpsc::Receiver<Result<amp_core::analysis_queue::Stats, String>>>,
+    queue_root: PathBuf,
+    queue_retry_at: Option<std::time::Instant>,
+    pub queue_enabled: bool,
+    stop_queue: std::sync::Arc<std::sync::atomic::AtomicBool>,
     pub status: String,
-    pub workers: usize,
     active_workers: usize,
     total: usize,
     done: usize,
@@ -48,6 +67,28 @@ impl Preparer {
             .and_then(|b| serde_json::from_slice::<Preparation>(b).ok())
             .unwrap_or_default()
             != self.draft
+    }
+    fn selected_track(&self, root: &std::path::Path, track: &Track) -> bool {
+        !self.title.is_empty() && self.selection_root == root && self.selection_path == track.path
+    }
+    fn published_track_changed(&self, track: &Track) -> bool {
+        if self.draft.extensions.contains_key("_amp_sync")
+            || track.preparation.extensions.contains_key("_amp_sync")
+        {
+            return !crate::library_cache::keep_current_preparation(
+                &self.draft,
+                &track.preparation,
+            ) && self.draft.extensions.get("_amp_sync")
+                != track.preparation.extensions.get("_amp_sync");
+        }
+        let clean = |p: &Preparation| {
+            let mut p = p.clone();
+            for field in ["embedded_tags", "embedded_genres", "audio_properties"] {
+                p.extensions.remove(field);
+            }
+            p
+        };
+        clean(&self.draft) != clean(&track.preparation)
     }
     pub fn prepare_panel(
         &mut self,
@@ -63,14 +104,14 @@ impl Preparer {
         };
         if !self.busy()
             && !self.title.is_empty()
-            && (self.root != root || self.path != track.path)
+            && !self.selected_track(root, track)
             && self.dirty()
         {
             ui.heading(format!("Unsaved preparation: {}", self.title));
             ui.weak("Save or discard this draft before preparing another song. Select the original song below to keep editing.");
             ui.horizontal(|ui| {
                 if ui.button("Save current draft").clicked() {
-                    let same = self.root == root;
+                    let same = self.selection_root == root;
                     self.save_inline(if same { library } else { None });
                 }
                 if ui.button("Discard draft").clicked() {
@@ -79,23 +120,28 @@ impl Preparer {
             });
             return;
         }
-        if !self.busy() && (self.root != root || self.path != track.path || self.title.is_empty()) {
+        if !self.busy() && (!self.selected_track(root, track) || self.title.is_empty()) {
             self.edit(root, track);
             self.open = false;
             self.position = 0.;
             self.section = None;
         }
         if !self.busy()
-            && self.root == root
-            && self.path == track.path
+            && self.selected_track(root, track)
             && !self.dirty()
-            && self.draft != track.preparation
+            && self.published_track_changed(track)
         {
             self.edit(root, track);
             self.open = false;
         }
-        if self.root != root || self.path != track.path {
-            ui.weak("Finish the current analysis before changing the prepared track.");
+        if !self.selected_track(root, track) {
+            ui.weak(if self.busy() {
+                "Finish the current analysis before changing the prepared track."
+            } else if self.status.is_empty() {
+                "Could not prepare this song. Check that its music source is connected."
+            } else {
+                &self.status
+            });
             return;
         }
         ui.horizontal_wrapped(|ui| {
@@ -129,6 +175,23 @@ impl Preparer {
                 self.save_inline(library);
             }
         });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Content type:");
+            let selected = amp_core::media_kind::kind(&self.path, &self.draft);
+            for (label, kind) in [
+                ("Music", amp_core::media_kind::Kind::Music),
+                ("Audiobook", amp_core::media_kind::Kind::Audiobook),
+                ("Speech", amp_core::media_kind::Kind::Speech),
+                ("Podcast", amp_core::media_kind::Kind::Podcast),
+            ] {
+                if ui.selectable_label(selected == kind, label).clicked() {
+                    self.draft
+                        .extensions
+                        .insert("media_kind".into(), serde_json::json!(kind.id()));
+                }
+            }
+            ui.weak("Save preparation to keep this choice. Files stay in place.");
+        });
         if amp_core::review::proposal(&self.draft)
             .is_some_and(|p| amp_core::energy_profile::read(&p).is_some())
             && ui
@@ -150,9 +213,18 @@ impl Preparer {
             .map(|p| p.duration)
             .or(self.draft.analysis.as_ref().map(|a| a.duration))
             .or(self.draft.cue_out)
+            .or_else(|| {
+                track
+                    .preparation
+                    .extensions
+                    .get("audio_properties")?
+                    .get("duration")?
+                    .as_f64()
+                    .filter(|v| v.is_finite() && *v > 0.)
+            })
             .unwrap_or(32.)
             .max(0.1);
-        ui.horizontal(|ui| {
+        ui.horizontal_wrapped(|ui| {
             if self.draft.bpm.is_some() && self.draft.beat_offset.is_none() {
                 ui.weak("Tempo estimated; align the beatgrid before beat-sensitive mixing.");
             }
@@ -292,8 +364,10 @@ impl Preparer {
                         .add_enabled(!dirty, egui::Button::new("Mix this section into DJ"))
                         .clicked()
                     {
-                        self.mix_section =
-                            Some((self.path.clone(), format!("energy-section:{}", section.id)));
+                        self.mix_section = Some((
+                            self.selection_path.clone(),
+                            format!("energy-section:{}", section.id),
+                        ));
                     }
                 });
             } else {
@@ -406,10 +480,11 @@ impl Preparer {
                 Ok((p, revision)) => {
                     self.draft = p;
                     self.editing_revision = revision;
-                    if let Some(t) =
-                        library.and_then(|l| l.tracks.iter_mut().find(|t| t.path == self.path))
+                    if let Some(t) = library
+                        .and_then(|l| l.tracks.iter_mut().find(|t| t.path == self.selection_path))
                     {
                         t.preparation = self.draft.clone();
+                        self.revision = self.revision.wrapping_add(1);
                     }
                     self.status =
                         "Preparation saved; playing decks keep their loaded snapshot.".into();
@@ -428,11 +503,17 @@ impl Preparer {
             self.stem_preview = None;
         }
     }
+    pub fn failed(&self) -> usize {
+        self.failures
+    }
     pub fn progress(&self) -> (usize, usize) {
         (self.done, self.total)
     }
     pub fn busy(&self) -> bool {
-        self.job.is_some() || self.compact_job.is_some()
+        self.job.is_some()
+            || self.compact_job.is_some()
+            || self.queue_init.is_some()
+            || self.queue_discovery.is_some()
     }
     pub fn catalog_ui(&mut self, ui: &mut egui::Ui, root: &std::path::Path, blocked: bool) {
         if let Some(rx) = &self.compact_job
@@ -442,13 +523,13 @@ impl Preparer {
             self.compact_job = None;
         }
         ui.heading("Portable catalog");
-        ui.weak("One local catalog file for song analysis, cues and playlists. No database server needed. Close other AMP versions before converting a shared library.");
+        ui.weak("A shared index points to 500-song catalog files. More files are created as needed, with no fixed library limit. No database server needed.");
         if amp_core::catalog_db::path(root).is_file() {
-            ui.label("This library uses ampdj/catalog.ampdb");
+            ui.label("Index: ampdj/catalog.ampdb. Starting the analysis queue organizes song catalogs in ampdj/catalogs and keeps a recovery copy.");
         } else if ui
             .add_enabled(
                 !blocked && !self.busy(),
-                egui::Button::new("Consolidate catalog into one file"),
+                egui::Button::new("Create portable catalog storage"),
             )
             .clicked()
         {
@@ -474,10 +555,20 @@ impl Preparer {
         if self.busy() {
             return;
         }
-        self.root = root.to_path_buf();
-        self.path = track.path.clone();
+        let (owner, relative) = match amp_core::music_sources::owner(root, &track.path) {
+            Ok(value) => value,
+            Err(error) => {
+                self.status = error.to_string();
+                return;
+            }
+        };
+        self.root = owner;
+        self.path = relative;
         self.title = track.title.clone();
-        match preparation::load_with_revision(&root.join(&track.path)) {
+        match preparation::load_with_revision(&amp_core::music_sources::audio_path(
+            root,
+            &track.path,
+        )) {
             Ok((p, revision)) => {
                 self.draft = p;
                 self.editing_revision = revision;
@@ -490,20 +581,230 @@ impl Preparer {
         if let Some(title) = self.draft.extensions.get("title").and_then(|v| v.as_str()) {
             self.title = title.into();
         }
-        self.library_id = amp_core::coordination::library_id(root).unwrap_or_default();
+        self.library_id = amp_core::coordination::library_id(&self.root).unwrap_or_default();
+        self.selection_root = root.into();
+        self.selection_path = track.path.clone();
         self.review_selected.clear();
         self.open = true;
     }
-    pub fn batch(&mut self, root: PathBuf, tracks: Vec<Track>) {
-        if self.busy() {
+    pub fn batch_ref(&mut self, root: PathBuf, tracks: &[Track]) {
+        self.queue_inputs(root, tracks, true);
+    }
+    pub fn resume_cached(&mut self, root: PathBuf, tracks: &[Track]) {
+        self.queue_inputs(root, tracks, false);
+    }
+    fn queue_inputs(&mut self, root: PathBuf, tracks: &[Track], verify: bool) {
+        if self.queue_init.is_some() || self.queue_discovery.is_some() {
             return;
         }
-        self.total = tracks.len();
-        self.done = 0;
-        self.failures = 0;
-        self.skipped = 0;
-        self.status = format!("Preparing {} tracks...", self.total);
-        self.start(root, tracks, false);
+        let queue = if self.queue_root == root {
+            self.queue.clone()
+        } else {
+            None
+        };
+        self.queue_retry_at = None;
+        self.queue_root = root.clone();
+        self.queue_enabled = true;
+        if self.total == 0 {
+            self.total = tracks.len();
+        }
+        let inputs: Vec<_> = tracks
+            .iter()
+            .filter(|t| amp_core::media_kind::is_music(&t.path, &t.preparation))
+            .map(|t| {
+                let mut preparation = Preparation {
+                    analysis: t.preparation.analysis.clone(),
+                    source_sha256: t.preparation.source_sha256.clone(),
+                    ..Default::default()
+                };
+                if let Some(kind) = t.preparation.extensions.get("media_kind") {
+                    preparation
+                        .extensions
+                        .insert("media_kind".into(), kind.clone());
+                }
+                if let Some(stat) = t.preparation.extensions.get("scan_source_stat") {
+                    preparation
+                        .extensions
+                        .insert("scan_source_stat".into(), stat.clone());
+                }
+                if let Some(stat) = t.preparation.extensions.get("analysis_source_stat") {
+                    preparation
+                        .extensions
+                        .insert("analysis_source_stat".into(), stat.clone());
+                }
+                Track {
+                    path: t.path.clone(),
+                    title: String::new(),
+                    preparation,
+                }
+            })
+            .collect();
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.queue_init = Some(rx);
+        let (discovered, discovery) = mpsc::sync_channel(1);
+        self.queue_discovery = Some(discovery);
+        self.status = "Opening the saved queue; folder discovery runs separately.".into();
+        std::thread::spawn(move || {
+            let opened = (|| {
+                let q = match queue {
+                    Some(q) => q,
+                    None => amp_core::analysis_queue::Queue::for_library(&root, "desktop")?,
+                };
+                q.seed_known(&inputs)?;
+                let stats = q.stats()?;
+                Ok::<_, String>((q, stats))
+            })();
+            match opened {
+                Ok((q, stats)) => {
+                    if tx.send(Ok((q.clone(), stats))).is_err() {
+                        return;
+                    }
+                    let result = if verify {
+                        q.enqueue_tracks(&inputs).and_then(|_| q.stats())
+                    } else {
+                        q.stats()
+                    };
+                    let _ = discovered.send(result);
+                }
+                Err(e) => {
+                    let _ = tx.send(Err(e));
+                }
+            }
+        });
+    }
+    pub fn retry_failed(&mut self) {
+        if self.queue_init.is_some() {
+            return;
+        }
+        let Some(q) = self.queue.clone() else { return };
+        let (tx, rx) = mpsc::sync_channel(1);
+        self.queue_init = Some(rx);
+        self.queue_enabled = true;
+        std::thread::spawn(move || {
+            let result = q
+                .retry_failed()
+                .and_then(|_| q.stats())
+                .map(|stats| (q, stats));
+            let _ = tx.send(result);
+        });
+    }
+    pub fn stop_queue(&mut self) {
+        self.queue_retry_at = None;
+        self.queue_enabled = false;
+        self.stop_queue
+            .store(true, std::sync::atomic::Ordering::Relaxed);
+        self.status = "Stopping after active songs; pending work is saved.".into();
+    }
+    fn start_queue(&mut self, root: PathBuf) {
+        self.queue_retry_at = None;
+        let Some(q) = self.queue.clone() else { return };
+        if crate::engine::path().is_none() {
+            self.status =
+                "Install the optional analysis engine to continue the saved queue.".into();
+            return;
+        }
+        let (tx, rx) = mpsc::sync_channel(8);
+        self.job = Some(rx);
+        self.stop_queue = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let stop = self.stop_queue.clone();
+        let workers = crate::preparation_speed::Mode::Fast
+            .workers(amp_core::batch::cpu_count())
+            .max(1);
+        self.status = "Processing saved analysis queue; new songs append at the end.".into();
+        std::thread::spawn(move || {
+            std::thread::scope(|scope| {
+                for _ in 0..workers {
+                    let q = &q;
+                    let stop = &stop;
+                    let tx = &tx;
+                    let root = &root;
+                    scope.spawn(move || {
+                        loop {
+                            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            let Some(_permit) =
+                                crate::preparation_speed::analysis_permit(Some(stop))
+                            else {
+                                break;
+                            };
+                            if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                break;
+                            }
+                            let job = match q.next() {
+                                Ok(Some(job)) => job,
+                                Ok(None) => break,
+                                Err(e) => {
+                                    let _ = tx.send(Update {
+                                        root: root.clone(),
+                                        path: PathBuf::new(),
+                                        result: Err(e),
+                                        selected: false,
+                                        skipped: false,
+                                    });
+                                    for _ in 0..20 {
+                                        if stop.load(std::sync::atomic::Ordering::Relaxed) {
+                                            break;
+                                        }
+                                        std::thread::sleep(std::time::Duration::from_millis(100));
+                                    }
+                                    continue;
+                                }
+                            };
+                            let _heartbeat = q.keep_alive(&job);
+                            let mut skipped = false;
+                            let result = match crate::engine::analyze(root, &job.path, None) {
+                                Ok(Some(p)) => Ok(p),
+                                Ok(None) => {
+                                    skipped = true;
+                                    preparation::load(&amp_core::music_sources::audio_path(
+                                        root, &job.path,
+                                    ))
+                                }
+                                Err(e) => Err(e),
+                            };
+                            let waiting = skipped
+                                && result.as_ref().is_ok_and(|p| {
+                                    !amp_core::analysis_queue::Queue::cached_complete(
+                                        root,
+                                        &Track {
+                                            path: job.path.clone(),
+                                            title: String::new(),
+                                            preparation: p.clone(),
+                                        },
+                                    )
+                                });
+                            let recorded = if waiting {
+                                q.defer(&job)
+                            } else {
+                                q.finish(&job, result.as_ref().map(|_| ()).map_err(String::as_str))
+                            };
+                            let queue_failed = recorded.is_err();
+                            let result = match recorded {
+                                Ok(()) => result,
+                                Err(e) => Err(e),
+                            };
+                            if tx
+                                .send(Update {
+                                    root: root.clone(),
+                                    path: if queue_failed {
+                                        PathBuf::new()
+                                    } else {
+                                        job.path
+                                    },
+                                    result,
+                                    selected: false,
+                                    skipped,
+                                })
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                    });
+                }
+            })
+        });
     }
     fn start(&mut self, root: PathBuf, tracks: Vec<Track>, selected: bool) {
         if crate::engine::path().is_none() {
@@ -511,16 +812,25 @@ impl Preparer {
             return;
         }
 
-        let (tx, rx) = mpsc::channel();
+        let (tx, rx) = mpsc::sync_channel(8);
         self.job = Some(rx);
-        self.active_workers = amp_core::batch::workers(self.workers, tracks.len());
-        let workers = self.active_workers;
+        self.active_workers = amp_core::batch::workers(
+            crate::preparation_speed::mode().workers(amp_core::batch::cpu_count()),
+            tracks.len(),
+        );
+        let workers = crate::preparation_speed::Mode::Fast
+            .workers(amp_core::batch::cpu_count())
+            .min(tracks.len());
         self.status = format!(
-            "Preparing {} tracks with {workers} parallel workers",
-            tracks.len()
+            "Preparing {} tracks with up to {} parallel workers",
+            tracks.len(),
+            self.active_workers
         );
         std::thread::spawn(move || {
             amp_core::batch::for_each(&tracks, workers, |track| {
+                let Some(_permit) = crate::preparation_speed::analysis_permit(None) else {
+                    return false;
+                };
                 let mut skipped = false;
                 let result = match crate::engine::analyze(
                     &root,
@@ -530,7 +840,7 @@ impl Preparer {
                     Ok(Some(p)) => Ok(p),
                     Ok(None) => {
                         skipped = true;
-                        preparation::load(&root.join(&track.path))
+                        preparation::load(&amp_core::music_sources::audio_path(&root, &track.path))
                     }
                     Err(e) => Err(e),
                 };
@@ -546,10 +856,64 @@ impl Preparer {
         });
     }
     pub fn poll(&mut self, root: &std::path::Path, library: Option<&mut Library>) {
+        let initialized = self.queue_init.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(value) => Some(value),
+            Err(mpsc::TryRecvError::Empty) => None,
+            Err(_) => Some(Err(
+                "Queue initialization interrupted; completed metadata was kept".into(),
+            )),
+        });
+        if let Some(result) = initialized {
+            self.queue_init = None;
+            match result {
+                Ok((q, stats)) => {
+                    self.queue = Some(q);
+                    self.total = stats.total;
+                    self.done = stats.done + stats.failed;
+                    self.failures = stats.failed;
+                    if self.queue_enabled && self.job.is_none() && stats.pending > 0 {
+                        self.start_queue(root.into());
+                    }
+                }
+                Err(e) => {
+                    self.status = e;
+                    self.queue_discovery = None;
+                }
+            }
+        }
+        let discovered = self
+            .queue_discovery
+            .as_ref()
+            .and_then(|rx| match rx.try_recv() {
+                Ok(value) => Some(value),
+                Err(mpsc::TryRecvError::Empty) => None,
+                Err(_) => Some(Err(
+                    "Folder discovery interrupted; saved queue was retained".into(),
+                )),
+            });
+        if let Some(result) = discovered {
+            self.queue_discovery = None;
+            match result {
+                Ok(stats) => {
+                    self.total = stats.total;
+                    if self.job.is_none() {
+                        self.done = stats.done + stats.failed;
+                        self.failures = stats.failed;
+                        if self.queue_enabled && stats.pending > 0 {
+                            self.start_queue(root.into());
+                        }
+                    }
+                }
+                Err(e) => self.status = e,
+            }
+        }
+        self.active_workers = crate::preparation_speed::mode()
+            .workers(amp_core::batch::cpu_count())
+            .min(self.total);
         let mut updates = Vec::new();
         let mut finished = false;
         if let Some(rx) = &self.job {
-            loop {
+            for _ in 0..8 {
                 match rx.try_recv() {
                     Ok(update) => updates.push(update),
                     Err(mpsc::TryRecvError::Empty) => break,
@@ -562,6 +926,25 @@ impl Preparer {
         }
         let mut library = library;
         for update in updates {
+            if update.path.as_os_str().is_empty() {
+                if let Err(error) = update.result {
+                    self.status = format!(
+                        "Shared queue unavailable: {error}. Waiting and retrying; completed work is safe."
+                    );
+                }
+                continue;
+            }
+            if update
+                .result
+                .as_ref()
+                .is_err_and(|e| amp_core::analysis_queue::Queue::temporary_failure(e))
+            {
+                self.status = format!(
+                    "Shared metadata busy for {}. Song remains queued for retry.",
+                    update.path.display()
+                );
+                continue;
+            }
             self.done += 1;
             self.skipped += usize::from(update.skipped);
             match update.result {
@@ -609,6 +992,31 @@ impl Preparer {
                 );
             }
             self.job = None;
+            if let Some(q) = &self.queue
+                && let Ok(stats) = q.stats()
+            {
+                self.total = stats.total;
+                self.done = stats.done + stats.failed;
+                self.failures = stats.failed;
+                if self.queue_enabled && stats.pending > 0 {
+                    self.queue_retry_at =
+                        Some(std::time::Instant::now() + std::time::Duration::from_secs(2));
+                } else if self.queue_enabled {
+                    self.status = format!(
+                        "Queue complete: {} done, {} failed. Watching folders for new songs.",
+                        stats.done, stats.failed
+                    );
+                }
+            }
+        }
+        if self.job.is_none()
+            && self.queue_enabled
+            && self
+                .queue_retry_at
+                .is_some_and(|at| std::time::Instant::now() >= at)
+        {
+            self.queue_retry_at = None;
+            self.start_queue(root.into());
         }
     }
     pub fn show(
@@ -629,7 +1037,7 @@ impl Preparer {
             if ui.button("Analyze track").clicked(){self.total=1;self.done=0;self.failures=0;let track=Track{path:self.path.clone(),title:self.title.clone(),preparation:self.draft.clone()};self.status="Analyzing decoded audio...".into();self.start(self.root.clone(),vec![track],true);}
             if ui.button("Save approved metadata").clicked(){
 self.draft.schema_version=Some(1);self.draft.manual_override=true;if let Some(a)=&mut self.draft.analysis{a.reviewed=true;}match preparation::save_if_unchanged(&self.root,&self.path,&self.draft,self.editing_revision.as_deref()){Ok(())=>{if let Ok(fresh)=preparation::load(&self.root.join(&self.path)){self.draft=fresh;}
-if self.root==root&&let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|t.path==self.path){t.preparation=self.draft.clone();if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.editing_revision=preparation::revision(&self.root.join(&self.path));self.status="Approved metadata saved in ampdj. Original audio unchanged.".into();},Err(e)=>{
+if let Some(lib)=library.as_mut()&&let Some(t)=lib.tracks.iter_mut().find(|t|self.selection_root==root && t.path==self.selection_path){t.preparation=self.draft.clone();self.revision=self.revision.wrapping_add(1);if let Some(title)=self.draft.extensions.get("title").and_then(|v|v.as_str()){t.title=title.into();}}self.editing_revision=preparation::revision(&self.root.join(&self.path));self.status="Approved metadata saved in ampdj. Original audio unchanged.".into();},Err(e)=>{
 let queued=(||{let base=if let Some(bytes)=&self.editing_revision{serde_json::from_slice(bytes).map_err(|e:serde_json::Error|e.to_string())?}else{Preparation::default()};amp_core::offline::Edit::new(self.library_id.clone(),self.path.clone(),base,self.draft.clone())?.queue()})();
 self.status=match queued{Ok(path)=>format!("{e}. Draft kept locally at {}. Reconnection will not publish it automatically.",path.display()),Err(_)=>format!("{e}. Unsaved draft remains open; local queue unavailable.")};}}}
         });});
@@ -669,6 +1077,15 @@ self.status=match queued{Ok(path)=>format!("{e}. Draft kept locally at {}. Recon
         ui.horizontal(|ui|{ui.label("BPM");let mut bpm=self.draft.bpm.unwrap_or(0.);if ui.add(egui::DragValue::new(&mut bpm).speed(0.1).range(0. ..=300.)).changed(){self.draft.bpm=if bpm>0.{Some(bpm)}else{None};self.draft.manual_override=true;}ui.label("Grid offset (s)");let mut offset=self.draft.beat_offset.unwrap_or(0.);if ui.add(egui::DragValue::new(&mut offset).speed(0.01).range(0. ..=21600.)).changed(){self.draft.beat_offset=Some(offset);self.draft.manual_override=true;}});
         ui.horizontal(|ui|{ui.label("Key");let mut key=self.draft.key.clone().unwrap_or_default();if ui.add(egui::TextEdit::singleline(&mut key).desired_width(140.)).changed(){self.draft.key=if key.is_empty(){None}else{Some(key)};self.draft.manual_override=true;}ui.label("Harmonic code");let mut code=self.draft.harmonic_key.clone().unwrap_or_default();if ui.add(egui::TextEdit::singleline(&mut code).desired_width(70.)).changed(){self.draft.harmonic_key=if code.is_empty(){None}else{Some(code)};self.draft.manual_override=true;}});
         ui.horizontal(|ui| {
+            ui.label("Content advisory");
+            let mut advisory = amp_core::content_advisory::classification(&self.draft);
+            let before = advisory;
+            egui::ComboBox::from_id_salt("content-advisory").selected_text(advisory.label()).show_ui(ui, |ui| {
+                for value in [amp_core::content_advisory::Classification::Unknown, amp_core::content_advisory::Classification::Clean, amp_core::content_advisory::Classification::Explicit] {
+                    ui.selectable_value(&mut advisory, value, value.label());
+                }
+            });
+            if advisory != before { amp_core::content_advisory::set_manual(&mut self.draft, advisory); }
             ui.label("Rating");
             let mut rating = self.draft.extensions.get("rating").and_then(|v| v.as_u64()).unwrap_or(0) as u32;
             if ui.add(egui::Slider::new(&mut rating, 0..=5)).changed() { self.draft.extensions.insert("rating".into(), serde_json::json!(rating)); }
@@ -773,5 +1190,133 @@ ui.add(egui::TextEdit::singleline(&mut cue.label).desired_width(220.));ui.add(eg
             }
         }
         ui.weak("Saved defaults apply on the next load; playing decks keep their current mix. Other computers need prepared stems too.");
+    }
+}
+
+#[cfg(test)]
+mod workflow_tests {
+    use super::*;
+    #[test]
+    fn stop_analysis_preserves_completed_work_selection_and_saved_folder_options() {
+        let dir = tempfile::tempdir().unwrap();
+        let index = dir.path().join("index.ampdb");
+        std::fs::write(dir.path().join("done.wav"), b"completed").unwrap();
+        std::fs::write(dir.path().join("pending.wav"), b"pending").unwrap();
+        let queue = amp_core::analysis_queue::Queue::open(&index, dir.path()).unwrap();
+        queue
+            .enqueue([
+                (PathBuf::from("done.wav"), true),
+                (PathBuf::from("pending.wav"), false),
+            ])
+            .unwrap();
+        let stats = queue.stats().unwrap();
+        assert_eq!((stats.done, stats.pending), (1, 1));
+        let saved = serde_json::json!({"main_path":"music","folders":["extra"],"completed":7,"cues":[12.5]});
+        amp_core::catalog_db::save_local_record(&index, "saved-library", &saved).unwrap();
+        let mut preparer = Preparer {
+            queue_enabled: true,
+            queue: Some(queue.clone()),
+            queue_root: dir.path().into(),
+            selection_root: dir.path().into(),
+            selection_path: "song.mp3".into(),
+            done: 7,
+            total: 8,
+            ..Default::default()
+        };
+        preparer.draft.bpm = Some(128.);
+        let before = preparer.draft.clone();
+        preparer.stop_queue();
+        assert!(!preparer.queue_enabled);
+        assert!(
+            preparer
+                .stop_queue
+                .load(std::sync::atomic::Ordering::Relaxed)
+        );
+        assert_eq!(preparer.queue_root, dir.path());
+        assert_eq!(preparer.selection_path, PathBuf::from("song.mp3"));
+        assert_eq!(preparer.done, 7);
+        assert_eq!(preparer.total, 8);
+        assert_eq!(
+            serde_json::to_value(&preparer.draft).unwrap(),
+            serde_json::to_value(before).unwrap()
+        );
+        assert_eq!(
+            amp_core::catalog_db::local_record(&index, "saved-library").unwrap(),
+            Some(saved)
+        );
+        drop(preparer);
+        drop(queue);
+        let reopened = amp_core::analysis_queue::Queue::open(&index, dir.path()).unwrap();
+        let stats = reopened.stats().unwrap();
+        assert_eq!((stats.total, stats.done, stats.pending), (2, 1, 1));
+    }
+    #[test]
+    fn preparation_uses_display_selection_and_saves_to_added_source_without_false_busy_or_reload() {
+        let main = tempfile::tempdir().unwrap();
+        let extra = tempfile::tempdir().unwrap();
+        std::fs::write(extra.path().join("song.mp3"), b"fixture").unwrap();
+        amp_core::music_sources::add(main.path(), extra.path()).unwrap();
+        let mut library = amp_core::scan(main.path()).unwrap();
+        library.tracks[0].preparation.extensions.insert(
+            "embedded_tags".into(),
+            serde_json::json!({"Artist":["Display tags"]}),
+        );
+        let track = library.tracks[0].clone();
+        let mut editor = Preparer::default();
+        editor.edit(main.path(), &track);
+        assert!(editor.selected_track(main.path(), &track));
+        assert!(!editor.busy());
+        assert!(
+            !editor.published_track_changed(&track),
+            "derived tags must not reopen metadata every frame"
+        );
+        editor.draft.bpm = Some(127.);
+        editor.save_inline(Some(&mut library));
+        assert_eq!(library.tracks[0].preparation.bpm, Some(127.));
+        assert_eq!(
+            preparation::load(&extra.path().join("song.mp3"))
+                .unwrap()
+                .bpm,
+            Some(127.)
+        );
+        assert!(editor.selected_track(main.path(), &track));
+    }
+}
+#[cfg(test)]
+mod queue_progress_tests {
+    use super::*;
+    fn check_waiting(path: PathBuf, error: &str) {
+        let mut preparer = Preparer {
+            total: 10,
+            done: 3,
+            failures: 1,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        preparer.job = Some(rx);
+        tx.send(Update {
+            root: PathBuf::from("unused"),
+            path,
+            result: Err(error.into()),
+            selected: false,
+            skipped: false,
+        })
+        .unwrap();
+        preparer.poll(std::path::Path::new("unused"), None);
+        assert_eq!(preparer.done, 3);
+        assert_eq!(preparer.failures, 1);
+        assert!(!preparer.status.starts_with(':'));
+        drop(tx);
+    }
+    #[test]
+    fn queue_access_errors_are_not_failed_or_completed_songs() {
+        check_waiting(PathBuf::new(), "Access is denied. (os error 5)");
+    }
+    #[test]
+    fn metadata_contention_does_not_advance_song_progress() {
+        check_waiting(
+            PathBuf::from("song.mp3"),
+            "Shared record busy; retry after reloading",
+        );
     }
 }

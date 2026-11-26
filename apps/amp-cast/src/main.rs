@@ -1,4 +1,5 @@
 use std::{net::SocketAddr, path::PathBuf};
+mod startup_catalog;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(
@@ -7,7 +8,6 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             .ok_or("Usage: amp-cast <music-folder>; AMP_CAST_BIND=0.0.0.0:8787 enables LAN")?,
     )
     .canonicalize()?;
-    let library = amp_core::scan(&root)?;
     let address: SocketAddr = std::env::var("AMP_CAST_BIND")
         .unwrap_or_else(|_| "127.0.0.1:8787".into())
         .parse()?;
@@ -19,6 +19,26 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .unwrap_or(amp_core::coordination::device_config_dir()?.join("cast"));
     let first_start = !config_dir.join("server.json").exists();
     let config = amp_cast::config::Config::load(&config_dir)?;
+    let catalog_file = config_dir.join("startup-catalog.json");
+    let library = if let Some(library) = startup_catalog::load(&catalog_file, &root) {
+        let refresh_root = root.clone();
+        let refresh_file = catalog_file.clone();
+        tokio::task::spawn_blocking(move || match amp_core::scan(&refresh_root) {
+            Ok(fresh) => {
+                if let Err(error) = startup_catalog::save(&refresh_file, &refresh_root, &fresh) {
+                    eprintln!("Catalog refresh could not be saved: {error}");
+                }
+            }
+            Err(error) => eprintln!("Catalog refresh failed; previous snapshot retained: {error}"),
+        });
+        library
+    } else {
+        let library = amp_core::scan(&root)?;
+        if let Err(error) = startup_catalog::save(&catalog_file, &root, &library) {
+            eprintln!("Startup catalog could not be saved: {error}");
+        }
+        library
+    };
     amp_core::coordination::device_id()?;
     amp_core::coordination::library_id(&root)?;
     let cast = amp_cast::Cast::with_identity(
@@ -70,18 +90,21 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     if !address.ip().is_loopback() && address.is_ipv4() && discovery_port != 0 {
         match tokio::net::UdpSocket::bind((std::net::Ipv4Addr::UNSPECIFIED, discovery_port)).await {
             Ok(socket) => {
+                let advertised_port = std::env::var("AMP_CAST_ADVERTISE_PORT")
+                    .ok()
+                    .map(|p| p.parse::<u16>())
+                    .transpose()?
+                    .filter(|p| *p != 0)
+                    .unwrap_or(listener.local_addr()?.port());
+                let paths = advertised_paths(address, advertised_port);
                 let reply = serde_json::to_vec(&amp_core::discovery::Advertisement {
                     protocol: 1,
                     service: "amp-cast".into(),
                     server_id: config.server_id.clone(),
                     station_id: config.station_id.clone(),
                     name: config.station_name.chars().take(64).collect(),
-                    port: std::env::var("AMP_CAST_ADVERTISE_PORT")
-                        .ok()
-                        .map(|p| p.parse::<u16>())
-                        .transpose()?
-                        .filter(|p| *p != 0)
-                        .unwrap_or(listener.local_addr()?.port()),
+                    port: advertised_port,
+                    paths,
                 })?;
                 tokio::spawn(async move {
                     let mut packet = [0; 256];
@@ -111,7 +134,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!(
-        "AMP Cast prototype listening on http://{}",
+        "AMP Cast {} listening on http://{}",
+        env!("CARGO_PKG_VERSION"),
         listener.local_addr()?
     );
     axum::serve(listener, amp_cast::router(cast.clone()))
@@ -130,4 +154,43 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         })
         .await?;
     Ok(())
+}
+
+// Candidate paths are reachability hints, never authorization. Receivers verify station IDs.
+fn advertised_paths(bind: std::net::SocketAddr, port: u16) -> Vec<String> {
+    let mut paths = std::collections::BTreeSet::new();
+    if let Ok(interfaces) = if_addrs::get_if_addrs() {
+        for interface in interfaces {
+            let name = interface.name.to_ascii_lowercase();
+            if [
+                "loopback",
+                "tun",
+                "tap",
+                "wg",
+                "wireguard",
+                "windscribe",
+                "tailscale",
+                "zerotier",
+                "utun",
+                "ppp",
+                "vpn",
+                "docker",
+                "veth",
+                "br-",
+            ]
+            .iter()
+            .any(|prefix| name.starts_with(prefix))
+            {
+                continue;
+            }
+            if let std::net::IpAddr::V4(ip) = interface.ip()
+                && ip.is_private()
+                && !ip.is_loopback()
+                && (bind.ip().is_unspecified() || bind.ip() == std::net::IpAddr::V4(ip))
+            {
+                paths.insert(format!("http://{ip}:{port}"));
+            }
+        }
+    }
+    paths.into_iter().take(8).collect()
 }

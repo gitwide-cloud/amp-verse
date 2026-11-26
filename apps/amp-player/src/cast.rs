@@ -8,6 +8,8 @@ struct Status {
     #[serde(default)]
     server_id: String,
     #[serde(default)]
+    library_id: Option<String>,
+    #[serde(default)]
     station_id: String,
     running: bool,
     now_playing: Option<String>,
@@ -174,7 +176,7 @@ fn search_radio(query: &str) -> Result<Vec<Radio>, String> {
     Err(format!("Radio search unavailable: {last}"))
 }
 enum Command {
-    Connect(String, String),
+    Connect(String, String, u64),
     Start,
     Stop,
     Refresh,
@@ -182,23 +184,34 @@ enum Command {
     Share,
 }
 struct Update {
+    generation: u64,
     snapshot: Result<Snapshot, String>,
     control_error: Option<String>,
 }
 pub struct Dashboard {
-    google: crate::google_cast::Output,
+    dlna: crate::dlna::Output,
+    pub normalize: bool,
+    pending_live: Option<std::time::Instant>,
+    live_binding: Option<(String, String)>,
+    pending_binding: Option<(String, String)>,
+    connection_generation: u64,
+    connected_password: String,
+    attempted_host: bool,
+    pub(super) google: crate::google_cast::Output,
     listen_after_play: bool,
     pub live_action: Option<bool>,
     pub live_active: bool,
+    pub live_player_only: bool,
     pub live_status: String,
     address: String,
     password: String,
     connected_address: String,
-    tx: mpsc::Sender<Command>,
-    rx: mpsc::Receiver<Update>,
+    tx: Option<mpsc::Sender<Command>>,
+    rx: Option<mpsc::Receiver<Update>>,
     snapshot: Option<Snapshot>,
     busy: bool,
     message: String,
+    last_poll_error: Option<String>,
     section: usize,
     search: String,
     discovery: Option<mpsc::Receiver<Result<Vec<amp_core::discovery::Found>, String>>>,
@@ -209,14 +222,249 @@ pub struct Dashboard {
     download: Option<mpsc::Receiver<Result<std::path::PathBuf, String>>>,
     radio_job: Option<mpsc::Receiver<Result<Vec<Radio>, String>>>,
     radio_results: Vec<Radio>,
-    radio: Option<std::process::Child>,
+    radio: Option<crate::station_receiver::Receiver>,
+    pub local_playback_active: bool,
+    pub output_gate: std::sync::Arc<crate::output_admission::Gate>,
 }
 impl Default for Dashboard {
     fn default() -> Self {
+        let mut dashboard = Self {
+            dlna: Default::default(),
+            normalize: !cfg!(test)
+                && crate::theme::settings_path()
+                    .and_then(|p| {
+                        amp_core::catalog_db::local_record(
+                            &p.with_file_name("media.ampdb"),
+                            "normalize-cast",
+                        )
+                        .ok()
+                        .flatten()
+                    })
+                    .and_then(|v| v.as_bool())
+                    .unwrap_or(false),
+            pending_live: None,
+            live_binding: None,
+            pending_binding: None,
+            connection_generation: 0,
+            connected_password: String::new(),
+            attempted_host: false,
+            google: Default::default(),
+            listen_after_play: false,
+            live_action: None,
+            live_active: false,
+            live_player_only: false,
+            live_status: String::new(),
+            address: std::env::var("AMP_CAST_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8787".into()),
+            password: String::new(),
+            connected_address: String::new(),
+            tx: None,
+            rx: None,
+            snapshot: None,
+            busy: false,
+            last_poll_error: None,
+            message:
+                "Search LAN or broadcast stations, or host a Smart Station to share your playlists."
+                    .into(),
+            section: 0,
+            search: String::new(),
+            discovery: None,
+            servers: Vec::new(),
+            host: None,
+            host_broadcast: false,
+            hosting: String::new(),
+            download: None,
+            radio_job: None,
+            radio_results: Vec::new(),
+            radio: None,
+            local_playback_active: false,
+            output_gate: crate::output_admission::current(),
+        };
+        if std::env::var("AMP_CAST_AUTOCONNECT").as_deref() == Ok("1") {
+            dashboard.connected_address = dashboard.address.trim().into();
+            dashboard.send(Command::Connect(
+                dashboard.address.clone(),
+                String::new(),
+                0,
+            ));
+        }
+        dashboard
+    }
+}
+impl Dashboard {
+    fn normalize_control(&mut self, ui: &mut egui::Ui) {
+        let mut changed = false;
+        ui.add_enabled_ui(!self.live_active, |ui| {
+            changed = ui
+                .checkbox(
+                    &mut self.normalize,
+                    "Normalize broadcast volume (adds buffering)",
+                )
+                .changed();
+        });
+        if changed
+            && let Some(path) = crate::theme::settings_path()
+            && let Err(e) = amp_core::catalog_db::save_local_record(
+                &path.with_file_name("media.ampdb"),
+                "normalize-cast",
+                &serde_json::json!(self.normalize),
+            )
+        {
+            self.live_status = format!("Could not remember volume setting: {e}");
+        }
+    }
+    pub fn request_live(&mut self, player_only: bool) {
+        if self.radio.is_some() {
+            self.live_status = "Stop receiving the station before sending live audio.".into();
+            return;
+        }
+        if self.live_active || self.sending() {
+            return;
+        }
+        self.live_player_only = player_only;
+        self.pending_live = Some(std::time::Instant::now());
+        self.pending_binding = Some(("127.0.0.1:8787".into(), self.password.clone()));
+        self.attempted_host = false;
+        self.live_status = "Connecting to local broadcast service…".into();
+        self.address = "127.0.0.1:8787".into();
+        self.connected_address = self.address.clone();
+        self.snapshot = None;
+        self.send(Command::Connect(
+            self.address.clone(),
+            self.password.clone(),
+            0,
+        ));
+    }
+    pub fn prepare_live(&mut self, root: &std::path::Path) {
+        let Some(started) = self.pending_live else {
+            return;
+        };
+        if started.elapsed() > Duration::from_secs(30) {
+            self.pending_live = None;
+            self.pending_binding = None;
+            self.live_status = format!(
+                "Could not start local broadcast: {}. Check the Cast server and retry.",
+                self.message
+            );
+        } else if self
+            .snapshot
+            .as_ref()
+            .is_some_and(|s| s.status.capabilities["live_dj"] == true)
+        {
+            self.pending_live = None;
+            self.live_action = Some(true);
+        } else if !self.busy && !self.attempted_host && self.snapshot.is_none() {
+            self.attempted_host = true;
+            self.host(root, false);
+            self.live_status = self.message.clone();
+        } else if !self.busy && self.snapshot.is_some() {
+            self.pending_live = None;
+            self.pending_binding = None;
+            self.live_status =
+                "This Cast server does not support live audio. Update AMP Cast and retry.".into();
+        }
+    }
+    pub fn quick_cast(&mut self, ui: &mut egui::Ui) {
+        ui.label("Cast current audio. Headphone cue stays private.");
+        self.normalize_control(ui);
+        ui.label(&self.live_status);
+        if self.pending_live.is_some() && ui.button("Cancel connection").clicked() {
+            self.pending_live = None;
+            self.pending_binding = None;
+            self.live_status = "Broadcast connection cancelled".into();
+        }
+        if !self.live_active
+            && self.pending_live.is_none()
+            && ui.button("Retry broadcast connection").clicked()
+        {
+            self.request_live(self.live_player_only);
+        }
+        let cast_address = self.endpoint().0;
+        self.google.show(
+            ui,
+            &cast_address,
+            self.live_active && self.snapshot.as_ref().is_some_and(|s| s.status.running),
+        );
+        self.dlna.show(
+            ui,
+            &cast_address,
+            self.live_active && self.snapshot.as_ref().is_some_and(|s| s.status.running),
+        );
+        if self.live_active && ui.button("Stop sending live audio").clicked() {
+            self.live_action = Some(false);
+            let _ = self.google.remote(crate::google_cast::Operation::Stop);
+        }
+    }
+    pub fn sync_candidate(&self) -> Option<crate::playlist_sync::Candidate> {
+        let status = &self.snapshot.as_ref()?.status;
+        if self.connected_address.is_empty() || status.server_id.is_empty() {
+            return None;
+        }
+        Some(crate::playlist_sync::Candidate {
+            address: self.connected_address.clone(),
+            password: self.password.clone(),
+            server_id: status.server_id.clone(),
+            library_id: status.library_id.clone()?,
+            password_required: status.password_required,
+        })
+    }
+    pub fn endpoint(&self) -> (String, String) {
+        self.live_binding
+            .as_ref()
+            .or(self.pending_binding.as_ref())
+            .cloned()
+            .unwrap_or_else(|| {
+                (
+                    if self.connected_address.is_empty() {
+                        self.address.clone()
+                    } else {
+                        self.connected_address.clone()
+                    },
+                    self.connected_password.clone(),
+                )
+            })
+    }
+    fn sending(&self) -> bool {
+        self.live_binding.is_some() || self.pending_binding.is_some()
+    }
+    fn arm_live_start(&mut self) {
+        if self.radio.is_some() {
+            self.live_status = "Stop receiving the station before sending live audio.".into();
+            return;
+        }
+        if !self.sending() {
+            self.pending_binding = Some(self.endpoint());
+        }
+        self.live_action = Some(true);
+    }
+    pub fn live_started(&mut self) {
+        if let Some(binding) = self.pending_binding.take() {
+            self.live_binding = Some(binding);
+        }
+    }
+    pub fn live_ended(&mut self) {
+        self.live_binding = None;
+        self.pending_binding = None;
+        self.pending_live = None;
+        self.live_active = false;
+    }
+    pub fn finish_live_if_stopped(&mut self, running: bool, final_status: String) -> bool {
+        if running {
+            return false;
+        }
+        self.live_ended();
+        self.live_action = None;
+        self.live_status = final_status;
+        true
+    }
+    fn ensure_worker(&mut self) {
+        if self.tx.is_some() {
+            return;
+        }
         let (tx, commands) = mpsc::channel();
         let (updates, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let mut client: Option<Client> = None;
+            let mut generation = 0;
             loop {
                 let command = match commands.recv_timeout(Duration::from_secs(2)) {
                     Ok(command) => command,
@@ -225,13 +473,15 @@ impl Default for Dashboard {
                     Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 };
                 let mut control_error = None;
-                if let Command::Connect(address, password) = command {
+                if let Command::Connect(address, password, next_generation) = command {
+                    generation = next_generation;
                     match Client::new(&address, password) {
                         Ok(value) => client = Some(value),
                         Err(error) => {
                             client = None;
                             if updates
                                 .send(Update {
+                                    generation,
                                     snapshot: Err(error),
                                     control_error: None,
                                 })
@@ -267,6 +517,7 @@ impl Default for Dashboard {
                 if let Some(client) = &client
                     && updates
                         .send(Update {
+                            generation,
                             snapshot: client.read(),
                             control_error,
                         })
@@ -276,54 +527,31 @@ impl Default for Dashboard {
                 }
             }
         });
-        let mut dashboard = Self {
-            google: Default::default(),
-            listen_after_play: false,
-            live_action: None,
-            live_active: false,
-            live_status: String::new(),
-            address: std::env::var("AMP_CAST_ADDRESS").unwrap_or_else(|_| "127.0.0.1:8787".into()),
-            password: String::new(),
-            connected_address: String::new(),
-            tx,
-            rx,
-            snapshot: None,
-            busy: false,
-            message:
-                "Search LAN or broadcast stations, or host a Smart Station to share your playlists."
-                    .into(),
-            section: 0,
-            search: String::new(),
-            discovery: None,
-            servers: Vec::new(),
-            host: None,
-            host_broadcast: false,
-            hosting: String::new(),
-            download: None,
-            radio_job: None,
-            radio_results: Vec::new(),
-            radio: None,
-        };
-        if std::env::var("AMP_CAST_AUTOCONNECT").as_deref() == Ok("1") {
-            dashboard.connected_address = dashboard.address.trim().into();
-            dashboard.send(Command::Connect(dashboard.address.clone(), String::new()));
+        self.tx = Some(tx);
+        self.rx = Some(rx);
+    }
+    fn send(&mut self, mut command: Command) {
+        if let Command::Connect(address, password, generation) = &mut command {
+            if self.live_binding.is_some()
+                || (self.pending_binding.is_some()
+                    && self.endpoint() != (address.trim().into(), password.clone()))
+            {
+                let (bound_address, _) = self.endpoint();
+                self.connected_address = bound_address;
+                self.message = "Stop sending live audio before changing stations.".into();
+                return;
+            }
+            self.connection_generation = self.connection_generation.wrapping_add(1);
+            *generation = self.connection_generation;
+            self.connected_address = address.trim().into();
+            self.connected_password = password.clone();
+            self.snapshot = None;
+        } else if self.sending() && !matches!(command, Command::Refresh) {
+            self.message = "Stop sending live audio before controlling another source.".into();
+            return;
         }
-        dashboard
-    }
-}
-impl Dashboard {
-    pub fn endpoint(&self) -> (String, String) {
-        (
-            if self.connected_address.is_empty() {
-                self.address.clone()
-            } else {
-                self.connected_address.clone()
-            },
-            self.password.clone(),
-        )
-    }
-    fn send(&mut self, command: Command) {
-        match self.tx.send(command) {
+        self.ensure_worker();
+        match self.tx.as_ref().unwrap().send(command) {
             Ok(()) => {
                 self.busy = true;
                 self.message.clear();
@@ -335,6 +563,14 @@ impl Dashboard {
         }
     }
     pub fn poll(&mut self) {
+        self.google.poll();
+        if let Some(receiver) = &mut self.radio {
+            let status = receiver.status();
+            if status.finished {
+                self.message = status.message;
+                self.radio = None;
+            }
+        }
         if let Some(rx) = &self.discovery
             && let Ok(result) = rx.try_recv()
         {
@@ -352,10 +588,18 @@ impl Dashboard {
             self.discovery = None;
         }
 
-        while let Ok(update) = self.rx.try_recv() {
+        while let Some(update) = self.rx.as_ref().and_then(|rx| rx.try_recv().ok()) {
+            if update.generation != self.connection_generation {
+                continue;
+            }
             self.busy = false;
             match update.snapshot {
                 Ok(snapshot) => {
+                    if let Some(previous) = self.last_poll_error.take()
+                        && self.message == previous
+                    {
+                        self.message.clear();
+                    }
                     if let Some(error) = update
                         .control_error
                         .or_else(|| snapshot.status.error.clone())
@@ -368,12 +612,30 @@ impl Dashboard {
                 Err(error) => {
                     self.listen_after_play = false;
                     self.snapshot = None;
-                    self.message = error;
+                    if let Some(control_error) = update.control_error {
+                        self.last_poll_error = None;
+                        self.message = control_error;
+                    } else {
+                        self.last_poll_error = Some(error.clone());
+                        self.message = error;
+                    }
                 }
             }
         }
     }
+    fn host_password(&self) -> String {
+        self.pending_binding
+            .as_ref()
+            .map_or_else(|| self.password.clone(), |(_, password)| password.clone())
+    }
     fn host(&mut self, root: &std::path::Path, smart: bool) {
+        if self.live_binding.is_some()
+            || (self.pending_binding.is_some() && (smart || self.endpoint().0 != "127.0.0.1:8787"))
+        {
+            self.message = "Stop sending live audio before hosting another station.".into();
+            return;
+        }
+        let host_password = self.host_password();
         let result = (|| -> Result<std::process::Child, String> {
             let binary = std::env::current_exe()
                 .map_err(failure)?
@@ -402,16 +664,19 @@ impl Dashboard {
             command
                 .env(
                     "PATH",
-                    format!(
-                        "{};{}",
-                        binary.parent().unwrap().display(),
-                        std::env::var("PATH").unwrap_or_default()
-                    ),
+                    std::env::join_paths(
+                        std::iter::once(binary.parent().unwrap().to_path_buf()).chain(
+                            std::env::var_os("PATH")
+                                .map(|p| std::env::split_paths(&p).collect::<Vec<_>>())
+                                .unwrap_or_default(),
+                        ),
+                    )
+                    .map_err(failure)?,
                 )
                 .arg(root)
                 .env("AMP_CAST_BIND", "0.0.0.0:8787")
                 .env("AMP_CAST_SMART_SHARING", if smart { "1" } else { "0" })
-                .env("AMP_CAST_PASSWORD", &self.password)
+                .env("AMP_CAST_PASSWORD", &host_password)
                 .env("AMP_CAST_CONFIG_DIR", &config)
                 .env("AMP_ANALYSIS_ENABLED", "0")
                 .stdout(log.try_clone().map_err(failure)?)
@@ -435,32 +700,87 @@ impl Dashboard {
                 .into();
                 self.address = "127.0.0.1:8787".into();
                 self.connected_address = self.address.clone();
-                self.send(Command::Connect(
-                    self.address.clone(),
-                    self.password.clone(),
-                ));
+                self.send(Command::Connect(self.address.clone(), host_password, 0));
                 self.message = "Starting your station. Reading the library…".into();
             }
             Err(e) => self.message = e,
         }
     }
     fn listen(&mut self, url: &str) {
-        if let Some(mut previous) = self.radio.take() {
-            let _ = previous.kill();
-            let _ = previous.wait();
+        if self.sending() {
+            self.message = "Stop sending live audio before receiving a station.".into();
+            return;
         }
-        let mut command = amp_core::command("ffplay");
-        command
-            .args(["-nodisp", "-autoexit", "-loglevel", "error", "-i", url])
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null());
-        match command.spawn() {
-            Ok(child) => self.radio = Some(child),
-            Err(e) => self.message = format!("Could not play station: {e}"),
+        if self.local_playback_active {
+            self.message =
+                "Pause local Player/DJ, previews and samples before listening to a station.".into();
+            return;
+        }
+        if let Some(previous) = &self.radio {
+            previous.stop();
+            self.message =
+                "Stopping the previous receiver. Choose Listen again when it finishes.".into();
+            return;
+        }
+        match crate::station_receiver::Receiver::start(url, self.output_gate.clone()) {
+            Ok(receiver) => self.radio = Some(receiver),
+            Err(error) => self.message = error,
         }
     }
     pub fn show(&mut self, ui: &mut egui::Ui, root: &std::path::Path, ready: bool) {
+        let size = ui.available_size();
+        ui.horizontal_top(|ui| {
+            if size.x > 850. {
+                crate::skin::panel(ui, false, |ui| {
+                    ui.set_width(200.);
+                    ui.set_min_height((size.y - 32.).max(180.));
+                    ui.heading("AMP Cast");
+                    ui.add_space(14.);
+                    for (index, label, icon) in [
+                        (0, "Find Stations", crate::icons::Icon::Search),
+                        (1, "Broadcast", crate::icons::Icon::Cast),
+                        (2, "Host Smart Station", crate::icons::Icon::Layers),
+                    ] {
+                        if crate::icons::button(
+                            ui,
+                            icon,
+                            label,
+                            self.section == index,
+                            egui::vec2(ui.available_width(), 48.),
+                        )
+                        .clicked()
+                        {
+                            self.section = index;
+                        }
+                    }
+                    ui.separator();
+                    ui.weak("Speakers & TVs");
+                    ui.label("Google Home / Chromecast");
+                    ui.label("UPnP / DLNA");
+                    ui.add_space(12.);
+                    ui.weak("Choose a destination below. Browsing keeps your music playing.");
+                });
+            }
+            ui.vertical(|ui| {
+                ui.set_width(ui.available_width());
+                ui.heading("AMP Cast");
+                ui.weak("Broadcast your mix, listen to stations, and cast to speakers and TVs.");
+                ui.add_space(12.);
+                egui::ScrollArea::vertical()
+                    .id_salt("cast-card-workspace")
+                    .auto_shrink([false, false])
+                    .max_height((size.y - 70.).max(120.))
+                    .show(ui, |ui| self.show_content(ui, root, ready, size.x > 850.));
+            });
+        });
+    }
+    fn show_content(
+        &mut self,
+        ui: &mut egui::Ui,
+        root: &std::path::Path,
+        ready: bool,
+        sidebar: bool,
+    ) {
         self.poll();
         if self.listen_after_play
             && !self.busy
@@ -520,251 +840,292 @@ impl Dashboard {
             }
             self.radio_job = None;
         }
-        ui.heading("AMP Cast");
-        ui.horizontal_wrapped(|ui| {
-            for (index, title) in ["Find Stations", "Broadcast", "Host Smart Station"]
-                .into_iter()
-                .enumerate()
-            {
-                ui.selectable_value(&mut self.section, index, title);
-            }
-        });
-        ui.separator();
-        if self.section == 0 {
+        if !sidebar {
             ui.horizontal_wrapped(|ui| {
-                if ui
-                    .add_enabled(
-                        self.discovery.is_none(),
-                        egui::Button::new("Search LAN stations"),
-                    )
-                    .clicked()
+                for (index, title) in ["Find Stations", "Broadcast", "Host Smart Station"]
+                    .into_iter()
+                    .enumerate()
                 {
-                    let (tx, rx) = mpsc::channel();
-                    self.discovery = Some(rx);
-                    std::thread::spawn(move || {
-                        let _ = tx.send(amp_core::discovery::discover());
-                    });
-                }
-                ui.add(
-                    egui::TextEdit::singleline(&mut self.search)
-                        .hint_text("Find a broadcast station by name")
-                        .desired_width(280.),
-                );
-                if ui
-                    .add_enabled(
-                        self.radio_job.is_none() && !self.search.trim().is_empty(),
-                        egui::Button::new("Search radio"),
-                    )
-                    .clicked()
-                {
-                    let query = self.search.clone();
-                    let (tx, rx) = mpsc::channel();
-                    self.radio_job = Some(rx);
-                    std::thread::spawn(move || {
-                        let _ = tx.send(search_radio(&query));
-                    });
+                    ui.selectable_value(&mut self.section, index, title);
                 }
             });
-            let mut chosen = None;
-            for server in &self.servers {
-                if ui
-                    .button(format!("{} · Connect", server.info.name))
-                    .clicked()
-                {
-                    chosen = Some(server.address.clone());
-                }
-            }
-            if let Some(address) = chosen {
-                self.address = address;
-                self.connected_address = self.address.clone();
-                self.snapshot = None;
-                self.send(Command::Connect(
-                    self.address.clone(),
-                    self.password.clone(),
-                ));
-            }
-            let mut play = None;
-            for station in &self.radio_results {
-                ui.horizontal(|ui| {
-                    ui.label(format!("{} · {}", station.name, station.country));
-                    if ui.button("Listen").clicked() {
-                        play = Some(station.url_resolved.clone());
-                    }
-                });
-            }
-            if let Some(url) = play {
-                self.listen(&url);
-            }
-            egui::CollapsingHeader::new("Connect by address / access code").show(ui, |ui| {
+        }
+        ui.separator();
+        crate::skin::panel(ui, false, |ui| {
+            ui.set_min_width(ui.available_width());
+            if self.section == 0 {
                 ui.horizontal_wrapped(|ui| {
-                    ui.text_edit_singleline(&mut self.address);
+                    if ui
+                        .add_enabled(
+                            self.discovery.is_none(),
+                            egui::Button::new("Search LAN stations"),
+                        )
+                        .clicked()
+                    {
+                        let (tx, rx) = mpsc::channel();
+                        self.discovery = Some(rx);
+                        std::thread::spawn(move || {
+                            let _ = tx.send(amp_core::discovery::discover());
+                        });
+                    }
                     ui.add(
-                        egui::TextEdit::singleline(&mut self.password)
-                            .password(true)
-                            .hint_text("Access code, if needed"),
+                        egui::TextEdit::singleline(&mut self.search)
+                            .hint_text("Find a broadcast station by name")
+                            .desired_width(280.),
                     );
-                    if ui.button("Connect").clicked() {
-                        self.connected_address = self.address.clone();
-                        self.snapshot = None;
-                        self.send(Command::Connect(
-                            self.address.clone(),
-                            self.password.clone(),
-                        ));
+                    if ui
+                        .add_enabled(
+                            self.radio_job.is_none() && !self.search.trim().is_empty(),
+                            egui::Button::new("Search radio"),
+                        )
+                        .clicked()
+                    {
+                        let query = self.search.clone();
+                        let (tx, rx) = mpsc::channel();
+                        self.radio_job = Some(rx);
+                        std::thread::spawn(move || {
+                            let _ = tx.send(search_radio(&query));
+                        });
                     }
                 });
-            });
-        } else if self.section == 1 {
-            ui.heading("Broadcast my live DJ mix");
-            ui.label("Send the actual master mix: both decks, crossfader, EQ, stems and sampler. Headphone cue stays private.");
-            let supported = self
-                .snapshot
-                .as_ref()
-                .is_some_and(|s| s.status.capabilities["live_dj"] == true);
-            if ui
-                .add_enabled(
-                    supported && !self.live_active,
-                    egui::Button::new("Start live DJ broadcast"),
-                )
-                .clicked()
-            {
-                self.live_action = Some(true);
-            }
-            if self.live_active && ui.button("Stop my live DJ broadcast").clicked() {
-                self.live_action = Some(false);
-            }
-            ui.label(&self.live_status);
-            if !supported {
-                ui.weak("Connect to an updated AMP Cast server first, or start one below.");
-                if ui.button("Connect to Cast on this computer").clicked() {
-                    self.connected_address = "127.0.0.1:8787".into();
-                    self.address = self.connected_address.clone();
+                let mut chosen = None;
+                for server in &self.servers {
+                    if ui
+                        .button(format!("{} · Connect", server.info.name))
+                        .clicked()
+                    {
+                        chosen = Some(server.address.clone());
+                    }
+                }
+                if let Some(address) = chosen {
+                    self.address = address;
+                    self.connected_address = self.address.clone();
+                    self.snapshot = None;
                     self.send(Command::Connect(
                         self.address.clone(),
                         self.password.clone(),
+                        0,
                     ));
                 }
-                if self.host.is_none()
-                    && ui
-                        .add_enabled(
-                            ready,
-                            egui::Button::new("Start Cast server on this computer"),
-                        )
-                        .clicked()
-                {
-                    self.host(root, true);
+                let mut play = None;
+                for station in &self.radio_results {
+                    ui.horizontal(|ui| {
+                        ui.label(format!("{} · {}", station.name, station.country));
+                        if ui.button("Listen").clicked() {
+                            play = Some(station.url_resolved.clone());
+                        }
+                    });
                 }
-            }
-        } else {
-            ui.heading(if self.section == 1 {
-                "Broadcast live audio"
+                if let Some(url) = play {
+                    self.listen(&url);
+                }
+                egui::CollapsingHeader::new("Connect by address / access code").show(ui, |ui| {
+                    ui.horizontal_wrapped(|ui| {
+                        ui.text_edit_singleline(&mut self.address);
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.password)
+                                .password(true)
+                                .hint_text("Access code, if needed"),
+                        );
+                        if ui.button("Connect").clicked() {
+                            self.connected_address = self.address.clone();
+                            self.snapshot = None;
+                            self.send(Command::Connect(
+                                self.address.clone(),
+                                self.password.clone(),
+                                0,
+                            ));
+                        }
+                    });
+                });
+            } else if self.section == 1 {
+                ui.heading("Broadcast live audio");
+                self.normalize_control(ui);
+                ui.label(if self.live_player_only {
+                    "Current source: Music Player"
+                } else {
+                    "Current source: DJ master mix"
+                });
+                ui.weak("Follows whichever Player or DJ output is currently active.");
+                ui.label(if self.live_player_only {
+                "Send the current Music Player output. DJ decks and sampler stay private."
             } else {
-                "Share playlists from this computer"
+                "Send the actual master mix: both decks, crossfader, EQ, stems and sampler. Headphone cue stays private."
             });
-            ui.label(if self.section==1 {"Other devices listen to the same live stream."}else{"Share saved normal and Smart Playlists on your LAN. Listeners can save original songs with your cues for offline listening."});
-            ui.label(format!("Music library: {}", root.display()));
-            if self.snapshot.is_some() {
-                if ui.button("Share playlists on connected station").clicked() {
-                    self.send(Command::Share);
-                }
-                ui.weak("Enables shared playlists and offline downloads on the selected server.");
-            }
-            if self.host.is_none() {
+                let supported = self
+                    .snapshot
+                    .as_ref()
+                    .is_some_and(|s| s.status.capabilities["live_dj"] == true);
                 if ui
                     .add_enabled(
-                        ready,
-                        egui::Button::new(if self.section == 1 {
-                            "Start broadcast"
-                        } else {
-                            "Host Smart Station"
-                        }),
+                        !self.live_active && self.pending_live.is_none(),
+                        egui::Button::new("Start live broadcast"),
                     )
                     .clicked()
                 {
-                    self.host(root, self.section == 2);
+                    if supported {
+                        self.arm_live_start();
+                    } else {
+                        self.request_live(self.live_player_only);
+                    }
                 }
-                if !ready {
-                    ui.weak("Choose a music library and let its scan finish first.");
+                if self.live_active && ui.button("Stop my live DJ broadcast").clicked() {
+                    self.live_action = Some(false);
+                }
+                ui.label(&self.live_status);
+                if !supported {
+                    ui.weak("Connect to an updated AMP Cast server first, or start one below.");
+                    if ui.button("Connect to Cast on this computer").clicked() {
+                        self.connected_address = "127.0.0.1:8787".into();
+                        self.address = self.connected_address.clone();
+                        self.send(Command::Connect(
+                            self.address.clone(),
+                            self.password.clone(),
+                            0,
+                        ));
+                    }
+                    if self.host.is_none()
+                        && ui
+                            .add_enabled(
+                                ready,
+                                egui::Button::new("Start Cast server on this computer"),
+                            )
+                            .clicked()
+                    {
+                        self.host(root, true);
+                    }
                 }
             } else {
-                ui.label(&self.hosting);
-                if ui.button("Stop my station").clicked() {
-                    if let Some(mut child) = self.host.take() {
-                        let _ = child.kill();
-                        let _ = child.wait();
+                ui.heading(if self.section == 1 {
+                    "Broadcast live audio"
+                } else {
+                    "Share playlists from this computer"
+                });
+                ui.label(if self.section==1 {"Other devices listen to the same live stream."}else{"Share saved normal and Smart Playlists on your LAN. Listeners can save original songs with your cues for offline listening."});
+                ui.label(format!("Music library: {}", root.display()));
+                if self.snapshot.is_some() {
+                    if ui.button("Share playlists on connected station").clicked() {
+                        self.send(Command::Share);
                     }
-                    self.hosting.clear();
-                    self.host_broadcast = false;
-                    self.snapshot = None;
+                    ui.weak(
+                        "Enables shared playlists and offline downloads on the selected server.",
+                    );
                 }
+                if self.host.is_none() {
+                    if ui
+                        .add_enabled(
+                            ready,
+                            egui::Button::new(if self.section == 1 {
+                                "Start broadcast"
+                            } else {
+                                "Host Smart Station"
+                            }),
+                        )
+                        .clicked()
+                    {
+                        self.host(root, self.section == 2);
+                    }
+                    if !ready {
+                        ui.weak("Add a music folder in Library first, then return here.");
+                    }
+                } else {
+                    ui.label(&self.hosting);
+                    if ui
+                        .add_enabled(!self.sending(), egui::Button::new("Stop my station"))
+                        .clicked()
+                    {
+                        if let Some(mut child) = self.host.take() {
+                            let _ = child.kill();
+                            let _ = child.wait();
+                        }
+                        self.hosting.clear();
+                        self.host_broadcast = false;
+                        self.snapshot = None;
+                    }
+                }
+                egui::CollapsingHeader::new("Access code (optional)").show(ui, |ui| {
+                    ui.add(egui::TextEdit::singleline(&mut self.password).password(true));
+                });
             }
-            egui::CollapsingHeader::new("Access code (optional)").show(ui, |ui| {
-                ui.add(egui::TextEdit::singleline(&mut self.password).password(true));
-            });
-        }
+        });
         ui.separator();
         let mut download = None;
         let mut listen_url = None;
         let mut stop_remote = false;
         let mut play_remote = None;
-        if let Some(snapshot) = &self.snapshot {
-            ui.label(format!(
-                "{} songs · {} listeners",
-                snapshot.status.tracks, snapshot.status.listeners
-            ));
-            if snapshot.status.password_required && self.password.is_empty() {
-                ui.weak("This station needs its access code.");
-            }
-            egui::CollapsingHeader::new("Songs in live station").show(ui, |ui| {
-                for track in &snapshot.queue.tracks {
-                    ui.label(&track.title);
+        crate::skin::panel(ui, false, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.heading("Station Status");
+            if let Some(snapshot) = &self.snapshot {
+                ui.label(format!(
+                    "{} songs · {} listeners",
+                    snapshot.status.tracks, snapshot.status.listeners
+                ));
+                if snapshot.status.password_required && self.password.is_empty() {
+                    ui.weak("This station needs its access code.");
                 }
-            });
-            if self.section == 1
-                && snapshot.status.running
-                && self.host.is_none()
-                && ui.button("Stop broadcast").clicked()
-            {
-                stop_remote = true;
-            }
-            ui.strong(
-                snapshot
-                    .status
-                    .now_playing
-                    .as_deref()
-                    .unwrap_or("Station connected"),
-            );
-            if snapshot.status.running && ui.button("Listen to live station").clicked() {
-                listen_url = Some(format!("http://{}/listen.mp3", self.connected_address));
-            }
-            if let Some(manifest) = &snapshot.manifest {
-                ui.label("Playlists · songs and full cue metadata are included in offline copies");
-                if let Some(lists) = manifest["playlists"].as_array() {
-                    for playlist in lists {
-                        ui.horizontal_wrapped(|ui| {
-                            ui.label(format!(
-                                "{} · {} songs",
-                                playlist["name"].as_str().unwrap_or("Playlist"),
-                                playlist["tracks"].as_array().map_or(0, Vec::len)
-                            ));
-                            if ui.button("Play here").clicked() {
-                                play_remote = playlist["id"].as_str().map(str::to_owned);
-                            }
-                            if ui
-                                .add_enabled(
-                                    self.download.is_none(),
-                                    egui::Button::new("Save offline…"),
-                                )
-                                .clicked()
-                            {
-                                download = Some((manifest.clone(), playlist.clone()));
-                            }
-                        });
+                egui::CollapsingHeader::new("Songs in live station").show(ui, |ui| {
+                    for track in &snapshot.queue.tracks {
+                        ui.label(&track.title);
                     }
+                });
+                if self.section == 1
+                    && snapshot.status.running
+                    && self.host.is_none()
+                    && ui.button("Stop broadcast").clicked()
+                {
+                    stop_remote = true;
                 }
-            } else if snapshot.status.capabilities["smart_sharing"].as_bool() != Some(true) {
-                ui.weak("Live station. Offline playlists are available from a Smart Station.");
+                ui.strong(
+                    snapshot
+                        .status
+                        .now_playing
+                        .as_deref()
+                        .unwrap_or("Station connected"),
+                );
+                if snapshot.status.running && ui.button("Listen to live station").clicked() {
+                    listen_url = Some(format!("http://{}/listen.mp3", self.connected_address));
+                }
+                if let Some(manifest) = &snapshot.manifest {
+                    ui.label(
+                        "Playlists · songs and full cue metadata are included in offline copies",
+                    );
+                    if let Some(lists) = manifest["playlists"].as_array() {
+                        for playlist in lists {
+                            ui.horizontal_wrapped(|ui| {
+                                ui.label(format!(
+                                    "{} · {} songs",
+                                    playlist["name"].as_str().unwrap_or("Playlist"),
+                                    playlist["tracks"].as_array().map_or(0, Vec::len)
+                                ));
+                                if ui.button("Play here").clicked() {
+                                    play_remote = playlist["id"].as_str().map(str::to_owned);
+                                }
+                                if ui
+                                    .add_enabled(
+                                        self.download.is_none(),
+                                        egui::Button::new("Save offline…"),
+                                    )
+                                    .clicked()
+                                {
+                                    download = Some((manifest.clone(), playlist.clone()));
+                                }
+                            });
+                        }
+                    }
+                } else if snapshot.status.capabilities["smart_sharing"].as_bool() != Some(true) {
+                    ui.weak("Live station. Offline playlists are available from a Smart Station.");
+                }
+            } else if self.busy {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    ui.label("Connecting to station…");
+                });
+            } else {
+                ui.strong("No station connected");
+                ui.weak("Find a station on your LAN, or start a broadcast.");
             }
-        }
+        });
         if stop_remote {
             self.send(Command::Stop);
         }
@@ -776,17 +1137,36 @@ impl Dashboard {
             self.listen(&url);
         }
         ui.separator();
-        self.google.show(
-            ui,
-            &self.connected_address,
-            self.snapshot.as_ref().is_some_and(|s| s.status.running),
-        );
-        if self.radio.is_some()
-            && ui.button("Stop listening").clicked()
-            && let Some(mut child) = self.radio.take()
-        {
-            let _ = child.kill();
-            let _ = child.wait();
+        let cast_address = self.endpoint().0;
+        let running = self.snapshot.as_ref().is_some_and(|s| s.status.running);
+        if ui.available_width() > 900. {
+            ui.columns(2, |columns| {
+                crate::skin::panel(&mut columns[0], false, |ui| {
+                    ui.set_min_height(170.);
+                    ui.set_min_width(ui.available_width());
+                    self.google.show(ui, &cast_address, running);
+                });
+                crate::skin::panel(&mut columns[1], false, |ui| {
+                    ui.set_min_height(170.);
+                    ui.set_min_width(ui.available_width());
+                    self.dlna.show(ui, &cast_address, running);
+                });
+            });
+        } else {
+            crate::skin::panel(ui, false, |ui| {
+                ui.set_min_width(ui.available_width());
+                self.google.show(ui, &cast_address, running);
+            });
+            crate::skin::panel(ui, false, |ui| {
+                ui.set_min_width(ui.available_width());
+                self.dlna.show(ui, &cast_address, running);
+            });
+        }
+        if let Some(receiver) = &mut self.radio {
+            ui.label(receiver.status().message);
+            if ui.button("Stop listening").clicked() {
+                receiver.stop();
+            }
         }
         if let Some((manifest, playlist)) = download
             && let Some(destination) = rfd::FileDialog::new()
@@ -820,17 +1200,193 @@ impl Dashboard {
     }
 }
 
-impl Drop for Dashboard {
-    fn drop(&mut self) {
-        if let Some(mut radio) = self.radio.take() {
-            let _ = radio.kill();
-            let _ = radio.wait();
-        }
-    }
-}
 #[cfg(test)]
 mod tests {
     use super::*;
+    fn mock_dashboard() -> (Dashboard, mpsc::Receiver<Command>, mpsc::Sender<Update>) {
+        let (tx, commands) = mpsc::channel();
+        let (updates, rx) = mpsc::channel();
+        let mut dashboard = Dashboard::default();
+        dashboard.tx.replace(tx);
+        dashboard.rx.replace(rx);
+        (dashboard, commands, updates)
+    }
+    fn live_snapshot() -> Snapshot {
+        Snapshot {
+            status: Status {
+                capabilities: serde_json::json!({"live_dj":true}),
+                running: true,
+                ..Default::default()
+            },
+            queue: Queue::default(),
+            manifest: None,
+        }
+    }
+    #[test]
+    fn finished_source_releases_role_and_allows_new_endpoint_and_restart() {
+        let (mut dashboard, commands, _) = mock_dashboard();
+        dashboard.send(Command::Connect("server-a:8787".into(), "a".into(), 0));
+        commands.recv().unwrap();
+        dashboard.arm_live_start();
+        dashboard.live_started();
+        dashboard.live_active = true;
+        assert!(!dashboard.finish_live_if_stopped(true, "Reconnecting…".into()));
+        assert!(
+            dashboard.sending(),
+            "transient network recovery keeps its binding"
+        );
+        dashboard.live_started();
+        assert_eq!(
+            dashboard.endpoint(),
+            ("server-a:8787".into(), "a".into()),
+            "no pending binding must not erase a valid active binding"
+        );
+        assert!(
+            dashboard
+                .finish_live_if_stopped(false, "Live broadcast stopped: encoder failed".into())
+        );
+        assert!(!dashboard.sending());
+        assert!(!dashboard.live_active);
+        assert!(dashboard.live_status.contains("encoder failed"));
+        dashboard.send(Command::Connect("server-b:8787".into(), "b".into(), 0));
+        assert!(
+            matches!(commands.recv().unwrap(), Command::Connect(address, password, _) if address == "server-b:8787" && password == "b")
+        );
+        dashboard.arm_live_start();
+        assert_eq!(dashboard.live_action, Some(true));
+        dashboard.live_started();
+        assert_eq!(dashboard.endpoint(), ("server-b:8787".into(), "b".into()));
+    }
+    #[test]
+    fn pending_local_host_uses_pinned_auth_while_manual_host_uses_edited_auth() {
+        let (mut dashboard, commands, _) = mock_dashboard();
+        dashboard.password = "original-secret".into();
+        dashboard.request_live(false);
+        assert!(
+            matches!(commands.recv().unwrap(), Command::Connect(_, password, _) if password == "original-secret")
+        );
+        dashboard.password = "edited-secret".into();
+        let child_secret = dashboard.host_password();
+        assert_eq!(child_secret, "original-secret");
+        // These are the same arguments host() uses for its child and reconnect.
+        dashboard.send(Command::Connect("127.0.0.1:8787".into(), child_secret, 0));
+        assert!(
+            matches!(commands.recv().unwrap(), Command::Connect(_, password, _) if password == "original-secret")
+        );
+        assert_eq!(dashboard.endpoint().1, "original-secret");
+        dashboard.live_ended();
+        assert_eq!(
+            dashboard.host_password(),
+            "edited-secret",
+            "manual Host keeps its explicitly edited access code"
+        );
+    }
+    #[test]
+    fn active_live_binding_keeps_quick_cast_on_original_endpoint_and_auth() {
+        let (mut dashboard, commands, _) = mock_dashboard();
+        dashboard.send(Command::Connect(
+            "server-a:8787".into(),
+            "secret-a".into(),
+            0,
+        ));
+        assert!(matches!(
+            commands.recv().unwrap(),
+            Command::Connect(_, _, 1)
+        ));
+        dashboard.arm_live_start();
+        dashboard.live_started();
+        dashboard.live_active = true;
+        // Reproduce address/access-code edits and a station selection from another pane.
+        dashboard.address = "server-b:8787".into();
+        dashboard.password = "secret-b".into();
+        dashboard.connected_address = dashboard.address.clone();
+        dashboard.send(Command::Connect(
+            dashboard.address.clone(),
+            dashboard.password.clone(),
+            0,
+        ));
+        dashboard.request_live(true);
+        assert_eq!(
+            dashboard.endpoint(),
+            ("server-a:8787".into(), "secret-a".into())
+        );
+        assert_eq!(dashboard.connected_address, "server-a:8787");
+        assert!(
+            commands.try_recv().is_err(),
+            "no reconnect/restart may reach the sender or station"
+        );
+        dashboard.send(Command::Play("unrelated".into()));
+        assert!(
+            commands.try_recv().is_err(),
+            "a sending app cannot switch into receiver control"
+        );
+    }
+    #[test]
+    fn pending_live_rejects_station_retarget_and_ignores_old_worker_snapshot() {
+        let temp = tempfile::tempdir().unwrap();
+        let (mut dashboard, commands, updates) = mock_dashboard();
+        dashboard.send(Command::Connect("server-b:8787".into(), "b".into(), 0));
+        commands.recv().unwrap();
+        dashboard.request_live(false);
+        assert!(
+            matches!(commands.recv().unwrap(), Command::Connect(a, _, 2) if a == "127.0.0.1:8787")
+        );
+        dashboard.send(Command::Connect("server-b:8787".into(), "b".into(), 0));
+        assert!(commands.try_recv().is_err());
+        updates
+            .send(Update {
+                generation: 1,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        dashboard.prepare_live(temp.path());
+        assert!(
+            dashboard.live_action.is_none(),
+            "old server live capability cannot activate pending source"
+        );
+        assert!(dashboard.snapshot.is_none());
+        updates
+            .send(Update {
+                generation: 2,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        dashboard.prepare_live(temp.path());
+        assert_eq!(dashboard.live_action, Some(true));
+        assert_eq!(dashboard.endpoint().0, "127.0.0.1:8787");
+        dashboard.live_started();
+        assert_eq!(dashboard.endpoint().0, "127.0.0.1:8787");
+    }
+    #[test]
+    fn live_start_waits_for_capability_and_times_out_readably() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut dashboard = Dashboard::default();
+        dashboard.request_live(true);
+        assert!(dashboard.busy);
+        assert!(dashboard.live_player_only);
+        assert_eq!(dashboard.endpoint().0, "127.0.0.1:8787");
+        dashboard.prepare_live(temp.path());
+        assert!(dashboard.live_action.is_none());
+        dashboard.snapshot = Some(Snapshot {
+            status: Status {
+                capabilities: serde_json::json!({"live_dj":true}),
+                ..Default::default()
+            },
+            queue: Queue::default(),
+            manifest: None,
+        });
+        dashboard.prepare_live(temp.path());
+        assert_eq!(dashboard.live_action.take(), Some(true));
+        assert!(dashboard.pending_live.is_none());
+        dashboard.pending_live = Some(std::time::Instant::now() - Duration::from_secs(31));
+        dashboard.prepare_live(temp.path());
+        assert!(dashboard.pending_live.is_none());
+        assert!(dashboard.live_status.contains("retry"));
+    }
     #[test]
     #[ignore = "uses the public Radio Browser directory"]
     fn radio_directory_returns_listenable_results() {
@@ -857,6 +1413,25 @@ mod tests {
             });
         });
         let address = rx.recv().unwrap().to_string();
+        let mut dashboard = Dashboard::default();
+        assert!(
+            dashboard.tx.is_none(),
+            "Opening Cast must not start a connection worker"
+        );
+        dashboard.poll();
+        assert!(dashboard.tx.is_none(), "Passive polling must stay dormant");
+        dashboard.send(Command::Connect(address.clone(), "test-password".into(), 0));
+        assert!(dashboard.tx.is_some());
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while dashboard.snapshot.is_none() && std::time::Instant::now() < deadline {
+            dashboard.poll();
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            dashboard.snapshot.is_some(),
+            "The first on-demand connection must work"
+        );
+        drop(dashboard);
         let client = Client::new(&address, "wrong".into()).unwrap();
         let state = client.read().unwrap();
         assert!(!state.status.running);
@@ -888,5 +1463,75 @@ mod tests {
             })
             .await
             .unwrap();
+    }
+    #[test]
+    fn matching_success_clears_only_its_previous_poll_failure() {
+        let (mut dashboard, _, updates) = mock_dashboard();
+        let generation = dashboard.connection_generation;
+        updates
+            .send(Update {
+                generation,
+                snapshot: Err("old socket 10054".into()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        assert_eq!(dashboard.message, "old socket 10054");
+        updates
+            .send(Update {
+                generation: generation + 1,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        assert_eq!(
+            dashboard.message, "old socket 10054",
+            "Wrong-generation response must not clear anything"
+        );
+        updates
+            .send(Update {
+                generation,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        assert!(dashboard.message.is_empty());
+        updates
+            .send(Update {
+                generation,
+                snapshot: Err("old socket 10054".into()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        dashboard.message = "Explicit local action failed".into();
+        updates
+            .send(Update {
+                generation,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        assert_eq!(dashboard.message, "Explicit local action failed");
+        updates
+            .send(Update {
+                generation,
+                snapshot: Ok(live_snapshot()),
+                control_error: Some("Server rejected user command".into()),
+            })
+            .unwrap();
+        dashboard.poll();
+        updates
+            .send(Update {
+                generation,
+                snapshot: Ok(live_snapshot()),
+                control_error: None,
+            })
+            .unwrap();
+        dashboard.poll();
+        assert_eq!(dashboard.message, "Server rejected user command");
     }
 }

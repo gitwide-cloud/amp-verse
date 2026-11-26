@@ -29,7 +29,9 @@ pub fn analyze(
     relative: &Path,
     draft: Option<&Preparation>,
 ) -> Result<Option<Preparation>, String> {
-    analyze_with(path(), root, relative, draft)
+    let (owner, path_in_source) =
+        amp_core::music_sources::owner(root, relative).map_err(|e| e.to_string())?;
+    analyze_with(path(), &owner, &path_in_source, draft)
 }
 fn analyze_with(
     executable: Option<PathBuf>,
@@ -66,6 +68,8 @@ fn analyze_with(
         use std::os::windows::process::CommandExt;
         command.creation_flags(0x08000000);
     }
+    crate::preparation_speed::wait(None);
+    crate::preparation_speed::configure(&mut command);
     let mut child = command
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -1,5 +1,15 @@
 # AMP Verse architecture
 
+Remote transport connection uses only `/api/v1/info` and `/api/v1/state`.
+It must never depend on downloading the full catalog. Desktop 1.0.5 adds
+`/api/v1/playlists`, returning only authenticated playlist IDs, names and kinds,
+including regular and Smart Playlists independently of offline-sharing flags.
+Android 0.2.8 fetches these names when Change playlist is opened and searches
+`/api/v1/resources?scope=all` in pages of 25 on demand. Browsing uses a separate
+request queue, so a slow search cannot hold up playback commands. Browse errors
+leave transport connected. Basic Play/Pause/Stop target the active playback
+owner; explicit deck selection remains available for deck tools.
+
 
 ## Desktop library and Android Remote ownership (current direction)
 
@@ -31,7 +41,7 @@ Cast has one encoder task at a time. It traverses the prepared track list in det
 - **AMP Library:** shared audio engine, metadata index, folders/file trees, playlists, network locations with local cache, prepared analysis and manual cue overrides. Replace process decks behind a stable engine interface with an in-process decoder/mixer when low latency, crossfades and device routing are added. Consider Symphonia/CPAL after format/device testing; no commitment to untested codec support.
 - **AMP Lab:** optional independently installed editor from GitHub Releases. Launch as a separate process with an explicit media/project handoff; preserve MP3 Lab licensing and provenance if code is ported. Do not dynamically load arbitrary native DLLs into the player. A versioned add-on manifest will declare compatible versions, asset digest, target OS and explicit install action. Verify checksums/provenance before any future installer executes downloaded code.
 - **AMP DJ:** expandable deck count, prepared Auto DJ, cues and beatgrid overlays, then stems, effects, MIDI/OSC and Companion. Separate audio graph from controls. Controls must reflect engine state; do not animate fake signals.
-- **AMP Cast:** independent headless service with browser administration, station lifecycle, listener endpoints and Auto DJ; later explicit output-device routing and scheduled playlists. A desktop controller is optional. Bind/discovery settings and credentials are separate from station preparation. Dual-path redundancy is an optional later Cast feature; there is no NetFuse or network-bonding module.
+- **AMP Cast:** independent headless service with browser administration, station lifecycle, listener endpoints and Auto DJ; later explicit output-device routing and scheduled playlists. A desktop controller is optional. Bind/discovery settings and credentials are separate from station preparation. Android protected audio supports bounded replay and two verified server paths; see CAST_RECOVERY.md for scope and verification. There is no NetFuse or network-bonding module.
 
 ## Android target
 

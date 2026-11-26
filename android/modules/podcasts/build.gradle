@@ -1,0 +1,2 @@
+ext.ampModule = 'podcasts'
+apply from: '../../companion.gradle'

@@ -19,6 +19,10 @@ pub fn save(
         .prefix(".amp-download-")
         .tempdir_in(destination)
         .map_err(|e| e.to_string())?;
+    // The destination may itself be an indexed library. Give this independent
+    // offline copy its own root before resolving portable preparation paths, so
+    // metadata stays inside the staging directory and follows the atomic rename.
+    amp_core::coordination::library_id(stage.path())?;
     let mut paths = Vec::new();
     let mut copied = std::collections::HashSet::new();
     let ids = playlist["tracks"]
@@ -117,6 +121,8 @@ mod tests {
     fn real_station_download_keeps_audio_cues_and_existing_copies() {
         let source = tempfile::tempdir().unwrap();
         let target = tempfile::tempdir().unwrap();
+        // A download into an existing indexed library must keep its own cues.
+        let target_id = amp_core::coordination::library_id(target.path()).unwrap();
         std::fs::write(source.path().join("song.wav"), b"unchanged audio").unwrap();
         let mut prep = amp_core::Preparation {
             manual_override: true,
@@ -170,7 +176,35 @@ mod tests {
             .iter()
             .find(|p| !p["tracks"].as_array().unwrap().is_empty())
             .unwrap();
+        assert_eq!(
+            amp_core::preparation::load(&source.path().join("song.wav"))
+                .unwrap()
+                .manual_cues
+                .len(),
+            1,
+            "source cue must exist before download"
+        );
+        let metadata: Value = ureq::get(format!("{base}/api/smart/tracks/0/metadata"))
+            .header("x-amp-password", "test")
+            .call()
+            .unwrap()
+            .body_mut()
+            .read_json()
+            .unwrap();
+        assert_eq!(
+            metadata["preparation"]["manual_cues"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1,
+            "exported cue must exist before download"
+        );
         let saved = save(&base, "test", &manifest, playlist, target.path()).unwrap();
+
+        let saved_identity: Value =
+            serde_json::from_slice(&std::fs::read(saved.join("ampdj/library.json")).unwrap())
+                .unwrap();
+        assert_ne!(saved_identity["id"].as_str().unwrap(), target_id);
         let offline = amp_core::Playlist::load(&saved.join("playlist.json"), &saved).unwrap();
         assert_eq!(offline.tracks.len(), 1);
         assert_eq!(
@@ -187,7 +221,8 @@ mod tests {
         let mut changed = manifest.clone();
         changed["station_id"] = serde_json::json!("other");
         assert!(save(&base, "test", &changed, playlist, target.path()).is_err());
-        assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(target.path()).unwrap().count(), 2);
+        assert!(!target.path().join("ampdj/tracks").exists());
         assert_eq!(
             amp_core::preparation::load(&source.path().join("song.wav"))
                 .unwrap()

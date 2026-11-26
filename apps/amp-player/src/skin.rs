@@ -1,11 +1,33 @@
 use eframe::egui::{self, Color32 as C, FontId, Rect, RichText, Stroke, Vec2};
-pub const GOLD: C = C::from_rgb(255, 194, 26);
+pub const GOLD: C = C::from_rgb(255, 211, 0);
 pub const GREEN: C = C::from_rgb(130, 245, 61);
-pub const ORANGE: C = C::from_rgb(255, 170, 28);
+pub const ORANGE: C = GOLD;
 pub const CYAN: C = C::from_rgb(36, 208, 235);
 pub const BLACK: C = C::from_rgb(7, 8, 12);
 
 pub fn configure(ctx: &egui::Context) {
+    let mut fonts = egui::FontDefinitions::default();
+    fonts.font_data.insert(
+        "amp-body".into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Barlow-Regular.ttf")).into(),
+    );
+    fonts.font_data.insert(
+        "amp-display".into(),
+        egui::FontData::from_static(include_bytes!("../assets/fonts/Barlow-SemiBold.ttf")).into(),
+    );
+    fonts
+        .families
+        .entry(egui::FontFamily::Proportional)
+        .or_default()
+        .insert(0, "amp-body".into());
+    let mut display_fallback = fonts.families[&egui::FontFamily::Proportional].clone();
+    display_fallback.insert(0, "amp-display".into());
+    fonts.families.insert(
+        egui::FontFamily::Name("AMP Display".into()),
+        display_fallback,
+    );
+    ctx.set_fonts(fonts);
+    ctx.data_mut(|data| data.insert_temp(egui::Id::unique("amp-brand-fonts"), true));
     crate::theme::apply(ctx, crate::theme::load());
 }
 pub fn accent(ui: &egui::Ui) -> C {
@@ -24,7 +46,7 @@ pub fn color(ui: &egui::Ui, value: C) -> C {
     if value == GREEN {
         return signal(ui);
     }
-    if crate::theme::current(ui.ctx()) == crate::theme::Theme::ModernLight {
+    if crate::theme::current(ui.ctx()).light() {
         if value == ORANGE {
             return C::from_rgb(150, 75, 0);
         }
@@ -55,7 +77,9 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
     let p = theme.palette();
     let bg = ui.painter().add(egui::Shape::Noop);
     let response = egui::Frame::new()
-        .corner_radius(if theme == crate::theme::Theme::Classic {
+        .corner_radius(if theme.material() {
+            16
+        } else if theme == crate::theme::Theme::Classic {
             2
         } else {
             10
@@ -72,20 +96,25 @@ pub fn panel<R>(ui: &mut egui::Ui, purple: bool, body: impl FnOnce(&mut egui::Ui
     } else {
         (p.elevated, p.surface)
     };
-    if theme == crate::theme::Theme::Classic || (purple && theme == crate::theme::Theme::ModernDark)
-    {
+    if theme == crate::theme::Theme::Classic {
         ui.painter().set(
             bg,
             gradient(
                 ui.painter(),
                 rect,
-                if purple { p.elevated } else { top },
+                if purple || theme == crate::theme::Theme::ModernDark {
+                    p.elevated
+                } else {
+                    top
+                },
                 bottom,
             ),
         );
     } else {
-        ui.painter()
-            .set(bg, egui::Shape::rect_filled(rect, 10., p.surface));
+        ui.painter().set(
+            bg,
+            egui::Shape::rect_filled(rect, if theme.material() { 16. } else { 10. }, p.surface),
+        );
     }
     if theme == crate::theme::Theme::Classic {
         let frame = rect.shrink(2.);
@@ -136,6 +165,51 @@ pub fn display<R>(ui: &mut egui::Ui, body: impl FnOnce(&mut egui::Ui) -> R) -> R
         .inner
 }
 
+/// Original vector chrome; no raster skin or proprietary artwork.
+pub fn rack_panel<R>(
+    ui: &mut egui::Ui,
+    selected: Option<C>,
+    body: impl FnOnce(&mut egui::Ui) -> R,
+) -> egui::InnerResponse<R> {
+    let theme = crate::theme::current(ui.ctx());
+    let p = theme.palette();
+    let background = ui.painter().add(egui::Shape::Noop);
+    let response = egui::Frame::new()
+        .inner_margin(6)
+        .corner_radius(if theme.material() { 16 } else { 12 })
+        .stroke(Stroke::new(
+            if selected.is_some() { 1.7 } else { 1. },
+            selected.unwrap_or(p.border),
+        ))
+        .show(ui, body);
+    let rect = response.response.rect;
+    if theme == crate::theme::Theme::Classic {
+        ui.painter().set(
+            background,
+            gradient(ui.painter(), rect, p.elevated, p.background),
+        );
+        ui.painter().rect_stroke(
+            rect.shrink(2.),
+            4.,
+            Stroke::new(1., BLACK),
+            egui::StrokeKind::Inside,
+        );
+        ui.painter().line_segment(
+            [
+                rect.left_top() + Vec2::splat(3.),
+                rect.right_top() + Vec2::new(-3., 3.),
+            ],
+            Stroke::new(1., C::from_rgb(125, 137, 149)),
+        );
+    } else {
+        ui.painter().set(
+            background,
+            egui::Shape::rect_filled(rect, if theme.material() { 16. } else { 12. }, p.surface),
+        );
+    }
+    response
+}
+
 #[derive(Clone, Copy)]
 pub struct Magnet {
     pub enabled: bool,
@@ -144,6 +218,8 @@ pub struct Magnet {
 }
 
 pub enum Module {
+    Podcasts,
+    Workspace,
     Verse,
     Library,
     Dj,
@@ -153,6 +229,13 @@ pub enum Module {
 }
 
 pub fn heading(ui: &mut egui::Ui, title: &str, purple: bool) -> Option<Module> {
+    if ui
+        .ctx()
+        .data(|d| d.get_temp::<bool>(egui::Id::unique("v1-workspace-content")))
+        .unwrap_or(false)
+    {
+        return None;
+    }
     heading_mode(ui, title, purple, !crate::window_layout::embedded(ui.ctx()))
 }
 pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool) -> Option<Module> {
@@ -163,7 +246,11 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     ui.painter().add(gradient(
         ui.painter(),
         rect,
-        p.elevated,
+        if theme.material() {
+            p.surface
+        } else {
+            p.elevated
+        },
         if theme == crate::theme::Theme::Classic {
             BLACK
         } else {
@@ -184,43 +271,79 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     ui.painter().text(
         rect.min + Vec2::new(38., 21.),
         egui::Align2::LEFT_CENTER,
-        "AMP VERSE",
-        FontId::proportional(21.),
+        if matches!(
+            title,
+            "PLAYER"
+                | "AMP Library"
+                | "AMP DJ"
+                | "AMP Lab"
+                | "AMP Cast"
+                | "AMP Podcasts"
+                | "Plugin Manager"
+        ) {
+            "AMP VERSE"
+        } else if title == "AMP VERSE" {
+            "AMP Player"
+        } else {
+            title
+        },
+        FontId::proportional(28.),
         p.text,
     );
     let menu_rect = Rect::from_min_max(rect.min, egui::pos2(rect.left() + 220., rect.bottom()));
     let center_left = rect.left() + 235.;
     let center_right = rect.right() - 155.;
-    if center_right - center_left > 140. {
-        let mid = (center_left + center_right) / 2.;
-        let label = if title == "AMP VERSE" {
-            "PLAYER"
-        } else {
-            title
-        };
-        let text_width = label.len() as f32 * 9.;
-        if theme == crate::theme::Theme::Classic {
-            for y in [14., 19., 24.] {
-                for (a, b) in [
-                    (center_left, mid - text_width / 2. - 12.),
-                    (mid + text_width / 2. + 12., center_right),
-                ] {
-                    if b > a {
-                        ui.painter().line_segment(
-                            [egui::pos2(a, rect.top() + y), egui::pos2(b, rect.top() + y)],
-                            Stroke::new(2., p.accent),
-                        );
-                    }
-                }
+    let scope = if title == "AMP DJ" {
+        ui.ctx()
+            .data(|data| data.get_temp::<Vec<f32>>(egui::Id::unique("six-deck-header-scope")))
+    } else {
+        None
+    };
+    if let Some(scope) = scope {
+        let area = Rect::from_min_max(
+            egui::pos2(center_left, rect.top() + 6.),
+            egui::pos2(center_right, rect.bottom() - 7.),
+        );
+        ui.painter().rect_filled(area, 3., BLACK);
+        for (index, level) in scope.iter().enumerate() {
+            let x = area.left() + index as f32 * area.width() / scope.len().max(1) as f32;
+            let height = level.sqrt() * (area.height() - 3.);
+            ui.painter().rect_filled(
+                Rect::from_min_size(
+                    egui::pos2(x, area.bottom() - height),
+                    Vec2::new(
+                        (area.width() / scope.len().max(1) as f32 - 1.).max(1.),
+                        height.max(1.),
+                    ),
+                ),
+                0.,
+                p.accent,
+            );
+        }
+    } else if center_right - center_left > 140. {
+        let bars = ui
+            .ctx()
+            .data(|data| data.get_temp::<Vec<f32>>(egui::Id::unique("workspace-master-scope")))
+            .unwrap_or_default();
+        let width = (center_right - center_left).min(480.);
+        let left = (center_left + center_right - width) / 2.;
+        for index in 0..48 {
+            let level = bars.get(index).copied().unwrap_or(0.).clamp(0., 1.);
+            let segments = (level.sqrt() * 7.).round() as usize;
+            for segment in 0..=segments {
+                ui.painter().rect_filled(
+                    Rect::from_min_size(
+                        egui::pos2(
+                            left + index as f32 * width / 48.,
+                            rect.bottom() - 7. - segment as f32 * 3.5,
+                        ),
+                        Vec2::new((width / 48. - 2.).max(1.), 2.5),
+                    ),
+                    0.5,
+                    p.accent,
+                );
             }
         }
-        ui.painter().text(
-            egui::pos2(mid, rect.center().y),
-            egui::Align2::CENTER_CENTER,
-            label,
-            FontId::proportional(20.),
-            p.text,
-        );
     }
     let response = ui.interact(
         menu_rect,
@@ -261,11 +384,13 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
             .max_height(height)
             .show(ui, |ui| {
                 for (label, module) in [
+                    ("Version 1 workspace", Module::Workspace),
                     ("AMP Player", Module::Verse),
                     ("AMP Library", Module::Library),
                     ("AMP DJ", Module::Dj),
                     ("AMP Cast", Module::Cast),
                     ("AMP Lab", Module::LabSetup),
+                    ("AMP Podcasts", Module::Podcasts),
                     ("Plugin Manager", Module::Addons),
                 ] {
                     let button = ui.button(label);
@@ -295,7 +420,7 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     let controls_left = rect.right() - 110.;
     let drag_rect = Rect::from_min_max(
         egui::pos2(menu_rect.right(), rect.top()),
-        egui::pos2(controls_left - 35., rect.bottom()),
+        egui::pos2(controls_left - 70., rect.bottom()),
     );
     let drag = ui.interact(
         drag_rect,
@@ -309,6 +434,44 @@ pub fn heading_mode(ui: &mut egui::Ui, title: &str, _purple: bool, native: bool)
     if native && drag.double_clicked() {
         ui.ctx()
             .send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized));
+    }
+    if title == "AMP DJ" || title == "PLAYER" {
+        let r = Rect::from_min_size(
+            egui::pos2(controls_left - 70., rect.top() + 5.),
+            egui::vec2(31., 31.),
+        );
+        if ui
+            .put(r, egui::Button::new(""))
+            .on_hover_text("Cast current audio to Google speakers")
+            .clicked()
+        {
+            ui.ctx()
+                .data_mut(|d| d.insert_temp(egui::Id::unique("quick-cast-click"), true));
+        }
+    }
+    if title == "AMP DJ" || title == "PLAYER" {
+        let origin = egui::pos2(controls_left - 63., rect.top() + 29.);
+        let stroke = Stroke::new(1.8, p.accent);
+        ui.painter().add(egui::Shape::line(
+            vec![
+                origin + Vec2::new(0., -11.),
+                origin + Vec2::new(0., -16.),
+                origin + Vec2::new(18., -16.),
+                origin + Vec2::new(18., 0.),
+                origin + Vec2::new(11., 0.),
+            ],
+            stroke,
+        ));
+        ui.painter().circle_filled(origin, 1.7, p.accent);
+        for radius in [6., 10.] {
+            let points = (0..=12)
+                .map(|i| {
+                    let angle = i as f32 * std::f32::consts::FRAC_PI_2 / 12.;
+                    origin + Vec2::new(radius * angle.cos(), -radius * angle.sin())
+                })
+                .collect();
+            ui.painter().add(egui::Shape::line(points, stroke));
+        }
     }
     let magnet_id = egui::Id::unique("pane-magnet");
     if let Some(mut magnet) = ui.ctx().data(|d| d.get_temp::<Magnet>(magnet_id)) {
@@ -452,6 +615,14 @@ pub fn button(ui: &mut egui::Ui, text: &str, accent: C) -> egui::Response {
     let theme = crate::theme::current(ui.ctx());
     let p = theme.palette();
     let accent = color(ui, accent);
+    if theme.material() {
+        return ui.add(
+            egui::Button::new(RichText::new(text).color(p.text))
+                .corner_radius(20)
+                .fill(p.elevated)
+                .min_size(egui::vec2(0., 36.)),
+        );
+    }
     let (rect, response) = ui.allocate_exact_size(
         egui::vec2(text.len() as f32 * 7.4 + 24., 32.),
         egui::Sense::click(),
@@ -501,6 +672,22 @@ pub fn deck_button(
     width: f32,
     primary: bool,
 ) -> egui::Response {
+    let theme = crate::theme::current(ui.ctx());
+    if theme.material() {
+        let p = theme.palette();
+        let fill = if primary { p.accent } else { p.elevated };
+        return ui.add_sized(
+            [width, 42.],
+            egui::Button::new(RichText::new(text).size(15.).strong().color(if primary {
+                theme.on_primary()
+            } else {
+                p.text
+            }))
+            .fill(fill)
+            .corner_radius(20)
+            .stroke(Stroke::NONE),
+        );
+    }
     let accent = if primary {
         color(ui, GOLD)
     } else {
@@ -522,7 +709,29 @@ pub fn deck_button(
     if primary {
         button = button.fill(C::from_rgb(105, 75, 12));
     }
-    ui.add_sized([width, 42.], button)
+    if crate::theme::current(ui.ctx()) == crate::theme::Theme::Classic {
+        let background = ui.painter().add(egui::Shape::Noop);
+        let response = ui.add_sized([width, 42.], button.fill(C::TRANSPARENT));
+        let (top, bottom) = if primary {
+            (C::from_rgb(135, 100, 20), C::from_rgb(60, 42, 9))
+        } else {
+            (C::from_rgb(48, 55, 63), C::from_rgb(13, 17, 23))
+        };
+        ui.painter().set(
+            background,
+            gradient(ui.painter(), response.rect, top, bottom),
+        );
+        ui.painter().line_segment(
+            [
+                response.rect.left_top() + Vec2::splat(3.),
+                response.rect.right_top() + Vec2::new(-3., 3.),
+            ],
+            Stroke::new(1., C::from_rgb(134, 145, 158)),
+        );
+        response
+    } else {
+        ui.add_sized([width, 42.], button)
+    }
 }
 
 pub fn bolt(painter: &egui::Painter, rect: Rect, color: C) {
@@ -541,8 +750,7 @@ pub fn bolt(painter: &egui::Painter, rect: Rect, color: C) {
     ));
 }
 
-/// Decorative vinyl grooves; no fabricated meter or waveform data.
-pub fn platter(
+pub fn vinyl_platter(
     ui: &mut egui::Ui,
     size: f32,
     accent: C,
@@ -554,20 +762,21 @@ pub fn platter(
     let radius = size * 0.46;
     ui.painter()
         .circle_filled(center, radius + 5., C::from_rgb(9, 9, 16));
-    ui.painter().circle_stroke(
-        center,
-        radius + 5.,
-        Stroke::new(3., C::from_rgb(151, 145, 166)),
-    );
     ui.painter()
-        .circle_filled(center, radius, accent.gamma_multiply(0.76));
+        .circle_stroke(center, radius + 5., Stroke::new(3., accent));
+    ui.painter()
+        .circle_filled(center, radius, C::from_rgb(22, 27, 32));
     for ring in 10..50 {
         ui.painter().circle_stroke(
             center,
             radius * ring as f32 / 50.,
             Stroke::new(
                 0.65,
-                accent.gamma_multiply(if ring % 2 == 0 { 0.5 } else { 0.9 }),
+                if ring % 2 == 0 {
+                    C::from_rgb(65, 70, 75)
+                } else {
+                    C::from_rgb(31, 36, 42)
+                },
             ),
         );
     }
@@ -577,7 +786,7 @@ pub fn platter(
             center,
             center + egui::vec2(angle.cos(), angle.sin()) * radius,
         ],
-        Stroke::new(6., C::from_rgb(27, 26, 40)),
+        Stroke::new(3., accent),
     );
     ui.painter()
         .circle_filled(center, radius * 0.29, C::from_rgb(23, 21, 36));
@@ -589,7 +798,7 @@ pub fn platter(
     bolt(
         ui.painter(),
         Rect::from_center_size(center, egui::vec2(size * 0.08, size * 0.13)),
-        GOLD,
+        accent,
     );
     response.on_hover_cursor(egui::CursorIcon::Grab)
 }
@@ -629,8 +838,29 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
         egui::vec2(160., 26.),
         egui::Layout::left_to_right(egui::Align::Center),
         |ui| {
+            let caption = |ui: &mut egui::Ui| {
+                let response = ui.add(
+                    egui::Label::new(label)
+                        .selectable(false)
+                        .sense(egui::Sense::click()),
+                );
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::unique(("switch-caption", label)), response.rect)
+                });
+                response.clicked()
+            };
+            let label_first = label == "Auto Mix";
+            if label_first && caption(ui) {
+                *value = !*value;
+            }
             let (rect, response) =
                 ui.allocate_exact_size(egui::vec2(44., 24.), egui::Sense::click());
+            #[cfg(test)]
+            if label.starts_with("Auto DJ") || label.starts_with("Auto Mix") {
+                ui.ctx()
+                    .data_mut(|data| data.insert_temp(egui::Id::unique("auto-dj-switch"), rect));
+            }
             if response.clicked() {
                 *value = !*value;
             }
@@ -652,7 +882,9 @@ pub fn switch(ui: &mut egui::Ui, value: &mut bool, label: &str) {
                 9.,
                 C::WHITE,
             );
-            ui.label(label);
+            if !label_first && caption(ui) {
+                *value = !*value;
+            }
         },
     );
 }

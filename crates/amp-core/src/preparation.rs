@@ -166,6 +166,7 @@ pub fn load_with_revision(path: &Path) -> Result<(Preparation, Option<Vec<u8>>),
         Ok(bytes) => {
             let mut p: Preparation = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
             assign_numbers(&mut p);
+            crate::cue_policy::repair_legacy_entry(&mut p);
             p.validate()?;
             Ok((p, Some(bytes)))
         }
@@ -205,6 +206,10 @@ fn save_record(
     expected: Option<Option<&[u8]>>,
     lease: Option<&crate::coordination::Lease>,
 ) -> Result<(), String> {
+    let (owner, path) = crate::music_sources::owner(root, relative).map_err(|e| e.to_string())?;
+    if owner != root.canonicalize().map_err(|e| e.to_string())? {
+        return save_record(&owner, &path, p, expected, lease);
+    }
     crate::storage::enroll(root)?;
     let _migration = crate::coordination::Lock::acquire(&root.join("ampdj/catalog-migration"))?;
     p.validate()?;
@@ -313,6 +318,31 @@ fn save_record(
                         .insert(key.clone(), value.clone());
                 } else {
                     candidate.as_object_mut().unwrap().remove(key);
+                }
+            }
+        }
+        // The decoder returns a fresh suggestion inside locked preparation.
+        // Stage that computed result rather than reconstructing a suggestion
+        // from the approved top-level values that the decoder deliberately kept.
+        if lease.primary_analysis()
+            && original.get("analysis_recommendation") != base.get("analysis_recommendation")
+            && let Some(suggestion) = original.get("analysis_recommendation")
+        {
+            let suggestion: Preparation =
+                serde_json::from_value(suggestion.clone()).map_err(|e| e.to_string())?;
+            suggestion.validate()?;
+            candidate = serde_json::to_value(suggestion).map_err(|e| e.to_string())?;
+            for key in automatic_fields.iter().filter(|&&key| {
+                !matches!(
+                    key,
+                    "_amp_sync" | "analysis_recommendation" | "analysis_proposals"
+                )
+            }) {
+                if let Some(value) = original.get(*key) {
+                    candidate
+                        .as_object_mut()
+                        .unwrap()
+                        .insert((*key).into(), value.clone());
                 }
             }
         }
@@ -496,6 +526,88 @@ mod tests {
         p.validate().unwrap();
         let p: Preparation = serde_json::from_slice(&serde_json::to_vec(&p).unwrap()).unwrap();
         assert_eq!(p.manual_cues[0].extensions["color"], "red");
+    }
+    #[test]
+    fn legacy_entry_runtime_repair_keeps_raw_revision_sidecar_and_source_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("original.wav");
+        let source_bytes = b"original audio fixture must remain unchanged";
+        fs::write(&audio, source_bytes).unwrap();
+        let mut saved = Preparation {
+            cue_in: 132.0202687,
+            cue_out: Some(146.8362812),
+            analysis: Some(AnalysisInfo {
+                engine: "legacy-analysis-fixture".into(),
+                duration: 149.699229,
+                tempo_confidence: 0.,
+                key_confidence: 0.,
+                reviewed: false,
+            }),
+            ..Default::default()
+        };
+        saved.cues = vec![
+            Cue {
+                id: "auto-in".into(),
+                kind: "boundary".into(),
+                seconds: 1.686,
+                ..Default::default()
+            },
+            Cue {
+                id: "auto-mix-in".into(),
+                kind: "mix-in".into(),
+                seconds: saved.cue_in,
+                ..Default::default()
+            },
+            Cue {
+                id: "late-drop".into(),
+                kind: "drop".into(),
+                seconds: 132.,
+                ..Default::default()
+            },
+        ];
+        saved
+            .extensions
+            .insert("future_data".into(), serde_json::json!({"retain":true}));
+        let mut raw = serde_json::to_vec_pretty(&saved).unwrap();
+        raw.push(b'\n');
+        let metadata = sidecar(&audio);
+        fs::write(&metadata, &raw).unwrap();
+
+        let (runtime, revision) = load_with_revision(&audio).unwrap();
+        assert_eq!(
+            runtime.cue_in, 1.686,
+            "runtime must use the safe early boundary"
+        );
+        assert_eq!(runtime.cues[1].seconds, 1.686);
+        assert_eq!(
+            runtime.cues[2], saved.cues[2],
+            "late drop remains optional guidance"
+        );
+        assert_eq!(runtime.cue_out, saved.cue_out);
+        assert_eq!(runtime.analysis, saved.analysis);
+        assert_eq!(
+            runtime.extensions["future_data"],
+            saved.extensions["future_data"]
+        );
+        assert_eq!(
+            revision.as_deref(),
+            Some(raw.as_slice()),
+            "optimistic revision must be the original serialized bytes"
+        );
+        assert_ne!(serde_json::to_vec(&runtime).unwrap(), raw);
+        assert_eq!(
+            fs::read(&metadata).unwrap(),
+            raw,
+            "loading must not migrate the sidecar"
+        );
+        assert_eq!(
+            fs::read(&audio).unwrap(),
+            source_bytes,
+            "loading must not rewrite original audio"
+        );
+        let (again, again_revision) = load_with_revision(&audio).unwrap();
+        assert_eq!(again, runtime);
+        assert_eq!(again_revision, revision);
     }
     #[test]
     fn canonical_store_overrides_legacy_without_editing_it() {

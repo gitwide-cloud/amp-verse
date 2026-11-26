@@ -1,0 +1,2 @@
+ext.ampModule = 'remote'
+apply from: '../../companion.gradle'

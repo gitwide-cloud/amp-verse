@@ -1,4 +1,16 @@
-# Mixxx MIDI mapping import
+# MIDI mapping import
+
+## VirtualDJ
+
+Desktop Library → Devices → DJ controllers → Import VirtualDJ mapping. First choose the XML from VirtualDJ's `Mappers` folder, then its matching MIDI device-definition XML from `Devices`. The controller names must match. Some factory definitions are embedded in VirtualDJ and may not be available as XML; a mapper alone does not contain the MIDI addresses and cannot be imported. AMP does not extract embedded definitions.
+
+Supported literal actions are `play_pause`, `stop`, `sync` (tempo matching), `volume`, `eq_low`, `eq_mid`, `eq_high`, `pitch_slider` and `pfl` on fixed decks 1/2, plus `crossfader`. An explicit `deck 1` or `deck 2` prefix is accepted. Buttons use standard note or CC messages; sliders use absolute 7-bit CC or native pitch bend. An explicit channel from 0 to 15 is required. Continuous inversion is supported. AMP keeps its own mixer curves, tempo range and pickup behavior.
+
+The review lists unsupported actions and input encodings. VDJScript expressions/chains, cue-stop/hold behavior, jog wheels, relative encoders, 14-bit paired CCs, automatic deck layers, HID and LED feedback are not translated. No imported script is executed. Imports with no usable controls, mismatched definitions, or only ambiguous assignments leave the previous profile intact. The translated profile and skipped-control report persist locally; nothing connects automatically.
+
+Implemented against the official [VirtualDJ mapper format](https://virtualdj.com/wiki/ControllerMappingFile%20v8.html) and [MIDI definition format](https://virtualdj.com/wiki/ControllerDefinitionMIDI). No VirtualDJ mapping collection or code is bundled. Synthetic tests cover translation, note release, inversion, pitch bend, skipped scripts, mismatched/HID definitions, invalid channels and MIDI numbers, layers, ambiguous assignments, XML limits and external-entity rejection. Physical controller compatibility has not been tested.
+
+## Mixxx
 
 Physical timecode vinyl/DVS is a separate audio-input feature and is not implemented by this importer. The accepted vinyl-control requirement is tracked in VINYL_CONTROL.md.
 

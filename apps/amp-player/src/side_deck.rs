@@ -61,6 +61,15 @@ pub struct SideDeck {
     cached: Vec<u8>,
     pending: Option<PathBuf>,
 }
+/// Playback copy only: cue guidance and the saved preparation remain available to the UI.
+fn runtime_track(track: &amp_core::Track, cue: Option<f64>) -> Result<amp_core::Track, String> {
+    let mut runtime = track.clone();
+    crate::manual_load::full_track(&mut runtime.preparation);
+    if let Some(cue) = cue {
+        crate::manual_load::seek(&mut runtime.preparation, cue)?;
+    }
+    Ok(runtime)
+}
 impl SideDeck {
     pub fn new(side: usize) -> Self {
         let config = if cfg!(test) {
@@ -93,7 +102,8 @@ impl SideDeck {
             audio.set_fader(0.);
             audio.set_gain(0, self.config.volume);
             if let Some(track) = &self.track {
-                audio.load(0, &self.root, track, false)?;
+                let runtime = runtime_track(track, None)?;
+                audio.load_original(0, &self.root, &runtime, false)?;
             }
             self.audio = Some(audio);
         }
@@ -137,9 +147,13 @@ impl SideDeck {
             preparation,
         };
         self.ensure()?;
-        self.audio.as_mut().unwrap().load(0, &root, &track, false)?;
+        let runtime = runtime_track(&track, None)?;
+        self.audio
+            .as_mut()
+            .unwrap()
+            .load_original(0, &root, &runtime, false)?;
         self.root = root;
-        self.seek = track.preparation.cue_in;
+        self.seek = runtime.preparation.cue_in;
         self.track = Some(track);
         self.config.path = Some(path);
         self.pending = None;
@@ -148,6 +162,9 @@ impl SideDeck {
         Ok(())
     }
     pub fn play(&mut self) -> Result<(), String> {
+        if let Some(audio) = &self.audio {
+            audio.controls.output_gate.local_allowed()?;
+        }
         if self.track.is_none() {
             if let Some(path) = self.config.path.clone() {
                 self.load(path)?;
@@ -158,7 +175,8 @@ impl SideDeck {
         self.ensure()?;
         let audio = self.audio.as_mut().unwrap();
         if audio.controls.finished[0].load(Relaxed) || !audio.loaded(0) {
-            audio.load(0, &self.root, self.track.as_ref().unwrap(), true)?;
+            let runtime = runtime_track(self.track.as_ref().unwrap(), None)?;
+            audio.load_original(0, &self.root, &runtime, true)?;
         } else {
             audio.controls.play[0].store(true, Relaxed);
         }
@@ -178,19 +196,16 @@ impl SideDeck {
         if !seconds.is_finite() || seconds < 0. {
             return Err("Cue position must be a nonnegative number of seconds".into());
         }
-        let mut track = self.track.clone().ok_or("Load a cue track first")?;
-        let end = track.preparation.cue_out.or(track
-            .preparation
-            .analysis
-            .as_ref()
-            .map(|analysis| analysis.duration));
-        track.preparation.cue_in = end.map_or(seconds, |end| seconds.min((end - 0.02).max(0.)));
+        let track = runtime_track(
+            self.track.as_ref().ok_or("Load a cue track first")?,
+            Some(seconds),
+        )?;
         let playing = self.playing();
         self.ensure()?;
         self.audio
             .as_mut()
             .unwrap()
-            .load(0, &self.root, &track, playing)?;
+            .load_original(0, &self.root, &track, playing)?;
         self.seek = track.preparation.cue_in;
         Ok(())
     }
@@ -468,6 +483,62 @@ fn config_path(side: usize) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cue_runtime_load_and_seek_ignore_generated_crop_without_changing_guidance() {
+        let mut track = amp_core::Track {
+            path: "cue.wav".into(),
+            title: "Cue".into(),
+            preparation: Default::default(),
+        };
+        track.preparation.cue_in = 195.;
+        track.preparation.cue_out = Some(212.);
+        track.preparation.cues.push(amp_core::preparation::Cue {
+            id: "drop".into(),
+            kind: "drop".into(),
+            seconds: 195.,
+            ..Default::default()
+        });
+        track
+            .preparation
+            .manual_cues
+            .push(amp_core::preparation::Cue {
+                id: "mine".into(),
+                kind: "hotcue".into(),
+                seconds: 30.,
+                ..Default::default()
+            });
+        let saved = track.preparation.clone();
+        let loaded = runtime_track(&track, None).unwrap();
+        assert_eq!(loaded.preparation.cue_in, 0.);
+        assert_eq!(loaded.preparation.cue_out, None);
+        let seeked = runtime_track(&track, Some(30.)).unwrap();
+        assert_eq!(seeked.preparation.cue_in, 30.);
+        assert_eq!(seeked.preparation.cue_out, None);
+        assert_eq!(seeked.preparation.cues, saved.cues);
+        assert_eq!(seeked.preparation.manual_cues, saved.manual_cues);
+        assert_eq!(track.preparation, saved);
+    }
+    #[test]
+    fn cue_runtime_preserves_approved_ranges_on_load_restart_and_seek() {
+        let track = amp_core::Track {
+            path: "cue.wav".into(),
+            title: "Cue".into(),
+            preparation: amp_core::Preparation {
+                cue_in: 10.,
+                cue_out: Some(80.),
+                manual_override: true,
+                ..Default::default()
+            },
+        };
+        let saved = track.preparation.clone();
+        let loaded = runtime_track(&track, None).unwrap();
+        assert_eq!(loaded.preparation, saved);
+        let seeked = runtime_track(&track, Some(50.)).unwrap();
+        assert_eq!(seeked.preparation.cue_in, 50.);
+        assert_eq!(seeked.preparation.cue_out, Some(80.));
+        assert!(runtime_track(&track, Some(f64::NAN)).is_err());
+        assert_eq!(track.preparation, saved);
+    }
     #[test]
     #[ignore = "requires native audio and AMP_WAVEFORM_FIXTURE; output muted"]
     fn auxiliary_transport_and_mode_changes_leave_main_playing() {

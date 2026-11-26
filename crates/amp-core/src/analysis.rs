@@ -8,79 +8,17 @@ use std::{io::Read, path::Path, process::Stdio};
 const RATE: f64 = 11025.;
 const BLOCK: usize = 110;
 const FFT: usize = 4096;
+#[path = "analysis_chroma.rs"]
+mod chroma_engine;
 #[path = "energy_cues.rs"]
 mod energy_cues;
+#[cfg(test)]
 fn chroma(samples: &[f32], sum: &mut [f64; 12]) {
-    let mut re = vec![0.; FFT];
-    let mut im = vec![0.; FFT];
-    for (i, x) in samples.iter().take(FFT).enumerate() {
-        re[i] =
-            *x as f64 * (0.5 - 0.5 * (std::f64::consts::TAU * i as f64 / (FFT - 1) as f64).cos());
-    }
-    let mut j = 0;
-    for i in 1..FFT {
-        let mut bit = FFT >> 1;
-        while j & bit != 0 {
-            j ^= bit;
-            bit >>= 1;
-        }
-        j ^= bit;
-        if i < j {
-            re.swap(i, j);
-            im.swap(i, j);
-        }
-    }
-    let mut size = 2;
-    while size <= FFT {
-        for start in (0..FFT).step_by(size) {
-            for k in 0..size / 2 {
-                let angle = -std::f64::consts::TAU * k as f64 / size as f64;
-                let (c, s) = (angle.cos(), angle.sin());
-                let a = start + k;
-                let b = a + size / 2;
-                let (tr, ti) = (re[b] * c - im[b] * s, re[b] * s + im[b] * c);
-                re[b] = re[a] - tr;
-                im[b] = im[a] - ti;
-                re[a] += tr;
-                im[a] += ti;
-            }
-        }
-        size *= 2;
-    }
-    let power: Vec<_> = (0..FFT / 2)
-        .map(|i| re[i] * re[i] + im[i] * im[i])
-        .collect();
-    let peak = power.iter().copied().fold(0., f64::max);
-    if peak < 1e-8 {
-        return;
-    }
-    for k in 1..FFT / 2 - 1 {
-        // Quadratic interpolation of log power reduces low-note FFT-bin bias.
-        let left = power[k - 1].max(1e-20).ln();
-        let center = power[k].max(1e-20).ln();
-        let right = power[k + 1].max(1e-20).ln();
-        let denominator = left - 2. * center + right;
-        let shift = if denominator.abs() > 1e-12 {
-            (0.5 * (left - right) / denominator).clamp(-0.5, 0.5)
-        } else {
-            0.
-        };
-        let frequency = (k as f64 + shift) * RATE / FFT as f64;
-        if !(65. ..=2500.).contains(&frequency)
-            || power[k] < peak * 0.025
-            || power[k] < power[k - 1]
-            || power[k] < power[k + 1]
-        {
-            continue;
-        }
-        let note = 69. + 12. * (frequency / 440.).log2();
-        if (note - note.round()).abs() > 0.35 {
-            continue;
-        }
-        let pc = (note.round() as i32).rem_euclid(12) as usize;
-        sum[pc] += power[k].sqrt() / frequency.sqrt();
-    }
+    chroma_engine::Analyzer::new().accumulate(samples, sum);
 }
+
+pub use crate::cue_policy::{automatic_entry_limit, repair_legacy_entry};
+
 fn correlation(a: &[f64; 12], b: &[f64; 12]) -> f64 {
     let am = a.iter().sum::<f64>() / 12.;
     let bm = b.iter().sum::<f64>() / 12.;
@@ -204,20 +142,30 @@ fn result(
         alternatives.push(value / 2.);
         bpm = Some(value / 2.); // Display the slower pulse; the double-time candidate remains reviewable.
     }
+    let rhythm_quality = bpm
+        .zip(offset)
+        .map(|(bpm, offset)| rhythm::stability(energy, RATE / BLOCK as f64, bpm, offset));
+    let stable = rhythm_quality.as_ref().and_then(|q| q["stable"].as_bool()) != Some(false);
     let (key, harmonic_key, key_confidence) = key(chroma);
     let audio_start = first as f64 * BLOCK as f64 / RATE;
     let mut energy_cues = energy_cues::candidates(energy, first, last);
     // Snap only within half a beat; never invent a bar/downbeat from tempo alone.
-    if let (Some(bpm), Some(offset)) = (bpm, offset) {
+    if let (Some(bpm), Some(offset)) = (bpm, offset)
+        && stable
+    {
         for (seconds, _) in &mut energy_cues {
             *seconds = rhythm::snap(*seconds, bpm, offset).clamp(audio_start, duration);
         }
     }
-    let cue_in = energy_cues
-        .first()
-        .map_or(audio_start, |(seconds, _)| *seconds);
     let cue_out = ((last + 1) as f64 * BLOCK as f64 / RATE).min(duration);
+    let ease_in = energy_cues::ease_in(energy, first, last).min(cue_out);
+    let cue_in = energy_cues::default_entry(ease_in, cue_out, &energy_cues);
+    let outro = energy_cues::outro(energy, first, last).clamp(audio_start, cue_out);
     let mut p = existing.clone();
+    p.extensions.insert(
+        "auto_cue_policy".into(),
+        serde_json::json!("early-entry-v2"),
+    );
     if !alternatives.is_empty() {
         p.extensions
             .insert("tempo_alternatives".into(), serde_json::json!(alternatives));
@@ -229,11 +177,16 @@ fn result(
                 energy,
                 RATE / BLOCK as f64,
                 duration,
-                bpm,
-                offset,
+                bpm.filter(|_| stable),
+                offset.filter(|_| stable),
             ))
             .map_err(|e| e.to_string())?,
         );
+    }
+    if let Some(quality) = rhythm_quality {
+        p.extensions.insert("rhythm_quality".into(), quality);
+    } else {
+        p.extensions.remove("rhythm_quality");
     }
     p.schema_version = Some(1);
     // Relative loudness/activity proxy, not a calibrated perceptual energy detector.
@@ -275,12 +228,35 @@ fn result(
             ..Default::default()
         },
     ];
+    p.cues.push(Cue {
+        id: "auto-ease-in".into(),
+        label: "Ease in · sustained audio".into(),
+        seconds: ease_in,
+        kind: "intro".into(),
+        ..Default::default()
+    });
+    p.cues.push(Cue {
+        id: "auto-outro".into(),
+        label: "Outro candidate".into(),
+        seconds: outro,
+        kind: "outro".into(),
+        ..Default::default()
+    });
+    if let Some(seconds) = energy_cues::high_energy(energy, first, last) {
+        p.cues.push(Cue {
+            id: "auto-high-energy".into(),
+            label: "High-energy candidate · sustained level".into(),
+            seconds,
+            kind: "high-energy".into(),
+            ..Default::default()
+        });
+    }
     for (index, (seconds, label)) in energy_cues.iter().enumerate() {
         p.cues.push(Cue {
             id: format!("auto-energy-{}", index + 1),
             label: (*label).into(),
             seconds: *seconds,
-            kind: if *label == "High-energy drop" {
+            kind: if *label == "Energy rise · drop candidate" {
                 "drop"
             } else {
                 "energy-start"
@@ -294,7 +270,7 @@ fn result(
         .enumerate()
     {
         let seconds = match (bpm, offset) {
-            (Some(bpm), Some(offset)) => rhythm::snap(seconds, bpm, offset),
+            (Some(bpm), Some(offset)) if stable => rhythm::snap(seconds, bpm, offset),
             _ => seconds,
         }
         .clamp(audio_start, cue_out);
@@ -308,8 +284,8 @@ fn result(
     }
     p.cues.push(Cue {
         id: "auto-mix-in".into(),
-        label: if energy_cues.is_empty() {
-            "Mix in · audio start fallback"
+        label: if (cue_in - ease_in).abs() < 0.001 {
+            "Mix in · ease in"
         } else {
             "Mix in · high energy"
         }
@@ -318,7 +294,9 @@ fn result(
         kind: "mix-in".into(),
         ..Default::default()
     });
-    if let (Some(bpm), Some(offset)) = (bpm, offset) {
+    if let (Some(bpm), Some(offset)) = (bpm, offset)
+        && stable
+    {
         let phrase = 64. * 60. / bpm;
         let mut at = offset;
         let mut i = 1;
@@ -366,8 +344,23 @@ fn result(
     Ok(p)
 }
 pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, String> {
+    crate::background::checkpoint();
     existing.validate()?;
-    let fingerprint = preparation::fingerprint(path)?;
+    let before = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    let staged = if let Some(directory) = std::env::var_os("AMP_PREPARATION_CACHE_DIR") {
+        std::fs::create_dir_all(&directory).map_err(|e| e.to_string())?;
+        let file = tempfile::Builder::new()
+            .prefix("analysis-")
+            .suffix(".audio")
+            .tempfile_in(directory)
+            .map_err(|e| e.to_string())?;
+        crate::background::copy_input(path, file.path())?;
+        Some(file)
+    } else {
+        None
+    };
+    let input = staged.as_ref().map_or(path, |file| file.path());
+    let fingerprint = preparation::fingerprint(input)?;
     if existing
         .source_sha256
         .as_ref()
@@ -375,10 +368,11 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
     {
         return Err("Audio differs from saved preparation. Review or remove the stale sidecar before analyzing.".into());
     }
-    let before = std::fs::metadata(path).map_err(|e| e.to_string())?;
+    let loudness = crate::loudness::measure(input).ok();
+    let mut perceptual_energy = None;
     let mut child = crate::command("ffmpeg")
         .args(["-v", "error", "-threads", "1", "-i"])
-        .arg(path)
+        .arg(input)
         .args(["-vn", "-ac", "1", "-ar", "11025", "-f", "f32le", "pipe:1"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -395,8 +389,10 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
         let mut previous2 = 0.;
         let mut spectral = Vec::new();
         let mut chroma_sum = [0.; 12];
+        let mut chroma = chroma_engine::Analyzer::new();
         let mut total = 0usize;
         loop {
+            crate::background::checkpoint();
             let mut n = 0;
             while n < buffer.len() {
                 let got = stream.read(&mut buffer[n..]).map_err(|e| e.to_string())?;
@@ -439,13 +435,17 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
             rhythmic.push((transient_energy / samples.len() as f64).sqrt());
             spectral.extend(samples);
             if spectral.len() >= FFT {
-                chroma(&spectral[..FFT], &mut chroma_sum);
+                chroma.accumulate(&spectral[..FFT], &mut chroma_sum);
                 spectral.drain(..FFT);
             }
             if n < buffer.len() {
                 break;
             }
         }
+        crate::background::checkpoint();
+        perceptual_energy = loudness.and_then(|l| {
+            crate::perceptual_energy::from_rms(&energy, RATE / BLOCK as f64, l.integrated_lufs)
+        });
         result(
             &energy,
             &rhythmic,
@@ -466,6 +466,27 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
         return Err("Audio changed while it was being analyzed".into());
     }
     let mut p = decoded?;
+    for (key, value) in [
+        (
+            "loudness",
+            loudness.and_then(|l| serde_json::to_value(l).ok()),
+        ),
+        (
+            "perceptual_energy",
+            perceptual_energy.map(|e| serde_json::json!(e)),
+        ),
+    ] {
+        if let Some(value) = value {
+            if let Some(proposal) = p.extensions.get_mut("analysis_recommendation") {
+                if let Some(fields) = proposal.as_object_mut() {
+                    // Preparation.extensions is flattened in serialized proposals.
+                    fields.insert(key.into(), value);
+                }
+            } else {
+                p.extensions.insert(key.into(), value);
+            }
+        }
+    }
     p.source_sha256 = Some(fingerprint);
     Ok(p)
 }
@@ -506,6 +527,89 @@ mod tests {
                 .unwrap()
                 > 19.
         );
+    }
+    #[test]
+    fn late_peak_does_not_replace_early_mix_in_and_landmarks_are_separate() {
+        let mut energy = vec![0.04; 15000];
+        energy[13200..14800].fill(0.8);
+        let p = result(&energy, &energy, &[0.; 12], 150., &Preparation::default()).unwrap();
+        assert!(p.cue_in < 1.);
+        assert!(p.cue_out.unwrap() > 148.);
+        assert_eq!(p.extensions["auto_cue_policy"], "early-entry-v2");
+        for (id, kind) in [
+            ("auto-ease-in", "intro"),
+            ("auto-high-energy", "high-energy"),
+            ("auto-outro", "outro"),
+            ("auto-mix-in", "mix-in"),
+        ] {
+            assert!(p.cues.iter().any(|cue| cue.id == id && cue.kind == kind));
+        }
+        assert!(
+            p.cues
+                .iter()
+                .any(|cue| cue.kind == "drop" && cue.seconds > 130.)
+        );
+        let mut manual = p.clone();
+        manual.manual_override = true;
+        manual.cue_in = 132.;
+        let kept = result(&energy, &energy, &[0.; 12], 150., &manual).unwrap();
+        assert_eq!(kept.cues, manual.cues);
+        assert_eq!(kept.manual_cues, manual.manual_cues);
+        assert_eq!(kept.cue_in, 132.);
+        assert!(
+            kept.extensions["analysis_recommendation"]["cue_in"]
+                .as_f64()
+                .unwrap()
+                < 1.
+        );
+    }
+    #[test]
+    fn legacy_entry_repair_is_pure_idempotent_and_preserves_manual_review_and_revision() {
+        let mut energy = vec![0.04; 15000];
+        energy[13200..14800].fill(0.8);
+        let mut legacy =
+            result(&energy, &energy, &[0.; 12], 150., &Preparation::default()).unwrap();
+        legacy.cue_in = 132.;
+        legacy
+            .cues
+            .iter_mut()
+            .find(|c| c.id == "auto-mix-in")
+            .unwrap()
+            .seconds = 132.;
+        legacy
+            .extensions
+            .insert("_amp_sync".into(), serde_json::json!({"revision":123}));
+        let original = legacy.clone();
+        assert!(repair_legacy_entry(&mut legacy));
+        assert_eq!(legacy.cue_in, 0.);
+        assert_eq!(
+            legacy.extensions["_amp_sync"],
+            original.extensions["_amp_sync"]
+        );
+        assert_eq!(legacy.analysis, original.analysis);
+        assert_eq!(legacy.source_sha256, original.source_sha256);
+        assert!(
+            legacy
+                .cues
+                .iter()
+                .any(|c| c.kind == "drop" && c.seconds > 130.)
+        );
+        assert!(!repair_legacy_entry(&mut legacy));
+        for mode in 0..3 {
+            let mut locked = original.clone();
+            match mode {
+                0 => locked.manual_override = true,
+                1 => locked.analysis.as_mut().unwrap().reviewed = true,
+                _ => locked.manual_cues.push(Cue {
+                    id: "mine".into(),
+                    seconds: 132.,
+                    ..Default::default()
+                }),
+            }
+            let before = serde_json::to_value(&locked).unwrap();
+            assert!(!repair_legacy_entry(&mut locked));
+            assert_eq!(serde_json::to_value(&locked).unwrap(), before);
+        }
     }
     #[test]
     fn click_tempo_and_manual_cues_survive() {

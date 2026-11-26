@@ -41,7 +41,7 @@ with tempfile.TemporaryDirectory() as folder:
         audio.setnchannels(1);audio.setsampwidth(2);audio.setframerate(8000);audio.writeframes(bytes(8000*2))
     port_socket=socket.socket();port_socket.bind(("127.0.0.1",0));port=port_socket.getsockname()[1];port_socket.close()
     base=f"http://127.0.0.1:{port}"
-    env=os.environ.copy();env.update(AMP_CONTROL_BIND=f"127.0.0.1:{port}",AMP_CONTROL_PASSWORD="test-secret",AMP_VERSE_CONFIG_DIR=str(root/"settings"))
+    env=os.environ.copy();env.update(AMP_CONTROL_BIND=f"127.0.0.1:{port}",AMP_CONTROL_PASSWORD="test-secret",AMP_CONTROL_AUTOSTART="1",AMP_VERSE_CONFIG_DIR=str(root/"settings"))
     for name in ("AMP_CONTROL_DISABLE","AMP_SCREENSHOT","AMP_SCREENSHOT_VIEW","AMP_DOCK_SMOKE"):env.pop(name,None)
     process=subprocess.Popen([binary,str(root)],env=env,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=subprocess.CREATE_NO_WINDOW if os.name=="nt" else 0)
     try:
@@ -64,25 +64,28 @@ with tempfile.TemporaryDirectory() as folder:
         _,(status,value)=command("set_energy",target=5);assert status==200,value
         assert http(base,"/api/v1/command",one)[0]==200
         changed=dict(one,target=6);assert http(base,"/api/v1/command",changed)[0]==409
+        # Legacy senders may still emit manual_lock; it must not introduce a
+        # second playback authority or disable the current controls.
         command("manual_lock",enabled=True)
-        _,(status,value)=command("set_energy",target=3);assert status==409 and not value["ok"]
+        _,(status,value)=command("set_energy",target=3);assert status==200 and value["ok"]
         until=time.monotonic()+3
         while True:
             feedback=http(base,"/api/v1/state")[1]["amp"]
-            if feedback["manual_dj_locked"] and feedback["target_energy"]==5:break
+            if not feedback["manual_dj_locked"] and feedback["target_energy"]==3:break
             assert time.monotonic()<until,feedback
             time.sleep(.02)
         for attempt in range(2):
             sock=websocket(port)
             try:
                 state=receive(sock)
-                assert state["amp"]["target_energy"]==5, state
+                assert state["amp"]["target_energy"]==3, state
                 assert state["amp"]["playback_state"]=="stopped",state
-                assert state["amp"]["manual_dj_locked"] is True,state
+                assert state["amp"]["manual_dj_locked"] is False,state
+                assert state["amp"]["playback_owner"]=="player",state
             finally: sock.close()
         state=http(base,"/api/v1/state")[1]
-        assert state["amp"]["target_energy"]==5 and state["amp"]["connected"]
-        print("PASS: native desktop HTTP, authenticated feedback, retries/conflicts, manual lock and passive WebSocket reconnect")
+        assert state["amp"]["target_energy"]==3 and state["amp"]["connected"]
+        print("PASS: native desktop HTTP, authenticated feedback, retries/conflicts, single playback owner, legacy command compatibility and passive WebSocket reconnect")
     finally:
         process.terminate()
         try:process.wait(timeout=5)

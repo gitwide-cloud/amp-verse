@@ -1,13 +1,5 @@
 //! Explicit window merges, independent of geometric edge snapping.
 use eframe::egui::{self, ViewportId};
-pub const NAMES: [&str; 6] = [
-    "AMP Verse",
-    "AMP Library",
-    "AMP DJ",
-    "AMP Lab",
-    "AMP Cast",
-    "Plugin Manager",
-];
 pub fn viewport(pane: usize) -> ViewportId {
     if pane == 0 {
         ViewportId::ROOT
@@ -26,7 +18,7 @@ pub fn viewport(pane: usize) -> ViewportId {
 }
 pub fn initial_size(pane: usize, monitor: Option<egui::Vec2>) -> [f32; 2] {
     let preferred = if pane == 2 {
-        egui::vec2(1440., 1000.)
+        egui::vec2(1440., 1100.)
     } else {
         egui::vec2(1100., 800.)
     };
@@ -251,11 +243,6 @@ pub fn resize_edges(ui: &mut egui::Ui) {
         );
     }
 }
-/// Physical viewport dimensions keep scaled small windows from selecting the roomy layout.
-pub fn dj_pads_below(size: egui::Vec2, expanded: bool) -> bool {
-    expanded && size.x >= 1200. && size.y >= 850.
-}
-
 /// Visible, bounded drag divider. Direction controls which adjacent panel grows.
 pub fn splitter(
     ui: &mut egui::Ui,
@@ -274,8 +261,22 @@ pub fn splitter(
     let (rect, _) = ui.allocate_exact_size(size, egui::Sense::hover());
     let response = ui.interact(rect, egui::Id::unique(id), egui::Sense::drag());
     if response.dragged() {
-        let delta = ui.input(|i| i.pointer.delta());
-        *value = (*value + if vertical { delta.x } else { delta.y } * direction)
+        let delta = ui.input(|i| {
+            if response.drag_started() {
+                i.pointer
+                    .interact_pos()
+                    .zip(i.pointer.press_origin())
+                    .map_or(egui::Vec2::ZERO, |(position, origin)| position - origin)
+            } else {
+                i.pointer.delta()
+            }
+        });
+        let scale = ui
+            .ctx()
+            .layer_transform_to_global(ui.layer_id())
+            .map_or(1., |t| t.scaling)
+            .max(0.01);
+        *value = (*value + (if vertical { delta.x } else { delta.y }) / scale * direction)
             .clamp(*range.start(), *range.end());
     }
     response
@@ -310,6 +311,10 @@ pub fn splitter(
             super::skin::foreground(ui),
         );
     } else {
+        if id.starts_with("dj-deck-") {
+            ui.painter()
+                .rect_filled(rect.shrink(1.), 3., ui.visuals().widgets.inactive.bg_fill);
+        }
         ui.painter().line_segment(
             [rect.center() - half, rect.center() + half],
             egui::Stroke::new(3., color),

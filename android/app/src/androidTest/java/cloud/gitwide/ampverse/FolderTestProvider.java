@@ -10,12 +10,19 @@ import java.io.FileNotFoundException;
 
 /** Test-only provider: no real phone files, permissions or library entries. */
 public class FolderTestProvider extends DocumentsProvider {
-    @Override public boolean isChildDocument(String parent,String child){return parent.equals("root")&&(child.equals("nested")||child.equals("song-a")||child.equals("song-b")||child.startsWith("meta"));}
+    @Override public boolean isChildDocument(String parent,String child){return (parent.equals("split-root")||parent.equals("bad-root"))||parent.equals("root")&&(child.equals("nested")||child.equals("song-a")||child.equals("song-b")||child.startsWith("meta"));}
     @Override public boolean onCreate(){return true;}
     @Override public Cursor queryRoots(String[] projection){return new MatrixCursor(new String[]{"root_id"});}
     @Override public Cursor queryDocument(String id,String[] projection){return new MatrixCursor(new String[]{Document.COLUMN_DOCUMENT_ID,Document.COLUMN_MIME_TYPE,Document.COLUMN_DISPLAY_NAME});}
     @Override public Cursor queryChildDocuments(String parent,String[] projection,String sort){
         MatrixCursor rows=new MatrixCursor(new String[]{Document.COLUMN_DOCUMENT_ID,Document.COLUMN_MIME_TYPE,Document.COLUMN_DISPLAY_NAME});
+        if(parent.equals("split-root")||parent.equals("bad-root")){
+            rows.addRow(new Object[]{"split-song","audio/mpeg","Song.mp3"});
+            rows.addRow(new Object[]{parent.equals("split-root")?"split-meta":"bad-meta",Document.MIME_TYPE_DIR,"ampdj"});
+        }
+        if(parent.equals("split-meta")){rows.addRow(new Object[]{"split-index","application/octet-stream","catalog.ampdb"});rows.addRow(new Object[]{"split-catalogs",Document.MIME_TYPE_DIR,"catalogs"});}
+        if(parent.equals("split-catalogs"))rows.addRow(new Object[]{"split-snapshot","application/octet-stream","songs-000001-fixture.ampdb"});
+        if(parent.equals("bad-meta"))rows.addRow(new Object[]{"bad-index","application/octet-stream","catalog.ampdb"});
         if(parent.equals("root")){
             rows.addRow(new Object[]{"song-a","audio/mpeg","A.mp3"});
             rows.addRow(new Object[]{"nested",Document.MIME_TYPE_DIR,"Album"});
@@ -30,6 +37,17 @@ public class FolderTestProvider extends DocumentsProvider {
         if(parent.equals("meta-album"))rows.addRow(new Object[]{"meta-b","application/json","B.FLAC.json"});
         return rows;
     }
-    @Override public ParcelFileDescriptor openDocument(String id,String mode,CancellationSignal cancel)throws FileNotFoundException{if(!id.equals("meta-a")&&!id.equals("meta-b"))throw new FileNotFoundException("Traversal fixture only");
+    @Override public ParcelFileDescriptor openDocument(String id,String mode,CancellationSignal cancel)throws FileNotFoundException{if(id.equals("split-index")||id.equals("split-snapshot")||id.equals("bad-index")){
+        try{java.io.File file=new java.io.File(getContext().getCacheDir(),id+".ampdb");file.delete();
+            if(id.equals("bad-index"))java.nio.file.Files.write(file.toPath(),new byte[]{1,2,3});
+            else try(android.database.sqlite.SQLiteDatabase db=android.database.sqlite.SQLiteDatabase.openOrCreateDatabase(file,null)){
+                db.execSQL("CREATE TABLE records(key TEXT PRIMARY KEY,document TEXT NOT NULL)");
+                if(id.equals("split-index")){db.setVersion(2);db.execSQL("CREATE TABLE shards(id INTEGER PRIMARY KEY,file TEXT,count INTEGER)");db.execSQL("INSERT INTO shards VALUES(1,'songs-000001-fixture.ampdb',1)");}
+                else{db.setVersion(1);db.execSQL("INSERT INTO records VALUES(?,?)",new Object[]{"tracks/Song.mp3.json","{\"cue_in\":9.5,\"bpm\":126,\"manual_override\":true}"});}
+            }
+            return ParcelFileDescriptor.open(file,ParcelFileDescriptor.MODE_READ_ONLY);
+        }catch(Exception error){throw new FileNotFoundException(error.toString());}
+    }
+    if(!id.equals("meta-a")&&!id.equals("meta-b"))throw new FileNotFoundException("Traversal fixture only");
         try{java.io.File file=new java.io.File(getContext().getCacheDir(),"preparation-fixture.json");java.nio.file.Files.write(file.toPath(),"{\"cue_in\":7.25,\"bpm\":128,\"manual_override\":true}".getBytes(java.nio.charset.StandardCharsets.UTF_8));return ParcelFileDescriptor.open(file,ParcelFileDescriptor.MODE_READ_ONLY);}catch(java.io.IOException error){throw new FileNotFoundException(error.toString());}}
 }

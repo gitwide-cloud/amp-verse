@@ -1,9 +1,8 @@
+#[path = "lab_recorder.rs"]
+mod recorder;
 #[path = "lab_timeline.rs"]
 mod timeline;
-use amp_core::{
-    Library,
-    arrangement::{Clip, render},
-};
+use amp_core::{Library, arrangement::Clip};
 use eframe::egui;
 use std::{
     path::{Path, PathBuf},
@@ -14,16 +13,27 @@ pub struct Arrangement {
     clips: Vec<Clip>,
     timeline: timeline::Timeline,
     editor: crate::lab_editor::Editor,
+    recorder: recorder::Recorder,
+    youtube: crate::lab_youtube::Panel,
     tab: usize,
     demo_loaded: bool,
     status: String,
     job: Option<mpsc::Receiver<Result<String, String>>>,
 }
+impl Drop for Arrangement {
+    fn drop(&mut self) {
+        self.shutdown();
+    }
+}
 impl Arrangement {
+    pub(super) fn shutdown(&mut self) {
+        self.recorder.shutdown();
+    }
     pub fn take_sample(&mut self) -> Option<crate::sample_editor::Delivery> {
         self.editor.take_sample()
     }
     pub(super) fn stop_preview(&mut self) {
+        self.recorder.stop();
         self.editor.stop();
         self.timeline.stop();
     }
@@ -38,36 +48,92 @@ impl Arrangement {
             ui.set_min_size(ui.available_size());
             let action = crate::skin::heading(ui, "AMP Lab", true);
             self.editor.poll(ui.ctx());
-            let previous = self.tab;
-            ui.horizontal_wrapped(|ui| {
-                ui.selectable_value(&mut self.tab, 0, "Waveform editor");
-                ui.selectable_value(&mut self.tab, 1, "Mix timeline");
-            });
-            if previous == 1 && self.tab != 1 {
+            self.recorder.poll(ui.ctx());
+            if let Some(path) = self.recorder.take_completed() {
                 self.timeline.stop();
-            }
-            if previous == 0 && self.tab != 0 {
-                self.editor.stop();
-            }
-            if !self.demo_loaded
-                && std::env::var("AMP_SCREENSHOT_VIEW").is_ok_and(|s| s == "lab")
-                && let Some(track) = library.and_then(|l| l.tracks.first())
-                && let Ok(path) = amp_core::resolve(root, &track.path)
-            {
+                self.tab = 0;
                 self.editor.load_path(path);
-                self.demo_loaded = true;
             }
-            egui::ScrollArea::vertical()
-                .id_salt("lab-workspace")
-                .max_height(ui.available_height())
-                .auto_shrink([false, false])
-                .show(ui, |ui| {
-                    if self.tab == 0 {
-                        self.editor.show(ui, root, library);
+            if let Some(path) = self.youtube.poll(ui.ctx()) {
+                self.tab = 0;
+                self.timeline.stop();
+                let loaded = self.editor.load_path(path);
+                self.youtube.opened(loaded);
+            }
+            let previous = self.tab;
+            let wide = ui.available_width() > 900.;
+            ui.horizontal_top(|ui| {
+                if wide {
+                    crate::skin::panel(ui, false, |ui| {
+                        ui.set_width(180.);
+                        ui.set_min_height((ui.available_height() - 30.).max(200.));
+                        for (index, label, icon) in [
+                            (0, "Waveform Editor", crate::icons::Icon::Analyze),
+                            (1, "Mix Timeline", crate::icons::Icon::Layers),
+                        ] {
+                            if crate::icons::button(
+                                ui,
+                                icon,
+                                label,
+                                self.tab == index,
+                                egui::vec2(ui.available_width(), 48.),
+                            )
+                            .clicked()
+                            {
+                                self.tab = index;
+                            }
+                        }
+                        ui.separator();
+                        ui.weak("Create clips and edit audio. Your source files stay in place.");
+                    });
+                }
+                ui.vertical(|ui| {
+                    ui.set_width(ui.available_width());
+                    ui.heading(if self.tab == 0 {
+                        "Waveform Editor"
                     } else {
-                        self.content(ui, root, library);
+                        "Mix Timeline"
+                    });
+                    ui.weak(if self.tab == 0 {
+                        "Edit waveforms, add markers and create cue points."
+                    } else {
+                        "Arrange clips and preview your mix."
+                    });
+                    if !wide {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.selectable_value(&mut self.tab, 0, "Waveform Editor");
+                            ui.selectable_value(&mut self.tab, 1, "Mix Timeline");
+                        });
                     }
+                    if previous == 1 && self.tab != 1 {
+                        self.timeline.stop();
+                    }
+                    if previous == 0 && self.tab != 0 {
+                        self.editor.stop();
+                    }
+                    if !self.demo_loaded
+                        && std::env::var("AMP_SCREENSHOT_VIEW").is_ok_and(|s| s == "lab")
+                        && let Some(track) = library.and_then(|l| l.tracks.first())
+                        && let Ok(path) = amp_core::resolve(root, &track.path)
+                    {
+                        self.editor.load_path(path);
+                        self.demo_loaded = true;
+                    }
+                    self.youtube.show(ui);
+                    egui::ScrollArea::vertical()
+                        .id_salt("lab-workspace")
+                        .max_height(ui.available_height())
+                        .auto_shrink([false, false])
+                        .show(ui, |ui| {
+                            if self.tab == 0 {
+                                self.recorder.show(ui);
+                                self.editor.show(ui, root, library);
+                            } else {
+                                self.content(ui, root, library);
+                            }
+                        });
                 });
+            });
             action
         })
     }
@@ -174,10 +240,14 @@ impl Arrangement {
                     for (i, c) in clips.iter().enumerate() {
                         let mut c = c.clone();
                         c.start = 0.;
-                        render(&root, &[c], &output.join(format!("track-{:02}.mp3", i + 1)))?;
+                        crate::lab_audio::timeline(
+                            &root,
+                            &[c],
+                            &output.join(format!("track-{:02}.mp3", i + 1)),
+                        )?;
                     }
                 } else {
-                    render(&root, &clips, &output)?;
+                    crate::lab_audio::timeline(&root, &clips, &output)?;
                 }
                 Ok("Export complete".into())
             })();

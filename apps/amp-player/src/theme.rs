@@ -7,14 +7,44 @@ pub enum Theme {
     ModernLight,
     #[default]
     ModernDark,
+    MaterialDark,
+    MaterialLight,
 }
 impl Theme {
-    pub const ALL: [Self; 3] = [Self::Classic, Self::ModernLight, Self::ModernDark];
+    pub const ALL: [Self; 5] = [
+        Self::Classic,
+        Self::ModernLight,
+        Self::ModernDark,
+        Self::MaterialDark,
+        Self::MaterialLight,
+    ];
+    pub fn material(self) -> bool {
+        matches!(self, Self::MaterialDark | Self::MaterialLight)
+    }
+    pub fn light(self) -> bool {
+        matches!(self, Self::ModernLight | Self::MaterialLight)
+    }
+    pub fn primary_container(self) -> C {
+        if self == Self::MaterialLight {
+            C::from_rgb(255, 224, 157)
+        } else {
+            C::from_rgb(87, 66, 0)
+        }
+    }
+    pub fn on_primary(self) -> C {
+        if self.light() {
+            C::WHITE
+        } else {
+            C::from_rgb(63, 46, 0)
+        }
+    }
     pub fn id(self) -> &'static str {
         match self {
             Self::Classic => "classic",
             Self::ModernLight => "modern-light",
             Self::ModernDark => "modern-dark",
+            Self::MaterialDark => "material-3-dark",
+            Self::MaterialLight => "material-3-light",
         }
     }
     pub fn label(self) -> &'static str {
@@ -22,6 +52,8 @@ impl Theme {
             Self::Classic => "Classic",
             Self::ModernLight => "Modern Light",
             Self::ModernDark => "Modern Dark",
+            Self::MaterialDark => "Material 3 Dark",
+            Self::MaterialLight => "Material 3 Light",
         }
     }
     pub fn parse(value: &str) -> Option<Self> {
@@ -42,11 +74,31 @@ pub struct Palette {
 impl Theme {
     pub fn palette(self) -> Palette {
         match self {
+            Self::MaterialDark => Palette {
+                background: C::from_rgb(22, 20, 15),
+                surface: C::from_rgb(34, 31, 25),
+                elevated: C::from_rgb(49, 46, 39),
+                border: C::from_rgb(79, 70, 57),
+                text: C::from_rgb(233, 225, 212),
+                accent: C::from_rgb(233, 194, 108),
+                signal: C::from_rgb(173, 208, 164),
+                muted: C::from_rgb(206, 197, 180),
+            },
+            Self::MaterialLight => Palette {
+                background: C::from_rgb(255, 248, 239),
+                surface: C::from_rgb(249, 242, 230),
+                elevated: C::from_rgb(237, 230, 219),
+                border: C::from_rgb(130, 118, 100),
+                text: C::from_rgb(32, 27, 19),
+                accent: C::from_rgb(114, 85, 0),
+                signal: C::from_rgb(54, 100, 51),
+                muted: C::from_rgb(79, 70, 57),
+            },
             Self::Classic => Palette {
                 background: C::from_rgb(7, 8, 12),
-                surface: C::from_rgb(27, 25, 39),
-                elevated: C::from_rgb(63, 59, 78),
-                border: C::from_rgb(143, 138, 161),
+                surface: C::from_rgb(24, 28, 34),
+                elevated: C::from_rgb(44, 50, 58),
+                border: C::from_rgb(98, 108, 120),
                 text: C::from_rgb(235, 235, 242),
                 accent: C::from_rgb(255, 194, 26),
                 signal: C::from_rgb(130, 245, 61),
@@ -63,14 +115,14 @@ impl Theme {
                 muted: C::from_rgb(84, 96, 111),
             },
             Self::ModernDark => Palette {
-                background: C::from_rgb(13, 16, 22),
-                surface: C::from_rgb(24, 29, 38),
-                elevated: C::from_rgb(34, 41, 53),
-                border: C::from_rgb(70, 81, 99),
-                text: C::from_rgb(231, 236, 243),
-                accent: C::from_rgb(255, 197, 54),
-                signal: C::from_rgb(130, 212, 155),
-                muted: C::from_rgb(155, 168, 187),
+                background: C::from_rgb(6, 13, 18),
+                surface: C::from_rgb(14, 23, 29),
+                elevated: C::from_rgb(30, 38, 44),
+                border: C::from_rgb(60, 75, 84),
+                text: C::from_rgb(245, 247, 249),
+                accent: C::from_rgb(255, 211, 0),
+                signal: C::from_rgb(63, 224, 101),
+                muted: C::from_rgb(170, 185, 198),
             },
         }
     }
@@ -126,13 +178,14 @@ pub fn current(ctx: &egui::Context) -> Theme {
 pub fn apply(ctx: &egui::Context, theme: Theme) {
     ctx.data_mut(|d| d.insert_temp(egui::Id::unique("amp-theme"), theme));
     let p = theme.palette();
-    let light = theme == Theme::ModernLight;
+    let light = theme.light();
     ctx.set_theme(if light {
         egui::ThemePreference::Light
     } else {
         egui::ThemePreference::Dark
     });
     let mut style = (*ctx.global_style()).clone();
+    style.text_styles = egui::Style::default().text_styles;
     style.visuals = if light {
         egui::Visuals::light()
     } else {
@@ -140,7 +193,9 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
     };
     style.visuals.panel_fill = p.background;
     style.visuals.window_fill = p.surface;
-    style.visuals.selection.bg_fill = if light {
+    style.visuals.selection.bg_fill = if theme.material() {
+        theme.primary_container()
+    } else if light {
         C::from_rgb(255, 226, 143)
     } else {
         C::from_rgb(103, 72, 9)
@@ -157,7 +212,13 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
     };
     style.visuals.widgets.hovered.bg_stroke = egui::Stroke::new(1., p.accent);
     style.visuals.hyperlink_color = p.accent;
-    let radius = if theme == Theme::Classic { 2 } else { 8 };
+    let radius = if theme.material() {
+        20
+    } else if theme == Theme::Classic {
+        2
+    } else {
+        8
+    };
     style.visuals.widgets.inactive.corner_radius = egui::CornerRadius::same(radius);
     style.visuals.widgets.hovered.corner_radius = egui::CornerRadius::same(radius);
     style.visuals.widgets.active.corner_radius = egui::CornerRadius::same(radius);
@@ -166,6 +227,78 @@ pub fn apply(ctx: &egui::Context, theme: Theme) {
     style.visuals.widgets.active.fg_stroke = egui::Stroke::new(1., p.text);
     style.spacing.button_padding = egui::vec2(10., 6.);
     style.spacing.item_spacing = egui::vec2(6., 5.);
+    if theme.material() {
+        style.visuals.extreme_bg_color = p.background;
+        style.visuals.text_edit_bg_color = Some(p.elevated);
+        style.visuals.faint_bg_color = p.surface;
+        style.visuals.window_corner_radius = egui::CornerRadius::same(24);
+        style.visuals.menu_corner_radius = egui::CornerRadius::same(16);
+        style.visuals.window_stroke = egui::Stroke::new(1., p.border);
+        style.visuals.widgets.noninteractive.bg_fill = p.surface;
+        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1., p.border);
+        style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(12);
+        style.visuals.widgets.inactive.weak_bg_fill = p.elevated;
+        style.visuals.widgets.hovered.weak_bg_fill = theme.primary_container();
+        style.visuals.widgets.hovered.bg_fill = theme.primary_container();
+        style.visuals.widgets.active.weak_bg_fill = theme.primary_container();
+        style.visuals.widgets.inactive.bg_stroke = egui::Stroke::NONE;
+        style.visuals.slider_trailing_fill = true;
+        style.spacing.button_padding = egui::vec2(10., 6.);
+        style.spacing.item_spacing = egui::vec2(6., 5.);
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(16.));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Button, egui::FontId::proportional(14.));
+        style
+            .text_styles
+            .insert(egui::TextStyle::Heading, egui::FontId::proportional(24.));
+    }
+    if theme == Theme::ModernDark {
+        // Let egui use the black selection stroke for text on the gold fill.
+        // A global white override also recolors selected labels and loses contrast.
+        style.visuals.override_text_color = None;
+        style.visuals.widgets.noninteractive.fg_stroke.color = p.text;
+        style.visuals.widgets.inactive.fg_stroke.color = p.text;
+        style.visuals.widgets.hovered.fg_stroke.color = p.text;
+        // egui also uses the active foreground for ordinary strong labels.
+        style.visuals.widgets.active.bg_fill = p.elevated;
+        style.visuals.widgets.active.fg_stroke.color = p.text;
+        let display_family = if ctx
+            .data(|data| data.get_temp::<bool>(egui::Id::unique("amp-brand-fonts")))
+            .unwrap_or(false)
+        {
+            egui::FontFamily::Name("AMP Display".into())
+        } else {
+            egui::FontFamily::Proportional
+        };
+        style.visuals.extreme_bg_color = p.background;
+        style.visuals.faint_bg_color = p.surface;
+        style.visuals.text_edit_bg_color = Some(p.background);
+        style.visuals.window_corner_radius = egui::CornerRadius::same(14);
+        style.visuals.menu_corner_radius = egui::CornerRadius::same(12);
+        style.visuals.widgets.noninteractive.bg_fill = p.surface;
+        style.visuals.widgets.noninteractive.bg_stroke = egui::Stroke::new(1., p.border);
+        style.visuals.widgets.noninteractive.corner_radius = egui::CornerRadius::same(12);
+        style.visuals.widgets.inactive.weak_bg_fill = p.elevated;
+        style.visuals.slider_trailing_fill = true;
+        style.visuals.selection.bg_fill = p.accent;
+        style.visuals.selection.stroke = egui::Stroke::new(1., p.background);
+        style.spacing.button_padding = egui::vec2(14., 9.);
+        style.spacing.item_spacing = egui::vec2(9., 8.);
+        style.text_styles.insert(
+            egui::TextStyle::Heading,
+            egui::FontId::new(27., display_family.clone()),
+        );
+        style
+            .text_styles
+            .insert(egui::TextStyle::Body, egui::FontId::proportional(16.));
+        style.text_styles.insert(
+            egui::TextStyle::Button,
+            egui::FontId::new(17., display_family),
+        );
+    }
     ctx.set_global_style(style);
     for id in [
         egui::ViewportId::ROOT,
@@ -221,6 +354,47 @@ pub fn selector(ui: &mut egui::Ui) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn card_headings_and_selected_controls_keep_readable_contrast() {
+        fn luminance(color: C) -> f32 {
+            let linear = |v: u8| {
+                let v = f32::from(v) / 255.;
+                if v <= 0.04045 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * linear(color.r()) + 0.7152 * linear(color.g()) + 0.0722 * linear(color.b())
+        }
+        let contrast = |a: C, b: C| {
+            let a = luminance(a);
+            let b = luminance(b);
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        };
+        let ctx = egui::Context::default();
+        apply(&ctx, Theme::ModernDark);
+        let style = ctx.global_style();
+        let visuals = &style.visuals;
+        assert!(
+            contrast(
+                visuals.strong_text_color(),
+                Theme::ModernDark.palette().surface
+            ) >= 7.,
+            "Normal strong card text must remain readable"
+        );
+        assert!(
+            contrast(
+                visuals.widgets.active.text_color(),
+                visuals.widgets.active.bg_fill
+            ) >= 7.,
+            "Pressed controls need readable labels"
+        );
+        assert!(
+            contrast(visuals.selection.stroke.color, visuals.selection.bg_fill) >= 7.,
+            "Selected gold controls need dark text"
+        );
+    }
     #[test]
     fn preferences_replace_and_round_trip_all_themes() {
         let dir = tempfile::tempdir().unwrap();

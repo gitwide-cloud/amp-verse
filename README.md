@@ -10,6 +10,18 @@ It takes inspiration from the music players many of us grew up with: **a classic
 
 > **Play your music. Mix your music. Take it with you.**
 
+## 1.1.0 release candidate
+
+This candidate aligns desktop, server, and Android at 1.1.0-rc.1. Test
+packages are installed manually into existing installations. The in-app
+updater offers stable releases. Android uses the existing app IDs and signing
+identity.
+
+Selecting a Smart Playlist for Auto Mix leaves current deck audio in place.
+Turn Auto Mix on to load and play from the selected source. Phone-to-server
+live audio sending and sustained stem tiers above two decks are still pending
+release acceptance.
+
 ## What can you do with it?
 
 | | |
@@ -50,7 +62,7 @@ The desktop and Android editions do not yet have identical features. See [Androi
 
 **[Browse releases](https://github.com/gitwide-cloud/amp-verse/releases)** · **[Builds and tests](https://github.com/gitwide-cloud/amp-verse/actions)**
 
-Download an available build for your platform from Releases. This is an actively developed project: check the release notes and workflow results before treating a preview as production-ready.
+Download an available build for your platform from Releases. This is an actively developed project: check the release notes and workflow results before treating a beta as production-ready.
 
 If you'd rather build from source, you'll need the Rust toolchain and the audio/runtime dependencies described in the project documentation.
 

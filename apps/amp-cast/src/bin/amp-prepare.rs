@@ -75,7 +75,55 @@ fn run() -> Result<(), String> {
 }
 fn prepare(root: &std::path::Path, requested: usize, force: bool) -> Result<(), String> {
     amp_core::coordination::library_id(root)?;
-    let library = amp_core::scan(root).map_err(|e| e.to_string())?;
+    let library = amp_core::scan_job_inputs(root).map_err(|e| e.to_string())?;
+    if !force {
+        let queue = amp_core::analysis_queue::Queue::for_library(root, "cli")?;
+        queue.enqueue_tracks(&library.tracks)?;
+        let errors = std::sync::atomic::AtomicUsize::new(0);
+        let count = amp_core::batch::workers(requested, queue.stats()?.pending);
+        let slots = vec![(); count];
+        amp_core::batch::for_each(&slots, count, |_| {
+            loop {
+                let job = match queue.next() {
+                    Ok(Some(j)) => j,
+                    Ok(None) => break,
+                    Err(e) => {
+                        eprintln!("{e}");
+                        errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
+                };
+                let _heartbeat = queue.keep_alive(&job);
+                let outcome = amp_core::library_engine::analyze_job(root, &job.path, false);
+                let result = match &outcome {
+                    Ok(amp_core::coordination::AnalysisResult::Skipped(
+                        amp_core::coordination::Skip::Busy,
+                    )) => queue.defer(&job),
+                    Ok(_) => queue.finish(&job, Ok(())),
+                    Err(e) => queue.finish(&job, Err(e)),
+                };
+                if let Err(e) = outcome {
+                    errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!("{}: {e}", job.path.display());
+                } else {
+                    println!("{} / queue job processed", job.path.display());
+                }
+                if let Err(e) = result {
+                    errors.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    eprintln!("{e}");
+                }
+            }
+            true
+        });
+        let n = errors.load(std::sync::atomic::Ordering::Relaxed);
+        return if n == 0 {
+            Ok(())
+        } else {
+            Err(format!(
+                "{n} queue jobs failed; completed work was retained"
+            ))
+        };
+    }
     let errors = std::sync::atomic::AtomicUsize::new(0);
     let workers = amp_core::batch::workers(requested, library.tracks.len());
     eprintln!(
@@ -83,7 +131,7 @@ fn prepare(root: &std::path::Path, requested: usize, force: bool) -> Result<(), 
         library.tracks.len()
     );
     amp_core::batch::for_each(&library.tracks, workers, |track| {
-        let result = amp_core::coordination::analyze_shared(root, &track.path, force);
+        let result = amp_core::library_engine::analyze_job(root, &track.path, force);
         match result {
             Ok(amp_core::coordination::AnalysisResult::Skipped(reason)) => {
                 println!("{} / skipped {reason:?}", track.path.display())

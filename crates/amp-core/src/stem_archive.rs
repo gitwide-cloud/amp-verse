@@ -17,6 +17,17 @@ pub fn store(
     folder: &Path,
     cancel: &AtomicBool,
 ) -> Result<(), String> {
+    store_with_checkpoint(file, key, manifest, folder, cancel, || Ok(()))
+}
+pub fn store_with_checkpoint(
+    file: &Path,
+    key: &str,
+    manifest: &serde_json::Value,
+    folder: &Path,
+    cancel: &AtomicBool,
+    checkpoint: impl Fn() -> Result<(), String>,
+) -> Result<(), String> {
+    checkpoint()?;
     let mut db = Connection::open(file).map_err(error)?;
     db.busy_timeout(std::time::Duration::from_secs(5))
         .map_err(error)?;
@@ -39,6 +50,7 @@ pub fn store(
             .map_err(error)?;
         let mut bytes = [0; 65536];
         loop {
+            checkpoint()?;
             if cancel.load(Relaxed) {
                 return Err("Stem archive cancelled".into());
             }

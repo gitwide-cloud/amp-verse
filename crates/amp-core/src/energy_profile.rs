@@ -100,6 +100,49 @@ pub fn read(p: &Preparation) -> Option<Profile> {
     profile.validate().ok()?;
     Some(profile)
 }
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AutomaticEntry {
+    pub seconds: f64,
+    pub energy: f64,
+}
+/// Select the early entry actually available to automatic mixing. Explicit and
+/// reviewed preparation keeps its saved cue; callers can score that cue instead.
+pub fn automatic_entry(p: &Preparation, target: f64, minimum: f64) -> Option<AutomaticEntry> {
+    if p.manual_override
+        || !p.manual_cues.is_empty()
+        || p.analysis.as_ref().is_some_and(|a| a.reviewed)
+        || !mixing_allowed(p)
+    {
+        return None;
+    }
+    let profile = read(p)?;
+    let first = entry_bound(p);
+    let end = p.cue_out.unwrap_or(profile.duration).min(profile.duration);
+    let limit = crate::cue_policy::automatic_entry_limit(first, end);
+    let section = profile.entry(target, first, end.min(limit + minimum), minimum)?;
+    let seconds = p
+        .cues
+        .iter()
+        .filter(|c| {
+            matches!(c.kind.as_str(), "drop" | "chorus" | "chorus_start")
+                && c.seconds >= section.start
+                && c.seconds < section.end
+                && c.seconds >= first
+                && c.seconds <= limit
+                && c.seconds + minimum <= end
+        })
+        .min_by(|a, b| {
+            (a.seconds - section.start)
+                .abs()
+                .total_cmp(&(b.seconds - section.start).abs())
+        })
+        .map(|feature| feature.seconds)
+        .unwrap_or(section.start);
+    Some(AutomaticEntry {
+        seconds,
+        energy: section.energy,
+    })
+}
 pub fn validate(p: &Preparation) -> Result<(), String> {
     if p.extensions
         .get("energy_section_mixing")
@@ -208,6 +251,75 @@ mod tests {
                 },
             ],
         }
+    }
+    #[test]
+    fn automatic_entry_does_not_snap_into_a_different_energy_section() {
+        let mut p = Preparation {
+            cue_out: Some(150.),
+            ..Default::default()
+        };
+        p.extensions.insert(
+            FIELD.into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[],"sections":[
+                    {"id":"intro","name":"Intro","start":0.,"end":16.,"energy":0.2},
+                    {"id":"strong","name":"Strong","start":16.,"end":32.,"energy":0.9},
+                    {"id":"quiet","name":"Quiet","start":32.,"end":150.,"energy":0.1}
+                ]
+            }),
+        );
+        p.cues.push(crate::preparation::Cue {
+            id: "wrong-section".into(),
+            kind: "drop".into(),
+            seconds: 40.,
+            ..Default::default()
+        });
+        assert_eq!(
+            automatic_entry(&p, 0.9, 8.),
+            Some(AutomaticEntry {
+                seconds: 16.,
+                energy: 0.9
+            })
+        );
+    }
+    #[test]
+    fn automatic_entry_keeps_compatible_landmarks_and_track_tail_bounds() {
+        let mut p = Preparation {
+            cue_out: Some(150.),
+            ..Default::default()
+        };
+        p.extensions.insert(
+            FIELD.into(),
+            serde_json::json!({
+                "version":1,"duration":150.,"step":1.,"curve":[],"sections":[
+                    {"id":"intro","name":"Intro","start":0.,"end":30.,"energy":0.2},
+                    {"id":"strong","name":"Strong","start":30.,"end":80.,"energy":0.6},
+                    {"id":"tail","name":"Tail","start":80.,"end":150.,"energy":0.1}
+                ]
+            }),
+        );
+        p.cues.push(crate::preparation::Cue {
+            id: "good".into(),
+            kind: "drop".into(),
+            seconds: 42.,
+            ..Default::default()
+        });
+        assert_eq!(
+            automatic_entry(&p, 0.9, 8.),
+            Some(AutomaticEntry {
+                seconds: 42.,
+                energy: 0.6
+            })
+        );
+        p.cue_out = Some(45.);
+        // Forty-two no longer leaves the required eight seconds of track.
+        assert_eq!(
+            automatic_entry(&p, 0.9, 8.),
+            Some(AutomaticEntry {
+                seconds: 0.,
+                energy: 0.2
+            })
+        );
     }
     #[test]
     fn energy_entry_chooses_local_match_and_rejects_too_short_tail() {

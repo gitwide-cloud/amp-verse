@@ -1,0 +1,829 @@
+use super::*;
+
+pub struct Workspace {
+    pub enabled: bool,
+    pub pane: usize,
+    pub rendering: bool,
+    pub player_library_open: bool,
+    pub player_browser: dj_browser::Browser,
+}
+impl Default for Workspace {
+    fn default() -> Self {
+        let enabled = std::env::var_os("AMP_V1_MODE").is_some()
+            || std::env::var("AMP_SCREENSHOT_VIEW").is_ok_and(|view| view.starts_with("v1-"));
+        let pane = std::env::var("AMP_SCREENSHOT_VIEW")
+            .ok()
+            .and_then(|view| match view.as_str() {
+                "v1-dj" => Some(2),
+                "v1-player" => Some(0),
+                "v1-podcasts" => Some(6),
+                "v1-library" | "v1-playlists" => Some(1),
+                "v1-cast" => Some(4),
+                "v1-lab" => Some(3),
+                "v1-addons" => Some(5),
+                _ => None,
+            })
+            .unwrap_or(1);
+        Self {
+            enabled,
+            pane,
+            rendering: false,
+            player_library_open: true,
+            player_browser: Default::default(),
+        }
+    }
+}
+impl Player {
+    pub(super) fn workspace_player(&mut self, ui: &mut egui::Ui) {
+        // A crowded navigation row must not enlarge the Player beyond its viewport.
+        ui.set_max_width(
+            ui.available_width()
+                .min((ui.clip_rect().right() - ui.cursor().left()).max(1.)),
+        );
+        let card_gap = if ui.available_height() < 600. {
+            4.
+        } else {
+            12.
+        };
+        self.player_ui(ui);
+        if self.podcasts.is_active() {
+            let position = self.audio.as_ref().map_or(0., |a| a.source_position(0));
+            let duration = self
+                .loaded_track(0)
+                .and_then(|t| t.preparation.extensions.get("duration_seconds"))
+                .and_then(|v| v.as_f64())
+                .unwrap_or(0.);
+            let mut seek = position;
+            ui.horizontal(|ui| {
+                ui.label("Episode");
+                if ui.button("−30 sec").clicked() {
+                    self.seek_deck_relative(0, -30.);
+                }
+                if duration > 0. {
+                    if ui
+                        .add(egui::Slider::new(&mut seek, 0.0..=duration).suffix(" sec"))
+                        .drag_stopped()
+                    {
+                        self.seek_deck_relative(0, seek - position);
+                    }
+                } else {
+                    ui.add(
+                        egui::DragValue::new(&mut seek)
+                            .range(0.0..=604800.)
+                            .suffix(" sec"),
+                    );
+                    if ui.button("Seek").clicked() {
+                        self.seek_deck_relative(0, seek - position);
+                    }
+                }
+                if ui.button("+30 sec").clicked() {
+                    self.seek_deck_relative(0, 30.);
+                }
+            });
+        }
+        ui.add_space(card_gap);
+        let track = self.loaded_track(0).cloned();
+        let position = self
+            .audio
+            .as_ref()
+            .map_or(0., |audio| audio.source_position(0));
+        skin::panel(ui, false, |ui| {
+            ui.set_min_width(ui.available_width());
+            if track
+                .as_ref()
+                .is_some_and(|t| t.preparation.extensions.contains_key("podcast_stream_url"))
+            {
+                ui.weak(
+                    "Publisher audio stream. Download this episode for local offline playback.",
+                );
+            } else {
+                self.waveforms[0].ignore_seek = false;
+                self.waveforms[0].overlay = false;
+                self.waveforms[0].overview = false;
+                self.waveforms[0].height = Some(if ui.available_height() < 220. {
+                    56.
+                } else {
+                    110.
+                });
+                self.waveforms[0].show(
+                    ui,
+                    self.loaded_origin[0].as_deref().unwrap_or(&self.root),
+                    track.as_ref(),
+                    position,
+                    self.wave_span,
+                    0,
+                );
+                if let Some(at) = self.waveforms[0].seek.take() {
+                    self.seek_waveform(ui.ctx(), 0, at);
+                }
+                if let Some(delta) = self.waveforms[0].scrub.take() {
+                    self.seek_deck_relative(0, delta);
+                }
+                if let Some(delta) = self.waveforms[0].drag.take() {
+                    self.scrub_waveform(ui.ctx(), 0, delta, true);
+                }
+            }
+        });
+        ui.add_space(card_gap);
+        if self.workspace.player_library_open {
+            if ui.available_width() >= 1050. {
+                let width = ui.available_width();
+                let height = ui.available_height();
+                ui.horizontal_top(|ui| {
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(width * 0.63 - 8., height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            self.player_library_ui(ui);
+                        },
+                    );
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), height),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| {
+                            self.workspace_player_queue(ui);
+                        },
+                    );
+                });
+            } else {
+                let height = ui.available_height();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(ui.available_width(), (height * 0.6).max(180.)),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.player_library_ui(ui);
+                    },
+                );
+                self.workspace_player_queue(ui);
+            }
+        } else {
+            self.workspace_player_queue(ui);
+        }
+    }
+    fn workspace_player_queue(&mut self, ui: &mut egui::Ui) {
+        let mut play = None;
+        let queue_card_height = ui.available_height();
+        skin::panel(ui, false, |ui| {
+            ui.set_min_width(ui.available_width());
+            ui.set_height((queue_card_height - 16.).max(40.));
+            ui.horizontal(|ui| {
+                ui.heading("Play queue");
+                ui.weak(format!("{} songs", self.queue.len()));
+                if !self.workspace.player_library_open && ui.button("Browse music").clicked() {
+                    self.workspace.player_library_open = true;
+                }
+                if ui
+                    .add_enabled(!self.queue.is_empty(), egui::Button::new("Clear"))
+                    .clicked()
+                {
+                    self.queue.clear();
+                    self.queue_selected = None;
+                }
+            });
+            let queue_height = ui.available_height().max(0.);
+            egui::ScrollArea::vertical()
+                .id_salt("v1-player-queue")
+                .max_height(queue_height)
+                .min_scrolled_height(0.)
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    if self.queue.is_empty() {
+                        ui.weak("Use + to add a song, or Queue Source to add the selected list.");
+                        if queue_height >= 260. {
+                            ui.vertical_centered(|ui| {
+                                ui.add_space(((queue_height - 200.) * 0.5).max(8.));
+                                let (rect, _) = ui.allocate_exact_size(
+                                    egui::vec2(60., 60.),
+                                    egui::Sense::hover(),
+                                );
+                                icons::draw(
+                                    ui,
+                                    rect,
+                                    icons::Icon::List,
+                                    theme::current(ui.ctx()).palette().muted,
+                                );
+                                ui.heading("Your queue is empty");
+                            });
+                        }
+                    }
+                    if let Some(library) = &self.library {
+                        for (order, index) in self.queue.iter().enumerate() {
+                            if let Some(track) = library.tracks.get(*index)
+                                && ui
+                                    .add_sized(
+                                        [ui.available_width(), 32.],
+                                        egui::Button::new(format!(
+                                            "{}   {}",
+                                            order + 1,
+                                            track.title
+                                        ))
+                                        .selected(self.loaded[0] == Some(*index)),
+                                    )
+                                    .clicked()
+                            {
+                                play = Some(order);
+                            }
+                        }
+                    }
+                });
+        });
+        if let Some(order) = play {
+            let index = self.queue.remove(order);
+            self.play(0, index);
+        }
+    }
+    pub(super) fn workspace_ui(&mut self, ui: &mut egui::Ui) {
+        ui.painter().rect_filled(
+            ui.max_rect(),
+            0.,
+            theme::current(ui.ctx()).palette().background,
+        );
+        crate::dragdrop::prepare_drag(ui.ctx());
+        let scope: Vec<f32> = self
+            .audio
+            .as_ref()
+            .map(|audio| {
+                (0..48)
+                    .map(|i| {
+                        audio
+                            .controls
+                            .scope
+                            .iter()
+                            .map(|deck| {
+                                f32::from_bits(
+                                    deck[i * 2].load(std::sync::atomic::Ordering::Relaxed),
+                                )
+                            })
+                            .sum::<f32>()
+                            .clamp(0., 1.)
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        ui.ctx()
+            .data_mut(|data| data.insert_temp(egui::Id::unique("workspace-master-scope"), scope));
+        self.header(
+            ui,
+            match self.workspace.pane {
+                0 => "PLAYER",
+                1 => "AMP Library",
+                2 => "AMP DJ",
+                3 => "AMP Lab",
+                4 => "AMP Cast",
+                6 => "AMP Podcasts",
+                _ => "Plugin Manager",
+            },
+            false,
+        );
+        ui.horizontal_wrapped(|ui| {
+            for (pane, label) in [
+                (0, "Player"),
+                (1, "Library"),
+                (2, "DJ"),
+                (3, "Lab"),
+                (4, "Cast & Remote"),
+                (5, "Add-ons"),
+                (6, "Podcasts"),
+            ] {
+                let icon = match pane {
+                    0 => icons::Icon::Play,
+                    1 => icons::Icon::Folder,
+                    2 => icons::Icon::Headphones,
+                    3 => icons::Icon::Flask,
+                    4 => icons::Icon::Cast,
+                    5 => icons::Icon::Puzzle,
+                    _ => icons::Icon::Microphone,
+                };
+                let tab = ui
+                    .scope(|ui| {
+                        // Full gold tab, matching the touch and desktop module navigation.
+                        let selected = self.workspace.pane == pane;
+                        let palette = theme::current(ui.ctx()).palette();
+                        if selected {
+                            ui.visuals_mut().override_text_color = Some(palette.background);
+                        }
+                        icons::button(
+                            ui,
+                            icon,
+                            label,
+                            selected,
+                            egui::vec2(
+                                if pane == 4 {
+                                    170.
+                                } else if pane == 6 {
+                                    135.
+                                } else {
+                                    115.
+                                },
+                                42.,
+                            ),
+                        )
+                    })
+                    .inner;
+                #[cfg(test)]
+                ui.ctx().data_mut(|data| {
+                    data.insert_temp(egui::Id::unique(("workspace-tab", pane)), tab.rect)
+                });
+                let drag_to_dj = pane == 2
+                    && tab.contains_pointer()
+                    && egui::DragAndDrop::has_payload_of_type::<PathBuf>(ui.ctx());
+                if tab.clicked() || drag_to_dj {
+                    self.workspace.pane = pane;
+                    self.lab_open = pane == 3;
+                }
+            }
+            ui.weak(env!("CARGO_PKG_VERSION"));
+            let settings_menu = ui.menu_button("   ", |ui| {
+                ui.label("Appearance");
+                theme::selector(ui);
+                ui.separator();
+                if ui.button("Separate module windows").clicked() {
+                    self.workspace.enabled = false;
+                    ui.ctx()
+                        .send_viewport_cmd(egui::ViewportCommand::MinInnerSize(egui::vec2(
+                            400., 150.,
+                        )));
+                    ui.close();
+                }
+            });
+            icons::draw(
+                ui,
+                settings_menu.response.rect.shrink(4.),
+                icons::Icon::Settings,
+                skin::foreground(ui),
+            );
+            settings_menu.response.widget_info(|| {
+                egui::WidgetInfo::labeled(egui::Role::Button, true, "Settings and appearance")
+            });
+            settings_menu
+                .response
+                .on_hover_text("Settings and appearance");
+        });
+        ui.separator();
+        let content_height = ui.available_height().max(60.);
+        let content = egui::Rect::from_min_size(
+            ui.cursor().min,
+            egui::vec2(ui.available_width(), content_height),
+        );
+        let mut child = ui.new_child(
+            egui::UiBuilder::new()
+                .max_rect(content)
+                .layout(egui::Layout::top_down(egui::Align::Min)),
+        );
+        child.set_clip_rect(content.intersect(ui.clip_rect()));
+        self.workspace.rendering = true;
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::unique("v1-workspace-content"), true));
+        window_layout::set_embedded(ui.ctx(), true);
+        if self.workspace.pane == 0 {
+            self.workspace_player(&mut child);
+        } else if self.workspace.pane == 2 {
+            let available = child
+                .available_size()
+                .min(child.clip_rect().max - child.next_widget_position())
+                .max(egui::vec2(1., 1.));
+            let scale = (available.x / 980.).min(available.y / 850.).min(1.);
+            window_layout::fitted_content(
+                &mut child,
+                "v1-dj-workspace",
+                available / scale,
+                scale,
+                |ui| self.pane_ui(ui, 2),
+            );
+        } else {
+            self.pane_ui(&mut child, self.workspace.pane);
+        }
+        window_layout::set_embedded(ui.ctx(), false);
+        self.workspace.rendering = false;
+        ui.ctx()
+            .data_mut(|d| d.insert_temp(egui::Id::unique("v1-workspace-content"), false));
+        ui.advance_cursor_after_rect(content);
+        window_layout::resize_edges(ui);
+        let id = egui::Id::unique("quick-cast-open");
+        let mut open = ui.ctx().data(|d| d.get_temp::<bool>(id)).unwrap_or(false);
+        if open {
+            egui::Window::new("Cast current audio")
+                .id(egui::Id::unique("quick-cast-window"))
+                .open(&mut open)
+                .default_width(480.)
+                .resizable(true)
+                .vscroll(true)
+                .show(ui.ctx(), |ui| self.cast.quick_cast(ui));
+            ui.ctx().data_mut(|d| d.insert_temp(id, open));
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn player_cards_fill_width_queue_fills_height_and_eq_stays_in_transport() {
+        fn inspect(
+            shape: &egui::Shape,
+            surface: egui::Color32,
+            cards: &mut Vec<egui::Rect>,
+            labels: &mut Vec<(String, egui::Rect)>,
+            width: f32,
+        ) {
+            match shape {
+                egui::Shape::Rect(rect)
+                    if rect.fill == surface
+                        && rect.rect.width() > width * 0.9
+                        && rect.rect.height() > 12. =>
+                {
+                    cards.push(rect.rect)
+                }
+                egui::Shape::Text(text) => labels.push((
+                    text.galley.job.text.clone(),
+                    egui::Rect::from_min_size(text.pos, text.galley.size()),
+                )),
+                egui::Shape::Vec(children) => {
+                    for child in children {
+                        inspect(child, surface, cards, labels, width);
+                    }
+                }
+                _ => {}
+            }
+        }
+        for (size, shell) in [
+            (egui::vec2(760., 540.), false),
+            (egui::vec2(1280., 900.), false),
+            (egui::vec2(1568., 1003.), false),
+            (egui::vec2(2560., 1536.), false),
+            (egui::vec2(760., 540.), true),
+            (egui::vec2(1280., 900.), true),
+            (egui::vec2(1568., 1003.), true),
+            (egui::vec2(2560., 1536.), true),
+        ] {
+            let ctx = egui::Context::default();
+            skin::configure(&ctx);
+            theme::apply(&ctx, theme::Theme::ModernDark);
+            let mut player = Player {
+                workspace: Workspace {
+                    enabled: true,
+                    pane: 0,
+                    rendering: !shell,
+                    player_library_open: false,
+                    ..Default::default()
+                },
+                playback_owner: playback_owner::Owner::Dj,
+                ..Default::default()
+            };
+            player.status =
+                "Saved library ready; checking for new tracks in background. ".repeat(8);
+            let mut output = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                },
+                |ui| {
+                    if shell {
+                        player.workspace_ui(ui);
+                    } else {
+                        player.workspace_player(ui);
+                    }
+                },
+            );
+            let mut cards = Vec::new();
+            let mut labels = Vec::new();
+            for shape in &output.shapes {
+                inspect(
+                    &shape.shape,
+                    theme::Theme::ModernDark.palette().surface,
+                    &mut cards,
+                    &mut labels,
+                    size.x,
+                );
+            }
+            output.textures_delta.clear();
+            cards.sort_by(|a, b| a.top().total_cmp(&b.top()));
+            cards.dedup();
+            if shell && cards.len() > 4 {
+                cards.drain(..cards.len() - 4);
+            }
+            assert_eq!(
+                cards.len(),
+                4,
+                "Expected transport, toolbar, waveform and queue cards at {size:?}: {cards:?}"
+            );
+            for card in &cards {
+                assert!(
+                    card.width() >= size.x - 2. && card.right() <= size.x + 1.,
+                    "Card must fill available width without horizontal overflow at {size:?}: {card:?}"
+                );
+            }
+            assert!(
+                (cards[3].bottom() - size.y).abs() <= 2.,
+                "Queue should fill the remaining height at {size:?}: {:?}",
+                cards[3]
+            );
+            let low = labels
+                .iter()
+                .find(|(text, _)| text == "Low")
+                .expect("Player low EQ remains visible")
+                .1;
+            assert!(
+                cards[0].contains_rect(low),
+                "EQ must stay inside the transport card at {size:?}"
+            );
+            if size.x >= 1050. {
+                assert!(
+                    low.left() > size.x * 0.7,
+                    "Wide Player EQ must remain on the right at {size:?}: {low:?}"
+                );
+            }
+            assert_eq!(player.playback_owner, playback_owner::Owner::Dj);
+            assert!(player.queue.is_empty() && player.audio.is_none());
+        }
+    }
+    #[test]
+    fn changing_workspaces_keeps_playback_owner_and_native_window_size() {
+        for size in [
+            egui::vec2(760., 540.),
+            egui::vec2(1280., 900.),
+            egui::vec2(1920., 1080.),
+        ] {
+            let ctx = egui::Context::default();
+            let mut player = Player {
+                workspace: Workspace {
+                    enabled: true,
+                    pane: 1,
+                    rendering: false,
+                    player_library_open: true,
+                    player_browser: Default::default(),
+                },
+                playback_owner: playback_owner::Owner::Dj,
+                ..Default::default()
+            };
+            for pane in [1, 2, 0, 5] {
+                let raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    ..Default::default()
+                };
+                let mut output = ctx.run_ui(raw, |ui| {
+                    let module = match pane {
+                        0 => skin::Module::Verse,
+                        1 => skin::Module::Library,
+                        2 => skin::Module::Dj,
+                        _ => skin::Module::Addons,
+                    };
+                    player.activate(ui, Some(module));
+                    player.workspace_ui(ui);
+                });
+                assert_eq!(player.workspace.pane, pane);
+                assert_eq!(player.playback_owner, playback_owner::Owner::Dj);
+                assert!(
+                    !output.viewport_output[&egui::ViewportId::ROOT]
+                        .commands
+                        .iter()
+                        .any(|command| matches!(command, egui::ViewportCommand::InnerSize(_))),
+                    "Navigation must not resize the native window"
+                );
+                output.textures_delta.clear();
+            }
+        }
+    }
+    #[test]
+    fn library_song_can_be_carried_over_dj_tab_and_dropped_on_main_deck() {
+        let folder = tempfile::tempdir().unwrap();
+        std::fs::write(folder.path().join("song.mp3"), b"fixture").unwrap();
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            root: folder.path().into(),
+            library: Some(amp_core::scan(folder.path()).unwrap()),
+            workspace: Workspace {
+                enabled: true,
+                pane: 1,
+                rendering: false,
+                player_library_open: true,
+                player_browser: Default::default(),
+            },
+            ..Default::default()
+        };
+        player.run.auto = true;
+        player.run.preloaded = Some((0, 0));
+        let mut source = egui::Pos2::ZERO;
+        let mut tab = source;
+        let mut destination = source;
+        for frame in 0..9 {
+            let point = if frame < 3 {
+                source
+            } else if frame < 5 {
+                tab
+            } else {
+                destination
+            };
+            let mut raw = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1280., 1000.),
+                )),
+                ..Default::default()
+            };
+            raw.events.push(egui::Event::PointerMoved(point));
+            if frame == 2 || frame == 7 {
+                raw.events.push(egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: frame == 2,
+                    modifiers: Default::default(),
+                });
+            }
+            let mut output = ctx.run_ui(raw, |ui| {
+                player.workspace_ui(ui);
+                if let Some(rect) = ctx.data(|data| {
+                    data.get_temp::<egui::Rect>(egui::Id::unique("library-first-track"))
+                }) {
+                    source = rect.center();
+                }
+                tab = ctx
+                    .data(|data| {
+                        data.get_temp::<egui::Rect>(egui::Id::unique(("workspace-tab", 2)))
+                    })
+                    .unwrap()
+                    .center();
+                if let Some((rect, layer)) = ctx.data(|data| {
+                    data.get_temp::<(egui::Rect, egui::LayerId)>(egui::Id::unique((
+                        "rack-jog-drop",
+                        0,
+                    )))
+                }) {
+                    destination =
+                        ctx.layer_transform_to_global(layer).unwrap_or_default() * rect.center();
+                }
+            });
+            output.textures_delta.clear();
+        }
+        assert_eq!(player.workspace.pane, 2);
+        assert_eq!(
+            player.pending_load[0].as_ref().map(|(path, _)| path),
+            Some(&folder.path().join("song.mp3"))
+        );
+        assert!(player.run.auto);
+    }
+    #[test]
+    fn actual_dj_browser_row_drags_to_b3_in_scaled_workspace() {
+        for size in [egui::vec2(1280., 900.), egui::vec2(2560., 1552.)] {
+            let folder = tempfile::tempdir().unwrap();
+            std::fs::write(folder.path().join("song.mp3"), b"fixture").unwrap();
+            let ctx = egui::Context::default();
+            let mut player = Player {
+                root: folder.path().into(),
+                library: Some(amp_core::scan(folder.path()).unwrap()),
+                workspace: Workspace {
+                    enabled: true,
+                    pane: 2,
+                    rendering: false,
+                    player_library_open: true,
+                    player_browser: Default::default(),
+                },
+                ..Default::default()
+            };
+            player.run.auto = true;
+            player.run.preloaded = Some((5, 0));
+            let mut source = egui::Pos2::ZERO;
+            let mut destination = source;
+            let mut bank = egui::Rect::NOTHING;
+            let mut card = bank;
+            for frame in 0..68 {
+                let mut raw = egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, size)),
+                    time: Some(frame as f64 / 20.),
+                    ..Default::default()
+                };
+                // Reach the real compact B3 slot before beginning the browser drag;
+                // wheel animation gets 0.4s to settle between bounded corrections.
+                if (2..56).contains(&frame)
+                    && frame % 8 == 2
+                    && !bank.expand(1.).contains_rect(card)
+                {
+                    raw.events.push(egui::Event::PointerMoved(bank.center()));
+                    raw.events.push(egui::Event::MouseWheel {
+                        unit: egui::MouseWheelUnit::Point,
+                        phase: egui::TouchPhase::Move,
+                        source: egui::MouseWheelSource::Unknown,
+                        delta: egui::vec2(
+                            0.,
+                            (bank.center().y - card.center().y).clamp(-150., 150.),
+                        ),
+                        modifiers: Default::default(),
+                    });
+                }
+                if frame >= 60 {
+                    let point = if frame == 60 { source } else { destination };
+                    raw.events.push(egui::Event::PointerMoved(point));
+                    if frame == 60 || frame == 65 {
+                        raw.events.push(egui::Event::PointerButton {
+                            pos: point,
+                            button: egui::PointerButton::Primary,
+                            pressed: frame == 60,
+                            modifiers: Default::default(),
+                        });
+                    }
+                }
+                let mut output = ctx.run_ui(raw, |ui| {
+                    player.workspace_ui(ui);
+                    let screen = |id| {
+                        let (rect, layer) = ctx
+                            .data(|data| data.get_temp::<(egui::Rect, egui::LayerId)>(id))
+                            .expect("Actual current drag/drop bounds must exist");
+                        ctx.layer_transform_to_global(layer).unwrap_or_default() * rect
+                    };
+                    source = screen(egui::Id::unique("dj-browser-first-track")).center();
+                    card = screen(egui::Id::unique(("rack-aux-extent", 5usize)));
+                    bank = screen(egui::Id::unique(("rack-aux-extent", 5usize)));
+                    destination = screen(egui::Id::unique(("rack-strip-drop", 5usize))).center();
+                });
+                output.textures_delta.clear();
+                if frame == 58 {
+                    assert!(
+                        bank.expand(1.).contains_rect(card),
+                        "Real B3 card must be fully reachable at{size:?}: {card:?} bank{bank:?}"
+                    );
+                    assert!(
+                        bank.contains(destination),
+                        "B3 drop point must be inside its actual bank viewport"
+                    );
+                    assert!(
+                        egui::Rect::from_min_size(egui::Pos2::ZERO, size).contains(source),
+                        "Actual browser source must be visible"
+                    );
+                }
+                if frame == 63 {
+                    assert!(
+                        egui::DragAndDrop::has_payload_of_type::<PathBuf>(&ctx),
+                        "Actual DJ browser failed to start drag at{size:?}, {source:?}"
+                    );
+                }
+            }
+            assert_eq!(
+                player.pending_load[5].as_ref().map(|(path, _)| path),
+                Some(&folder.path().join("song.mp3")),
+                "Actual full B3 drop must stage on the reserved deck at{size:?}"
+            );
+            assert!(
+                player.run.auto && player.run.preloaded == Some((5, 0)),
+                "Drag must not replace the active automation reservation"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod player_library_tests {
+    use super::*;
+    #[test]
+    fn player_contains_sources_and_queue_actions_without_leaving_player() {
+        let ctx = egui::Context::default();
+        let mut player = Player {
+            library: Some(Library {
+                tracks: Vec::new(),
+                tree: Folder {
+                    name: "Music".into(),
+                    folders: Vec::new(),
+                    tracks: Vec::new(),
+                },
+            }),
+            ..Default::default()
+        };
+        let mut text = Vec::new();
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(1600., 1100.),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                player.workspace_player(ui);
+            },
+        );
+        fn collect(shape: &egui::Shape, text: &mut Vec<String>) {
+            match shape {
+                egui::Shape::Text(t) => text.push(t.galley.text().into()),
+                egui::Shape::Vec(v) => {
+                    for s in v {
+                        collect(s, text)
+                    }
+                }
+                _ => {}
+            }
+        }
+        for s in &out.shapes {
+            collect(&s.shape, &mut text);
+        }
+        out.textures_delta.clear();
+        for label in ["Folders", "Playlists", "Smart Playlists", "Queue Source"] {
+            assert!(
+                text.iter().any(|t| t == label),
+                "Player is missing {label}: {text:?}"
+            );
+        }
+        assert_eq!(
+            player.workspace.pane, 1,
+            "Rendering Player browsing must not switch destinations"
+        );
+    }
+}

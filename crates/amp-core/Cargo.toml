@@ -1,14 +1,20 @@
 [package]
 name = "amp-core"
-version.workspace = true
+version = "1.0.22"
 edition.workspace = true
 license.workspace = true
 
 [features]
 default = []
 analysis = []
+# CI checks content IDs when another dependency enables insertion-ordered JSON.
+knowledge-order-check = ["serde_json/preserve_order"]
 
 [dependencies]
+url = "2"
+roxmltree = "=0.21.2"
+amp-dj-policy = { path = "../amp-dj-policy" }
+lofty = "0.25.5"
 rusqlite = { version = "0.37", features = ["bundled", "blob"] }
 serde.workspace = true
 serde_json.workspace = true

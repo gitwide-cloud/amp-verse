@@ -1,0 +1,13 @@
+{
+  "source": "self-generated 440Hz sine, no personal media",
+  "duration_seconds": 12,
+  "codec": "aac",
+  "sample_rate": 44100,
+  "channels": 2,
+  "profiles_kbps": [
+    192,
+    128,
+    96
+  ],
+  "note": "VOD test retains12 segments; production live window6 withdelete_segments and20s idle cleanup"
+}

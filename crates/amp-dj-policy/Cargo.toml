@@ -1,0 +1,10 @@
+[package]
+name = "amp-dj-policy"
+version = "1.0.22"
+edition.workspace = true
+license.workspace = true
+[lib]
+crate-type = ["rlib", "cdylib"]
+
+[dependencies]
+serde.workspace = true

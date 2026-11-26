@@ -47,6 +47,7 @@ pub struct Editor {
     pub stop_preview: bool,
     pub refresh_sources: bool,
     pub connect_import: Option<(std::path::PathBuf, amp_core::show::SmartPlaylist)>,
+    pub send_to_dj: Option<String>,
     pub mix_request: Option<(amp_core::show::SmartPlaylist, Vec<usize>)>,
     pub preview_status: String,
     pub preview: Option<(std::path::PathBuf, f64)>,
@@ -80,11 +81,20 @@ impl Editor {
                 && cache.draft.validate().is_ok()
                 && cache.baseline.validate().is_ok()
             {
-                self.draft = Some(cache.draft);
-                self.baseline = Some(cache.baseline);
-                self.source_labels = cache.labels;
-                self.status =
-                    "Restored your local editing draft. Save Playlist publishes changes.".into();
+                match merge_rules(&cache.baseline, &cache.draft, saved, false) {
+                    Ok(restored) => {
+                        self.draft = Some(restored);
+                        self.baseline = Some(saved.clone());
+                        self.source_labels = cache.labels;
+                        self.status = "Restored local edits alongside your saved playlists. Save Playlist publishes changes.".into();
+                    }
+                    Err(error) => {
+                        self.status = format!(
+                            "Showing saved playlists. Your local draft is retained for conflict review: {error}"
+                        );
+                        self.conflict_review = Some((cache.draft, saved.clone()));
+                    }
+                }
             }
         }
         self.draft.as_mut().unwrap().resolve_sources(root);
@@ -168,7 +178,7 @@ impl Editor {
                 .as_nanos()
         );
         playlist.name = "New Smart Playlist".into();
-        set_source_mode(&mut playlist, SourceMode::Folders);
+        set_source_mode(&mut playlist, SourceMode::All);
         settings.playlists.push(playlist);
         self.selected = settings.playlists.len() - 1;
     }
@@ -288,6 +298,7 @@ impl Editor {
                 if dirty { ui.colored_label(crate::ORANGE,"Unsaved changes · DJ still uses the saved version"); }
                 ui.horizontal_wrapped(|ui|{let button=ui.button("Save Playlist");save|=button.clicked();#[cfg(test)]ui.ctx().data_mut(|data|data.insert_temp(egui::Id::unique("smart-top-save"),button.rect));if !self.status.is_empty(){ui.add(egui::Label::new(&self.status).wrap());}});
                 ui.add_space(16.);
+                ui.checkbox(&mut p.companion_available,"Available in Companion").on_hover_text("Discover this playlist and its eligible songs. Save Playlist to publish.");
                 ui.strong("Music sources");
                 if p.source_unavailable {
                     ui.colored_label(crate::ORANGE,"Source library not connected · settings retained, playback paused for this playlist");
@@ -310,16 +321,26 @@ impl Editor {
                 let source = source_summary(p);
                 ui.add(egui::Label::new(format!("{} — {}", source, count.map_or("waiting for library scan".into(), |count|format!("{count} songs")))).wrap());
                 ui.add_enabled_ui(!p.source_unavailable, |ui| {
+                if p.restrict_folders && p.folders.is_empty() && p.playlist_sources.is_empty() {
+                    ui.colored_label(crate::ORANGE,"Choose the entire library or a folder through Add Music Source. Genre filters cannot match without a source.");
+                }
                 if let Some(lib)=library {
                     ui.label(format!("Indexed library: {} · {} songs",root.display(),lib.tracks.len()));
-                    if let Some(relative)=library_folder_picker(ui,&lib.tree,p.folders.first()){
-                        add_indexed_folder(p,relative.clone());
-                        self.refresh_sources=true;
-                        self.source_labels.insert(p.id.clone(),format!("Folder: {}",root.join(&relative).display()));
-                        self.status="Folder added with all subfolders. Existing sources kept. Save Playlist to apply.".into();
-                    }
                 }
                 ui.menu_button("Add Music Source", |ui| {
+                    if ui.button("Use entire library").on_hover_text("Use all connected music sources; keep genre and analysis filters").clicked() && confirm_source_change(p) {
+                        set_source_mode(p,SourceMode::All);
+                        self.source_labels.remove(&p.id);
+                        self.refresh_sources=true;
+                        self.status="Entire library selected. Genre and analysis filters kept. Save Playlist to apply.".into();
+                        ui.close();
+                    }
+                    if let Some(lib)=library && let Some(relative)=library_folder_picker(ui,&lib.tree,p.folders.first()){
+                        add_indexed_folder(p,relative.clone());
+                        self.refresh_sources=true;
+                        self.source_labels.insert(p.id.clone(),format!("Folder: {}",amp_core::music_sources::audio_path(root,&relative).display()));
+                        self.status="Folder added with all subfolders. Existing sources kept. Save Playlist to apply.".into();
+                    }
                     if ui.button("Select Folder...").clicked() {
                         if let Some(folder) = rfd::FileDialog::new().set_directory(root).pick_folder() {
                             let mut selected=p.clone();
@@ -356,8 +377,6 @@ impl Editor {
                             }
                         }
                     });
-                    ui.separator();
-                    if ui.button("Use entire library").clicked() && confirm_source_change(p) { set_source_mode(p,SourceMode::All); self.source_labels.remove(&p.id); ui.close(); }
                 });
                 });
                 let mut remove_folder=None;
@@ -368,6 +387,33 @@ impl Editor {
                 if let Some(i)=remove_playlist {p.playlist_sources.remove(i);}
                 ui.weak("Sources are combined; overlapping songs appear once. Save Playlist to apply.");
                 ui.add_space(18.);
+                ui.strong("Genres");
+                ui.horizontal_wrapped(|ui| {
+                    if ui.selectable_label(p.genres.is_empty(), "All genres").clicked() { p.genres.clear(); }
+                    let mut choices = std::collections::BTreeSet::from(["Rock".to_owned(), "R&B".to_owned()]);
+                    choices.extend(p.genres.iter().cloned());
+                    if let Some(lib) = library {
+                        for track in &lib.tracks { choices.extend(amp_core::genres::values(&track.preparation)); }
+                    }
+                    egui::ComboBox::from_id_salt("smart-genres")
+                        .selected_text(if p.genres.is_empty() { "Choose genres…".to_owned() } else if p.genres.join(" + ").chars().count() <= 36 { p.genres.join(" + ") } else { format!("{} genres selected", p.genres.len()) })
+                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+                        .show_ui(ui, |ui| {
+                            for genre in choices {
+                                let mut checked = p.genres.contains(&genre);
+                                if ui.checkbox(&mut checked, &genre).changed() {
+                                    if checked { p.genres.push(genre); } else { p.genres.retain(|g| g != &genre); }
+                                }
+                            }
+                        });
+                });
+                if !p.genres.is_empty() {
+                    let count = library.map_or(0, |lib| lib.tracks.iter().filter(|t| amp_core::show::eligible(p,t)).count());
+                    ui.label(format!("{count} matching songs · any selected genre"));
+                    ui.weak("Uses saved genre tags. Untagged songs are skipped. Edit a song’s genre in Library tags.");
+                }
+                crate::smart_filter_ui::show(ui,p,library);
+                ui.add_space(16.);
                 ui.strong("Mixing style");
                 ui.horizontal(|ui| {
                     let width = ((ui.available_width()-12.)/3.).max(45.);
@@ -409,6 +455,7 @@ impl Editor {
                         .changed()
                     {
                         p.energy_progression = progressing.then_some(EnergyPlan {
+                            arc: amp_core::show::ArcShape::Linear,
                             target: 3.,
                             transitions: 3,
                             hold: true,
@@ -553,10 +600,20 @@ impl Editor {
                             self.mix_request=Some((p.clone(),order));
                         }
                     }
+                    let blocked = dj_handoff_blocker(p, saved, library);
+                    if ui.add_enabled(blocked.is_none(), egui::Button::new("Send to DJ")
+                        .min_size(egui::vec2(140., 38.)))
+                        .on_hover_text(blocked.unwrap_or("Open DJ and start Auto Mix using this saved Smart Playlist"))
+                        .clicked() {
+                        self.send_to_dj = Some(p.id.clone());
+                    }
                 });
+                if let Some(reason) = dj_handoff_blocker(p, saved, library) {
+                    ui.weak(reason);
+                }
                 if !self.preview_order.is_empty() {
                     ui.separator(); ui.strong("Mix preview · suggested order");
-                    for (index,title) in self.preview_order.iter().enumerate() { let row=ui.add(egui::Label::new(format!("{}. {title}",index+1)).truncate().sense(egui::Sense::click_and_drag()));if let Some(path)=self.preview_paths.get(index){crate::dragdrop::source(&row,root.join(path));} }
+                    for (index,title) in self.preview_order.iter().enumerate() { let row=ui.add(egui::Label::new(format!("{}. {title}",index+1)).selectable(false).truncate().sense(egui::Sense::click_and_drag()));if let Some(path)=self.preview_paths.get(index){crate::dragdrop::source(&row,amp_core::music_sources::audio_path(root,path));} }
                     if ui.add_enabled(!self.audition_blocked,egui::Button::new("Audition first track")).on_hover_text("Available when player, DJ, sampler and Auto Mix are stopped").clicked() && let Some(lib)=library && let Some(index)=preview_mix(p,lib).first().copied() {
                         self.preview=Some((lib.tracks[index].path.clone(),lib.tracks[index].preparation.cue_in));
                     }
@@ -586,12 +643,42 @@ impl Editor {
             ui.add_space(8.);ui.add(egui::Label::new(&self.status).wrap());
             if !self.preview_status.is_empty() { ui.add(egui::Label::new(&self.preview_status).wrap()); }
         });
+        settings.version = settings.version.max(settings.required_version());
         ui.ctx().data_mut(|data| {
             data.insert_temp(egui::Id::unique("smart-editor-viewport"), area.inner_rect)
         });
         self.cache_draft();
     }
 }
+// Compare the selected draft at the button, after this frame's edits. Other
+// playlists' drafts do not block a handoff and are never discarded by it.
+fn dj_handoff_blocker(
+    playlist: &amp_core::show::SmartPlaylist,
+    saved: &Settings,
+    library: Option<&amp_core::Library>,
+) -> Option<&'static str> {
+    let published = saved.playlists.iter().find(|p| p.id == playlist.id);
+    if published.is_none()
+        || serde_json::to_value(playlist).ok() != serde_json::to_value(published.unwrap()).ok()
+    {
+        return Some("Save Playlist before sending it to DJ.");
+    }
+    if playlist.source_unavailable {
+        return Some("Reconnect source library before sending to DJ.");
+    }
+    let Some(library) = library else {
+        return Some("Wait for the music library before sending to DJ.");
+    };
+    if !library
+        .tracks
+        .iter()
+        .any(|track| amp_core::show::eligible(playlist, track))
+    {
+        return Some("No matching songs — choose a Music Source and save.");
+    }
+    None
+}
+
 #[derive(serde::Serialize, serde::Deserialize)]
 struct DraftCache {
     draft: Settings,
@@ -623,7 +710,7 @@ fn save_draft_bytes(path: &std::path::Path, bytes: &[u8]) -> std::io::Result<()>
     file.persist(path).map_err(|error| error.error)?;
     Ok(())
 }
-fn source_summary(p: &amp_core::show::SmartPlaylist) -> String {
+pub(super) fn source_summary(p: &amp_core::show::SmartPlaylist) -> String {
     if !p.playlist_sources.is_empty() || p.folders.len() > 1 {
         return format!(
             "{} folders + {} playlist sources",
@@ -741,7 +828,15 @@ fn source_folder_tree(
     selected: Option<&std::path::PathBuf>,
     choice: &mut Option<std::path::PathBuf>,
 ) {
-    let label = format!("{} · {} songs", folder.name, folder_total(folder));
+    if !folder.has_tracks() {
+        return;
+    }
+
+    let label = format!(
+        "{} · {} songs",
+        amp_core::music_sources::display_name(&folder.name),
+        folder_total(folder)
+    );
     let same = selected
         .is_some_and(|p| amp_core::folder_contains(p, path) && amp_core::folder_contains(path, p));
     let header = egui::collapsing_header::CollapsingState::load_with_default_open(
@@ -767,22 +862,19 @@ fn library_folder_picker(
     selected: Option<&std::path::PathBuf>,
 ) -> Option<std::path::PathBuf> {
     let mut choice = None;
-    let button = ui.button("Browse Library Folders…");
-    egui::Popup::menu(&button)
-        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-        .show(|ui| {
-            ui.set_min_width(340.);
-            ui.weak("Select a folder to include every song in its subfolders.");
-            egui::ScrollArea::both()
-                .id_salt("smart-library-tree")
-                .max_height(300.)
-                .show(ui, |ui| {
-                    source_folder_tree(ui, tree, std::path::Path::new(""), selected, &mut choice)
-                });
-            if choice.is_some() {
-                ui.close();
-            }
-        });
+    ui.menu_button("Browse Library Folders…", |ui| {
+        ui.set_min_width(340.);
+        ui.weak("Select a folder to include every song in its subfolders.");
+        egui::ScrollArea::both()
+            .id_salt("smart-library-tree")
+            .max_height(300.)
+            .show(ui, |ui| {
+                source_folder_tree(ui, tree, std::path::Path::new(""), selected, &mut choice)
+            });
+        if choice.is_some() {
+            ui.close();
+        }
+    });
     choice
 }
 fn select_folder(
@@ -994,6 +1086,7 @@ fn merge_rules(
             conflicts.join("; ")
         ));
     }
+    merged.version = merged.version.max(merged.required_version());
     merged.validate()?;
     Ok(merged)
 }
@@ -1182,6 +1275,57 @@ fn source_ui(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn dj_handoff_requires_published_matching_sources_and_preserves_other_drafts() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("song.mp3"), b"fixture").unwrap();
+        let library = amp_core::scan(root.path()).unwrap();
+        let mut saved = test_settings();
+        let selected = &mut saved.playlists[0];
+        selected.allowed.clear();
+        selected.restrict_allowed = false;
+        selected.folders.clear();
+        selected.restrict_folders = false;
+        let mut draft = saved.clone();
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            None
+        );
+        draft.playlists.last_mut().unwrap().name = "Keep my other draft".into();
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            None
+        );
+        draft.playlists[0].name = "Unsaved rename".into();
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            Some("Save Playlist before sending it to DJ.")
+        );
+        draft.playlists[0] = saved.playlists[0].clone();
+        draft.playlists[0].id = "brand-new".into();
+        assert!(dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)).is_some());
+        saved.playlists.push(draft.playlists[0].clone());
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            None
+        );
+        assert!(dj_handoff_blocker(&draft.playlists[0], &saved, None).is_some());
+        let empty = amp_core::Library {
+            tracks: vec![],
+            tree: library.tree.clone(),
+        };
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&empty)),
+            Some("No matching songs — choose a Music Source and save.")
+        );
+        draft.playlists[0].source_unavailable = true;
+        *saved.playlists.last_mut().unwrap() = draft.playlists[0].clone();
+        assert_eq!(
+            dj_handoff_blocker(&draft.playlists[0], &saved, Some(&library)),
+            Some("Reconnect source library before sending to DJ.")
+        );
+        assert_eq!(draft.playlists.last().unwrap().name, "Keep my other draft");
+    }
     fn test_settings() -> Settings {
         let mut settings = Settings::default();
         let mut second = settings.playlists[0].clone();
@@ -1287,6 +1431,25 @@ mod tests {
         println!("Music root selection includes {count} songs recursively");
     }
     #[test]
+    fn clean_filter_editor_merge_upgrades_schema_before_save() {
+        let root = tempfile::tempdir().unwrap();
+        let baseline = test_settings();
+        baseline.save(root.path()).unwrap();
+        let current = Settings::load(root.path()).unwrap();
+        let mut draft = current.clone();
+        draft.playlists[0]
+            .filters
+            .push(amp_core::smart_filters::Filter::new(
+                amp_core::smart_filters::Field::Clean,
+            ));
+        let merged = merge_rules(&current, &draft, &current, false).unwrap();
+        assert_eq!(merged.version, 3);
+        merged.save(root.path()).unwrap();
+        let saved = Settings::load(root.path()).unwrap();
+        assert!(saved.playlists[0].requires_advisory());
+        assert_eq!(saved.version, 3);
+    }
+    #[test]
     fn top_save_button_publishes_the_draft_even_with_a_lower_save_button() {
         let root = tempfile::tempdir().unwrap();
         test_settings().save(root.path()).unwrap();
@@ -1294,6 +1457,7 @@ mod tests {
         let mut editor = Editor::default();
         editor.open_playlist("demo", root.path(), &saved);
         editor.draft.as_mut().unwrap().playlists[0].name = "Saved by top button".into();
+        editor.draft.as_mut().unwrap().playlists[0].genres = vec!["Rock".into(), "R&B".into()];
         let context = egui::Context::default();
         let mut draw = |position: egui::Pos2, pressed: Option<bool>| {
             let mut raw = egui::RawInput {
@@ -1327,6 +1491,10 @@ mod tests {
         assert_eq!(
             Settings::load(root.path()).unwrap().playlists[0].name,
             "Saved by top button"
+        );
+        assert_eq!(
+            Settings::load(root.path()).unwrap().playlists[0].genres,
+            vec!["Rock", "R&B"]
         );
         assert!(!editor.has_unsaved());
     }
@@ -1458,14 +1626,40 @@ mod tests {
         assert_eq!(serde_json::to_value(&profile).unwrap(), before);
     }
     #[test]
+    fn all_indexed_music_keeps_genre_filters_and_matches_without_folder_selection() {
+        let mut profile = Settings::default().playlists.remove(0);
+        set_source_mode(&mut profile, SourceMode::Folders);
+        profile.genres = vec!["Electronic".into()];
+        profile.excluded = vec!["keep-excluded".into()];
+        let mut track = amp_core::Track {
+            path: "__amp_sources/extra/song.mp3".into(),
+            title: "Track".into(),
+            preparation: Default::default(),
+        };
+        track
+            .preparation
+            .extensions
+            .insert("genre".into(), serde_json::json!("Electronic"));
+        assert!(!amp_core::show::eligible(&profile, &track));
+        set_source_mode(&mut profile, SourceMode::All);
+        assert_eq!(profile.genres, vec!["Electronic"]);
+        assert_eq!(profile.excluded, vec!["keep-excluded"]);
+        assert!(amp_core::show::eligible(&profile, &track));
+        track
+            .preparation
+            .extensions
+            .insert("genre".into(), serde_json::json!("Rock"));
+        assert!(!amp_core::show::eligible(&profile, &track));
+    }
+    #[test]
     fn local_draft_persistence_and_new_playlist_keep_ids_and_saved_rules() {
         let dir = tempfile::tempdir().unwrap();
         let saved = test_settings();
         let mut editor = Editor::default();
         editor.new_playlist(dir.path(), &saved);
         let new = editor.draft.as_ref().unwrap().playlists.last().unwrap();
-        assert!(new.restrict_folders && new.folders.is_empty());
-        assert!(new.restrict_allowed);
+        assert!(!new.restrict_folders && new.folders.is_empty());
+        assert!(!new.restrict_allowed);
         assert_eq!(saved.playlists.len(), 2);
         let mut draft = saved.clone();
         draft.playlists[0].name = "Local name".into();
@@ -1485,6 +1679,30 @@ mod tests {
         assert_eq!(restored.draft.playlists[0].style, Style::Chill);
         assert_eq!(restored.draft.playlists[0].target_energy, Some(3.));
         assert!(!dir.path().join("ampdj/smart-playlists.json").exists());
+    }
+    #[test]
+    fn recovered_demo_draft_keeps_existing_shared_playlists_visible() {
+        let base = Settings::default();
+        let mut draft = base.clone();
+        draft.playlists[0].restrict_folders = true;
+        let current = test_settings();
+        let restored = merge_rules(&base, &draft, &current, false).unwrap();
+        for playlist in &current.playlists {
+            assert!(restored.playlists.iter().any(|p| p.id == playlist.id));
+        }
+    }
+    #[test]
+    fn smart_card_source_summary_distinguishes_library_from_empty_selection() {
+        let mut p = test_settings().playlists.remove(0);
+        set_source_mode(&mut p, SourceMode::All);
+        assert_eq!(source_summary(&p), "Entire library");
+        set_source_mode(&mut p, SourceMode::Folders);
+        assert_eq!(source_summary(&p), "No music source selected");
+        p.folders.push("Dance".into());
+        assert_eq!(source_summary(&p), "Folder: Dance");
+        set_source_mode(&mut p, SourceMode::Songs);
+        p.allowed.push("track-id".into());
+        assert_eq!(source_summary(&p), "Playlist / selected songs");
     }
     #[test]
     fn empty_source_selection_never_expands_to_entire_library() {
@@ -1523,6 +1741,7 @@ mod tests {
             },
         };
         let list = amp_core::Playlist {
+            companion_available: false,
             sync: None,
             version: 1,
             name: "Source".into(),

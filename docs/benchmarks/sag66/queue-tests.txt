@@ -1,0 +1,19 @@
+   Compiling amp-core v1.0.22 (/srv/sager-work/sager/projects/amp-verse-next-major-worktrees/codex-sag66/crates/amp-core)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 28.34s
+     Running unittests src/lib.rs (target/debug/deps/amp_core-7b3810fb8fd2c692)
+
+running 12 tests
+test library_engine::analysis_queue::heartbeat_retry_tests::cancellation_during_backoff_prevents_another_write ... ok
+test library_engine::analysis_queue::heartbeat_retry_tests::disconnected_stop_channel_does_not_renew ... ok
+test library_engine::analysis_queue::heartbeat_retry_tests::ownership_loss_and_unknown_errors_are_terminal ... ok
+test library_engine::analysis_queue::heartbeat_retry_tests::persistent_contention_is_bounded ... ok
+test library_engine::analysis_queue::heartbeat_retry_tests::transient_failure_recovers_and_resets_retry_budget ... ok
+test library_engine::analysis_queue::tests::cached_waiting_songs_start_without_a_filesystem_rescan ... ok
+test library_engine::analysis_queue::tests::directory_observations_are_not_confirmed_with_a_second_stat ... ok
+test library_engine::analysis_queue::tests::fifo_changes_resume_and_failure_do_not_restart_completed_work ... ok
+test library_engine::analysis_queue::tests::queue_paths_use_portable_relative_separators ... ok
+test library_engine::analysis_queue::tests::shared_index_claims_are_exclusive_expire_and_do_not_rewrite_unchanged_work ... ok
+test library_engine::analysis_queue::tests::six_thousand_jobs_are_persistent_without_retaining_preparation ... ok
+test library_engine::analysis_queue::transient_failure_tests::lock_contention_stays_pending_and_legacy_contention_is_recovered ... ok
+
+test result: ok. 12 passed; 0 failed; 0 ignored; 0 measured; 88 filtered out; finished in 21.65s
