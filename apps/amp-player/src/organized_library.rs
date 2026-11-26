@@ -1,6 +1,6 @@
 use super::*;
 #[path = "library_cards.rs"]
-mod cards;
+pub(super) mod cards;
 /// Shared local-artwork renderer; two pending decodes, at most64 cached textures.
 /// Falls back to a code-drawn tile without network requests.
 pub(super) fn artwork(
