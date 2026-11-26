@@ -3574,6 +3574,7 @@ mod tests {
                 .tracks
                 .is_empty()
         );
+        wait(&mut player, |p| !p.audio.as_ref().unwrap().playing(deck));
         assert!(!player.audio.as_ref().unwrap().playing(deck));
         assert!(!player.run.auto);
         for i in 0..3 {
