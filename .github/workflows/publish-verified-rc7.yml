@@ -1,0 +1,23 @@
+name: Publish verified complete RC7
+on:
+  push:
+    branches: ['fix/publish-rc7']
+    paths: ['.github/workflows/publish-verified-rc7.yml', 'tools/publish_verified_rc7.py', 'deploy/releases/rc7-inventory.json']
+permissions:
+  contents: write
+  actions: read
+concurrency:
+  group: publish-complete-rc7
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Verify frozen source, platform qualifications and every uploaded asset before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python3 tools/publish_verified_rc7.py
