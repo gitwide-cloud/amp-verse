@@ -1,13 +1,13 @@
 # AMP⚡VERSE
 
-## Latest test release: 1.1.0-rc.5
+## Latest test release: 1.1.0-rc.6
 
-**[Download RC5 for all platforms](https://github.com/gitwide-cloud/amp-verse/releases/tag/v1.1.0-rc.5)**
+**[Download RC6 for all platforms](https://github.com/gitwide-cloud/amp-verse/releases/tag/v1.1.0-rc.6)**
 
-- [Windows desktop installer (.exe)](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.5/AMP-Verse-Desktop-Setup-1.1.0-rc.5.exe)
-- [Android Full APK, build 49](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.5/amp-verse-full-1.1.0-rc.5-b49-arm64-v8a.apk)
-- [Windows standalone server installer (.zip)](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.5/AMP-Verse-Server-Setup-1.1.0-rc.5-windows-x86_64.zip)
-- [Linux desktop](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.5/amp-verse-linux-v1.1.0-rc.5.zip) / [Linux standalone server](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.5/amp-verse-server-linux-v1.1.0-rc.5.zip)
+- [Windows desktop installer (.exe)](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.6/AMP-Verse-Desktop-Setup-1.1.0-rc.6.exe)
+- [Android Full APK, build 50](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.6/amp-verse-full-1.1.0-rc.6-b50-arm64-v8a.apk)
+- [Windows standalone server installer (.zip)](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.6/AMP-Verse-Server-Setup-1.1.0-rc.6-windows-x86_64.zip)
+- [Linux desktop](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.6/amp-verse-linux-v1.1.0-rc.6.zip) / [Linux standalone server](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.6/amp-verse-server-linux-v1.1.0-rc.6.zip)
 
 This is a release candidate for testing. Android Lite, the five existing Android companion add-ons, analysis engines, the Bitfocus Companion module and checksums are on the release page. Older in-app update checkers show stable releases only; download this RC directly from GitHub. Install over your existing app without uninstalling to retain its data.
 
