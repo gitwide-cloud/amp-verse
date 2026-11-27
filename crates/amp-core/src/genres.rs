@@ -101,6 +101,20 @@ pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparatio
             }
         }
 
+        if tag.tag_type() == lofty::tag::TagType::Id3v2 {
+            let id3: lofty::id3::v2::Id3v2Tag = tag.clone().into();
+            for frame in &id3 {
+                if let lofty::id3::v2::Frame::UserText(text) = frame {
+                    for canonical in ["Holiday", "Season"] {
+                        if text.description.eq_ignore_ascii_case(canonical) {
+                            tags.entry(canonical.into())
+                                .or_default()
+                                .push(text.content.to_string());
+                        }
+                    }
+                }
+            }
+        }
         for item in tag.items() {
             let value = match item.value() {
                 lofty::tag::ItemValue::Text(text) | lofty::tag::ItemValue::Locator(text) => {
@@ -110,15 +124,6 @@ pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparatio
                     format!("[{} bytes of binary metadata]", bytes.len())
                 }
             };
-            if let ItemKey::Unknown(key) = item.key() {
-                for canonical in ["Holiday", "Season"] {
-                    if key.eq_ignore_ascii_case(canonical) {
-                        tags.entry(canonical.into())
-                            .or_default()
-                            .push(value.clone());
-                    }
-                }
-            }
             tags.entry(format!("{:?}", item.key()))
                 .or_default()
                 .push(value);
