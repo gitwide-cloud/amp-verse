@@ -1,0 +1,152 @@
+[
+  {
+    "name": "amp-analysis-engine-linux-v1.1.0-rc.6.zip",
+    "sha256": "f7b31aa96d80bf455e48193d302ffa1d0ec3ca4216538001c0c3163733510b8b",
+    "size": 4172486
+  },
+  {
+    "name": "amp-analysis-engine-windows-v1.1.0-rc.6.zip",
+    "sha256": "4d23c14f6b6068761b18f7b1fab596843421e95033cbdb47964af3cdbbc48834",
+    "size": 3830186
+  },
+  {
+    "name": "amp-engine-linux-x86_64",
+    "sha256": "68def45de031fd00b634b5dc615fe16736a5f332021f584f03354d2527de722f",
+    "size": 4365880
+  },
+  {
+    "name": "amp-engine-windows-x86_64.exe",
+    "sha256": "66b548cecc3fc989ef5856ff1e02d2618ef4d04acb018c89015379a5c49aa30d",
+    "size": 4148736
+  },
+  {
+    "name": "amp-modules.json",
+    "sha256": "33352109affeb4c83f4301d5c06b84926fff4f0143ef526106493c705ac52672",
+    "size": 6031
+  },
+  {
+    "name": "amp-update.json",
+    "sha256": "09abd07e284adcb30b829115e81ca8b5d96a5cf3372028b47746960b75384256",
+    "size": 2648
+  },
+  {
+    "name": "amp-verse-cast-1.1.0-rc.6-b50-arm64-v8a.apk",
+    "sha256": "494e3274ba73d4df665892d37d89a5e91c353a2e31e45112873789f0c60fb207",
+    "size": 16101719
+  },
+  {
+    "name": "amp-verse-cast-1.1.0-rc.6-b50-arm64-v8a.apk.sha256",
+    "sha256": "111db53bfc52e4940abb029bf14e80a4ef7b34c7dbf05637427eca4b81bf7dbe",
+    "size": 111
+  },
+  {
+    "name": "AMP-Verse-Desktop-Setup-1.1.0-rc.6.exe",
+    "sha256": "90ef10ed114bcbca2295f73c501b701bf41f0698ff6e1e8918897c3185b5fe01",
+    "size": 300486656
+  },
+  {
+    "name": "amp-verse-dj-1.1.0-rc.6-b50-arm64-v8a.apk",
+    "sha256": "dcf90a158796a262604d5e4fcacf206d0649b2c5defedfa4d5545cd2b7a13b7d",
+    "size": 12636512
+  },
+  {
+    "name": "amp-verse-dj-1.1.0-rc.6-b50-arm64-v8a.apk.sha256",
+    "sha256": "0858185f2ffa90a8819e5fb1f06654783806bdbecdb3d9175661df3255efdca5",
+    "size": 109
+  },
+  {
+    "name": "amp-verse-full-1.1.0-rc.6-b50-arm64-v8a.apk",
+    "sha256": "3d2e8e268d4cfb0d69aa1613185e207d45359d3047c8d419f4dcb6286b473c50",
+    "size": 49220370
+  },
+  {
+    "name": "amp-verse-full-1.1.0-rc.6-b50-arm64-v8a.apk.sha256",
+    "sha256": "5657b8443c2aab533835b3918a19d795dd0d7391bf0c0191db718d503742bf36",
+    "size": 111
+  },
+  {
+    "name": "amp-verse-lab-1.1.0-rc.6-b50-arm64-v8a.apk",
+    "sha256": "894a28027856b6dd9eb4a67eb1b786da58b1c3d0672af29badbfd663a7e12120",
+    "size": 42867404
+  },
+  {
+    "name": "amp-verse-lab-1.1.0-rc.6-b50-arm64-v8a.apk.sha256",
+    "sha256": "e365081412e978ba2871c17255fe860e445fc3d107c520468a3a891dd71277c5",
+    "size": 110
+  },
+  {
+    "name": "amp-verse-linux-v1.1.0-rc.6.zip",
+    "sha256": "c59b5f55c145a0190812c0d3d004a1ded12ebfe37c71931cf0d95f997c913d5d",
+    "size": 172263001
+  },
+  {
+    "name": "amp-verse-lite-1.1.0-rc.6-b50-arm64-v8a.apk",
+    "sha256": "4fa5328f1b572cf8b4afbc61a759c542b6b39372c332a1c70dc2da2abc52376e",
+    "size": 15401449
+  },
+  {
+    "name": "amp-verse-lite-1.1.0-rc.6-b50-arm64-v8a.apk.sha256",
+    "sha256": "7d223788c909b342a4b0fc696ea65de1e2e73672b5089d6c43639a649f516ec7",
+    "size": 111
+  },
+  {
+    "name": "amp-verse-podcasts-1.1.0-rc.6-b50-arm64-v8a.apk",
+    "sha256": "d2b0cef6444f57892c6ece66e47273761719c3aa69008a1d1df05c4d699deb14",
+    "size": 12648800
+  },
+  {
+    "name": "amp-verse-podcasts-1.1.0-rc.6-b50-arm64-v8a.apk.sha256",
+    "sha256": "151937501aa7db670233fd58cc8e5bfe8106041167dee40442e7b286078e6d66",
+    "size": 115
+  },
+  {
+    "name": "amp-verse-remote-1.1.0-rc.6-b50-arm64-v8a.apk",
+    "sha256": "281b1e3575cbb3bd5e6940a243826c47f19c36623fdf3a044fdd1624b143c379",
+    "size": 12706144
+  },
+  {
+    "name": "amp-verse-remote-1.1.0-rc.6-b50-arm64-v8a.apk.sha256",
+    "sha256": "0f6bef954eda09b48f77ee5c9d1bc0c153a29979efd66a3fa4333b77d854c03c",
+    "size": 113
+  },
+  {
+    "name": "amp-verse-server-linux-v1.1.0-rc.6.zip",
+    "sha256": "0889c10711e23d9d3057e87466468ba16e42ea51bdd891f600a730bb1e34294a",
+    "size": 35457639
+  },
+  {
+    "name": "AMP-Verse-Server-Setup-1.1.0-rc.6-windows-x86_64.zip",
+    "sha256": "bb2bebcbc92ea21a76d066a70bb61cf8c8f6c56bf2e396fa752c47aca6eb06a5",
+    "size": 228204249
+  },
+  {
+    "name": "amp-verse-windows-v1.1.0-rc.6.zip",
+    "sha256": "d2494a132ce14901bb668f92e91f046f326047dbcd8cfdd06bbacf757d1669d4",
+    "size": 298541709
+  },
+  {
+    "name": "ampverse-0.2.0.tgz",
+    "sha256": "d18541e93219b727b4628fef169127aac087eb1cf19df13b849c269d89f78bb3",
+    "size": 25913
+  },
+  {
+    "name": "android-packages.json",
+    "sha256": "e44ad54cb2823cdb469e396680a0d167b36659594f66ebf967bcc7d3e210defb",
+    "size": 2246
+  },
+  {
+    "name": "release-provenance.json",
+    "sha256": "93b915e4599d40291c8d599fc5b53fa67ba00d2a32521034e577a7cdb3c36b35",
+    "size": 6443
+  },
+  {
+    "name": "SHA256SUMS.txt",
+    "sha256": "8fb040085fb95330d179c0bae62b5f1293ea5427ff0b88c2b2775978d5ae820e",
+    "size": 3077
+  },
+  {
+    "name": "signed-package-receipt.json",
+    "sha256": "0ec2db9859b87dc82a14ec4e6921e4842fe573a304171b761261280627c2a7d5",
+    "size": 7087
+  }
+]
