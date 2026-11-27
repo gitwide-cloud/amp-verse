@@ -19,7 +19,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: actions/checkout@v4
         with:
-          ref: '5d18affe41a5a96214c93e3c6f65b392082e90e2'
+          ref: '263042ffeff55102b17dd3875caec4c741b6bf51'
           fetch-depth: 0
           path: product-source
       - uses: actions/setup-python@v5
@@ -31,7 +31,7 @@ jobs:
         run: |
           python3 tools/test_package_android_local_signing.py
           cd product-source
-          test "$(git rev-parse HEAD)" = 5d18affe41a5a96214c93e3c6f65b392082e90e2
+          test "$(git rev-parse HEAD)" = 263042ffeff55102b17dd3875caec4c741b6bf51
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -63,14 +63,14 @@ jobs:
             sleep 20
           done
           test "$reviewed" = true
-          python3 tools/android_rc.py gate --ref refs/heads/release/thanksgiving-20261126 --tag v1.1.0-rc.6 --native-run 46067254244 --output "$RUNNER_TEMP/android-local-source-gate.json"
+          python3 tools/android_rc.py gate --ref refs/heads/release/thanksgiving-20261126 --tag v1.1.0-rc.6 --native-run 46068873752 --output "$RUNNER_TEMP/android-local-source-gate.json"
           cd ..
           mkdir -p android-local-unsigned
           cp "$RUNNER_TEMP/android-local-source-gate.json" android-local-unsigned/
-          python3 tools/package_android_local_signing.py --source product-source --destination android-local-unsigned --expected-source 5d18affe41a5a96214c93e3c6f65b392082e90e2
+          python3 tools/package_android_local_signing.py --source product-source --destination android-local-unsigned --expected-source 263042ffeff55102b17dd3875caec4c741b6bf51
       - uses: actions/upload-artifact@v4
         with:
-          name: android-local-unsigned-5d18affe
+          name: android-local-unsigned-263042ff
           path: android-local-unsigned/
           if-no-files-found: error
       - uses: actions/upload-artifact@v4
