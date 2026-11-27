@@ -21,6 +21,9 @@ pub fn canonical(value: &str) -> String {
     let value = value.trim();
     match value.to_lowercase().as_str() {
         "r&b" | "rnb" | "r & b" | "rhythm and blues" | "rhythm & blues" => "R&B".into(),
+        "hip-hop" | "hip hop" | "hiphop" => "hip-hop".into(),
+        "d&b" | "dnb" | "drum and bass" | "drum & bass" => "drum & bass".into(),
+        "acapella" | "acappella" | "a capella" | "a cappella" => "a cappella".into(),
         "rock" => "Rock".into(),
         _ => value.to_lowercase(),
     }
@@ -132,6 +135,24 @@ pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparatio
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn normalized_file_tags_keep_legacy_playlist_genres_matching() {
+        for (old, corrected) in [
+            ("Hip Hop", "Hip-Hop"),
+            ("hiphop", "Hip-Hop"),
+            ("DNB", "Drum & Bass"),
+            ("drum and bass", "Drum & Bass"),
+            ("Acapella", "A cappella"),
+            ("RNB", "R&B"),
+        ] {
+            let mut p = Preparation::default();
+            p.extensions
+                .insert("genre".into(), serde_json::json!(corrected));
+            assert!(matches(&[old.into()], &p));
+            p.extensions.insert("genre".into(), serde_json::json!(old));
+            assert!(matches(&[corrected.into()], &p));
+        }
+    }
     #[test]
     fn scanner_reads_embedded_tags_without_analysis_or_audio_changes() {
         let root = tempfile::tempdir().unwrap();
