@@ -24,6 +24,7 @@ mod docking;
 mod dragdrop;
 mod engine;
 mod engine_download;
+mod genre_picker;
 mod google_cast;
 mod hot_cues;
 mod icons;

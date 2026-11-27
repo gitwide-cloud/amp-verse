@@ -38,6 +38,7 @@ pub struct Editor {
     selected: usize,
     status: String,
     search: String,
+    genre_picker: crate::genre_picker::Picker,
     assignments_open: bool,
     draft: Option<Settings>,
     baseline: Option<Settings>,
@@ -390,22 +391,7 @@ impl Editor {
                 ui.strong("Genres");
                 ui.horizontal_wrapped(|ui| {
                     if ui.selectable_label(p.genres.is_empty(), "All genres").clicked() { p.genres.clear(); }
-                    let mut choices = std::collections::BTreeSet::from(["Rock".to_owned(), "R&B".to_owned()]);
-                    choices.extend(p.genres.iter().cloned());
-                    if let Some(lib) = library {
-                        for track in &lib.tracks { choices.extend(amp_core::genres::values(&track.preparation)); }
-                    }
-                    egui::ComboBox::from_id_salt("smart-genres")
-                        .selected_text(if p.genres.is_empty() { "Choose genres…".to_owned() } else if p.genres.join(" + ").chars().count() <= 36 { p.genres.join(" + ") } else { format!("{} genres selected", p.genres.len()) })
-                        .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
-                        .show_ui(ui, |ui| {
-                            for genre in choices {
-                                let mut checked = p.genres.contains(&genre);
-                                if ui.checkbox(&mut checked, &genre).changed() {
-                                    if checked { p.genres.push(genre); } else { p.genres.retain(|g| g != &genre); }
-                                }
-                            }
-                        });
+                    self.genre_picker.show(ui, &mut p.genres, library);
                 });
                 if !p.genres.is_empty() {
                     let count = library.map_or(0, |lib| lib.tracks.iter().filter(|t| amp_core::show::eligible(p,t)).count());
