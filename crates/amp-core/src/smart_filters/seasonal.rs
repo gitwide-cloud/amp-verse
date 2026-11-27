@@ -163,8 +163,10 @@ mod tests {
     use super::*;
     use crate::{Track, smart_filters::Filter};
     fn track(data: serde_json::Value) -> Track {
-        let mut p = Preparation::default();
-        p.extensions = serde_json::from_value(data).unwrap();
+        let p = Preparation {
+            extensions: serde_json::from_value(data).unwrap(),
+            ..Default::default()
+        };
         Track {
             path: "song.mp3".into(),
             title: "song".into(),
