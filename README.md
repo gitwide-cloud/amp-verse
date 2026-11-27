@@ -1,5 +1,16 @@
 # AMP⚡VERSE
 
+## Latest test release: 1.1.0-rc.5
+
+**[Download RC5 for all platforms](https://github.com/gitwide-cloud/amp-verse/releases/tag/v1.1.0-rc.5)**
+
+- [Windows desktop installer (.exe)](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.5/AMP-Verse-Desktop-Setup-1.1.0-rc.5.exe)
+- [Android Full APK, build 49](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.5/amp-verse-full-1.1.0-rc.5-b49-arm64-v8a.apk)
+- [Windows standalone server installer (.zip)](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.5/AMP-Verse-Server-Setup-1.1.0-rc.5-windows-x86_64.zip)
+- [Linux desktop](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.5/amp-verse-linux-v1.1.0-rc.5.zip) / [Linux standalone server](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.5/amp-verse-server-linux-v1.1.0-rc.5.zip)
+
+This is a release candidate for testing. Android Lite, the five existing Android companion add-ons, analysis engines, the Bitfocus Companion module and checksums are on the release page. Older in-app update checkers show stable releases only; download this RC directly from GitHub. Install over your existing app without uninstalling to retain its data.
+
 **Your music. Your playground.**
 
 AMP⚡VERSE is an open-source music player and DJ playground built for music hobbyists, home labs, and anyone who loves having their own music collection.
@@ -50,7 +61,7 @@ The desktop and Android editions do not yet have identical features. See [Androi
 
 **[Browse releases](https://github.com/gitwide-cloud/amp-verse/releases)** · **[Builds and tests](https://github.com/gitwide-cloud/amp-verse/actions)**
 
-Download an available build for your platform from Releases. This is an actively developed project: check the release notes and workflow results before treating a preview as production-ready.
+Download an available build for your platform from Releases. This is an actively developed project: check the release notes and workflow results before treating a test build as production-ready.
 
 If you'd rather build from source, you'll need the Rust toolchain and the audio/runtime dependencies described in the project documentation.
 
