@@ -57,7 +57,7 @@ pub fn show(ui: &mut egui::Ui, playlist: &mut SmartPlaylist, library: Option<&Li
                         ui.selectable_value(exact,true,"is");ui.selectable_value(exact,false,"contains");
                         ui.add(egui::TextEdit::singleline(terms).desired_width(220.).hint_text("Value; another value"));
                         ui.menu_button("Choose values…",|ui|{
-                            let mut values=std::collections::BTreeSet::new();
+                            let mut values:std::collections::BTreeSet<String>=amp_core::smart_filters::seasonal_presets(*field).iter().map(|s|(*s).to_owned()).collect();
                             if let Some(library)=library{for track in &library.tracks{values.extend(amp_core::smart_filters::texts(*field,&track.preparation).into_iter().filter(|v|!v.trim().is_empty()));}}
                             if values.is_empty(){ui.weak("No saved values in this library yet.");}
                             egui::ScrollArea::vertical().max_height(220.).show(ui,|ui|{
@@ -71,6 +71,7 @@ pub fn show(ui: &mut egui::Ui, playlist: &mut SmartPlaylist, library: Option<&Li
                     }
                 }
             });
+            if matches!(filter.field(),Field::Holiday|Field::Season) {ui.weak("Uses saved holiday/season tags and clearly labeled music. Seasons are not inferred from holidays or today’s date. Choose values; separate multiple choices with ;. Update other devices before syncing these new filters.");}
             if filter.field()==Field::Clean {ui.weak("Yes includes only reliably marked Clean tracks. No includes Explicit and Unknown. Titles never establish Clean status. Update desktop and server together before syncing these rules.");}
             if filter.field()==Field::StemCount {ui.weak("Counts saved stem entries. Device-local stem readiness is shown separately in the DJ library.");}
             if filter.field()==Field::SectionName {ui.weak("Uses saved section labels; automatic energy sections are not semantic verse/chorus labels.");}

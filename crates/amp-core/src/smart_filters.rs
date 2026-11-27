@@ -1,9 +1,13 @@
 //! Portable AND filters over actual preparation and embedded metadata. Missing required values never match.
 use crate::{Preparation, Track};
 use serde::{Deserialize, Serialize};
+mod seasonal;
+pub use seasonal::presets as seasonal_presets;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Field {
     Clean,
+    Holiday,
+    Season,
     Bpm,
     TempoAlternative,
     Key,
@@ -45,6 +49,8 @@ pub enum Kind {
 }
 impl Field {
     pub const ALL: &'static [Self] = &[
+        Self::Holiday,
+        Self::Season,
         Self::Clean,
         Self::Bpm,
         Self::TempoAlternative,
@@ -81,6 +87,8 @@ impl Field {
     ];
     pub fn label(self) -> &'static str {
         match self {
+            Self::Holiday => "Holiday",
+            Self::Season => "Season",
             Self::Clean => "Clean / non-explicit (known clean only)",
             Self::Bpm => "BPM",
             Self::TempoAlternative => "Alternative BPM",
@@ -118,7 +126,9 @@ impl Field {
     }
     pub fn kind(self) -> Kind {
         match self {
-            Self::Key
+            Self::Holiday
+            | Self::Season
+            | Self::Key
             | Self::Camelot
             | Self::CueKind
             | Self::CueLabel
@@ -315,6 +325,7 @@ fn strings(value: Option<&serde_json::Value>) -> Vec<String> {
 }
 pub fn texts(field: Field, p: &Preparation) -> Vec<String> {
     match field {
+        Field::Holiday | Field::Season => seasonal::values(field, p),
         Field::Key => p.key.iter().cloned().collect(),
         Field::Camelot => p.harmonic_key.iter().cloned().collect(),
         Field::Engine => p.analysis.iter().map(|a| a.engine.clone()).collect(),
