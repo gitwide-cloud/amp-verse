@@ -110,7 +110,7 @@ def package(role, application, engine, archive, crt, output, run_id):
         encoding="utf-8")
     shutil.copy2(ROOT / "tools/launch-windows-installed.ps1", payload / "launch-windows-installed.ps1")
     shutil.copy2(ROOT / "tools/install-windows-package.ps1", output / "install-windows-package.ps1")
-    entry = '@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%~dp0install-windows-package.ps1" -CreateShortcuts\r\npause\r\n'
+    entry = '@echo off\r\npowershell.exe -NoProfile -ExecutionPolicy Bypass -STA -File "%~dp0install-windows-package.ps1" -PackageRoot "%~dp0." -CreateShortcuts\r\npause\r\n'
     (output / "Install AMP Verse.cmd").write_bytes(entry.encode())
     modes = {"Launch AMP Verse.cmd": "Window"} if role == "Desktop" else {
         "Open AMP Verse Server.cmd": "Window", "Server Tray.cmd": "Tray",
