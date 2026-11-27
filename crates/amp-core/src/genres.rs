@@ -84,6 +84,13 @@ pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparatio
         // Convert a clone back to the format-specific view; never write it.
         if tag.tag_type() == lofty::tag::TagType::VorbisComments {
             let comments: lofty::ogg::tag::VorbisComments = tag.clone().into();
+            for (source, canonical) in [("HOLIDAY", "Holiday"), ("SEASON", "Season")] {
+                for value in comments.get_all(source) {
+                    tags.entry(canonical.into())
+                        .or_default()
+                        .push(value.to_owned());
+                }
+            }
             for value in comments.get_all("ITUNESADVISORY") {
                 tags.entry("ITUNESADVISORY".into())
                     .or_default()
@@ -103,6 +110,15 @@ pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparatio
                     format!("[{} bytes of binary metadata]", bytes.len())
                 }
             };
+            if let ItemKey::Unknown(key) = item.key() {
+                for canonical in ["Holiday", "Season"] {
+                    if key.eq_ignore_ascii_case(canonical) {
+                        tags.entry(canonical.into())
+                            .or_default()
+                            .push(value.clone());
+                    }
+                }
+            }
             tags.entry(format!("{:?}", item.key()))
                 .or_default()
                 .push(value);

@@ -111,6 +111,9 @@ pub(super) fn values(field: Field, p: &Preparation) -> Vec<String> {
             }
         }
     }
+    if !out.is_empty() {
+        return out;
+    }
     // Genre and album labels are useful for existing libraries without new tags.
     let mut labels = crate::genres::values(p);
     labels.extend(super::texts(Field::Album, p));
@@ -201,7 +204,9 @@ mod tests {
     }
     #[test]
     fn aliases_multiple_choices_and_round_trip_preserve_eligibility() {
-        let t = track(serde_json::json!({"holiday":["Xmas","New Year's Eve"],"season":"Fall"}));
+        let t = track(
+            serde_json::json!({"holiday":["Xmas","New Year's Eve"],"season":"Fall","album":"Summer Hits"}),
+        );
         assert_eq!(
             values(Field::Holiday, &t.preparation),
             vec!["Christmas", "New Year"]
@@ -232,5 +237,33 @@ mod tests {
             &synced,
             &track(serde_json::json!({}))
         ));
+    }
+    #[test]
+    fn custom_file_tags_are_imported_without_writing_audio() {
+        let root = tempfile::tempdir().unwrap();
+        let path = root.path().join("music.flac");
+        let mut bytes = b"fLaC".to_vec();
+        bytes.extend([0, 0, 0, 34]);
+        let mut info = [0u8; 34];
+        info[0..2].copy_from_slice(&4096u16.to_be_bytes());
+        info[2..4].copy_from_slice(&4096u16.to_be_bytes());
+        info[10..18].copy_from_slice(&((44100u64 << 44) | (15u64 << 36) | 44100).to_be_bytes());
+        bytes.extend(info);
+        let mut comments = Vec::new();
+        comments.extend(0u32.to_le_bytes());
+        comments.extend(2u32.to_le_bytes());
+        for tag in ["HOLIDAY=Xmas", "SEASON=Fall"] {
+            comments.extend((tag.len() as u32).to_le_bytes());
+            comments.extend(tag.as_bytes());
+        }
+        bytes.push(0x84);
+        bytes.extend((comments.len() as u32).to_be_bytes()[1..].iter());
+        bytes.extend(comments);
+        std::fs::write(&path, &bytes).unwrap();
+        let mut p = Preparation::default();
+        crate::genres::read_embedded(&path, &mut p);
+        assert_eq!(values(Field::Holiday, &p), vec!["Christmas"]);
+        assert_eq!(values(Field::Season, &p), vec!["Autumn"]);
+        assert_eq!(std::fs::read(path).unwrap(), bytes);
     }
 }

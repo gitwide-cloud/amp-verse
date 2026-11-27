@@ -19,6 +19,7 @@ final class SeasonalMusic {
         List<String> explicit=new ArrayList<>();PhoneSmartRules.strings(x.opt(key),explicit);PhoneSmartRules.strings(tags.opt(field),explicit);
         Set<String> out=new LinkedHashSet<>();
         for(String raw:explicit)for(String part:raw.split("[;/\\x00]")){String value=normalize(part);if(field.equals("Holiday"))classifyHoliday(value,out);else{String name=season(value);if(name!=null)out.add(name);}}
+        if(!out.isEmpty())return new ArrayList<>(out);
         List<String> rawGenres=new ArrayList<>(),labels=new ArrayList<>();PhoneSmartRules.strings(x.has("genre")?x.opt("genre"):x.opt("embedded_genres"),rawGenres);
         for(String raw:rawGenres)for(String part:raw.split("[;/\\x00]"))labels.add(part);
         PhoneSmartRules.strings(x.has("album")?x.opt("album"):tags.opt("AlbumTitle"),labels);

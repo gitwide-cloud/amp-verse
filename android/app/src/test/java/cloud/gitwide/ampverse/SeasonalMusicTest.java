@@ -15,7 +15,7 @@ public class SeasonalMusicTest {
         assertTrue(SeasonalMusic.values(new JSONObject("{\"title\":\"Winter Wonderland\",\"album\":\"Fall Out Boy\"}"),"Season").isEmpty());
     }
     @Test public void explicitAliasesAndLegacyPreparationMatchDesktop() throws Exception {
-        JSONObject p=new JSONObject("{\"extensions\":{\"holiday\":[\"Xmas\",\"New Year's Eve\"],\"season\":\"Fall\"}}");
+        JSONObject p=new JSONObject("{\"extensions\":{\"holiday\":[\"Xmas\",\"New Year's Eve\"],\"season\":\"Fall\",\"album\":\"Summer Hits\"}}");
         assertEquals(Arrays.asList("Christmas","New Year"),SeasonalMusic.values(p,"Holiday"));
         assertEquals(Arrays.asList("Autumn"),SeasonalMusic.values(p,"Season"));
         assertEquals("Text",PhoneSmartRules.kind("Holiday"));assertEquals("Text",PhoneSmartRules.kind("Season"));
