@@ -63,7 +63,7 @@ dependencies = [
 
 [[package]]
 name = "amp-cast"
-version = "1.1.0-rc.6"
+version = "1.1.0-rc.7"
 dependencies = [
  "amp-core",
  "async-stream",
@@ -118,7 +118,7 @@ dependencies = [
 
 [[package]]
 name = "amp-player"
-version = "1.1.0-rc.6"
+version = "1.1.0-rc.7"
 dependencies = [
  "amp-cast",
  "amp-core",
