@@ -1,0 +1,80 @@
+name: Exact Android release for local signing
+on:
+  push:
+    branches: ['fix/publish-rc6']
+    paths: ['.github/workflows/android-local-signing.yml', 'tools/package_android_local_signing.py', 'tools/test_package_android_local_signing.py']
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: android-local-signing-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  unsigned-release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    env:
+      CARGO_BUILD_JOBS: '2'
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          ref: '5d18affe41a5a96214c93e3c6f65b392082e90e2'
+          fetch-depth: 0
+          path: product-source
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Check delivery validation and approved source/native proof
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          python3 tools/test_package_android_local_signing.py
+          cd product-source
+          test "$(git rev-parse HEAD)" = 5d18affe41a5a96214c93e3c6f65b392082e90e2
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+        with:
+          packages: platform-tools platforms;android-35 build-tools;35.0.0 ndk;27.0.12077973
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: aarch64-linux-android
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: product-source -> target
+          cache-on-failure: true
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.11.1'
+      - name: Build release outputs without any private key
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          test -z "$AMP_ANDROID_KEYSTORE"
+          gradle -p product-source/android :app:assembleLiteRelease :app:assembleFullRelease :app:testFullReleaseUnitTest :app:lintFullRelease :app:lintLiteRelease :amp-dj:assembleRelease :amp-lab:assembleRelease :amp-cast:assembleRelease :amp-podcasts:assembleRelease :amp-remote:assembleRelease
+          cd product-source
+          reviewed=false
+          for attempt in $(seq 1 60); do
+            git fetch --quiet origin release/thanksgiving-20261126
+            if git merge-base --is-ancestor HEAD origin/release/thanksgiving-20261126; then reviewed=true; break; fi
+            sleep 20
+          done
+          test "$reviewed" = true
+          python3 tools/android_rc.py gate --ref refs/heads/release/thanksgiving-20261126 --tag v1.1.0-rc.6 --native-run 46067254244 --output "$RUNNER_TEMP/android-local-source-gate.json"
+          cd ..
+          mkdir -p android-local-unsigned
+          cp "$RUNNER_TEMP/android-local-source-gate.json" android-local-unsigned/
+          python3 tools/package_android_local_signing.py --source product-source --destination android-local-unsigned --expected-source 5d18affe41a5a96214c93e3c6f65b392082e90e2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: android-local-unsigned-5d18affe
+          path: android-local-unsigned/
+          if-no-files-found: error
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: android-local-release-reports-${{ github.sha }}
+          path: product-source/android/app/build/reports/
