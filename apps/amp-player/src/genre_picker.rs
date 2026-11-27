@@ -177,8 +177,8 @@ impl Picker {
                 );
                 #[cfg(test)]
                 ui.ctx().data_mut(|d| {
-                    d.insert_temp(egui::Id::new("genre-search-hit"), search_response.rect);
-                    d.insert_temp(egui::Id::new("genre-visible-tags"), Vec::<String>::new());
+                    d.insert_temp(egui::Id::unique("genre-search-hit"), search_response.rect);
+                    d.insert_temp(egui::Id::unique("genre-visible-tags"), Vec::<String>::new());
                 });
                 #[cfg(not(test))]
                 let _ = search_response;
@@ -250,16 +250,19 @@ impl Picker {
                                     #[cfg(test)]
                                     ui.ctx().data_mut(|d| {
                                         d.insert_temp(
-                                            egui::Id::new(("genre-tag-hit", &tag)),
+                                            egui::Id::unique(("genre-tag-hit", &tag)),
                                             response.rect,
                                         );
                                         let mut visible = d
-                                            .get_temp::<Vec<String>>(egui::Id::new(
+                                            .get_temp::<Vec<String>>(egui::Id::unique(
                                                 "genre-visible-tags",
                                             ))
                                             .unwrap_or_default();
                                         visible.push(tag.clone());
-                                        d.insert_temp(egui::Id::new("genre-visible-tags"), visible);
+                                        d.insert_temp(
+                                            egui::Id::unique("genre-visible-tags"),
+                                            visible,
+                                        );
                                     });
                                     if response.changed() {
                                         set_choices(selected, &[tag], checked);
@@ -271,8 +274,9 @@ impl Picker {
                 ui.weak("Expand a category to choose individual genres.");
             });
         #[cfg(test)]
-        ui.ctx()
-            .data_mut(|d| d.insert_temp(egui::Id::new("genre-picker-hit"), response.response.rect));
+        ui.ctx().data_mut(|d| {
+            d.insert_temp(egui::Id::unique("genre-picker-hit"), response.response.rect)
+        });
         #[cfg(not(test))]
         let _ = response;
     }
@@ -391,19 +395,22 @@ mod tests {
         }
         let rect = |key| ctx.data(|d| d.get_temp::<egui::Rect>(key).unwrap());
         frame(vec![]);
-        click(&mut frame, rect(egui::Id::new("genre-picker-hit")));
+        click(&mut frame, rect(egui::Id::unique("genre-picker-hit")));
         frame(vec![]);
-        let search = rect(egui::Id::new("genre-search-hit"));
+        let search = rect(egui::Id::unique("genre-search-hit"));
         assert!(search.min.x >= 0. && search.max.x <= 420.);
         click(&mut frame, search);
         frame(vec![egui::Event::Text("house".into())]);
         frame(vec![]);
         let visible = ctx.data(|d| {
-            d.get_temp::<Vec<String>>(egui::Id::new("genre-visible-tags"))
+            d.get_temp::<Vec<String>>(egui::Id::unique("genre-visible-tags"))
                 .unwrap()
         });
         assert_eq!(visible, ["house"]);
-        click(&mut frame, rect(egui::Id::new(("genre-tag-hit", "house"))));
+        click(
+            &mut frame,
+            rect(egui::Id::unique(("genre-tag-hit", "house"))),
+        );
         drop(frame);
         assert_eq!(selected, ["Rock", "house"]);
     }
