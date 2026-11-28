@@ -583,6 +583,8 @@ impl Player {
         if self.analyze_after_scan {
             return;
         }
+        // Start is explicit even on a first scan with no cached library yet.
+        self.preparer.queue_enabled = true;
         if let Some(library) = &self.library {
             self.preparer
                 .resume_cached(self.root.clone(), &library.tracks);
@@ -4354,44 +4356,48 @@ mod window_tests {
     }
     #[test]
     fn analysis_job_inputs_publish_added_subfolders_while_preserving_existing_metadata() {
-        let main = tempfile::tempdir().unwrap();
-        let extra = tempfile::tempdir().unwrap();
-        std::fs::write(main.path().join("old.mp3"), b"fixture").unwrap();
-        let mut old = amp_core::scan(main.path()).unwrap();
-        old.tracks[0].preparation.bpm = Some(123.);
-        old.tracks[0].preparation.manual_override = true;
-        std::fs::create_dir_all(extra.path().join("Artist/Album")).unwrap();
-        std::fs::write(extra.path().join("Artist/Album/new.mp3"), b"fixture").unwrap();
-        amp_core::music_sources::add(main.path(), extra.path()).unwrap();
-        let mut player = Player {
-            root: main.path().into(),
-            library: Some(old),
-            analyze_after_scan: true,
-            ..Default::default()
-        };
-        let (tx, rx) = mpsc::channel();
-        player.analysis_scan = Some(rx);
-        let jobs = amp_core::scan_job_inputs(main.path()).unwrap();
-        assert_eq!(jobs.tracks.len(), 2);
-        let new = jobs.tracks.iter().find(|t| t.title == "new").unwrap();
-        let (owner, relative) = amp_core::music_sources::owner(main.path(), &new.path).unwrap();
-        assert_eq!(owner, extra.path().canonicalize().unwrap());
-        assert_eq!(relative, PathBuf::from("Artist/Album/new.mp3"));
-        tx.send(Ok(jobs)).unwrap();
-        player.poll_analysis_scan();
-        assert!(!player.analyze_after_scan);
-        assert_eq!(player.preparer.progress().1, 2);
-        assert_eq!(player.library.as_ref().unwrap().tracks.len(), 2);
-        let old = player
-            .library
-            .as_ref()
-            .unwrap()
-            .tracks
-            .iter()
-            .find(|t| t.path == Path::new("old.mp3"))
-            .unwrap();
-        assert_eq!(old.preparation.bpm, Some(123.));
-        assert!(old.preparation.manual_override);
+        for requested in [true, false] {
+            let main = tempfile::tempdir().unwrap();
+            let extra = tempfile::tempdir().unwrap();
+            std::fs::write(main.path().join("old.mp3"), b"fixture").unwrap();
+            let mut old = amp_core::scan(main.path()).unwrap();
+            old.tracks[0].preparation.bpm = Some(123.);
+            old.tracks[0].preparation.manual_override = true;
+            std::fs::create_dir_all(extra.path().join("Artist/Album")).unwrap();
+            std::fs::write(extra.path().join("Artist/Album/new.mp3"), b"fixture").unwrap();
+            amp_core::music_sources::add(main.path(), extra.path()).unwrap();
+            let mut player = Player {
+                root: main.path().into(),
+                library: Some(old),
+                analyze_after_scan: true,
+                ..Default::default()
+            };
+            player.preparer.queue_enabled = requested;
+            let (tx, rx) = mpsc::channel();
+            player.analysis_scan = Some(rx);
+            let jobs = amp_core::scan_job_inputs(main.path()).unwrap();
+            assert_eq!(jobs.tracks.len(), 2);
+            let new = jobs.tracks.iter().find(|t| t.title == "new").unwrap();
+            let (owner, relative) = amp_core::music_sources::owner(main.path(), &new.path).unwrap();
+            assert_eq!(owner, extra.path().canonicalize().unwrap());
+            assert_eq!(relative, PathBuf::from("Artist/Album/new.mp3"));
+            tx.send(Ok(jobs)).unwrap();
+            player.poll_analysis_scan();
+            assert!(!player.analyze_after_scan);
+            assert_eq!(player.preparer.progress().1, if requested { 2 } else { 0 });
+            assert_eq!(player.preparer.queue_enabled, requested);
+            assert_eq!(player.library.as_ref().unwrap().tracks.len(), 2);
+            let old = player
+                .library
+                .as_ref()
+                .unwrap()
+                .tracks
+                .iter()
+                .find(|t| t.path == Path::new("old.mp3"))
+                .unwrap();
+            assert_eq!(old.preparation.bpm, Some(123.));
+            assert!(old.preparation.manual_override);
+        }
     }
     #[test]
     fn unavailable_root_does_not_clear_existing_library_or_live_session() {
