@@ -7,14 +7,22 @@ import re
 
 
 def generate(directory, version, apk=None, version_code=None):
-    if not re.fullmatch(r"\d+\.\d+\.\d+", version):
-        raise ValueError("Expected stable three-part version")
+    if not re.fullmatch(r"(?:0|[1-9]\d{0,7})\.(?:0|[1-9]\d{0,7})\.(?:0|[1-9]\d{0,7})(?:-(?:rc|beta)\.[1-9]\d{0,7})?", version):
+        raise ValueError("Expected stable, beta or RC version")
     packages = {}
     for platform in ("windows", "linux"):
         path = directory / f"amp-verse-{platform}-v{version}.zip"
         if not path.is_file():
             raise ValueError(f"Missing {platform} package: {path.name}")
         packages[platform + "-x86_64"] = describe(path)
+    for platform in ("windows", "linux"):
+        path = directory / f"amp-server-{platform}-v{version}.zip"
+        if path.is_file():
+            packages[f"server-{platform}-x86_64"] = describe(path)
+    for platform, name in (("windows", "amp-engine-windows-x86_64.exe"), ("linux", "amp-engine-linux-x86_64")):
+        path = directory / name
+        if path.is_file():
+            packages[f"engine-{platform}-x86_64"] = describe(path)
     if apk:
         if apk.parent.resolve() != directory.resolve() or apk.suffix != ".apk" or not version_code or version_code < 1:
             raise ValueError("APK must be a signed release asset in the package directory with a version code")
@@ -22,7 +30,9 @@ def generate(directory, version, apk=None, version_code=None):
     editions = directory / "android-packages.json"
     if editions.is_file():
         android = json.loads(editions.read_text(encoding="utf-8"))
-        for key in ("android-full-arm64", "android-lite-arm64"):
+        for key in android["packages"]:
+            if key != "android-arm64" and not re.fullmatch(r"android-(?:full|lite|dj|lab|cast|podcasts|remote)-arm64", key):
+                raise ValueError("Unknown Android edition")
             entry = android["packages"][key]
             path = directory / entry["name"]
             if path.parent.resolve() != directory.resolve() or not path.is_file() or describe(path) != {field: entry[field] for field in ("name", "sha256", "size")}:

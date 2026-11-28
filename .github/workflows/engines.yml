@@ -117,6 +117,11 @@ jobs:
         run: powershell.exe -NoProfile -File tools/test_windows_server_install.ps1
       - name: Build standalone server and analysis engine
         run: cargo build -p amp-cast -p amp-engine --release --locked
+      - name: Verify standalone server update transaction and recovery
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then ext=.exe; else ext=; fi
+          python tools/smoke_in_app_update.py --server-helper "target/release/amp-server-update$ext" --server "target/release/amp-cast$ext"
       - uses: actions/setup-dotnet@v4
         if: runner.os == 'Windows'
         with:
@@ -129,7 +134,7 @@ jobs:
         run: |
           mkdir -p engine-checkpoint
           if [ "${{ runner.os }}" = "Windows" ]; then ext=.exe; else ext=; fi
-          cp target/release/amp-cast$ext target/release/amp-prepare$ext target/release/amp-engine$ext engine-checkpoint/
+          cp target/release/amp-cast$ext target/release/amp-prepare$ext target/release/amp-engine$ext target/release/amp-server-update$ext engine-checkpoint/
           cp LICENSE THIRD_PARTY_NOTICES.md docs/SERVER_ANALYSIS_DATABASE.md engine-checkpoint/
           if [ "${{ runner.os }}" = "Windows" ]; then cp deploy/install-windows-server.ps1 deploy/show-windows-server-access.ps1 "deploy/Show Server Access Code.cmd" engine-checkpoint/; fi
           cp test-output/chroma/report.json engine-checkpoint/chroma-benchmark.json

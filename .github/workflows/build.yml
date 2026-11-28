@@ -170,6 +170,8 @@ jobs:
       - name: Verify Suno import publication and Lab decoding with real codecs
         run: cargo test -p amp-player --bin amp-player lab_youtube::suno::tests::local_codec_import -- --ignored --test-threads=1
       - run: cargo build --workspace --release --locked
+      - name: Verify native desktop and server update, restart, rollback and cleanup
+        run: python tools/smoke_in_app_update.py --helper target/release/amp-update${{ matrix.suffix }} --server-helper target/release/amp-server-update${{ matrix.suffix }} --server target/release/amp-cast${{ matrix.suffix }}
       - name: Build base player without analysis implementation
         run: cargo build -p amp-player --release --locked
       - name: Verify optional analysis process
@@ -216,7 +218,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p dist
-          cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} target/release/amp-prepare${{ matrix.suffix }} target/release/amp-update${{ matrix.suffix }} dist/
+          cp target/release/amp-player${{ matrix.suffix }} target/release/amp-cast${{ matrix.suffix }} target/release/amp-prepare${{ matrix.suffix }} target/release/amp-update${{ matrix.suffix }} target/release/amp-server-update${{ matrix.suffix }} dist/
           if [ "${{ runner.os }}" = "Windows" ]; then cp target/release/amp-keylock.dll dist/; fi
           mkdir -p dist/licenses/signalsmith
           cp -r apps/amp-player/vendor/signalsmith/* dist/licenses/signalsmith/
@@ -284,11 +286,10 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then asset=amp-engine-windows-x86_64.exe; else asset=amp-engine-linux-x86_64; fi
           cp target/release/amp-engine${{ matrix.suffix }} "engine-dist/$asset"
           (cd engine-dist && sha256sum "$asset" > "$asset.sha256")
-          # Only stable release tags are auto-installable. Beta artifacts remain manual.
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            if [ "${{ runner.os }}" = "Windows" ]; then platform=windows-x86_64; else platform=linux-x86_64; fi
-            python tools/engine_release_metadata.py --directory engine-dist --platform "$platform" --release "$GITHUB_REF_NAME"
-          fi
+          # Component compatibility metadata follows the verified product channel.
+          if [ "${{ runner.os }}" = "Windows" ]; then platform=windows-x86_64; else platform=linux-x86_64; fi
+          release=$(python -c "import sys;sys.path.insert(0,'tools');from package_downloads import product_release;from pathlib import Path;print('v'+product_release(Path('.'))[0])")
+          python tools/engine_release_metadata.py --directory engine-dist --platform "$platform" --release "$release"
       - uses: actions/upload-artifact@v4
         with:
           name: amp-analysis-engine-${{ runner.os }}
@@ -415,7 +416,7 @@ jobs:
           cd packages
           # Artifact storage strips executable bits. Restore them before making
           # Linux ZIPs so the updater can restart the newly installed binaries.
-          find . -type f \( -name amp-player -o -name amp-update -o -name amp-cast -o -name amp-prepare -o -name amp-stem-worker -o -name amp-engine -o -name amp-engine-linux-x86_64 -o -name deno -o -name yt-dlp \) -exec chmod +x {} +
+          find . -type f \( -name amp-player -o -name amp-update -o -name amp-server-update -o -name amp-cast -o -name amp-prepare -o -name amp-stem-worker -o -name amp-engine -o -name amp-engine-linux-x86_64 -o -name deno -o -name yt-dlp \) -exec chmod +x {} +
           for dir in amp-verse-*; do (cd "$dir" && zip -r "../$dir.zip" .); done
           for dir in amp-analysis-engine-*; do (cd "$dir" && zip -r "../$dir-${GITHUB_REF_NAME}.zip" .); done
           cp amp-analysis-engine-Windows/amp-engine-windows-x86_64.exe* .
@@ -426,10 +427,29 @@ jobs:
         with:
           name: android-published
           path: packages
+      - name: Package server core updates without settings or manager files
+        shell: bash
+        run: |
+          for platform in windows linux; do
+            python tools/package_server_update.py --source "$(find packages -maxdepth 1 -type d -name "amp-verse-$platform-*" -print -quit)" --output "packages/amp-server-$platform-${GITHUB_REF_NAME}.zip"
+          done
       - name: Generate verified cross-platform update manifest
         run: python tools/update_manifest.py --version "${GITHUB_REF_NAME#v}" --directory packages --apk "$(find packages -maxdepth 1 -name 'amp-verse-full-*.apk' -print -quit)" --version-code "$(cat packages/version-code.txt)"
       - name: Package optional AMP Podcasts
         run: python tools/package_podcasts.py --version "${GITHUB_REF_NAME#v}" --destination packages
+      - name: Finalize checksums for every published package
+        run: |
+          python - <<'PY'
+          import hashlib,pathlib
+          root=pathlib.Path('packages')
+          patterns=('*.zip','*.apk','*.apk.sha256','amp-update.json','amp-modules.json','android-packages.json','amp-engine-*','*.ampplugin*')
+          paths=sorted({p for pattern in patterns for p in root.glob(pattern) if p.is_file()})
+          lines=[]
+          for path in paths:
+              with path.open('rb') as source: digest=hashlib.file_digest(source,'sha256').hexdigest()
+              lines.append(digest+'  '+path.name)
+          (root/'SHA256SUMS.txt').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          PY
       - uses: softprops/action-gh-release@v2
         with:
           prerelease: false
@@ -437,6 +457,9 @@ jobs:
           files: |
             packages/*.zip
             packages/*.apk
+            packages/*.apk.sha256
+            packages/amp-modules.json
+            packages/android-packages.json
             packages/SHA256SUMS.txt
             packages/amp-update.json
             packages/amp-engine-*

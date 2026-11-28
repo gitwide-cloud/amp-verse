@@ -6,8 +6,8 @@ import re
 
 
 def write_metadata(root, directory, platform, release):
-    if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)", release):
-        raise ValueError("Expected a stable vMAJOR.MINOR.PATCH release tag")
+    if not re.fullmatch(r"v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(?:-(?:beta|rc)\.[1-9][0-9]*)?", release):
+        raise ValueError("Expected a stable, beta or RC release tag")
     asset = {"windows-x86_64": "amp-engine-windows-x86_64.exe",
              "linux-x86_64": "amp-engine-linux-x86_64"}[platform]
     source = (root / "crates/amp-core/src/engine_api.rs").read_text()

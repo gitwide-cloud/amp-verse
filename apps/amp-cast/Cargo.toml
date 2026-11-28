@@ -5,7 +5,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 
+[[bin]]
+name = "amp-server-update"
+path = "src/update_helper.rs"
+
 [dependencies]
+amp-updater = { path = "../../crates/amp-updater" }
 if-addrs = "0.15"
 mdns-sd = "=0.21.7"
 rust_cast = { version = "=0.21.0", features = ["cast"] }

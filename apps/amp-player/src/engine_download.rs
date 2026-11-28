@@ -43,24 +43,10 @@ struct EngineManifest {
     asset: String,
 }
 
-// Only stable numeric release tags participate; ordering never uses GitHub's
-// publication date or the repository-wide latest pointer (also used by Android).
-fn version(tag: &str) -> Option<[u64; 3]> {
-    let parts: Vec<_> = tag.strip_prefix('v')?.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let mut result = [0; 3];
-    for (i, part) in parts.iter().enumerate() {
-        if part.is_empty()
-            || !part.bytes().all(|b| b.is_ascii_digit())
-            || (part.len() > 1 && part.starts_with('0'))
-        {
-            return None;
-        }
-        result[i] = part.parse().ok()?;
-    }
-    Some(result)
+// Use the same numeric beta/RC/stable identity as application updates.
+fn version(tag: &str) -> Option<amp_updater::release::Version> {
+    tag.strip_prefix('v')?;
+    amp_updater::release::version(tag).ok()
 }
 
 fn release_asset<'a>(release: &'a Release, name: &str) -> Option<&'a str> {
@@ -78,11 +64,14 @@ fn select_release<F>(
     asset: &str,
     platform: &str,
     read: &mut F,
+    installed: &str,
 ) -> Result<(String, String), String>
 where
     F: FnMut(&str, u64) -> Result<Vec<u8>, String>,
 {
-    releases.retain(|r| !r.draft && !r.prerelease && version(&r.tag_name).is_some());
+    releases.retain(|r| {
+        !r.draft && amp_updater::release::channel_accepts(&r.tag_name, r.prerelease, installed)
+    });
     releases.sort_by_key(|r| std::cmp::Reverse(version(&r.tag_name)));
     for release in releases {
         let (Some(binary), Some(checksum), Some(metadata)) = (
@@ -131,7 +120,13 @@ where
         let complete = batch.len() < 100;
         releases.extend(batch);
         if complete {
-            let (binary, checksum) = select_release(releases, asset, platform, &mut read)?;
+            let (binary, checksum) = select_release(
+                releases,
+                asset,
+                platform,
+                &mut read,
+                env!("CARGO_PKG_VERSION"),
+            )?;
             let checksum = read(&checksum, 1024)?;
             let bytes = read(&binary, 32 * 1024 * 1024)?;
             return install(
@@ -318,6 +313,7 @@ mod tests {
             "amp-engine-windows-x86_64.exe",
             "windows-x86_64",
             &mut |_, _| Ok(serde_json::to_vec(&manifest).unwrap()),
+            "1.0.22",
         )
     }
 
@@ -340,7 +336,7 @@ mod tests {
     #[test]
     fn stable_versions_ordered_numerically() {
         assert!(version("v0.10.0") > version("v0.9.0"));
-        for tag in ["v01.2.3", "v1.2", "v1.2.3-rc.1", "android-v1.2.3"] {
+        for tag in ["v01.2.3", "v1.2", "v1.2.3-rc.0", "android-v1.2.3"] {
             assert!(version(tag).is_none());
         }
         let chosen = select(
@@ -349,6 +345,23 @@ mod tests {
         )
         .unwrap();
         assert!(chosen.0.contains("/v0.10.0/"));
+    }
+
+    #[test]
+    fn rc_engine_installer_selects_current_channel_numerically() {
+        let mut first = fixture("v1.1.0-rc.9");
+        first["prerelease"] = true.into();
+        let mut newest = fixture("v1.1.0-rc.11");
+        newest["prerelease"] = true.into();
+        let result = select_release(
+            serde_json::from_value(serde_json::json!([first, newest])).unwrap(),
+            "amp-engine-windows-x86_64.exe",
+            "windows-x86_64",
+            &mut |_, _| Ok(serde_json::to_vec(&metadata("v1.1.0-rc.11")).unwrap()),
+            "1.1.0-rc.11",
+        )
+        .unwrap();
+        assert!(result.0.contains("/v1.1.0-rc.11/"));
     }
 
     #[test]

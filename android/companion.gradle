@@ -10,6 +10,7 @@ android {
         versionCode productRelease.getProperty('versionCode').toInteger()
         versionName productRelease.getProperty('versionName')
         buildConfigField 'String', 'MODULE', '"'+ampModule+'"'
+        buildConfigField 'String', 'EDITION', '"'+ampModule+'"'
         ndk { abiFilters 'arm64-v8a' }
     }
     compileOptions { sourceCompatibility JavaVersion.VERSION_17; targetCompatibility JavaVersion.VERSION_17 }
@@ -17,7 +18,7 @@ android {
     packaging { jniLibs { useLegacyPackaging = true } }
     sourceSets.main {
         java.srcDirs += ['../../companion/java','../../app/src/main/java',"../../features/${ampModule}/java"]
-        java.includes = ['**/CompanionActivity.java','**/ModuleRpc.java','**/FeatureScreen.java','**/Appearance.java','**/Chrome.java','**/CardIcon.java','**/UiSections.java']
+        java.includes = ['**/AppUpdate.java','**/ReleaseCheck.java','**/CompanionActivity.java','**/ModuleRpc.java','**/FeatureScreen.java','**/Appearance.java','**/Chrome.java','**/CardIcon.java','**/UiSections.java']
         if(ampModule == 'lab') java.includes += ['**/lab/*.java']
         if(ampModule == 'remote') java.includes += ['**/RemotePanel.java','**/ControlDiscovery.java','**/CastDiscovery.java','**/CastClient.java','**/StationAudioStatus.java','**/ProtectedCastSource.java']
         if(ampModule == 'cast') java.includes += ['**/CastPanel.java','**/DevicesIcon.java','**/CastHostSession.java','**/CastHostSelection.java','**/CastHostReconnect.java','**/CastLibraryView.java','**/CastLibraryModel.java','**/RadioDirectory.java','**/CastClient.java','**/StationAudioStatus.java','**/CastDiscovery.java','**/ProtectedCastSource.java','**/GoogleCastActivity.java','**/GoogleCastOptions.java']

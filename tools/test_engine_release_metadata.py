@@ -23,7 +23,9 @@ class MetadataTests(unittest.TestCase):
                 self.assertEqual(metadata["protocol"], 1)
                 self.assertEqual(metadata["engine_id"], "amp-prep-heuristic-5")
                 self.assertEqual(metadata["release"], "v0.3.2")
-                for tag in ["v0.3.2-rc.1", "v01.2.3", "../../bad", "0.3.2"]:
+                write_metadata(root, directory, platform, "v1.1.0-rc.11")
+                self.assertEqual(json.loads((directory / (asset+".json")).read_text())["release"],"v1.1.0-rc.11")
+                for tag in ["v0.3.2-rc.0", "v01.2.3", "../../bad", "0.3.2"]:
                     with self.assertRaises(ValueError):
                         write_metadata(root, directory, platform, tag)
 

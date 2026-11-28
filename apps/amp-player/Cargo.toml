@@ -10,6 +10,7 @@ name = "amp-update"
 path = "src/update_helper.rs"
 
 [dependencies]
+amp-updater = { path = "../../crates/amp-updater" }
 url = "2"
 zip = { version = "4", default-features = false, features = ["deflate"] }
 image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

@@ -111,6 +111,7 @@ def package(root, destination, variant, tag, sdk, java):
     manifest["version"], manifest["version_code"] = common_version
     (destination / "amp-modules.json").write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     packages = {"android-" + edition + "-arm64": entry for edition, entry in manifest["editions"].items()}
+    packages.update({"android-"+module+"-arm64":entry for module,entry in manifest["android"].items()})
     packages["android-arm64"] = packages["android-full-arm64"]
     (destination / "android-packages.json").write_text(json.dumps({"version": common_version[0], "packages": packages}, indent=2) + "\n", encoding="utf-8")
     return manifest

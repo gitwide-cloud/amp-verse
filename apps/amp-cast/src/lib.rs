@@ -14,6 +14,7 @@ mod server_output;
 pub mod sharing;
 mod station_control;
 pub mod studio;
+pub mod updater;
 use amp_core::{Library, Track};
 use axum::{
     Json, Router,
@@ -60,6 +61,7 @@ struct Station {
     worker: Option<JoinHandle<()>>,
 }
 pub struct Cast {
+    pub updater: updater::Updater,
     operation: Mutex<()>,
     google_cast: google_cast::Service,
     player_intent: std::sync::atomic::AtomicU64,
@@ -105,6 +107,7 @@ impl Cast {
         let root = root.canonicalize().unwrap_or(root);
         let (audio, _) = broadcast::channel(256);
         Arc::new(Self {
+            updater: Default::default(),
             operation: Mutex::new(()),
             google_cast: Default::default(),
             player_intent: std::sync::atomic::AtomicU64::new(0),
@@ -185,6 +188,7 @@ impl Cast {
 }
 pub fn router(cast: Arc<Cast>) -> Router {
     Router::new()
+        .merge(updater::routes())
         .merge(playlist_sync::routes())
         .merge(player_control::routes())
         .merge(google_cast::routes())

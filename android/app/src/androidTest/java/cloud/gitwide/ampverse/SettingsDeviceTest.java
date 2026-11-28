@@ -66,9 +66,10 @@ public class SettingsDeviceTest {
         }finally{prefs.edit().putString("theme",original).putBoolean("repeat",repeat).commit();}
     }
     @Test public void updateVersionResultsAreHonest() throws Exception {
-        assertTrue(ReleaseCheck.describe("{\"tag_name\":\"v0.2.0\"}","0.1.1").startsWith("New release"));
-        assertTrue(ReleaseCheck.describe("{\"tag_name\":\"v0.1.1\"}","0.1.1").startsWith("You have the latest"));
-        assertTrue(ReleaseCheck.describe("{\"tag_name\":\"v0.1.0\"}","0.1.1").contains("newer than"));
+        String release="[{\"tag_name\":\"v1.1.0-rc.11\",\"draft\":false,\"prerelease\":true,\"assets\":[{\"name\":\"amp-update.json\"}]}]";
+        assertTrue(ReleaseCheck.describe(release,"1.1.0-rc.10").startsWith("New update"));
+        assertTrue(ReleaseCheck.describe(release,"1.1.0-rc.11").startsWith("You have the latest"));
+        assertTrue(ReleaseCheck.describe(release,"1.1.0").startsWith("You have the latest"));
         assertTrue(ReleaseCheck.compare("1.10.0","1.2.0")>0);
         try{ReleaseCheck.compare("v2.0.0-beta","1.0.0");fail("Unsupported tag accepted");}catch(IllegalArgumentException expected){}
     }
