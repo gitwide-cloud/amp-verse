@@ -196,7 +196,16 @@ impl Panel {
                 self.selected=selected(library,self.all,&self.folders,&list_paths,&profiles,&self.filter,&self.search);self.selection_key=Some(key);
             }
             ui.strong(format!("{} songs selected",self.selected.len()));
-            ui.horizontal(|ui|{if ui.button("Choose destination…").clicked(){self.destination=rfd::FileDialog::new().set_title("Export catalog destination").pick_folder();}if let Some(path)=&self.destination{ui.label(path.file_name().unwrap_or(path.as_os_str()).to_string_lossy());}});
+            ui.horizontal(|ui| {
+                if ui.button("Choose destination…").clicked() {
+                    self.destination = rfd::FileDialog::new()
+                        .set_title("Export catalog destination")
+                        .pick_folder();
+                }
+                if let Some(path) = &self.destination {
+                    ui.label(path.file_name().unwrap_or(path.as_os_str()).to_string_lossy());
+                }
+            });
             if self.rar.is_none(){ui.label("RAR is not installed. Install WinRAR on Windows or RAR on Linux to create these archive parts.");ui.hyperlink_to("Get WinRAR / RAR","https://www.rarlab.com/download.htm");}
             if ui.add_enabled(!self.selected.is_empty()&&self.destination.is_some()&&self.rar.is_some(),egui::Button::new("Export catalog")).clicked(){
                 let root=root.to_owned();let chosen:HashSet<_>=self.selected.iter().cloned().collect();
