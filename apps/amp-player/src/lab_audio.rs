@@ -184,16 +184,43 @@ fn mix(parts: &[Vec<f32>; 3], levels: [f32; 3]) -> Result<Vec<f32>, String> {
 /// User clip exports keep their own metadata timeline; temporary processing
 /// renders deliberately use `render` without creating a catalog for scratch files.
 pub(super) fn export_clip(
-    source: &Path, start: f64, length: f64, p: Processing, filter: &str,
-    output: &Path, cancel: Arc<AtomicBool>,
+    source: &Path,
+    start: f64,
+    length: f64,
+    p: Processing,
+    filter: &str,
+    output: &Path,
+    cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
-    let source_preparation = amp_core::preparation::load(source)?;
-    render(source, start, length, p, filter, output, cancel)?;
+    let mut source_preparation = amp_core::preparation::load(source)?;
+    amp_core::genres::read_embedded(source, &mut source_preparation);
     let preparation = amp_core::music_annotations::for_clip(&source_preparation);
+    let categories =
+        serde_json::to_string(&preparation.extensions[amp_core::music_annotations::FIELD])
+            .map_err(|e| e.to_string())?;
+    // Exported MP3s carry their declared categories before atomic audio publication.
+    // A failed portable-catalog write cannot turn a known clip into an online lookup candidate.
+    render_output(
+        source,
+        start,
+        length,
+        p,
+        filter,
+        RenderOutput {
+            path: output,
+            categories: Some(&categories),
+        },
+        cancel,
+    )?;
     let parent = output.parent().ok_or("Export folder missing")?;
     let filename = output.file_name().ok_or("Export filename missing")?;
     amp_core::preparation::save_if_unchanged(parent, Path::new(filename), &preparation, None)
-        .map_err(|e| format!("Audio saved at {}; clip categories could not be saved: {e}", output.display()))
+        .map_err(|e| {
+            format!(
+                "Audio saved at {}; clip categories could not be saved: {e}",
+                output.display()
+            )
+        })
 }
 
 pub(super) fn render(
@@ -205,6 +232,33 @@ pub(super) fn render(
     output: &Path,
     cancel: Arc<AtomicBool>,
 ) -> Result<(), String> {
+    render_output(
+        source,
+        start,
+        length,
+        p,
+        filter,
+        RenderOutput {
+            path: output,
+            categories: None,
+        },
+        cancel,
+    )
+}
+struct RenderOutput<'a> {
+    path: &'a Path,
+    categories: Option<&'a str>,
+}
+fn render_output(
+    source: &Path,
+    start: f64,
+    length: f64,
+    p: Processing,
+    filter: &str,
+    destination: RenderOutput<'_>,
+    cancel: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let output = destination.path;
     p.validate()?;
     if !start.is_finite() || start < 0. || !length.is_finite() || length <= 0. {
         return Err("Invalid Lab selection".into());
@@ -247,6 +301,14 @@ pub(super) fn render(
         c.args(["-c:a", "libmp3lame", "-b:a", "256k", "-id3v2_version", "3"]);
     } else {
         c.args(["-c:a", "pcm_s16le"]);
+    }
+    if output
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("mp3"))
+        && let Some(categories) = destination.categories
+    {
+        c.arg("-metadata")
+            .arg(format!("AMPVerseCategories={categories}"));
     }
     c.arg(pending.path()).stdout(Stdio::null());
     let encoder = Process::spawn(&mut c, cancel.clone())?;
@@ -553,12 +615,26 @@ mod render_tests {
         let d = tempfile::tempdir().unwrap();
         let input = source(d.path());
         let before = std::fs::read(&input).unwrap();
-        let mut original = amp_core::Preparation { bpm: Some(120.), cue_in: 2., cue_out: Some(10.), ..Default::default() };
+        let mut original = amp_core::Preparation {
+            bpm: Some(120.),
+            cue_in: 2.,
+            cue_out: Some(10.),
+            ..Default::default()
+        };
         set(&mut original, Category::AiGenerated, true);
         amp_core::preparation::save(d.path(), Path::new("source.wav"), &original).unwrap();
         let recorded_source = amp_core::preparation::load(&input).unwrap();
         let out = d.path().join("clip.mp3");
-        export_clip(&input, 0.25, 1., Processing::default(), "anull", &out, Arc::new(AtomicBool::new(false))).unwrap();
+        export_clip(
+            &input,
+            0.25,
+            1.,
+            Processing::default(),
+            "anull",
+            &out,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap();
         let saved = amp_core::preparation::load(&out).unwrap();
         assert!(marked(&saved, Category::Clip));
         assert!(marked(&saved, Category::AiGenerated));
@@ -566,8 +642,65 @@ mod render_tests {
         assert_eq!(saved.cue_in, 0.);
         assert!(saved.cue_out.is_none());
         assert_eq!(std::fs::read(&input).unwrap(), before);
-        assert_eq!(amp_core::preparation::load(&input).unwrap(), recorded_source);
-        assert!(export_clip(&input, 0., 1., Processing::default(), "anull", &out, Arc::new(AtomicBool::new(false))).is_err());
+        assert_eq!(
+            amp_core::preparation::load(&input).unwrap(),
+            recorded_source
+        );
+        assert!(
+            export_clip(
+                &input,
+                0.,
+                1.,
+                Processing::default(),
+                "anull",
+                &out,
+                Arc::new(AtomicBool::new(false))
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    #[ignore = "requires FFmpeg"]
+    fn exported_mp3_remains_a_clip_when_portable_metadata_cannot_be_written() {
+        let d = tempfile::tempdir().unwrap();
+        let input = source(d.path());
+        let original = std::fs::read(&input).unwrap();
+        let destination = d.path().join("exports");
+        std::fs::create_dir(&destination).unwrap();
+        std::fs::create_dir(destination.join("ampdj")).unwrap();
+        std::fs::write(
+            destination.join("ampdj/library.json"),
+            b"unrelated file must be kept",
+        )
+        .unwrap();
+        let out = destination.join("clip.mp3");
+        let error = export_clip(
+            &input,
+            0.25,
+            1.,
+            Processing::default(),
+            "anull",
+            &out,
+            Arc::new(AtomicBool::new(false)),
+        )
+        .unwrap_err();
+        assert!(error.contains("Audio saved at"), "{error}");
+        let library = amp_core::scan(&destination).unwrap();
+        assert_eq!(library.tracks.len(), 1);
+        assert!(amp_core::music_annotations::marked(
+            &library.tracks[0].preparation,
+            amp_core::music_annotations::Category::Clip
+        ));
+        assert!(!amp_core::music_annotations::automatic_lookup_allowed(
+            &library.tracks[0].preparation
+        ));
+        assert_eq!(std::fs::read(input).unwrap(), original);
+        assert_eq!(
+            std::fs::read(destination.join("ampdj/library.json")).unwrap(),
+            b"unrelated file must be kept"
+        );
+        let duration = crate::lab_editor::duration(&out).unwrap();
+        assert!(duration > 0.8 && duration < 1.2);
     }
     #[test]
     #[ignore = "requires configured native stem model and FFmpeg"]

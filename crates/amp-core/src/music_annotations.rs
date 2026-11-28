@@ -44,6 +44,9 @@ pub fn marked(p: &Preparation, category: Category) -> bool {
     {
         return value;
     }
+    if let Some(value) = embedded_choice(p, category) {
+        return value;
+    }
     crate::genres::values(p).iter().any(|genre| {
         let normalized: String = genre
             .to_lowercase()
@@ -57,6 +60,22 @@ pub fn marked(p: &Preparation, category: Category) -> bool {
             Category::Clip => normalized == "clip",
         }
     })
+}
+fn embedded_choice(p: &Preparation, category: Category) -> Option<bool> {
+    let values = p
+        .extensions
+        .get("embedded_tags")?
+        .get("AMPVerseCategories")?
+        .as_array()?;
+    if values.len() != 1 {
+        return None;
+    }
+    let text = values[0].as_str().filter(|text| text.len() <= 4096)?;
+    let map = serde_json::from_str::<std::collections::BTreeMap<String, bool>>(text).ok()?;
+    if map.len() > 32 || map.keys().any(|key| key.len() > 64) {
+        return None;
+    }
+    map.get(category.id()).copied()
 }
 pub fn set(p: &mut Preparation, category: Category, marked: bool) {
     let value = p
@@ -183,6 +202,75 @@ mod filter_tests {
             let portable: Filter =
                 serde_json::from_slice(&serde_json::to_vec(&yes).unwrap()).unwrap();
             assert!(portable.matches(&track));
+        }
+    }
+}
+
+#[cfg(test)]
+mod compatibility_tests {
+    use crate::{
+        show::{Settings, SmartPlaylistExport},
+        smart_filters::{Field, Filter},
+    };
+    #[test]
+    fn category_rules_are_version_fenced_for_settings_exports_and_sync() {
+        let root = tempfile::tempdir().unwrap();
+        let mut settings = Settings::default();
+        settings.playlists[0].filters.push(Filter::Flag {
+            field: Field::Clip,
+            value: true,
+        });
+        assert_eq!(settings.required_version(), 4);
+        assert!(settings.validate().is_err());
+        settings.version = 4;
+        settings.validate().unwrap();
+        use crate::playlist_sync_contract::{Action, Kind, Operation};
+        let mut operation = Operation {
+            protocol: 1,
+            operation_id: "op-category".into(),
+            device_id: "phone".into(),
+            server_id: "server".into(),
+            library_id: "library".into(),
+            document_id: "smart_demo".into(),
+            kind: Kind::Smart,
+            document_version: 4,
+            action: Action::Create,
+            base_revision: None,
+            document: Some(serde_json::to_value(&settings.playlists[0]).unwrap()),
+        };
+        operation.validate("server", "library").unwrap();
+        operation.document_version = 3;
+        assert!(operation.validate("server", "library").is_err());
+        let bytes = SmartPlaylistExport::encode(&settings.playlists[0], root.path()).unwrap();
+        let mut doc: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(doc["version"], 5);
+        SmartPlaylistExport::decode(&bytes, root.path()).unwrap();
+        doc["version"] = 4.into();
+        assert!(
+            SmartPlaylistExport::decode(&serde_json::to_vec(&doc).unwrap(), root.path()).is_err()
+        );
+    }
+}
+
+#[cfg(test)]
+mod shared_cases {
+    #[test]
+    fn rust_category_matching_agrees_with_shared_client_vectors() {
+        let value: serde_json::Value =
+            serde_json::from_str(include_str!("../tests/fixtures/track_categories.json")).unwrap();
+        for case in value["cases"].as_array().unwrap() {
+            let prep: crate::Preparation =
+                serde_json::from_value(case["preparation"].clone()).unwrap();
+            let actual: Vec<_> = super::Category::ALL
+                .iter()
+                .map(|&c| super::marked(&prep, c))
+                .collect();
+            assert_eq!(
+                serde_json::json!(actual),
+                case["expected"],
+                "{:?}",
+                case["preparation"]
+            );
         }
     }
 }

@@ -258,6 +258,24 @@ fn basic_tags(track: &Track) -> serde_json::Map<String, Value> {
             tags.insert(key.to_string(), value.clone());
         }
     }
+    if amp_core::music_annotations::validate(&track.preparation).is_ok() {
+        let categories = amp_core::music_annotations::Category::ALL
+            .iter()
+            .map(|&category| {
+                (
+                    category.id().to_owned(),
+                    json!(amp_core::music_annotations::marked(
+                        &track.preparation,
+                        category
+                    )),
+                )
+            })
+            .collect::<serde_json::Map<_, _>>();
+        tags.insert("track_annotations".into(), Value::Object(categories));
+        if let Some(value) = track.preparation.extensions.get("track_notes") {
+            tags.insert("track_notes".into(), value.clone());
+        }
+    }
     // Scanner keys are Lofty ItemKey names, not the manual extension names.
     // Project only known ordinary tags; an explicit manual value (including empty) wins.
     if let Some(embedded) = track.preparation.extensions.get("embedded_tags") {
@@ -625,7 +643,29 @@ mod tests {
             title: "Catalog title".into(),
             preparation,
         };
+        amp_core::music_annotations::set(
+            &mut track.preparation,
+            amp_core::music_annotations::Category::Clip,
+            true,
+        );
+        track
+            .preparation
+            .extensions
+            .insert("track_notes".into(), json!("Event intro"));
         let tags = basic_tags(&track);
+        assert_eq!(tags["track_annotations"]["clip"], true);
+        assert_eq!(tags["track_notes"], "Event intro");
+        track
+            .preparation
+            .extensions
+            .insert("track_notes".into(), json!("x".repeat(4097)));
+        let rejected = basic_tags(&track);
+        assert!(!rejected.contains_key("track_notes"));
+        assert!(!rejected.contains_key("track_annotations"));
+        track
+            .preparation
+            .extensions
+            .insert("track_notes".into(), json!("Event intro"));
         assert_eq!(tags["artist"], "First artist; Second artist");
         assert_eq!(tags["album"], "Real album");
         assert_eq!(tags["album_artist"], "Album artist");

@@ -102,7 +102,7 @@ impl Operation {
         }
         if match self.kind {
             Kind::Normal => self.document_version != 1,
-            Kind::Smart => !(1..=3).contains(&self.document_version),
+            Kind::Smart => !(1..=4).contains(&self.document_version),
         } {
             return Err("Unsupported document schema".into());
         }

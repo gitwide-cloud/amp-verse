@@ -928,6 +928,8 @@ fn convert_publish(
             &format!("title={name}"),
             "-metadata",
             &format!("comment=Suno source: {source_url}"),
+            "-metadata",
+            "AMPVerseCategories={\"ai_generated\":true}",
         ]);
     }
     cmd.arg(&converted);

@@ -259,10 +259,12 @@ fn collect(c: &Cast) -> Result<Value, String> {
         }
     }
     let mut smart_revision = Value::Null;
+    let mut smart_document_version = 1;
     if let Some(settings) = smart_raw(c)? {
         let typed: amp_core::show::Settings =
             serde_json::from_value(settings.clone()).map_err(|e| e.to_string())?;
         typed.validate()?;
+        smart_document_version = typed.version;
         smart_revision = rev(&settings);
         for rules in settings["playlists"]
             .as_array()
@@ -272,7 +274,7 @@ fn collect(c: &Cast) -> Result<Value, String> {
         }
     }
     let token = budget.finish();
-    let response = json!({"protocol":1,"server_id":c.server_id,"library_id":c.library_id,"snapshot_token":token,"documents":documents,"smart_revision":smart_revision,"deletes_supported":false,"automatic_client_sync":false,"max_smart_document_version":3});
+    let response = json!({"protocol":1,"server_id":c.server_id,"library_id":c.library_id,"snapshot_token":token,"documents":documents,"smart_revision":smart_revision,"deletes_supported":false,"automatic_client_sync":false,"max_smart_document_version":4,"smart_document_version":smart_document_version});
     let mut hash = Sha256::new();
     let mut writer = BudgetWriter {
         remaining: MAX_SNAPSHOT,

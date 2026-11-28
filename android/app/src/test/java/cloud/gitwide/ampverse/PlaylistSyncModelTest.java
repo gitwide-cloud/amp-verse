@@ -6,6 +6,43 @@ import org.json.*;
 import java.util.*;
 
 public class PlaylistSyncModelTest {
+    @Test public void removingCategoryRuleReleasesTheDraftOnTheExistingServer() throws Exception {
+        JSONObject s=state(),remote=normal("Smart",1).put("document_id","smart_cat").put("kind","smart").put("document_version",3);
+        remote.getJSONObject("document").put("id","cat");
+        PlaylistSyncModel.pull(s,snapshot(remote).put("max_smart_document_version",3));
+        JSONObject entry=s.getJSONObject("documents").getJSONObject("smart_cat"),view=PlaylistSyncModel.visible(entry);
+        JSONObject draft=PlaylistSyncModel.copy(view.getJSONObject("document"));
+        draft.put("filters",new JSONArray().put(new JSONObject().put("type","Flag").put("field","Clip").put("value",true)));
+        PlaylistSyncModel.save(s,view,draft);assertNull(PlaylistSyncModel.next(s));
+        assertEquals("server_update_required",entry.getJSONObject("blocked").getString("status"));
+        JSONObject reopened=PlaylistSyncModel.visible(entry),edited=PlaylistSyncModel.copy(reopened.getJSONObject("document"));
+        edited.put("filters",new JSONArray());PlaylistSyncModel.save(s,reopened,edited);
+        assertFalse(entry.has("blocked"));
+        JSONObject op=PlaylistSyncModel.next(s);assertEquals(3,op.getInt("document_version"));
+        JSONObject receipt=ack(op,2);receipt.getJSONObject("canonical").put("document_version",3);
+        PlaylistSyncModel.reply(s,op,200,receipt);assertNull(PlaylistSyncModel.next(s));
+    }
+    @Test public void categoryDraftWaitsForCompatibleServerWithoutLosingRules() throws Exception {
+        JSONObject s=state(),remote=normal("Smart",1).put("document_id","smart_cat").put("kind","smart").put("document_version",2);
+        remote.getJSONObject("document").put("id","cat");
+        PlaylistSyncModel.pull(s,snapshot(remote).put("max_smart_document_version",3));
+        JSONObject entry=s.getJSONObject("documents").getJSONObject("smart_cat"),view=PlaylistSyncModel.visible(entry);
+        JSONObject draft=PlaylistSyncModel.copy(view.getJSONObject("document"));
+        draft.put("filters",new JSONArray().put(new JSONObject().put("type","Flag").put("field","Clip").put("value",true)));
+        PlaylistSyncModel.save(s,view,draft);
+        assertNull(PlaylistSyncModel.next(s));
+        assertEquals("server_update_required",entry.getJSONObject("blocked").getString("status"));
+        assertFalse(entry.has("pending"));
+        assertEquals(4,entry.getJSONObject("desired").getInt("document_version"));
+        PlaylistSyncModel.pull(s,snapshot(remote).put("max_smart_document_version",4));
+        JSONObject op=PlaylistSyncModel.next(s);
+        assertEquals(4,op.getInt("document_version"));
+        assertTrue(PlaylistSyncModel.equal(draft,op.getJSONObject("document")));
+        JSONObject receipt=ack(op,2);receipt.getJSONObject("canonical").put("document_version",4);
+        PlaylistSyncModel.reply(s,op,200,receipt);
+        assertNull(PlaylistSyncModel.next(s));
+    }
+
     @Test public void cleanRuleSurvivesOpaqueSmartRenameAndVersionThreeAck()throws Exception{
         JSONObject s=state(),remote=normal("Clean set",1).put("document_id","smart_clean").put("kind","smart").put("document_version",3);
         JSONArray filters=new JSONArray().put(new JSONObject().put("type","Flag").put("field","Clean").put("value",true));
@@ -24,7 +61,7 @@ public class PlaylistSyncModelTest {
     JSONObject state()throws Exception{return PlaylistSyncModel.state("server","library","phone");}
     JSONObject normal(String name,int revision)throws Exception{return new JSONObject().put("document_id","normal_stable").put("kind","normal").put("document_version",1).put("revision",new JSONObject().put("revision",revision)).put("document",new JSONObject().put("version",1).put("name",name).put("companion_available",true).put("future",new JSONObject().put("keep",true)).put("tracks",new JSONArray().put(ref("a")).put(ref("missing")).put(ref("a"))));}
     JSONObject ref(String key)throws Exception{return new JSONObject().put("track_key",PlaylistSyncModel.trackKey(key+".mp3")).put("library_id","library").put("relative_path",key+".mp3");}
-    JSONObject snapshot(JSONObject doc)throws Exception{return new JSONObject().put("protocol",1).put("server_id","server").put("library_id","library").put("smart_revision",new JSONObject().put("revision",1)).put("documents",new JSONArray().put(doc));}
+    JSONObject snapshot(JSONObject doc)throws Exception{return new JSONObject().put("protocol",1).put("server_id","server").put("library_id","library").put("max_smart_document_version",4).put("smart_revision",new JSONObject().put("revision",1)).put("documents",new JSONArray().put(doc));}
     JSONObject ack(JSONObject op,int revision)throws Exception{return new JSONObject().put("server_id","server").put("library_id","library").put("operation_id",op.getString("operation_id")).put("status","applied").put("canonical",new JSONObject().put("document_id",op.getString("document_id")).put("kind",op.getString("kind")).put("document_version",1).put("revision",new JSONObject().put("revision",revision).put("library_id","library")).put("document",PlaylistSyncModel.copy(op.getJSONObject("document"))));}
     @Test public void pullPreservesDuplicatesAndUnresolvedMappingWithoutTouchingMedia()throws Exception{
         JSONObject s=state(),remote=normal("Server",1);PlaylistSyncModel.pull(s,snapshot(remote));JSONObject view=PlaylistSyncModel.visible(s.getJSONObject("documents").getJSONObject("normal_stable"));

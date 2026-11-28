@@ -64,7 +64,8 @@ pub fn matches(selected: &[String], preparation: &Preparation) -> bool {
         .any(|genre| tags.contains(&canonical(genre)))
 }
 
-pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparation) {
+/// Refresh derived tags in memory only; preserves manual values and never writes audio.
+pub fn read_embedded(path: &std::path::Path, preparation: &mut Preparation) {
     // Derived tags never replace a user-saved genre. Refresh them on each background
     // scan so edits made in another tag editor become visible without reanalysis.
     preparation.extensions.remove("embedded_genres");
@@ -105,7 +106,7 @@ pub(crate) fn read_embedded(path: &std::path::Path, preparation: &mut Preparatio
             let id3: lofty::id3::v2::Id3v2Tag = tag.clone().into();
             for frame in &id3 {
                 if let lofty::id3::v2::Frame::UserText(text) = frame {
-                    for canonical in ["Holiday", "Season"] {
+                    for canonical in ["Holiday", "Season", "AMPVerseCategories"] {
                         if text.description.eq_ignore_ascii_case(canonical) {
                             tags.entry(canonical.into())
                                 .or_default()

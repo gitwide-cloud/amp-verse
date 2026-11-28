@@ -17,6 +17,26 @@
       "kind": "Flag"
     },
     {
+      "field": "AiGenerated",
+      "label": "Marked AI-generated",
+      "kind": "Flag"
+    },
+    {
+      "field": "Acappella",
+      "label": "Marked a cappella",
+      "kind": "Flag"
+    },
+    {
+      "field": "Instrumental",
+      "label": "Marked instrumental",
+      "kind": "Flag"
+    },
+    {
+      "field": "Clip",
+      "label": "Marked clip",
+      "kind": "Flag"
+    },
+    {
       "field": "Bpm",
       "label": "BPM",
       "kind": "Number"
@@ -38,7 +58,7 @@
     },
     {
       "field": "Energy",
-      "label": "Energy (1–10)",
+      "label": "Energy (1\u201310)",
       "kind": "Number"
     },
     {
@@ -108,7 +128,7 @@
     },
     {
       "field": "SectionEnergy",
-      "label": "Any section energy (1–10)",
+      "label": "Any section energy (1\u201310)",
       "kind": "Number"
     },
     {
