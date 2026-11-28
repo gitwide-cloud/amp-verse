@@ -7,6 +7,7 @@ android {
     namespace 'cloud.gitwide.ampverse'
     compileSdk 35
     sourceSets.main.jniLibs.srcDir("build/generated/djLogicJni")
+    sourceSets.test.resources.srcDir(rootProject.file("../crates/amp-core/tests/fixtures"))
     defaultConfig {
         applicationId 'cloud.gitwide.ampverse'
         minSdk 28

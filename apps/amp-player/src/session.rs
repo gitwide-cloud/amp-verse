@@ -135,8 +135,114 @@ pub struct Recovery {
     worker: Option<std::thread::JoinHandle<Result<(), String>>>,
     last: Option<std::time::Instant>,
     pub error: Option<String>,
+    source_probe: Option<mpsc::Receiver<Vec<String>>>,
+    sources_checked: bool,
+    probe_started: Option<std::time::Instant>,
+    probe_wait_notice: bool,
+    details: Vec<String>,
+}
+/// Check only saved deck inputs, never the queue or the complete music library.
+/// Runs on a worker so a sleeping NAS cannot block window input.
+fn probe_sources(root: &Path, paths: &[(String, PathBuf)]) -> Vec<String> {
+    let mut errors = Vec::new();
+    if let Ok(root) = root.canonicalize() {
+        amp_core::storage::register(&root);
+    }
+    for (label, path) in paths {
+        let result = (|| {
+            let file = std::fs::File::open(path).map_err(|e| e.to_string())?;
+            if !file.metadata().map_err(|e| e.to_string())?.is_file() {
+                return Err("Saved input is not an audio file".into());
+            }
+            amp_core::preparation::load(path).map(|_| ())
+        })();
+        if let Err(error) = result {
+            errors.push(format!("{label}: {error}"));
+        }
+    }
+    errors
+}
+impl Snapshot {
+    fn source_paths(&self) -> Vec<(String, PathBuf)> {
+        let mut paths: Vec<_> = self
+            .decks
+            .iter()
+            .enumerate()
+            .filter_map(|(i, saved)| {
+                saved
+                    .as_ref()
+                    .map(|deck| (format!("Deck {}", deck_rack::NAMES[i]), deck.path.clone()))
+            })
+            .collect();
+        if let Some(sides) = &self.side_decks {
+            for (i, side) in sides.iter().enumerate() {
+                if let Some(deck) = &side.deck {
+                    paths.push((format!("Cue deck {}", i + 1), deck.path.clone()));
+                }
+            }
+        }
+        paths
+    }
 }
 impl Recovery {
+    fn sources_ready(&mut self, ctx: &egui::Context) -> bool {
+        if self.sources_checked {
+            return true;
+        }
+        if let Some(rx) = &self.source_probe {
+            match rx.try_recv() {
+                Ok(details) => {
+                    self.details.extend(details);
+                    self.probe_started = None;
+                    if self.probe_wait_notice {
+                        self.error = None;
+                        self.probe_wait_notice = false;
+                    }
+                    self.source_probe = None;
+                    self.sources_checked = true;
+                    return true;
+                }
+                Err(mpsc::TryRecvError::Empty) => {
+                    let elapsed = self.probe_started.map(|t| t.elapsed()).unwrap_or_default();
+                    let deadline = Duration::from_secs(15);
+                    if elapsed >= deadline {
+                        if !self.probe_wait_notice {
+                            self.error = Some("Saved music storage is taking longer to respond. Your checkpoint is kept; paused recovery will continue when it responds. You can start fresh instead.".into());
+                            self.probe_wait_notice = true;
+                        }
+                    } else {
+                        ctx.request_repaint_after(deadline - elapsed);
+                    }
+                    return false;
+                }
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.source_probe = None;
+                    self.attempted = true;
+                    self.error = Some("Saved-track check was interrupted. Your checkpoint is kept; choose Restore session to retry.".into());
+                    return false;
+                }
+            }
+        }
+        let Some(snapshot) = &self.pending else {
+            return false;
+        };
+        let paths = snapshot.source_paths();
+        if paths.is_empty() {
+            self.sources_checked = true;
+            return true;
+        }
+        let root = snapshot.root.clone();
+        let (tx, rx) = mpsc::channel();
+        self.source_probe = Some(rx);
+        self.probe_started = Some(std::time::Instant::now());
+        ctx.request_repaint_after(Duration::from_secs(15));
+        let ctx = ctx.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(probe_sources(&root, &paths));
+            ctx.request_repaint();
+        });
+        false
+    }
     pub(super) fn needs_attention(&self) -> bool {
         self.error.is_some()
             || (self.pending.is_some() && (!self.automatic_restore || self.attempted))
@@ -271,6 +377,11 @@ impl Snapshot {
 }
 impl Player {
     pub(super) fn try_automatic_recovery(&mut self, ctx: &egui::Context) {
+        // Poll an existing check even if the user disables automatic recovery.
+        // Keep a single worker: the OS may still be waiting for network I/O.
+        if self.recovery.source_probe.is_some() {
+            self.recovery.sources_ready(ctx);
+        }
         if self.recovery.pending.is_some() && !self.recovery.attempted {
             let (size, maximized) = ctx.input(|i| {
                 (
@@ -293,11 +404,30 @@ impl Player {
         }
 
         if self.library.is_some()
-            && self.scan.is_none()
             && self.recovery.pending.is_some()
             && self.recovery.automatic_restore
             && !self.recovery.attempted
+            && !self.run.auto
+            && !self.auto
+            && self
+                .audio
+                .as_ref()
+                .is_none_or(|a| (0..6).all(|d| !a.playing(d)) && !a.fading())
+            && self.recovery.sources_ready(ctx)
         {
+            // Establish the output once before any deck loads. If this fails,
+            // retain the actual device error instead of counting each deck as missing.
+            let needs_audio = self
+                .recovery
+                .pending
+                .as_ref()
+                .is_some_and(|s| s.decks.iter().any(Option::is_some));
+            if needs_audio && let Err(error) = self.ensure_audio() {
+                self.recovery.details.push(format!("Audio output: {error}"));
+                self.recovery.error = Some("The saved session is kept. Check your audio output, then choose Restore session.".into());
+                self.recovery.attempted = true;
+                return;
+            }
             self.recovery.attempted = true;
             self.restore_session(ctx);
         }
@@ -471,6 +601,13 @@ impl Player {
     pub(super) fn recovery_ui(&mut self, ui: &mut egui::Ui) {
         if let Some(error) = &self.recovery.error {
             ui.colored_label(ORANGE, error);
+            if !self.recovery.details.is_empty() {
+                ui.collapsing("Details", |ui| {
+                    for detail in &self.recovery.details {
+                        ui.weak(detail);
+                    }
+                });
+            }
             if self.recovery.pending.is_none() && ui.button("Start a new checkpoint").clicked() {
                 self.recovery.error = None;
             }
@@ -492,13 +629,15 @@ impl Player {
             ui.label("Previous session available — restore paused decks and queue?");
             restore = ui
                 .add_enabled(
-                    self.library.is_some() && !active,
+                    self.library.is_some() && !active && self.recovery.source_probe.is_none(),
                     egui::Button::new("Restore session"),
                 )
                 .clicked();
             discard = ui.button("Start fresh").clicked();
         });
         if discard {
+            self.recovery.source_probe = None;
+            self.recovery.details.clear();
             self.recovery.pending = None;
             self.recovery.error = None;
             return;
@@ -540,7 +679,7 @@ impl Player {
             if let Some(saved) = saved
                 && let Err(e) = self.safe_load_path(deck, saved.path.clone(), Some(saved.position))
             {
-                errors.push(e);
+                errors.push(format!("Deck {}: {e}", deck_rack::NAMES[deck]));
             }
         }
         if let Some(sides) = &snapshot.side_decks {
@@ -650,9 +789,12 @@ impl Player {
         }
         .into();
         if errors.is_empty() && missing == 0 {
+            self.recovery.details.clear();
+            self.recovery.source_probe = None;
             self.recovery.error = None;
             self.recovery.pending = None;
         } else {
+            self.recovery.details.extend(errors.iter().cloned());
             self.recovery.error = Some(format!(
                 "Recovery skipped {} missing queue entries and {} unavailable decks. Original checkpoint retained; reconnect storage and retry, or Start fresh.",
                 missing,
@@ -695,7 +837,7 @@ mod tests {
     }
 
     #[test]
-    fn automatic_recovery_waits_for_the_startup_refresh() {
+    fn cached_empty_recovery_does_not_wait_for_unrelated_full_refresh() {
         let dir = tempfile::tempdir().unwrap();
         let mut player = Player {
             root: dir.path().into(),
@@ -715,16 +857,161 @@ mod tests {
         player.scan = Some(rx);
         player.try_automatic_recovery(&egui::Context::default());
         assert!(
-            !player.recovery.attempted,
-            "cached startup data must not trigger recovery before refresh releases shared metadata"
+            player.recovery.attempted,
+            "a cached session must not wait for a full NAS refresh"
         );
-        assert!(player.recovery.pending.is_some());
-        player.scan = None;
-        player.try_automatic_recovery(&egui::Context::default());
-        assert!(player.recovery.attempted);
+        assert!(player.scan.is_some());
         assert!(player.recovery.pending.is_none());
+        assert!(
+            player.audio.is_none(),
+            "an empty session must not open an audio output"
+        );
     }
 
+    #[test]
+    fn active_automix_defers_delayed_recovery() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut player = Player {
+            root: dir.path().into(),
+            library: Some(Library {
+                tracks: vec![],
+                tree: Folder {
+                    name: "music".into(),
+                    folders: vec![],
+                    tracks: vec![],
+                },
+            }),
+            ..Default::default()
+        };
+        player.recovery.pending = Some(player.session_snapshot());
+        player.recovery.automatic_restore = true;
+        player.run.auto = true;
+        player.try_automatic_recovery(&egui::Context::default());
+        assert!(!player.recovery.attempted && player.recovery.pending.is_some());
+        player.run.auto = false;
+        player.auto = true;
+        player.try_automatic_recovery(&egui::Context::default());
+        assert!(!player.recovery.attempted && player.recovery.pending.is_some());
+        assert!(!player.recovery.needs_attention());
+    }
+    #[test]
+    fn recovery_probe_is_bounded_to_loaded_inputs_and_preserves_real_failures() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("track.mp3");
+        std::fs::write(&audio, b"fixture, never decoded by the source check").unwrap();
+        let corrupt = amp_core::sidecar(&audio);
+        std::fs::write(&corrupt, b"not json").unwrap();
+        let player = Player {
+            root: dir.path().into(),
+            ..Default::default()
+        };
+        let mut snapshot = player.session_snapshot();
+        snapshot.decks[0] = Some(Deck {
+            path: audio.clone(),
+            position: 0.,
+        });
+        snapshot.decks[3] = Some(Deck {
+            path: dir.path().join("missing.mp3"),
+            position: 0.,
+        });
+        snapshot.queue = vec![dir.path().join("do-not-probe-queued-song.mp3"); 1000];
+        let paths = snapshot.source_paths();
+        assert_eq!(paths.len(), 2);
+        let errors = probe_sources(dir.path(), &paths);
+        assert_eq!(errors.len(), 2);
+        assert!(errors[0].starts_with("Deck A1:"));
+        assert!(errors[1].starts_with("Deck B2:"));
+        assert_eq!(
+            std::fs::read(&audio).unwrap(),
+            b"fixture, never decoded by the source check"
+        );
+        assert_eq!(std::fs::read(&corrupt).unwrap(), b"not json");
+    }
+    #[test]
+    fn recovery_probe_completion_is_independent_of_the_full_scan() {
+        let (tx, rx) = mpsc::channel();
+        let mut recovery = Recovery {
+            source_probe: Some(rx),
+            ..Default::default()
+        };
+        assert!(!recovery.sources_ready(&egui::Context::default()));
+        tx.send(vec!["Deck A1: source is offline".into()]).unwrap();
+        assert!(recovery.sources_ready(&egui::Context::default()));
+        assert_eq!(recovery.details, ["Deck A1: source is offline"]);
+        assert!(recovery.sources_checked);
+        assert!(!recovery.attempted);
+    }
+    #[test]
+    fn probe_reads_remain_valid_during_portable_catalog_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let audio = dir.path().join("source.mp3");
+        let original = b"source bytes stay unchanged";
+        std::fs::write(&audio, original).unwrap();
+        let prep = amp_core::Preparation::default();
+        amp_core::preparation::save(dir.path(), Path::new("source.mp3"), &prep).unwrap();
+        amp_core::catalog_db::ensure(dir.path()).unwrap();
+        assert!(!amp_core::preparation::portable(&audio).is_file());
+        let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+        let worker_barrier = barrier.clone();
+        let root = dir.path().to_path_buf();
+        let writer = std::thread::spawn(move || {
+            worker_barrier.wait();
+            for i in 0..32 {
+                let path = root.join("source.mp3");
+                let (mut prep, revision) =
+                    amp_core::preparation::load_with_revision(&path).unwrap();
+                prep.extensions
+                    .insert("probe_test".into(), serde_json::json!(i));
+                amp_core::preparation::save_if_unchanged(
+                    &root,
+                    Path::new("source.mp3"),
+                    &prep,
+                    revision.as_deref(),
+                )
+                .unwrap();
+            }
+        });
+        barrier.wait();
+        for _ in 0..64 {
+            assert!(probe_sources(dir.path(), &[("Deck A1".into(), audio.clone())]).is_empty());
+        }
+        writer.join().unwrap();
+        assert_eq!(
+            amp_core::preparation::load(&audio).unwrap().extensions["probe_test"],
+            31
+        );
+        assert_eq!(std::fs::read(audio).unwrap(), original);
+    }
+    #[test]
+    fn slow_probe_reports_wait_without_starting_another_worker() {
+        let (tx, rx) = mpsc::channel();
+        let mut recovery = Recovery {
+            source_probe: Some(rx),
+            probe_started: Some(std::time::Instant::now() - Duration::from_secs(16)),
+            ..Default::default()
+        };
+        let ctx = egui::Context::default();
+        assert!(!recovery.sources_ready(&ctx));
+        assert!(recovery.probe_wait_notice && recovery.error.is_some());
+        assert!(recovery.source_probe.is_some());
+        assert!(!recovery.sources_ready(&ctx));
+        tx.send(Vec::new()).unwrap();
+        assert!(recovery.sources_ready(&ctx));
+        assert!(recovery.source_probe.is_none());
+        assert!(recovery.error.is_none());
+        assert!(!recovery.probe_wait_notice);
+    }
+    #[test]
+    fn disconnected_probe_keeps_the_checkpoint_retryable() {
+        let (tx, rx) = mpsc::channel();
+        drop(tx);
+        let mut recovery = Recovery {
+            source_probe: Some(rx),
+            ..Default::default()
+        };
+        assert!(!recovery.sources_ready(&egui::Context::default()));
+        assert!(recovery.attempted && recovery.error.is_some());
+    }
     #[test]
     #[ignore = "requires local audio fixture and native output; recovery remains silent"]
     fn auxiliary_cue_positions_restore_paused_without_changing_preparation() {
