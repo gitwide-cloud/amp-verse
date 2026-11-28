@@ -145,10 +145,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 let mut terminate =
                     tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
                         .expect("SIGTERM handler");
-                tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=terminate.recv()=>{} }
+                tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=terminate.recv()=>{}, _=cast.updater.exit.notified()=>{} }
             }
             #[cfg(not(unix))]
-            let _ = tokio::signal::ctrl_c().await;
+            tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=cast.updater.exit.notified()=>{} };
             cast.analysis.stop();
             cast.shutdown().await;
         })

@@ -129,7 +129,7 @@ jobs:
         run: |
           mkdir -p engine-checkpoint
           if [ "${{ runner.os }}" = "Windows" ]; then ext=.exe; else ext=; fi
-          cp target/release/amp-cast$ext target/release/amp-prepare$ext target/release/amp-engine$ext engine-checkpoint/
+          cp target/release/amp-cast$ext target/release/amp-prepare$ext target/release/amp-engine$ext target/release/amp-server-update$ext engine-checkpoint/
           cp LICENSE THIRD_PARTY_NOTICES.md docs/SERVER_ANALYSIS_DATABASE.md engine-checkpoint/
           if [ "${{ runner.os }}" = "Windows" ]; then cp deploy/install-windows-server.ps1 deploy/show-windows-server-access.ps1 "deploy/Show Server Access Code.cmd" engine-checkpoint/; fi
           cp test-output/chroma/report.json engine-checkpoint/chroma-benchmark.json

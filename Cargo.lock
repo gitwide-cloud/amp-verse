@@ -63,9 +63,10 @@ dependencies = [
 
 [[package]]
 name = "amp-cast"
-version = "1.1.0-rc.10"
+version = "1.1.0-rc.11"
 dependencies = [
  "amp-core",
+ "amp-updater",
  "async-stream",
  "axum",
  "bytes",
@@ -118,10 +119,11 @@ dependencies = [
 
 [[package]]
 name = "amp-player"
-version = "1.1.0-rc.10"
+version = "1.1.0-rc.11"
 dependencies = [
  "amp-cast",
  "amp-core",
+ "amp-updater",
  "axum",
  "cc",
  "cpal",
@@ -165,6 +167,19 @@ dependencies = [
 [[package]]
 name = "amp-stems"
 version = "1.0.22"
+
+[[package]]
+name = "amp-updater"
+version = "1.1.0-rc.11"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "ureq",
+ "windows",
+ "zip",
+]
 
 [[package]]
 name = "android-activity"

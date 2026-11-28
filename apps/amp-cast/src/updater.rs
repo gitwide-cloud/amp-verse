@@ -1,0 +1,224 @@
+//! Server-owned update: official GitHub feed, verified core package, graceful restart.
+use super::*;
+use serde_json::{Value, json};
+use std::sync::atomic::{AtomicBool, Ordering};
+#[derive(Default)]
+pub struct Updater {
+    busy: AtomicBool,
+    cancel: AtomicBool,
+    state: std::sync::Mutex<Value>,
+    committed: AtomicBool,
+    pub exit: tokio::sync::Notify,
+}
+fn available() -> bool {
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| {
+            p.file_name().map(|n| {
+                n == if cfg!(windows) {
+                    "amp-cast.exe"
+                } else {
+                    "amp-cast"
+                }
+            })
+        })
+        .unwrap_or(false)
+}
+pub fn routes() -> Router<Arc<Cast>> {
+    Router::new()
+        .route("/api/update", get(status))
+        .route("/api/update/install", post(install))
+        .route("/api/update/cancel", post(cancel))
+}
+async fn status(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
+    if !cast.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    let mut state = cast.updater.state.lock().unwrap().clone();
+    if state.is_null() {
+        if let Some(dir) = cast.config_dir.lock().unwrap().as_ref() {
+            if let Ok(message) = std::fs::read_to_string(dir.join("updates/last-result.txt")) {
+                state = json!({"status":message});
+            }
+        }
+    }
+    Json(json!({"version":env!("CARGO_PKG_VERSION"),"available":available(),"busy":cast.updater.busy.load(Ordering::Relaxed),"update":state})).into_response()
+}
+async fn cancel(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
+    if !cast.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if cast.updater.committed.load(Ordering::SeqCst) {
+        return (
+            StatusCode::CONFLICT,
+            "Installation has started; server is restarting",
+        )
+            .into_response();
+    }
+    cast.updater.cancel.store(true, Ordering::Relaxed);
+    Json(json!({"status":"Cancelling update; installed files are retained"})).into_response()
+}
+async fn install(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
+    if !cast.authorized(&headers) {
+        return StatusCode::UNAUTHORIZED.into_response();
+    }
+    if !available() {
+        return (
+            StatusCode::CONFLICT,
+            "Update the desktop host from its Add-ons tab",
+        )
+            .into_response();
+    }
+    if cast.updater.busy.swap(true, Ordering::SeqCst) {
+        return (StatusCode::CONFLICT, "An update is already in progress").into_response();
+    }
+    cast.updater.cancel.store(false, Ordering::Relaxed);
+    *cast.updater.state.lock().unwrap() = json!({"status":"Checking for updates…"});
+    tokio::task::spawn_blocking(move || {
+        let result = prepare(&cast);
+        if let Err(error) = result {
+            *cast.updater.state.lock().unwrap() = json!({"status":error,"failed":true});
+        }
+        if !cast.updater.committed.load(Ordering::SeqCst) {
+            cast.updater.busy.store(false, Ordering::SeqCst);
+        }
+    });
+    (
+        StatusCode::ACCEPTED,
+        Json(json!({"status":"Checking for updates…"})),
+    )
+        .into_response()
+}
+fn prepare(cast: &Cast) -> Result<(), String> {
+    let key = format!("server-{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+    let Some(update) =
+        amp_updater::delivery::resolve(env!("CARGO_PKG_VERSION"), &key, &cast.updater.cancel)?
+    else {
+        *cast.updater.state.lock().unwrap() = json!({"status":"Server is up to date"});
+        return Ok(());
+    };
+    *cast.updater.state.lock().unwrap() =
+        json!({"status":format!("Downloading {}…",update.version)});
+    let root = cast
+        .config_dir
+        .lock()
+        .unwrap()
+        .clone()
+        .ok_or("Server settings folder unavailable")?
+        .join("updates");
+    let (temp, files) = amp_updater::delivery::extract(&update, &root, &cast.updater.cancel)?;
+    let executable = std::env::current_exe().map_err(|e| e.to_string())?;
+    let destination = executable
+        .parent()
+        .ok_or("Server application folder unavailable")?
+        .to_path_buf();
+    let helper = if cfg!(windows) {
+        "amp-server-update.exe"
+    } else {
+        "amp-server-update"
+    };
+    let server = if cfg!(windows) {
+        "amp-cast.exe"
+    } else {
+        "amp-cast"
+    };
+    if !files.contains(&PathBuf::from(helper)) || !files.contains(&PathBuf::from(server)) {
+        return Err("Server update package is incomplete; installed files retained".into());
+    }
+    // The manager remains open. Only server core files belong to this transaction.
+    if files.iter().any(|p| {
+        p.components().count() != 1
+            || !matches!(
+                p.to_str(),
+                Some(
+                    "amp-cast"
+                        | "amp-cast.exe"
+                        | "amp-server-update"
+                        | "amp-server-update.exe"
+                        | "amp-engine"
+                        | "amp-engine.exe"
+                        | "amp-prepare"
+                        | "amp-prepare.exe"
+                        | "build.json"
+                        | "LICENSE"
+                        | "THIRD_PARTY_NOTICES.md"
+                )
+            )
+    }) {
+        return Err("Server core update contains unexpected nested files".into());
+    }
+    let probe = tempfile::NamedTempFile::new_in(&destination)
+        .map_err(|e| format!("Server folder is not writable: {e}"))?;
+    drop(probe);
+    let stage = temp.path().join("files");
+    let runner = temp.path().join(helper);
+    std::fs::copy(stage.join(helper), &runner).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&runner, std::fs::Permissions::from_mode(0o755))
+            .map_err(|e| e.to_string())?;
+    }
+    let job = temp.path().join("job.json");
+    let plan = amp_updater::helper::Job {
+        parent: std::process::id(),
+        destination,
+        stage,
+        files,
+        result: root.join("last-result.txt"),
+        server: true,
+        arguments: vec![cast.root.to_string_lossy().into_owned()],
+    };
+    std::fs::write(&job, serde_json::to_vec(&plan).map_err(|e| e.to_string())?)
+        .map_err(|e| e.to_string())?;
+    if cast.updater.cancel.load(Ordering::Relaxed) {
+        return Err("Update cancelled; installed files retained".into());
+    }
+    let mut command = std::process::Command::new(runner);
+    command.arg(&job);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        command.creation_flags(0x08000000);
+    }
+    command
+        .spawn()
+        .map_err(|e| format!("Could not start updater: {e}"))?;
+    let _ = temp.keep();
+    cast.updater.committed.store(true, Ordering::SeqCst);
+    *cast.updater.state.lock().unwrap() =
+        json!({"status":"Installing update and restarting the server…"});
+    cast.updater.exit.notify_one();
+    Ok(())
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tower::ServiceExt;
+    #[tokio::test]
+    async fn cross_site_and_wrong_password_cannot_start_an_update() {
+        for (name, value) in [
+            ("sec-fetch-site", "cross-site"),
+            ("x-amp-password", "wrong"),
+        ] {
+            let root = tempfile::tempdir().unwrap();
+            let cast = Cast::new(
+                root.path().into(),
+                amp_core::scan(root.path()).unwrap(),
+                Some("private".into()),
+            );
+            let app = super::super::router(cast.clone());
+            let request = axum::http::Request::builder()
+                .method("POST")
+                .uri("/api/update/install")
+                .header(name, value)
+                .body(Body::empty())
+                .unwrap();
+            assert_eq!(
+                app.oneshot(request).await.unwrap().status(),
+                StatusCode::UNAUTHORIZED
+            );
+            assert!(!cast.updater.busy.load(Ordering::Relaxed));
+        }
+    }
+}

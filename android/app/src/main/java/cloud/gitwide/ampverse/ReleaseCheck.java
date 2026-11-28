@@ -1,6 +1,7 @@
 package cloud.gitwide.ampverse;
 
 import org.json.JSONObject;
+import org.json.JSONArray;
 import java.net.HttpURLConnection;
 import java.net.URL;
 import java.io.ByteArrayOutputStream;
@@ -10,7 +11,7 @@ final class ReleaseCheck {
     static String check(String installed) {
         HttpURLConnection connection=null;
         try {
-            connection=(HttpURLConnection)new URL("https://api.github.com/repos/gitwide-cloud/amp-verse/releases/latest").openConnection();
+            connection=(HttpURLConnection)new URL("https://api.github.com/repos/gitwide-cloud/amp-verse/releases?per_page=100").openConnection();
             connection.setConnectTimeout(5000);connection.setReadTimeout(5000);connection.setInstanceFollowRedirects(false);
             connection.setRequestProperty("Accept","application/vnd.github+json");connection.setRequestProperty("User-Agent","AMPVerse-Android");
             int code=connection.getResponseCode();
@@ -25,11 +26,22 @@ final class ReleaseCheck {
         finally{if(connection!=null)connection.disconnect();}
     }
     static String describe(String json,String installed)throws Exception{
-        JSONObject release=new JSONObject(json);String tag=release.getString("tag_name");
-        int comparison=compare(tag,installed);
-        if(comparison>0)return "New release: "+tag+". Open GitHub Releases to review and download.";
-        if(comparison==0)return "You have the latest published version ("+tag+").";
-        return "Installed "+installed+" is newer than the latest published release ("+tag+").";
+        JSONObject release=select(new JSONArray(json),installed);
+        if(release==null)return "You have the latest compatible published update.";
+        return "New update: "+release.getString("tag_name")+". Tap Update to install.";
+    }
+    static JSONObject select(JSONArray releases,String installed)throws Exception {
+        int[] current=version(installed);JSONObject selected=null;
+        for(int i=0;i<releases.length();i++){
+            JSONObject item=releases.optJSONObject(i);if(item==null||item.optBoolean("draft",true))continue;
+            String tag=item.optString("tag_name");int[] candidate;
+            try{candidate=version(tag);}catch(IllegalArgumentException error){continue;}
+            boolean pre=candidate[3]<2;
+            if(item.optBoolean("prerelease",!pre)!=pre||candidate[3]<current[3]||compare(tag,installed)<=0)continue;
+            JSONArray assets=item.optJSONArray("assets");boolean complete=false;
+            if(assets!=null)for(int a=0;a<assets.length();a++){JSONObject asset=assets.optJSONObject(a);if(asset!=null&&asset.optString("name").equals("amp-update.json"))complete=true;}
+            if(complete&&(selected==null||compare(tag,selected.getString("tag_name"))>0))selected=item;
+        }return selected;
     }
     static boolean betaVersion(String version){
         return version!=null&&version.matches("[vV]?(?:0|[1-9][0-9]{0,7})\\.(?:0|[1-9][0-9]{0,7})\\.(?:0|[1-9][0-9]{0,7})-beta\\.[1-9][0-9]{0,7}");

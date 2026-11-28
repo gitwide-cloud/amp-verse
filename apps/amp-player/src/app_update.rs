@@ -78,35 +78,19 @@ fn read(
 }
 
 fn stage(cancel: &AtomicBool, tx: &mpsc::Sender<Event>) -> Result<Option<PathBuf>, String> {
-    let info = read(
-        "https://api.github.com/repos/gitwide-cloud/amp-verse/releases/latest",
-        2 * 1024 * 1024,
-        cancel,
-        tx,
-    )?;
-    let info: serde_json::Value = serde_json::from_slice(&info).map_err(|e| e.to_string())?;
-    if info["draft"] != false || info["prerelease"] != false {
-        return Err("No stable update is published".into());
-    }
-    let tag = info["tag_name"].as_str().ok_or("Release version missing")?;
-    if !crate::update_package::is_newer_stable(tag, env!("CARGO_PKG_VERSION"))? {
-        return Ok(None);
-    }
-    let data = read(&release_url(tag, "amp-update.json")?, 1048576, cancel, tx)?;
-    let manifest: Manifest =
-        serde_json::from_slice(&data).map_err(|e| format!("Invalid update manifest: {e}"))?;
-    if manifest.schema != 1
-        || crate::update_package::version(&manifest.version)?
-            != crate::update_package::version(tag)?
-    {
-        return Err("Update manifest version mismatch".into());
-    }
     let platform = format!("{}-{}", std::env::consts::OS, std::env::consts::ARCH);
-    let package = manifest
-        .packages
-        .get(&platform)
-        .filter(|p| crate::update_package::valid_package(p) && p.name.ends_with(".zip"))
-        .ok_or("No compatible update package is published for this platform")?;
+    let Some(update) =
+        amp_updater::delivery::resolve(env!("CARGO_PKG_VERSION"), &platform, cancel)?
+    else {
+        return Ok(None);
+    };
+    let tag = update.tag.as_str();
+    let manifest = Manifest {
+        schema: 1,
+        version: update.version,
+        packages: update.packages,
+    };
+    let package = &update.package;
     let _ = tx.send(Event::Progress(format!(
         "Downloading {}…",
         manifest.version
@@ -126,7 +110,15 @@ fn stage(cancel: &AtomicBool, tx: &mpsc::Sender<Event>) -> Result<Option<PathBuf
         return Err("Update cancelled".into());
     }
     let stage = temp.path().join("files");
-    let files = crate::update_package::extract(&archive, &stage)?;
+    let mut files = crate::update_package::extract(&archive, &stage)?;
+    // A standalone server has its own update action and can keep broadcasting.
+    // Never overwrite its running executable during a desktop-only update.
+    files.retain(|p| {
+        !matches!(
+            p.to_str(),
+            Some("amp-cast" | "amp-cast.exe" | "amp-server-update" | "amp-server-update.exe")
+        )
+    });
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let destination = exe
         .parent()
@@ -144,6 +136,41 @@ fn stage(cancel: &AtomicBool, tx: &mpsc::Sender<Event>) -> Result<Option<PathBuf
     };
     if !files.contains(&PathBuf::from(player)) || !files.contains(&PathBuf::from(helper)) {
         return Err("Update package is incomplete; current installation retained".into());
+    }
+    let engine_name = if cfg!(windows) {
+        "amp-engine.exe"
+    } else {
+        "amp-engine"
+    };
+    if destination.join("addons").join(engine_name).is_file() {
+        let key = format!("engine-{}-{}", std::env::consts::OS, std::env::consts::ARCH);
+        let engine = manifest
+            .packages
+            .get(&key)
+            .filter(|p| crate::update_package::valid_package(p))
+            .ok_or("Matching analysis-engine update is missing; installed app retained")?;
+        let engine_file = temp.path().join(&engine.name);
+        std::fs::write(
+            &engine_file,
+            read(&release_url(tag, &engine.name)?, engine.size, cancel, tx)?,
+        )
+        .map_err(|e| e.to_string())?;
+        crate::update_package::verify(&engine_file, engine)?;
+        let relative = PathBuf::from("addons").join(engine_name);
+        std::fs::create_dir_all(stage.join("addons")).map_err(|e| e.to_string())?;
+        std::fs::copy(&engine_file, stage.join(&relative)).map_err(|e| e.to_string())?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                stage.join(&relative),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .map_err(|e| e.to_string())?;
+        }
+        if !files.contains(&relative) {
+            files.push(relative);
+        }
     }
     let probe = tempfile::NamedTempFile::new_in(&destination)
         .map_err(|e| format!("Application folder is not writable: {e}"))?;

@@ -119,3 +119,9 @@ AMP⚡VERSE is an independent, hobbyist-focused, open-source project. The projec
 AMP Lab builds on ideas and technology from the separate [MP3 Lab project](https://github.com/gitwide-cloud/mp3-lab). MP3 Lab remains its own project.
 
 This is a project for people who miss the personality of classic music software and still enjoy discovering what they can build with their own music. **Listen casually, DJ a party, or turn your home lab into a radio station—it's your call.**
+
+### Updates inside the apps
+
+Desktop: Add-ons → Update. Server: its web window → Add-ons → Update server. Android: Update in the app; each separate add-on also has Update this add-on. Downloads are verified before replacing application files. Server updates restart only the existing server; music, playlists, pairing and settings stay in their existing locations. Android asks for its required installation approval.
+
+RC builds follow newer RC releases and can promote to stable; beta builds can advance to RC or stable. Stable builds remain on the stable channel. Drafts and releases without the complete update manifest are ignored. Versions are compared numerically, including RC 9 → RC 10. This updater fix must first be applied once to older installations whose update code only understands stable releases.

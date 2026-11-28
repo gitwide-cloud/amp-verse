@@ -23,7 +23,7 @@ class UpdateManifestTests(unittest.TestCase):
             self.assertEqual(result['packages']['android-arm64']['version_code'], 42)
             self.assertEqual(result['packages']['linux-x86_64']['sha256'], hashlib.sha256(b'package').hexdigest())
 
-    def test_release_candidate_uses_product_identity_without_updater_asset(self):
+    def test_release_candidate_uses_product_identity_and_updater_asset(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             (root / "android").mkdir()
@@ -39,8 +39,12 @@ class UpdateManifestTests(unittest.TestCase):
                     "release_channel": "rc",
                     "package_version": "1.1.0-rc.1+git.12345678",
                 })
-                with self.assertRaises(ValueError):
-                    generate(root, "1.1.0-rc.1")
+                for platform in ("windows", "linux"):
+                    (root / f"amp-verse-{platform}-v1.1.0-rc.1.zip").write_bytes(b"package")
+                    (root / f"amp-server-{platform}-v1.1.0-rc.1.zip").write_bytes(b"server")
+                manifest = generate(root, "1.1.0-rc.1")
+                self.assertEqual(manifest["version"], "1.1.0-rc.1")
+                self.assertIn("server-windows-x86_64", manifest["packages"])
                 properties.write_text("versionName=1.0.22\nversionCode=42\n")
                 with self.assertRaisesRegex(ValueError, "product versions disagree"):
                     desktop_version(root)
@@ -71,6 +75,25 @@ class UpdateManifestTests(unittest.TestCase):
             with patch.dict(os.environ, {"GITHUB_REF": "refs/tags/v1.1.1"}):
                 with self.assertRaisesRegex(ValueError, "tag does not match"):
                     desktop_version(root)
+
+    def test_every_android_edition_and_engine_is_addressable(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for platform in ("windows", "linux"):
+                (root / f"amp-verse-{platform}-v1.1.0-rc.11.zip").write_bytes(b"desktop")
+                (root / f"amp-server-{platform}-v1.1.0-rc.11.zip").write_bytes(b"server")
+            (root / "amp-engine-windows-x86_64.exe").write_bytes(b"engine")
+            editions = {}
+            for edition in ("full", "lite", "dj", "lab", "cast", "podcasts", "remote"):
+                path = root / f"amp-{edition}.apk"
+                path.write_bytes(edition.encode())
+                editions[f"android-{edition}-arm64"] = {"name":path.name,"sha256":hashlib.sha256(path.read_bytes()).hexdigest(),"size":path.stat().st_size,"version_code":55}
+            (root / "android-packages.json").write_text(json.dumps({"packages":editions}))
+            result = generate(root, "1.1.0-rc.11")
+            self.assertEqual(len(result["packages"]), 12)
+            self.assertIn("android-dj-arm64", result["packages"])
+            self.assertIn("engine-windows-x86_64", result["packages"])
+            self.assertIn("server-linux-x86_64", result["packages"])
 
     def test_missing_platform_does_not_publish_manifest(self):
         with tempfile.TemporaryDirectory() as directory:

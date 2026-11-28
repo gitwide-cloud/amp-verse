@@ -22,6 +22,11 @@ public final class CompanionActivity extends Activity {
     private ListenableFuture<MediaController> connection;
     private MediaController controller;
     boolean closed,active,playerReady;
+    Button updateButton;
+    TextView updateStatus;
+    final Runnable updatePoll=new Runnable(){public void run(){if(closed)return;updateButton.setEnabled(!AppUpdate.busy);updateStatus.setText(AppUpdate.status);if(!AppUpdate.busy)AppUpdate.installPending(CompanionActivity.this);handler.postDelayed(this,750);}};
+    @Override public void onResume(){super.onResume();android.content.SharedPreferences p=getSharedPreferences("updates",0);if(p.getBoolean("permission_pending",false)&&getPackageManager().canRequestPackageInstalls())p.edit().putBoolean("permission_pending",false).putBoolean("install",true).apply();handler.post(updatePoll);}
+    @Override public void onPause(){handler.removeCallbacks(updatePoll);super.onPause();}
     Runnable ipcChanged=()->{};
     void ipc(boolean ready,String message){playerReady=ready;status.setText("AMP Player IPC: "+message);ipcChanged.run();}
     int dp(int value){return (int)(value*getResources().getDisplayMetrics().density);}
@@ -36,6 +41,7 @@ public final class CompanionActivity extends Activity {
     void work(Callable<String> action){worker.execute(()->{try{String message=action.call();runOnUiThread(()->{if(!closed)status.setText(message);});}catch(Exception e){runOnUiThread(()->{if(!closed)status.setText(e.getMessage());});}});}
     @Override public void onCreate(Bundle state){super.onCreate(state);if(BuildConfig.DEBUG&&getIntent().getBooleanExtra("amp-test-keep-awake",false))getWindow().addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);colors=new Appearance(this);LinearLayout root=column();root.setBackground(Chrome.panel(colors,false));root.setPadding(dp(8),dp(8),dp(8),dp(8));root.setOnApplyWindowInsetsListener((v,i)->{v.setPadding(dp(8)+i.getSystemWindowInsetLeft(),i.getSystemWindowInsetTop(),dp(8)+i.getSystemWindowInsetRight(),i.getSystemWindowInsetBottom());return i;});
         row(root,button("ϟ AMP "+BuildConfig.MODULE.toUpperCase(java.util.Locale.ROOT),()->startActivity(new Intent().setClassName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.MainActivity"))),button("Back to Player",()->{startActivity(new Intent().setClassName("cloud.gitwide.ampverse","cloud.gitwide.ampverse.MainActivity"));finish();}));
+        updateButton=button("Update this add-on",()->{AppUpdate.start(this);status.setText("Checking official updates…");});root.addView(updateButton);updateStatus=label(AppUpdate.status,13);root.addView(updateStatus);
         status=label("Connecting to AMP Player…",14);root.addView(status);ScrollView scroll=new ScrollView(this);body=column();scroll.addView(body);root.addView(scroll,new LinearLayout.LayoutParams(-1,0,1));setContentView(root);
         if(BuildConfig.MODULE.equals("cast")){feature=new FeatureScreen(this);feature.open(body);}
     }
