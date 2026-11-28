@@ -6,6 +6,9 @@ pub struct Deck {
     pub path: PathBuf,
     pub position: f64,
 }
+fn default_automatic_restore() -> bool {
+    true
+}
 fn default_pair() -> [usize; 2] {
     [0, 1]
 }
@@ -91,7 +94,7 @@ pub struct Snapshot {
     eq_open: bool,
     #[serde(default)]
     fx_open: bool,
-    #[serde(default)]
+    #[serde(default = "default_automatic_restore")]
     automatic_restore: bool,
     version: u32,
     root: PathBuf,
@@ -134,12 +137,18 @@ pub struct Recovery {
     pub error: Option<String>,
 }
 impl Recovery {
+    pub(super) fn needs_attention(&self) -> bool {
+        self.error.is_some()
+            || (self.pending.is_some() && (!self.automatic_restore || self.attempted))
+    }
+
     pub(super) fn enabled(&self) -> bool {
         self.file.is_some()
     }
     pub fn open(root: &Path) -> Self {
         use sha2::{Digest, Sha256};
         let mut state = Self {
+            automatic_restore: true,
             key: format!(
                 "session/{:x}",
                 Sha256::digest(root.to_string_lossy().as_bytes())
@@ -284,6 +293,7 @@ impl Player {
         }
 
         if self.library.is_some()
+            && self.scan.is_none()
             && self.recovery.pending.is_some()
             && self.recovery.automatic_restore
             && !self.recovery.attempted
@@ -654,6 +664,67 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recovery_prompt_waits_for_automatic_attempt_but_retains_real_errors() {
+        let mut player = Player::default();
+        player.recovery.pending = Some(player.session_snapshot());
+        player.recovery.automatic_restore = true;
+        assert!(!player.recovery.needs_attention());
+        player.recovery.attempted = true;
+        assert!(player.recovery.needs_attention());
+        player.recovery.attempted = false;
+        player.recovery.error = Some("Storage unavailable".into());
+        assert!(player.recovery.needs_attention());
+    }
+    #[test]
+    fn legacy_session_defaults_to_paused_recovery_and_keeps_explicit_opt_out() {
+        let snapshot = Player::default().session_snapshot();
+        let mut value = serde_json::to_value(snapshot).unwrap();
+        value.as_object_mut().unwrap().remove("automatic_restore");
+        assert!(
+            serde_json::from_value::<Snapshot>(value.clone())
+                .unwrap()
+                .automatic_restore
+        );
+        value["automatic_restore"] = serde_json::json!(false);
+        assert!(
+            !serde_json::from_value::<Snapshot>(value)
+                .unwrap()
+                .automatic_restore
+        );
+    }
+
+    #[test]
+    fn automatic_recovery_waits_for_the_startup_refresh() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut player = Player {
+            root: dir.path().into(),
+            library: Some(Library {
+                tracks: vec![],
+                tree: Folder {
+                    name: "music".into(),
+                    folders: vec![],
+                    tracks: vec![],
+                },
+            }),
+            ..Default::default()
+        };
+        player.recovery.pending = Some(player.session_snapshot());
+        player.recovery.automatic_restore = true;
+        let (_tx, rx) = std::sync::mpsc::channel();
+        player.scan = Some(rx);
+        player.try_automatic_recovery(&egui::Context::default());
+        assert!(
+            !player.recovery.attempted,
+            "cached startup data must not trigger recovery before refresh releases shared metadata"
+        );
+        assert!(player.recovery.pending.is_some());
+        player.scan = None;
+        player.try_automatic_recovery(&egui::Context::default());
+        assert!(player.recovery.attempted);
+        assert!(player.recovery.pending.is_none());
+    }
+
     #[test]
     #[ignore = "requires local audio fixture and native output; recovery remains silent"]
     fn auxiliary_cue_positions_restore_paused_without_changing_preparation() {

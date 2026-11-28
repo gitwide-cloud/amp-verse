@@ -80,7 +80,7 @@ impl Membership {
     fn indices(
         &mut self,
         profile: &amp_core::show::SmartPlaylist,
-        library: &Library,
+        library: &std::sync::Arc<Library>,
         generation: u64,
     ) -> Option<Vec<usize>> {
         if let Some(rx) = &self.job {
@@ -100,12 +100,13 @@ impl Membership {
         let matching = self.cached.as_ref().filter(|result| result.key == key);
         let ready = matching.map(|result| result.indices.clone());
         if self.job.is_none() && matching.is_none() {
-            let tracks = library.tracks.clone();
+            let snapshot = std::sync::Arc::clone(library);
             let profile = profile.clone();
             let (tx, rx) = mpsc::channel();
             self.job = Some(rx);
             std::thread::spawn(move || {
-                let indices = tracks
+                let indices = snapshot
+                    .tracks
                     .iter()
                     .enumerate()
                     .filter(|(_, track)| amp_core::show::eligible(&profile, track))
@@ -115,6 +116,43 @@ impl Membership {
             });
         }
         ready
+    }
+}
+
+fn playlist_key(path: &Path) -> String {
+    let text = path.to_string_lossy();
+    let bytes = text.as_bytes();
+    if text.starts_with(r"\\")
+        || (bytes.len() >= 3
+            && bytes[0].is_ascii_alphabetic()
+            && bytes[1] == b':'
+            && matches!(bytes[2], b'\\' | b'/'))
+    {
+        let text = text.replace('/', "\\");
+        let folded = text.to_ascii_lowercase();
+        let text = if folded.starts_with(r"\\?\unc\") {
+            format!(r"\\{}", &text[8..])
+        } else if folded.starts_with(r"\\?\") {
+            text[4..].to_owned()
+        } else {
+            text
+        };
+        if let Some(tail) = text.strip_prefix(r"\\") {
+            let mut parts = tail.splitn(3, '\\');
+            return format!(
+                r"\\{}\{}\{}",
+                parts.next().unwrap_or_default().to_ascii_lowercase(),
+                parts.next().unwrap_or_default().to_ascii_lowercase(),
+                parts.next().unwrap_or_default()
+            );
+        }
+        if text.as_bytes().get(1) == Some(&b':') {
+            format!("{}{}", text[..1].to_ascii_lowercase(), &text[1..])
+        } else {
+            text
+        }
+    } else {
+        crate::playlist_sync::root_key(path)
     }
 }
 impl Browser {
@@ -133,20 +171,31 @@ impl Browser {
             self.membership = Membership::default();
         }
         for (path, playlist) in view.normal {
-            if let Some((_, old)) = self.playlists.iter_mut().find(|(p, _)| *p == path) {
-                let accept = match (&old.sync, &playlist.sync) {
-                    (Some(old), Some(new)) if old.library_id == new.library_id => {
-                        new.revision >= old.revision
-                    }
-                    (Some(_), None) => false,
-                    _ => true,
-                };
-                if accept {
-                    *old = playlist;
+            self.upsert_playlist(path, playlist);
+        }
+    }
+    pub(super) fn upsert_playlist(&mut self, path: PathBuf, playlist: Playlist) -> usize {
+        let key = playlist_key(&path);
+        if let Some(index) = self
+            .playlists
+            .iter()
+            .position(|(old, _)| playlist_key(old) == key)
+        {
+            let old = &mut self.playlists[index].1;
+            let accept = match (&old.sync, &playlist.sync) {
+                (Some(old), Some(new)) if old.library_id == new.library_id => {
+                    new.revision >= old.revision
                 }
-            } else {
-                self.playlists.push((path, playlist));
+                (Some(_), None) => false,
+                _ => true,
+            };
+            if accept {
+                *old = playlist;
             }
+            index
+        } else {
+            self.playlists.push((path, playlist));
+            self.playlists.len() - 1
         }
     }
     fn capture(
@@ -978,18 +1027,7 @@ impl Player {
         {
             match Playlist::load(&path, &self.root) {
                 Ok(list) => {
-                    let index = self
-                        .dj_browser
-                        .playlists
-                        .iter()
-                        .position(|(p, _)| p == &path);
-                    if let Some(i) = index {
-                        self.dj_browser.playlists[i].1 = list;
-                        self.dj_browser.playlist = Some(i);
-                    } else {
-                        self.dj_browser.playlists.push((path, list));
-                        self.dj_browser.playlist = Some(self.dj_browser.playlists.len() - 1);
-                    }
+                    self.dj_browser.playlist = Some(self.dj_browser.upsert_playlist(path, list));
                 }
                 Err(e) => self.status = e.to_string(),
             }
@@ -1045,6 +1083,98 @@ impl Player {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn playlist_aliases_do_not_merge_distinct_case_sensitive_files() {
+        assert_ne!(
+            playlist_key(Path::new(r"\\nas\share\music\A.json")),
+            playlist_key(Path::new(r"\\NAS\SHARE\music\a.json"))
+        );
+        assert_ne!(
+            playlist_key(Path::new("/music/A.json")),
+            playlist_key(Path::new("/music/a.json"))
+        );
+        assert_ne!(
+            playlist_key(Path::new(r"C:\Music\p.json")),
+            playlist_key(Path::new(r"c:\Music2\p.json"))
+        );
+        assert_eq!(
+            playlist_key(Path::new(r"\\?\C:\Music\p.json")),
+            playlist_key(Path::new("c:/Music/p.json"))
+        );
+        assert_eq!(playlist_key(Path::new(r"\\?\")), "");
+    }
+    #[test]
+    fn aliased_playlist_sync_keeps_a_newer_revision_and_song_order() {
+        let mut browser = Browser::default();
+        let fresh = Playlist {
+            version: 1,
+            name: "Same name".into(),
+            tracks: vec!["b.mp3".into(), "a.mp3".into(), "b.mp3".into()],
+            companion_available: false,
+            sync: Some(amp_core::coordination::Revision {
+                library_id: "library".into(),
+                revision: 5,
+                ..Default::default()
+            }),
+        };
+        browser.upsert_playlist(
+            PathBuf::from(r"\\?\UNC\nas\share\music\one.json"),
+            fresh.clone(),
+        );
+        let mut stale = fresh.clone();
+        stale.sync.as_mut().unwrap().revision = 4;
+        stale.tracks.clear();
+        browser.upsert_playlist(PathBuf::from(r"\\NAS\SHARE\music\one.json"), stale);
+        assert_eq!(browser.playlists.len(), 1);
+        assert_eq!(browser.playlists[0].1.tracks, fresh.tracks);
+        browser.upsert_playlist(PathBuf::from(r"\\nas\share\music\two.json"), fresh);
+        assert_eq!(
+            browser.playlists.len(),
+            2,
+            "same title is not the same saved playlist"
+        );
+    }
+
+    #[test]
+    fn saved_sync_updates_the_existing_windows_playlist_card() {
+        let mut browser = Browser::default();
+        let old = Playlist {
+            version: 1,
+            name: "Kitty".into(),
+            tracks: vec!["old.mp3".into()],
+            companion_available: false,
+            sync: None,
+        };
+        browser.playlists.push((
+            PathBuf::from(r"\\?\UNC\LAGnas\Public\plex\music\ampdj\playlists\kitty.json"),
+            old.clone(),
+        ));
+        browser.playlist = Some(0);
+        let mut fresh = old;
+        fresh.tracks = vec!["new.mp3".into()];
+        browser.refresh_sync_saved(
+            crate::playlist_sync::SavedView {
+                settings: None,
+                normal: vec![(
+                    PathBuf::from(r"\\LAGNAS\Public\plex\music\ampdj\playlists\kitty.json"),
+                    fresh,
+                )],
+            },
+            &mut amp_core::show::Settings::default(),
+            &mut crate::show_editor::Editor::default(),
+        );
+        assert_eq!(
+            browser.playlists.len(),
+            1,
+            "one saved playlist must produce one card across scan/sync path spellings"
+        );
+        assert_eq!(
+            browser.playlists[0].1.tracks,
+            vec![PathBuf::from("new.mp3")]
+        );
+        assert_eq!(browser.playlist, Some(0));
+    }
+
     #[test]
     fn rejected_browser_smart_source_keeps_the_active_choice() {
         let mut player = Player {
@@ -1118,7 +1248,7 @@ mod tests {
     fn smart_membership_reuses_matches_and_invalidates_rules_and_analysis() {
         let mut profile = amp_core::show::Settings::default().playlists.remove(0);
         profile.genres = vec!["Rock".into()];
-        let mut library = Library {
+        let mut library = std::sync::Arc::new(Library {
             tracks: (0..14000)
                 .map(|index| {
                     let mut preparation = amp_core::Preparation::default();
@@ -1138,11 +1268,11 @@ mod tests {
                 folders: vec![],
                 tracks: vec![],
             },
-        };
+        });
         fn wait(
             cache: &mut Membership,
             p: &amp_core::show::SmartPlaylist,
-            l: &Library,
+            l: &std::sync::Arc<Library>,
             g: u64,
         ) -> Vec<usize> {
             let deadline = std::time::Instant::now() + Duration::from_secs(5);
@@ -1175,7 +1305,7 @@ mod tests {
                 .iter()
                 .all(|i| i % 2 == 1)
         );
-        library.tracks[0]
+        std::sync::Arc::make_mut(&mut library).tracks[0]
             .preparation
             .extensions
             .insert("genre".into(), serde_json::json!("R&B"));
