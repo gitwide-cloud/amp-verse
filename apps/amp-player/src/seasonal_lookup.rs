@@ -708,4 +708,83 @@ mod tests {
         assert!(data["count"].as_u64().is_some_and(|count| count > 0));
         assert_eq!(parse_records(&data).len(), 1);
     }
+    #[test]
+    fn cached_online_catalog_updates_live_library_and_persisted_preparation() {
+        let root = tempfile::tempdir().unwrap();
+        let path = PathBuf::from("song.mp3");
+        let original = b"original audio fixture";
+        fs::write(root.path().join(&path), original).unwrap();
+        let mut preparation = Preparation {
+            bpm: Some(123.),
+            manual_override: true,
+            cue_in: 8.,
+            ..Default::default()
+        };
+        preparation
+            .extensions
+            .insert("title".into(), serde_json::json!("Jingle Bells"));
+        preparation
+            .extensions
+            .insert("artist".into(), serde_json::json!("Bing Crosby"));
+        amp_core::preparation::save(root.path(), &path, &preparation).unwrap();
+        let mut library = Library {
+            tracks: vec![amp_core::Track {
+                path: path.clone(),
+                title: "Jingle Bells".into(),
+                preparation,
+            }],
+            tree: amp_core::Folder {
+                name: "music".into(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        };
+        let category = Category {
+            field: Field::Holiday,
+            name: "Christmas".into(),
+        };
+        let catalog = Catalog {
+            version: 1,
+            category: category.clone(),
+            retrieved: now(),
+            query: category.query(),
+            next_offset: 1,
+            total: 1,
+            records: vec![record()],
+        };
+        let folder = root.path().join("ampdj/online-catalogs");
+        fs::create_dir_all(&folder).unwrap();
+        amp_core::coordination::atomic_write(
+            &folder.join(format!("{}.json", category.key())),
+            &catalog,
+        )
+        .unwrap();
+        let mut lookup = Lookup::default();
+        lookup.request(root.path(), vec![category], Some(&library), false);
+        let context = egui::Context::default();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while lookup.task.is_some() {
+            lookup.poll(&context, root.path(), Some(&mut library));
+            assert!(Instant::now() < deadline, "{}", lookup.status);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            lookup.status.contains("1 song matches"),
+            "{}",
+            lookup.status
+        );
+        let saved = amp_core::preparation::load(&root.path().join(&path)).unwrap();
+        assert_eq!(
+            amp_core::smart_filters::texts(Field::Holiday, &saved),
+            vec!["Christmas"]
+        );
+        assert_eq!(
+            amp_core::smart_filters::texts(Field::Holiday, &library.tracks[0].preparation),
+            vec!["Christmas"]
+        );
+        assert_eq!(saved.bpm, Some(123.));
+        assert!(saved.manual_override);
+        assert_eq!(saved.cue_in, 8.);
+        assert_eq!(fs::read(root.path().join(path)).unwrap(), original);
+    }
 }
