@@ -1,0 +1,9 @@
+{
+  "rows": 20000,
+  "before_ms": 263.248,
+  "after_ms": 0.102,
+  "baseline": "8dfb0e87c8caf60f276bad78f084a6e228bc86ab",
+  "scope": "Actual Membership.indices production-code extraction; dispatch only, not total DJ frame latency or hardware audio qualification",
+  "audio_files_used": false,
+  "snapshot_semantics": "The worker shares the existing immutable Arc<Library>; matching/invalidation behavior retains its tests"
+}

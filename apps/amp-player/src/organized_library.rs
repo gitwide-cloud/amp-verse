@@ -697,18 +697,7 @@ impl Player {
         };
         match Playlist::load(&path, &self.root) {
             Ok(list) => {
-                let index = if let Some(index) = self
-                    .dj_browser
-                    .playlists
-                    .iter()
-                    .position(|(p, _)| p == &path)
-                {
-                    self.dj_browser.playlists[index].1 = list;
-                    index
-                } else {
-                    self.dj_browser.playlists.push((path, list));
-                    self.dj_browser.playlists.len() - 1
-                };
+                let index = self.dj_browser.upsert_playlist(path, list);
                 self.select_playlist_card(index);
             }
             Err(error) => self.status = error.to_string(),
@@ -1252,16 +1241,7 @@ impl Player {
         {
             Ok(saved) => {
                 self.playlist_snapshot = Some((path.clone(), saved.clone()));
-                if let Some(entry) = self
-                    .dj_browser
-                    .playlists
-                    .iter_mut()
-                    .find(|(p, _)| p == &path)
-                {
-                    entry.1 = saved;
-                } else {
-                    self.dj_browser.playlists.push((path, saved));
-                }
+                self.dj_browser.upsert_playlist(path, saved);
                 self.status = "Playlist copy saved.".into();
             }
             Err(error) => self.status = error.to_string(),

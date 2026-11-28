@@ -695,16 +695,7 @@ impl Player {
             self.run.settings = settings;
         }
         for (path, playlist) in snapshot.playlists {
-            if let Some((_, current)) = self
-                .dj_browser
-                .playlists
-                .iter_mut()
-                .find(|(p, _)| *p == path)
-            {
-                *current = playlist;
-            } else {
-                self.dj_browser.playlists.push((path, playlist));
-            }
+            self.dj_browser.upsert_playlist(path, playlist);
         }
     }
     fn accept_library_scan(&mut self, mut lib: Library) {
@@ -1399,7 +1390,7 @@ impl Player {
         let saved = Playlist::load(&path, &self.root).map_err(|error| error.to_string())?;
         self.queue_selected = None;
         self.playlist_snapshot = Some((path.clone(), saved.clone()));
-        self.dj_browser.playlists.push((path, saved));
+        self.dj_browser.upsert_playlist(path, saved);
         self.new_playlist_name = None;
         self.status = format!(
             "Playlist created with {} songs. Add songs from Library, then Save.",
@@ -1466,16 +1457,7 @@ impl Player {
         {
             Ok(saved) => {
                 self.playlist_snapshot = Some((path.clone(), saved.clone()));
-                if let Some(entry) = self
-                    .dj_browser
-                    .playlists
-                    .iter_mut()
-                    .find(|(p, _)| p == &path)
-                {
-                    entry.1 = saved;
-                } else {
-                    self.dj_browser.playlists.push((path, saved));
-                }
+                self.dj_browser.upsert_playlist(path, saved);
                 self.status = "Playlist saved".into();
             }
             Err(error) => self.status = error.to_string(),
@@ -4064,7 +4046,7 @@ impl eframe::App for Player {
                 capture(&ctx, path.into());
             }
         }
-        if self.recovery.pending.is_some() || self.recovery.error.is_some() {
+        if self.recovery.needs_attention() {
             egui::Window::new("Session recovery")
                 .order(egui::Order::Foreground)
                 .collapsible(false)
