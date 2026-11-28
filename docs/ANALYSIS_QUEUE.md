@@ -99,3 +99,21 @@ failed source scans return errors before this step. Deferred claims are displaye
 as waiting and do not increment finished progress. Failed jobs are shown separately
 from the music preparation cards. Playback throttling follows active transports,
 including silent DJ playback; pausing the deck and Auto Mix clears it.
+
+## Stop and startup snapshots
+
+A completed background folder scan cannot re-enable a stopped desktop queue.
+Explicit Start/resume still opens discovery normally. Desktop and server startup
+snapshots both accept at most 256 MiB, so a complete desktop-sized library is not
+rejected by a smaller server-only limit. The bounds, library root checks, path
+validation and preservation of a previous snapshot on failed publication remain
+in force. Raising the limit does not truncate tracks or strip preparation metadata.
+
+Completed full discoveries wait for saved-queue initialization instead of being
+dropped when their result arrives first. This lets the authoritative discovery
+reconcile obsolete terminal history while preserving cached manual preparation.
+
+Discovery merges known preparation before scheduling, keeping fresh source stamps.
+Spoken classifications outside special folders reach queue reconciliation as small
+descriptors; their analysis payloads are not cloned or scheduled. Explicit Music
+overrides remain authoritative, and original audio and saved notes are retained.

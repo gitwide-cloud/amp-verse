@@ -625,8 +625,15 @@ impl Preparer {
         self.review_selected.clear();
         self.open = true;
     }
+    /// Keep a complete discovery in its result channel until initialization can accept it.
+    pub fn accepts_discovery(&self) -> bool {
+        self.queue_init.is_none() && self.queue_discovery.is_none()
+    }
+    /// A late discovery result must not undo a user's Stop request.
     pub fn batch_ref(&mut self, root: PathBuf, tracks: &[Track]) {
-        self.queue_inputs(root, tracks, true);
+        if self.queue_enabled {
+            self.queue_inputs(root, tracks, true);
+        }
     }
     pub fn resume_cached(&mut self, root: PathBuf, tracks: &[Track]) {
         self.queue_inputs(root, tracks, false);
@@ -644,23 +651,39 @@ impl Preparer {
         self.queue_root = root.clone();
         self.queue_enabled = true;
         if self.total == 0 {
-            self.total = tracks.len();
+            self.total = tracks
+                .iter()
+                .filter(|t| amp_core::media_kind::is_music(&t.path, &t.preparation))
+                .count();
         }
         let discovered_paths =
             verify.then(|| tracks.iter().map(|t| t.path.clone()).collect::<Vec<_>>());
         let inputs: Vec<_> = tracks
             .iter()
-            .filter(|t| amp_core::media_kind::is_music(&t.path, &t.preparation))
             .map(|t| {
+                let kind = amp_core::media_kind::kind(&t.path, &t.preparation);
+                let music = kind == amp_core::media_kind::Kind::Music;
                 let mut preparation = Preparation {
-                    analysis: t.preparation.analysis.clone(),
-                    source_sha256: t.preparation.source_sha256.clone(),
+                    analysis: if music {
+                        t.preparation.analysis.clone()
+                    } else {
+                        None
+                    },
+                    source_sha256: if music {
+                        t.preparation.source_sha256.clone()
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 };
                 if let Some(kind) = t.preparation.extensions.get("media_kind") {
                     preparation
                         .extensions
                         .insert("media_kind".into(), kind.clone());
+                } else if !music {
+                    preparation
+                        .extensions
+                        .insert("media_kind_detected".into(), serde_json::json!(kind.id()));
                 }
                 if let Some(stat) = t.preparation.extensions.get("scan_source_stat") {
                     preparation
@@ -1406,5 +1429,23 @@ mod deferred_progress_regressions {
         assert_eq!(p.done, 3, "A deferred claim is not a completed job");
         assert_eq!(p.failures, 1);
         drop(tx);
+    }
+}
+
+#[cfg(test)]
+mod cancelled_discovery_regressions {
+    use super::*;
+    #[test]
+    fn late_complete_scan_does_not_restart_a_stopped_queue() {
+        let root = tempfile::tempdir().unwrap();
+        let mut preparer = Preparer::default();
+        preparer.batch_ref(root.path().into(), &[]);
+        assert!(
+            !preparer.queue_enabled,
+            "A completed scan must respect Stop"
+        );
+        assert!(preparer.queue_init.is_none());
+        assert!(preparer.queue_discovery.is_none());
+        assert!(preparer.job.is_none());
     }
 }
