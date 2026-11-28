@@ -619,7 +619,6 @@ impl Player {
             match result {
                 Ok(mut library) => {
                     self.last_scan = std::time::Instant::now();
-                    self.preparer.batch_ref(self.root.clone(), &library.tracks);
                     if let Some(current) = &self.library {
                         let known: std::collections::HashMap<_, _> = current
                             .tracks
@@ -628,12 +627,23 @@ impl Player {
                             .collect();
                         for track in &mut library.tracks {
                             if let Some(old) = known.get(&track.path) {
+                                let source_stat = track
+                                    .preparation
+                                    .extensions
+                                    .get("scan_source_stat")
+                                    .cloned();
                                 let detected = track
                                     .preparation
                                     .extensions
                                     .get("media_kind_detected")
                                     .cloned();
                                 track.preparation = old.preparation.clone();
+                                if let Some(source_stat) = source_stat {
+                                    track
+                                        .preparation
+                                        .extensions
+                                        .insert("scan_source_stat".into(), source_stat);
+                                }
                                 if !track.preparation.extensions.contains_key("media_kind")
                                     && let Some(detected) = detected
                                 {
@@ -646,6 +656,7 @@ impl Player {
                             }
                         }
                     }
+                    self.preparer.batch_ref(self.root.clone(), &library.tracks);
                     for track in &mut library.tracks {
                         track.preparation.extensions.remove("scan_source_stat");
                     }
@@ -4452,6 +4463,58 @@ mod window_tests {
             .unwrap();
         assert_eq!(old.preparation.bpm, Some(123.));
         assert!(old.preparation.manual_override);
+    }
+    #[test]
+    fn completed_discovery_retires_explicit_spoken_jobs_without_a_folder_hint() {
+        let root = tempfile::tempdir().unwrap();
+        let path = Path::new("lecture.mp3");
+        std::fs::write(root.path().join(path), b"protected spoken fixture").unwrap();
+        let mut spoken = amp_core::Preparation::default();
+        spoken
+            .extensions
+            .insert("media_kind".into(), serde_json::json!("speech"));
+        spoken
+            .extensions
+            .insert("keep".into(), serde_json::json!("speaker notes"));
+        amp_core::preparation::save(root.path(), path, &spoken).unwrap();
+        let legacy =
+            amp_core::analysis_queue::Queue::for_library(root.path(), "speech-fixture").unwrap();
+        legacy.enqueue([(path.into(), false)]).unwrap();
+        assert_eq!(legacy.stats().unwrap().total, 1);
+        drop(legacy);
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(amp_core::scan(root.path()).unwrap()),
+            analyze_after_scan: true,
+            ..Default::default()
+        };
+        player.preparer.queue_enabled = true;
+        let (tx, rx) = mpsc::channel();
+        player.analysis_scan = Some(rx);
+        tx.send(Ok(amp_core::scan_job_inputs(root.path()).unwrap()))
+            .unwrap();
+        player.poll_analysis_scan();
+        player.preparer.stop_queue();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !player.preparer.accepts_discovery() && std::time::Instant::now() < deadline {
+            player.preparer.poll(&player.root, player.library.as_mut());
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        assert!(player.preparer.accepts_discovery());
+        assert_eq!(player.preparer.progress().1, 0);
+        let check =
+            amp_core::analysis_queue::Queue::for_library(root.path(), "speech-check").unwrap();
+        assert_eq!(check.stats().unwrap().total, 0);
+        assert_eq!(
+            std::fs::read(root.path().join(path)).unwrap(),
+            b"protected spoken fixture"
+        );
+        assert_eq!(
+            amp_core::preparation::load(&root.path().join(path))
+                .unwrap()
+                .extensions["keep"],
+            "speaker notes"
+        );
     }
     #[test]
     fn unavailable_root_does_not_clear_existing_library_or_live_session() {

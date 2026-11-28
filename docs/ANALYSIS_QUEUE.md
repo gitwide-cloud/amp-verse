@@ -112,3 +112,8 @@ in force. Raising the limit does not truncate tracks or strip preparation metada
 Completed full discoveries wait for saved-queue initialization instead of being
 dropped when their result arrives first. This lets the authoritative discovery
 reconcile obsolete terminal history while preserving cached manual preparation.
+
+Discovery merges known preparation before scheduling, keeping fresh source stamps.
+Spoken classifications outside special folders reach queue reconciliation as small
+descriptors; their analysis payloads are not cloned or scheduled. Explicit Music
+overrides remain authoritative, and original audio and saved notes are retained.

@@ -651,23 +651,39 @@ impl Preparer {
         self.queue_root = root.clone();
         self.queue_enabled = true;
         if self.total == 0 {
-            self.total = tracks.len();
+            self.total = tracks
+                .iter()
+                .filter(|t| amp_core::media_kind::is_music(&t.path, &t.preparation))
+                .count();
         }
         let discovered_paths =
             verify.then(|| tracks.iter().map(|t| t.path.clone()).collect::<Vec<_>>());
         let inputs: Vec<_> = tracks
             .iter()
-            .filter(|t| amp_core::media_kind::is_music(&t.path, &t.preparation))
             .map(|t| {
+                let kind = amp_core::media_kind::kind(&t.path, &t.preparation);
+                let music = kind == amp_core::media_kind::Kind::Music;
                 let mut preparation = Preparation {
-                    analysis: t.preparation.analysis.clone(),
-                    source_sha256: t.preparation.source_sha256.clone(),
+                    analysis: if music {
+                        t.preparation.analysis.clone()
+                    } else {
+                        None
+                    },
+                    source_sha256: if music {
+                        t.preparation.source_sha256.clone()
+                    } else {
+                        None
+                    },
                     ..Default::default()
                 };
                 if let Some(kind) = t.preparation.extensions.get("media_kind") {
                     preparation
                         .extensions
                         .insert("media_kind".into(), kind.clone());
+                } else if !music {
+                    preparation
+                        .extensions
+                        .insert("media_kind_detected".into(), serde_json::json!(kind.id()));
                 }
                 if let Some(stat) = t.preparation.extensions.get("scan_source_stat") {
                     preparation
