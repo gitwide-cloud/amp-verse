@@ -15,6 +15,7 @@ struct Update {
 #[derive(Default)]
 pub struct Preparer {
     pub revision: u64,
+    analysis_summary: Option<(PathBuf, std::time::Instant, usize, usize, usize)>,
     wave: crate::waveform::Lane,
     position: f64,
     zoom: Option<f64>,
@@ -503,6 +504,43 @@ impl Preparer {
             self.stem_preview = None;
         }
     }
+    pub fn analysis_counts(
+        &mut self,
+        root: &std::path::Path,
+        library: Option<&Library>,
+    ) -> (usize, usize, usize) {
+        let Some(library) = library else {
+            self.analysis_summary = None;
+            return (0, 0, 0);
+        };
+        if self
+            .analysis_summary
+            .as_ref()
+            .is_none_or(|(key, at, len, _, _)| {
+                key != root
+                    || *len != library.tracks.len()
+                    || at.elapsed() >= std::time::Duration::from_secs(1)
+            })
+        {
+            let mut total = 0;
+            let mut analyzed = 0;
+            for t in &library.tracks {
+                if amp_core::media_kind::is_music(&t.path, &t.preparation) {
+                    total += 1;
+                    analyzed += usize::from(t.preparation.analysis.is_some());
+                }
+            }
+            self.analysis_summary = Some((
+                root.into(),
+                std::time::Instant::now(),
+                library.tracks.len(),
+                total,
+                analyzed,
+            ));
+        }
+        let (_, _, len, total, analyzed) = self.analysis_summary.as_ref().unwrap();
+        (*total, *analyzed, *len - *total)
+    }
     pub fn failed(&self) -> usize {
         self.failures
     }
@@ -608,6 +646,8 @@ impl Preparer {
         if self.total == 0 {
             self.total = tracks.len();
         }
+        let discovered_paths =
+            verify.then(|| tracks.iter().map(|t| t.path.clone()).collect::<Vec<_>>());
         let inputs: Vec<_> = tracks
             .iter()
             .filter(|t| amp_core::media_kind::is_music(&t.path, &t.preparation))
@@ -660,7 +700,11 @@ impl Preparer {
                         return;
                     }
                     let result = if verify {
-                        q.enqueue_tracks(&inputs).and_then(|_| q.stats())
+                        q.reconcile_discovered_paths(
+                            discovered_paths.as_deref().unwrap_or_default(),
+                        )
+                        .and_then(|_| q.enqueue_tracks(&inputs))
+                        .and_then(|_| q.stats())
                     } else {
                         q.stats()
                     };
@@ -945,6 +989,22 @@ impl Preparer {
                 );
                 continue;
             }
+            if !update.selected
+                && update.skipped
+                && update.result.as_ref().is_ok_and(|p| {
+                    !amp_core::analysis_queue::Queue::cached_preparation_complete(
+                        &update.root,
+                        &update.path,
+                        p,
+                    )
+                })
+            {
+                self.status = format!(
+                    "Waiting for another worker: {}. This attempt is not counted as finished.",
+                    update.path.display()
+                );
+                continue;
+            }
             self.done += 1;
             self.skipped += usize::from(update.skipped);
             match update.result {
@@ -964,7 +1024,7 @@ impl Preparer {
                         self.status = format!(
                             "{} {}/{} ({} workers): {}",
                             if update.skipped {
-                                "Reused / claimed elsewhere"
+                                "Reused completed analysis"
                             } else {
                                 "Prepared"
                             },
@@ -1318,5 +1378,33 @@ mod queue_progress_tests {
             PathBuf::from("song.mp3"),
             "Shared record busy; retry after reloading",
         );
+    }
+}
+
+#[cfg(test)]
+mod deferred_progress_regressions {
+    use super::*;
+    #[test]
+    fn another_workers_claim_is_not_counted_as_finished_analysis() {
+        let mut p = Preparer {
+            total: 10,
+            done: 3,
+            failures: 1,
+            ..Default::default()
+        };
+        let (tx, rx) = mpsc::channel();
+        p.job = Some(rx);
+        tx.send(Update {
+            root: "unused".into(),
+            path: "waiting.mp3".into(),
+            result: Ok(Preparation::default()),
+            selected: false,
+            skipped: true,
+        })
+        .unwrap();
+        p.poll(std::path::Path::new("unused"), None);
+        assert_eq!(p.done, 3, "A deferred claim is not a completed job");
+        assert_eq!(p.failures, 1);
+        drop(tx);
     }
 }
