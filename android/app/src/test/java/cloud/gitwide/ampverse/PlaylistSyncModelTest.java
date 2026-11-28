@@ -6,6 +6,22 @@ import org.json.*;
 import java.util.*;
 
 public class PlaylistSyncModelTest {
+    @Test public void legacySmartRenameKeepsItsKnownContainerVersion() throws Exception {
+        JSONObject s=state(),remote=normal("Old",1).put("kind","smart").put("document_id","smart_legacy");
+        PlaylistSyncModel.pull(s,snapshot(remote));
+        PlaylistSyncModel.save(s,remote,PlaylistSyncModel.copy(remote.getJSONObject("document")).put("name","Renamed"));
+        JSONObject op=PlaylistSyncModel.next(s);assertEquals(1,op.getInt("document_version"));
+        PlaylistSyncModel.reply(s,op,200,ack(op,2));assertNull(PlaylistSyncModel.next(s));
+    }
+    @Test public void downgradedSmartAcknowledgmentCannotDiscardThePendingDraft() throws Exception {
+        JSONObject s=state(),remote=normal("Smart",1).put("kind","smart").put("document_id","smart_clean").put("document_version",3);
+        remote.getJSONObject("document").put("filters",new JSONArray().put(new JSONObject().put("type","Flag").put("field","Clean").put("value",true)));
+        PlaylistSyncModel.pull(s,snapshot(remote));
+        PlaylistSyncModel.save(s,remote,PlaylistSyncModel.copy(remote.getJSONObject("document")).put("name","Renamed"));
+        JSONObject op=PlaylistSyncModel.next(s),receipt=ack(op,2);receipt.getJSONObject("canonical").put("document_version",2);
+        try{PlaylistSyncModel.reply(s,op,200,receipt);fail("A lower schema cannot acknowledge the operation");}catch(JSONException expected){}
+        assertTrue(PlaylistSyncModel.equal(op,PlaylistSyncModel.next(s)));
+    }
     @Test public void removingCategoryRuleReleasesTheDraftOnTheExistingServer() throws Exception {
         JSONObject s=state(),remote=normal("Smart",1).put("document_id","smart_cat").put("kind","smart").put("document_version",3);
         remote.getJSONObject("document").put("id","cat");
@@ -62,7 +78,7 @@ public class PlaylistSyncModelTest {
     JSONObject normal(String name,int revision)throws Exception{return new JSONObject().put("document_id","normal_stable").put("kind","normal").put("document_version",1).put("revision",new JSONObject().put("revision",revision)).put("document",new JSONObject().put("version",1).put("name",name).put("companion_available",true).put("future",new JSONObject().put("keep",true)).put("tracks",new JSONArray().put(ref("a")).put(ref("missing")).put(ref("a"))));}
     JSONObject ref(String key)throws Exception{return new JSONObject().put("track_key",PlaylistSyncModel.trackKey(key+".mp3")).put("library_id","library").put("relative_path",key+".mp3");}
     JSONObject snapshot(JSONObject doc)throws Exception{return new JSONObject().put("protocol",1).put("server_id","server").put("library_id","library").put("max_smart_document_version",4).put("smart_revision",new JSONObject().put("revision",1)).put("documents",new JSONArray().put(doc));}
-    JSONObject ack(JSONObject op,int revision)throws Exception{return new JSONObject().put("server_id","server").put("library_id","library").put("operation_id",op.getString("operation_id")).put("status","applied").put("canonical",new JSONObject().put("document_id",op.getString("document_id")).put("kind",op.getString("kind")).put("document_version",1).put("revision",new JSONObject().put("revision",revision).put("library_id","library")).put("document",PlaylistSyncModel.copy(op.getJSONObject("document"))));}
+    JSONObject ack(JSONObject op,int revision)throws Exception{return new JSONObject().put("server_id","server").put("library_id","library").put("operation_id",op.getString("operation_id")).put("status","applied").put("canonical",new JSONObject().put("document_id",op.getString("document_id")).put("kind",op.getString("kind")).put("document_version",op.getInt("document_version")).put("revision",new JSONObject().put("revision",revision).put("library_id","library")).put("document",PlaylistSyncModel.copy(op.getJSONObject("document"))));}
     @Test public void pullPreservesDuplicatesAndUnresolvedMappingWithoutTouchingMedia()throws Exception{
         JSONObject s=state(),remote=normal("Server",1);PlaylistSyncModel.pull(s,snapshot(remote));JSONObject view=PlaylistSyncModel.visible(s.getJSONObject("documents").getJSONObject("normal_stable"));
         assertEquals(3,PlaylistSyncModel.orderedReferences(view).length());JSONObject mappings=new JSONObject().put(PlaylistSyncModel.trackKey("a.mp3"),"local-content-id");assertEquals(Arrays.asList("local-content-id","local-content-id"),PlaylistSyncModel.mappedNormal(view,mappings));assertEquals(3,remote.getJSONObject("document").getJSONArray("tracks").length());assertFalse(s.has("playback"));assertFalse(s.has("preparation"));

@@ -22,17 +22,21 @@ final class PlaylistSyncModel {
         authority(state,snapshot);if(snapshot.getInt("protocol")!=1)throw new JSONException("Unsupported playlist sync protocol");
         JSONArray docs=snapshot.getJSONArray("documents");if(docs.length()>1000)throw new JSONException("Too many server playlists");
         JSONObject entries=state.getJSONObject("documents");
-        int containerVersion=snapshot.optInt("smart_document_version",2);
+        int containerVersion=snapshot.optInt("smart_document_version",1);
+        boolean hasSmartDocument=false;
         for(int i=0;i<docs.length();i++){JSONObject canonical=copy(docs.getJSONObject(i));String id=canonical.getString("document_id");String kind=canonical.getString("kind");
             if(!(kind.equals("normal")&&id.startsWith("normal_")||kind.equals("smart")&&id.startsWith("smart_")))throw new JSONException("Unsupported playlist document");
             int version=canonical.optInt("document_version",-1);
-            if(kind.equals("smart"))containerVersion=Math.max(containerVersion,version);
+            if(kind.equals("smart")){hasSmartDocument=true;containerVersion=Math.max(containerVersion,version);}
             if(version<1||version>4||kind.equals("normal")&&version!=1)throw new JSONException("Update AMP Verse to use this playlist format; saved drafts were kept");
             if(kind.equals("normal")){JSONArray refs=canonical.getJSONObject("document").getJSONArray("tracks");if(refs.length()>20000)throw new JSONException("Too many ordered references");for(int n=0;n<refs.length();n++){JSONObject ref=refs.getJSONObject(n);String path=ref.getString("relative_path");if(!state.getString("library_id").equals(ref.getString("library_id"))||path.isEmpty()||path.startsWith("/")||path.contains("\\")||path.contains(":")||Arrays.asList(path.split("/",-1)).contains("..")||Arrays.asList(path.split("/",-1)).contains("")||!trackKey(path).equals(ref.getString("track_key")))throw new JSONException("Server track reference identity is invalid");JSONObject known=copy(ref).put("title",path);if(!state.getJSONObject("catalog").has(ref.getString("track_key")))state.getJSONObject("catalog").put(ref.getString("track_key"),known);}}
             JSONObject entry=entries.optJSONObject(id);if(entry==null){entry=new JSONObject();entries.put(id,entry);}
             entry.put("current",canonical);if(!entry.has("desired")&&!entry.has("pending")&&!entry.has("blocked"))entry.put("baseline",canonical);
         }
         // Missing entries are retained: this protocol has no deletion tombstones.
+        // An empty older snapshot may represent a v2 container, but an actual
+        // v1 Smart document is evidence of its true container version.
+        if(!hasSmartDocument&&!snapshot.has("smart_document_version"))containerVersion=2;
         if(containerVersion<1||containerVersion>4)throw new JSONException("Update AMP Verse to use these server Smart Playlists");
         state.put("smart_document_version",containerVersion);
         int supported=snapshot.optInt("max_smart_document_version",2);
