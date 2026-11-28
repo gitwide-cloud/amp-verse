@@ -117,6 +117,11 @@ jobs:
         run: powershell.exe -NoProfile -File tools/test_windows_server_install.ps1
       - name: Build standalone server and analysis engine
         run: cargo build -p amp-cast -p amp-engine --release --locked
+      - name: Verify standalone server update transaction and recovery
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then ext=.exe; else ext=; fi
+          python tools/smoke_in_app_update.py --server-helper "target/release/amp-server-update$ext"
       - uses: actions/setup-dotnet@v4
         if: runner.os == 'Windows'
         with:
