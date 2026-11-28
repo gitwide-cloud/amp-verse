@@ -22,13 +22,33 @@ final class PlaylistSyncModel {
         authority(state,snapshot);if(snapshot.getInt("protocol")!=1)throw new JSONException("Unsupported playlist sync protocol");
         JSONArray docs=snapshot.getJSONArray("documents");if(docs.length()>1000)throw new JSONException("Too many server playlists");
         JSONObject entries=state.getJSONObject("documents");
+        int containerVersion=snapshot.optInt("smart_document_version",1);
+        boolean hasSmartDocument=false;
         for(int i=0;i<docs.length();i++){JSONObject canonical=copy(docs.getJSONObject(i));String id=canonical.getString("document_id");String kind=canonical.getString("kind");
             if(!(kind.equals("normal")&&id.startsWith("normal_")||kind.equals("smart")&&id.startsWith("smart_")))throw new JSONException("Unsupported playlist document");
+            int version=canonical.optInt("document_version",-1);
+            if(kind.equals("smart")){hasSmartDocument=true;containerVersion=Math.max(containerVersion,version);}
+            if(version<1||version>4||kind.equals("normal")&&version!=1)throw new JSONException("Update AMP Verse to use this playlist format; saved drafts were kept");
             if(kind.equals("normal")){JSONArray refs=canonical.getJSONObject("document").getJSONArray("tracks");if(refs.length()>20000)throw new JSONException("Too many ordered references");for(int n=0;n<refs.length();n++){JSONObject ref=refs.getJSONObject(n);String path=ref.getString("relative_path");if(!state.getString("library_id").equals(ref.getString("library_id"))||path.isEmpty()||path.startsWith("/")||path.contains("\\")||path.contains(":")||Arrays.asList(path.split("/",-1)).contains("..")||Arrays.asList(path.split("/",-1)).contains("")||!trackKey(path).equals(ref.getString("track_key")))throw new JSONException("Server track reference identity is invalid");JSONObject known=copy(ref).put("title",path);if(!state.getJSONObject("catalog").has(ref.getString("track_key")))state.getJSONObject("catalog").put(ref.getString("track_key"),known);}}
             JSONObject entry=entries.optJSONObject(id);if(entry==null){entry=new JSONObject();entries.put(id,entry);}
             entry.put("current",canonical);if(!entry.has("desired")&&!entry.has("pending")&&!entry.has("blocked"))entry.put("baseline",canonical);
         }
         // Missing entries are retained: this protocol has no deletion tombstones.
+        // An empty older snapshot may represent a v2 container, but an actual
+        // v1 Smart document is evidence of its true container version.
+        if(!hasSmartDocument&&!snapshot.has("smart_document_version"))containerVersion=2;
+        if(containerVersion<1||containerVersion>4)throw new JSONException("Update AMP Verse to use these server Smart Playlists");
+        state.put("smart_document_version",containerVersion);
+        int supported=snapshot.optInt("max_smart_document_version",2);
+        state.put("max_smart_document_version",supported);
+        Iterator<String> retainedIds=entries.keys();
+        while(retainedIds.hasNext()) {
+            JSONObject entry=entries.getJSONObject(retainedIds.next());
+            JSONObject blocked=entry.optJSONObject("blocked"),desired=entry.optJSONObject("desired");
+            if(blocked!=null&&"server_update_required".equals(blocked.optString("status"))&&desired!=null&&desired.optInt("document_version",1)<=supported) {
+                entry.remove("blocked");entry.remove("blocked_message");
+            }
+        }
         state.put("smart_revision",snapshot.opt("smart_revision")).put("snapshot_token",snapshot.optString("snapshot_token"));
     }
     static String deliveryStatus(JSONObject state)throws JSONException {
@@ -47,6 +67,12 @@ final class PlaylistSyncModel {
         Object baseline=desired.opt("revision");return new JSONObject().put("protocol",1).put("operation_id",operationId).put("device_id",state.getString("device_id")).put("server_id",state.getString("server_id")).put("library_id",state.getString("library_id")).put("document_id",desired.getString("document_id")).put("kind",desired.getString("kind")).put("document_version",desired.getInt("document_version")).put("action",desired.optBoolean("new_document")?"create":"update").put("base_revision",baseline==null?JSONObject.NULL:baseline).put("document",copy(desired.getJSONObject("document")));
     }
     private static void wireBound(JSONObject operation)throws JSONException {if(operation.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8).length>1024*1024)throw new JSONException("This edit exceeds the server operation limit; reduce it before saving");}
+    private static int draftVersion(JSONObject state,JSONObject entry,JSONObject document) {
+        int floor=state.optInt("smart_document_version",2);
+        JSONObject current=entry.optJSONObject("current");
+        if(current!=null&&"smart".equals(current.optString("kind")))floor=Math.max(floor,current.optInt("document_version",1));
+        return Math.max(floor,TrackCategories.requiredVersion(document));
+    }
     static void save(JSONObject state,JSONObject original,JSONObject document)throws JSONException {
         String name=document.optString("name");if(name.trim().isEmpty()||name.getBytes(java.nio.charset.StandardCharsets.UTF_8).length>200)throw new JSONException("Playlist names must be 1–200 UTF-8 bytes");
         if(original.getString("kind").equals("normal")&&document.getJSONArray("tracks").length()>20000)throw new JSONException("Too many playlist references");
@@ -60,7 +86,12 @@ final class PlaylistSyncModel {
             try{if(!equal(previous.opt("revision"),original.opt("revision")))throw new JSONException("The editor baseline changed");desired=copy(previous);desired.put("document",mergeDraft(original.getJSONObject("document"),previous.getJSONObject("document"),document));}
             catch(JSONException conflict){entry.put("other_local_draft",copy(previous)).put("blocked",new JSONObject().put("status","local_draft_conflict")).put("blocked_message","Overlapping saved phone drafts require review");entry.put("desired_base_document",copy(original.getJSONObject("document")));entry.put("desired",copy(original).put("document",copy(document)));return;}
         }else entry.put("desired_base_document",copy(original.getJSONObject("document")));
+        if(desired.getString("kind").equals("smart"))desired.put("document_version",draftVersion(state,entry,desired.getJSONObject("document")));
         entry.put("desired",desired);
+        JSONObject blocked=entry.optJSONObject("blocked");
+        if(blocked!=null&&"server_update_required".equals(blocked.optString("status"))&&desired.optInt("document_version",1)<=state.optInt("max_smart_document_version",2)) {
+            entry.remove("blocked");entry.remove("blocked_message");
+        }
     }
     static JSONObject next(JSONObject state)throws JSONException {
         JSONObject entries=state.getJSONObject("documents");List<String> ids=new ArrayList<>();Iterator<String> it=entries.keys();while(it.hasNext())ids.add(it.next());Collections.sort(ids);
@@ -68,6 +99,12 @@ final class PlaylistSyncModel {
             if(entry.has("pending"))return copy(entry.getJSONObject("pending"));
             if(!entry.has("desired"))continue;
             JSONObject desired=entry.getJSONObject("desired");
+            if(desired.getString("kind").equals("smart"))desired.put("document_version",draftVersion(state,entry,desired.getJSONObject("document")));
+            if(desired.getString("kind").equals("smart")&&desired.optInt("document_version",1)>state.optInt("max_smart_document_version",2)) {
+                entry.put("blocked",new JSONObject().put("status","server_update_required"));
+                entry.put("blocked_message","Update the selected server to sync these Smart Playlist filters. Your phone draft is kept.");
+                continue;
+            }
             JSONObject op=operation(state,desired,UUID.randomUUID().toString());wireBound(op);
             entry.put("pending",op);return copy(op);
         }return null;
@@ -81,7 +118,7 @@ final class PlaylistSyncModel {
             JSONObject revision=canonical.optJSONObject("revision");
             Object ordinal=revision==null?null:revision.opt("revision");
             Object schema=canonical.opt("document_version");int version=canonical.optInt("document_version",-1),requested=operation.getInt("document_version");
-            if(!(schema instanceof Number)||!schema.toString().matches("[0-9]+")||!canonical.optString("kind").equals(operation.getString("kind"))||version<requested||version>3
+            if(!(schema instanceof Number)||!schema.toString().matches("[0-9]+")||!canonical.optString("kind").equals(operation.getString("kind"))||version<requested||version>4
                 ||operation.getString("kind").equals("normal")&&version!=1
                 ||revision==null||!(ordinal instanceof Number)||!ordinal.toString().matches("[0-9]+")
                 ||!state.getString("library_id").equals(revision.optString("library_id")))

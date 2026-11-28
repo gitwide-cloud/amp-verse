@@ -72,6 +72,7 @@ pub fn show(ui: &mut egui::Ui, playlist: &mut SmartPlaylist, library: Option<&Li
                 }
             });
             if matches!(filter.field(),Field::Holiday|Field::Season) {ui.weak("Uses saved holiday/season tags and clearly labeled music. Seasons are not inferred from holidays or today’s date. Choose values; separate multiple choices with ;. Update other devices before syncing these new filters.");}
+            if matches!(filter.field(),Field::AiGenerated|Field::Acappella|Field::Instrumental|Field::Clip) {ui.weak("Yes includes tracks with this category. No includes unmarked/unknown tracks; it does not verify their origin. Set categories in Prepare selected song and save preparation.");}
             if filter.field()==Field::Clean {ui.weak("Yes includes only reliably marked Clean tracks. No includes Explicit and Unknown. Titles never establish Clean status. Update desktop and server together before syncing these rules.");}
             if filter.field()==Field::StemCount {ui.weak("Counts saved stem entries. Device-local stem readiness is shown separately in the DJ library.");}
             if filter.field()==Field::SectionName {ui.weak("Uses saved section labels; automatic energy sections are not semantic verse/chorus labels.");}

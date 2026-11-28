@@ -201,6 +201,31 @@ impl Preparer {
             }
             ui.weak("Save preparation to keep this choice. Files stay in place.");
         });
+        ui.horizontal_wrapped(|ui| {
+            ui.label("Track categories:");
+            for &category in amp_core::music_annotations::Category::ALL {
+                let mut marked = amp_core::music_annotations::marked(&self.draft, category);
+                if ui.checkbox(&mut marked, category.label()).changed() {
+                    amp_core::music_annotations::set(&mut self.draft, category, marked);
+                }
+            }
+        });
+        ui.weak("Save preparation to keep these notes. Unmarked means unknown, not proof of human-made music. AI tracks and clips skip automatic web matching; local analysis still works.");
+        let mut notes = self
+            .draft
+            .extensions
+            .get("track_notes")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_owned();
+        if ui
+            .add(egui::TextEdit::singleline(&mut notes).hint_text("Other track notes…"))
+            .changed()
+        {
+            self.draft
+                .extensions
+                .insert("track_notes".into(), serde_json::json!(notes));
+        }
         if amp_core::review::proposal(&self.draft)
             .is_some_and(|p| amp_core::energy_profile::read(&p).is_some())
             && ui

@@ -628,7 +628,7 @@ fn cycle(binding: &Binding, directory: &Path) -> Result<String, String> {
                     if doc.kind == Kind::Smart
                         && doc.document_version > fresh.max_smart_document_version
                     {
-                        record.conflict = Some("Selected server needs a compatible update before syncing Clean rules; local rules retained".into());
+                        record.conflict = Some("Selected server needs a compatible update before syncing these Smart Playlist filters; local rules retained".into());
                         continue;
                     }
                     let mut op = operation(binding, doc, revision, action);

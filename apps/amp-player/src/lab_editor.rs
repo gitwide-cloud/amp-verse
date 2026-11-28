@@ -338,7 +338,7 @@ impl Editor {
         let processing = self.processing;
         self.status = "Exporting 256 kbps MP3".into();
         thread::spawn(move || {
-            let outcome = crate::lab_audio::render(
+            let outcome = crate::lab_audio::export_clip(
                 &input,
                 start,
                 length,

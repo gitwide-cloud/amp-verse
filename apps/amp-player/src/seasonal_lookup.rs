@@ -307,6 +307,14 @@ struct Song {
     id: Option<String>,
     length: Option<f64>,
 }
+fn lookup_songs(tracks: &[amp_core::Track]) -> Vec<Song> {
+    tracks
+        .iter()
+        .filter(|t| amp_core::media_kind::is_music(&t.path, &t.preparation))
+        .filter(|t| amp_core::music_annotations::automatic_lookup_allowed(&t.preparation))
+        .map(Song::from)
+        .collect()
+}
 impl Song {
     fn from(track: &amp_core::Track) -> Self {
         Self {
@@ -447,12 +455,7 @@ impl Lookup {
         if categories.is_empty() {
             return;
         }
-        let songs = library
-            .tracks
-            .iter()
-            .filter(|t| amp_core::media_kind::is_music(&t.path, &t.preparation))
-            .map(Song::from)
-            .collect();
+        let songs = lookup_songs(&library.tracks);
         self.pending = Some((root.to_owned(), categories, songs, more));
         if let Some(task) = &self.task {
             task.cancel.store(true, Relaxed);
@@ -786,5 +789,36 @@ mod tests {
         assert!(saved.manual_override);
         assert_eq!(saved.cue_in, 8.);
         assert_eq!(fs::read(root.path().join(path)).unwrap(), original);
+    }
+}
+
+#[cfg(test)]
+mod annotation_tests {
+    use super::*;
+    use amp_core::{
+        Preparation, Track,
+        music_annotations::{Category, set},
+    };
+    #[test]
+    fn seasonal_online_matching_skips_marked_ai_and_clips_but_keeps_music() {
+        let mut tracks: Vec<_> = (0..5)
+            .map(|n| Track {
+                path: format!("song{n}.mp3").into(),
+                title: "Music".into(),
+                preparation: Preparation::default(),
+            })
+            .collect();
+        set(&mut tracks[0].preparation, Category::AiGenerated, true);
+        set(&mut tracks[1].preparation, Category::Clip, true);
+        set(&mut tracks[2].preparation, Category::Instrumental, true);
+        tracks[4]
+            .preparation
+            .extensions
+            .insert("media_kind".into(), serde_json::json!("audiobook"));
+        let paths: Vec<_> = lookup_songs(&tracks).into_iter().map(|s| s.path).collect();
+        assert_eq!(
+            paths,
+            vec![PathBuf::from("song2.mp3"), PathBuf::from("song3.mp3")]
+        );
     }
 }

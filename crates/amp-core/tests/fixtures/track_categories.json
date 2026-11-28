@@ -1,0 +1,126 @@
+{
+  "schema": 1,
+  "cases": [
+    {
+      "preparation": {
+        "title": "AI instrumental clip",
+        "cue_in": 0.0
+      },
+      "expected": [
+        false,
+        false,
+        false,
+        false
+      ]
+    },
+    {
+      "preparation": {
+        "embedded_genres": [
+          "AI generated"
+        ],
+        "cue_in": 0.0
+      },
+      "expected": [
+        true,
+        false,
+        false,
+        false
+      ]
+    },
+    {
+      "preparation": {
+        "genre": "Rock;A capella/Instrumental",
+        "cue_in": 0.0
+      },
+      "expected": [
+        false,
+        true,
+        true,
+        false
+      ]
+    },
+    {
+      "preparation": {
+        "genre": "",
+        "embedded_genres": [
+          "Instrumental"
+        ],
+        "cue_in": 0.0
+      },
+      "expected": [
+        false,
+        false,
+        false,
+        false
+      ]
+    },
+    {
+      "preparation": {
+        "genre": "Instrumental",
+        "track_annotations": {
+          "instrumental": false,
+          "clip": true,
+          "ai_generated": true
+        },
+        "cue_in": 0.0
+      },
+      "expected": [
+        true,
+        false,
+        false,
+        true
+      ]
+    },
+    {
+      "preparation": {
+        "cue_in": 0,
+        "embedded_tags": {
+          "AMPVerseCategories": [
+            "{\"clip\":true,\"ai_generated\":true}"
+          ]
+        }
+      },
+      "expected": [
+        true,
+        false,
+        false,
+        true
+      ]
+    },
+    {
+      "preparation": {
+        "cue_in": 0,
+        "track_annotations": {
+          "clip": false
+        },
+        "embedded_tags": {
+          "AMPVerseCategories": [
+            "{\"clip\":true}"
+          ]
+        }
+      },
+      "expected": [
+        false,
+        false,
+        false,
+        false
+      ]
+    },
+    {
+      "preparation": {
+        "cue_in": 0,
+        "embedded_tags": {
+          "AMPVerseCategories": [
+            "{\"clip\":\"yes\"}"
+          ]
+        }
+      },
+      "expected": [
+        false,
+        false,
+        false,
+        false
+      ]
+    }
+  ]
+}

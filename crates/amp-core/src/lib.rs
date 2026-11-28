@@ -20,6 +20,7 @@ pub mod discovery;
 pub mod energy_profile;
 pub mod engine_api;
 pub mod knowledge;
+pub mod music_annotations;
 pub mod playlist_sync_contract;
 pub mod podcast_feed;
 pub mod show;
@@ -86,6 +87,7 @@ impl Preparation {
             return Err("Beat offset must be nonnegative".into());
         }
         preparation::validate(self)?;
+        music_annotations::validate(self)?;
         stem_mix::knobs(self)?;
         energy_profile::validate(self)?;
         Ok(())
