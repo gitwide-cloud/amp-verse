@@ -68,11 +68,14 @@ fn run() -> Result<(), String> {
     } else {
         if job.server { "amp-cast" } else { "amp-player" }
     });
-    std::process::Command::new(exe)
-        .args(&job.arguments)
-        .current_dir(&job.destination)
-        .spawn()
-        .map_err(|e| e.to_string())?;
+    let mut restart = std::process::Command::new(exe);
+    restart.args(&job.arguments).current_dir(&job.destination);
+    #[cfg(windows)]
+    if job.server {
+        use std::os::windows::process::CommandExt;
+        restart.creation_flags(0x08000000); // Keep a headless server headless.
+    }
+    restart.spawn().map_err(|e| e.to_string())?;
     // Reclaim the owned download/staging directory after applying the transaction.
     // On Windows the running helper itself remains locked until it exits; large
     // archives and extracted payloads must not accumulate between updates.

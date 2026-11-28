@@ -190,6 +190,40 @@ fn prepare(cast: &Cast) -> Result<(), String> {
     cast.updater.exit.notify_one();
     Ok(())
 }
+// Bound HTTP draining: a radio listener can otherwise keep its stream open forever
+// and prevent the verified helper from replacing the exited server process.
+async fn drain(
+    listener: tokio::net::TcpListener,
+    app: Router,
+    signal: impl std::future::Future<Output = ()> + Send + 'static,
+    grace: std::time::Duration,
+) -> std::io::Result<()> {
+    let started = Arc::new(tokio::sync::Notify::new());
+    let notify = started.clone();
+    let server = axum::serve(listener, app).with_graceful_shutdown(async move {
+        signal.await;
+        notify.notify_one();
+    });
+    let serving = std::future::IntoFuture::into_future(server);
+    tokio::pin!(serving);
+    tokio::select! {
+        result=&mut serving=>result,
+        _=started.notified()=>match tokio::time::timeout(grace,&mut serving).await {Ok(result)=>result,Err(_)=>Ok(())}
+    }
+}
+pub async fn serve(listener: tokio::net::TcpListener, cast: Arc<Cast>) -> std::io::Result<()> {
+    let app = super::router(cast.clone());
+    drain(listener,app,async move {
+        #[cfg(unix)] {
+            let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
+            tokio::select!{_=tokio::signal::ctrl_c()=>{},_=terminate.recv()=>{},_=cast.updater.exit.notified()=>{}}
+        }
+        #[cfg(not(unix))]
+        tokio::select!{_=tokio::signal::ctrl_c()=>{},_=cast.updater.exit.notified()=>{}};
+        cast.analysis.stop();cast.shutdown().await;
+    },std::time::Duration::from_secs(3)).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -219,5 +253,42 @@ mod tests {
             );
             assert!(!cast.updater.busy.load(Ordering::Relaxed));
         }
+    }
+    #[tokio::test]
+    async fn held_stream_cannot_block_a_server_update_forever() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let app = Router::new().route(
+            "/held",
+            get(|| async {
+                Body::from_stream(async_stream::stream! {
+                    yield Ok::<Bytes,std::convert::Infallible>(Bytes::from_static(b"ready"));
+                    std::future::pending::<()>().await;
+                })
+            }),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let server = tokio::spawn(drain(
+            listener,
+            app,
+            async move {
+                let _ = rx.await;
+            },
+            std::time::Duration::from_millis(50),
+        ));
+        let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
+        client
+            .write_all(b"GET /held HTTP/1.1\r\nHost: localhost\r\n\r\n")
+            .await
+            .unwrap();
+        let mut bytes = [0; 1024];
+        assert!(client.read(&mut bytes).await.unwrap() > 0);
+        tx.send(()).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(2), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
     }
 }

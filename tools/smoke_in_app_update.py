@@ -4,7 +4,7 @@ import argparse, hashlib, json, os, pathlib, shutil, subprocess, tempfile, time
 def digest(path):return hashlib.sha256(path.read_bytes()).hexdigest()
 def compile_fixture(root, label):
     source=root/(label+'.rs');binary=root/(label+('.exe' if os.name=='nt' else ''))
-    source.write_text('fn main(){let args:Vec<String>=std::env::args().collect();if args.len()==3{std::fs::write(&args[1],format!("'+label+'\\n{}\\n{}",args[2],std::env::var("AMP_UPDATE_FIXTURE_IDENTITY").unwrap_or_default())).unwrap();}}')
+    source.write_text('fn main(){let args:Vec<String>=std::env::args().collect();if args.len()==3{std::fs::write(&args[1],format!("'+label+'\\n{}\\n{}\\n{}",args[2],std::env::var("AMP_UPDATE_FIXTURE_IDENTITY").unwrap_or_default(),std::process::id())).unwrap();}}')
     subprocess.run(['rustc',str(source),'-o',str(binary)],check=True,timeout=60,capture_output=True)
     return binary
 
@@ -26,7 +26,25 @@ def exercise(helper,server):
             assert run.returncode==(1 if broken else 0),(run.returncode,run.stdout,run.stderr)
             end=time.monotonic()+10
             while not marker.exists() and time.monotonic()<end:time.sleep(.05)
-            assert marker.read_text()==('old' if broken else 'new')+'\n'+music+'\nexisting-identity-fixture'
+            lines=marker.read_text().splitlines()
+            assert lines[:3]==[('old' if broken else 'new'),music,'existing-identity-fixture']
+            pid=int(lines[3])
+            if os.name=='nt':
+                import ctypes
+                kernel=ctypes.WinDLL('kernel32',use_last_error=True);kernel.OpenProcess.restype=ctypes.c_void_p
+                handle=kernel.OpenProcess(0x00100000,False,pid)
+                if handle:
+                    try:assert kernel.WaitForSingleObject(ctypes.c_void_p(handle),5000)==0
+                    finally:kernel.CloseHandle(ctypes.c_void_p(handle))
+                else:assert ctypes.get_last_error()==87
+            else:
+                end=time.monotonic()+5
+                process=pathlib.Path('/proc')/str(pid)/'stat'
+                while process.exists() and time.monotonic()<end:
+                    try:
+                        if process.read_text().split()[2]=='Z':break
+                    except FileNotFoundError:break
+                    time.sleep(.01)
             assert digest(app/executable)==digest(old if broken else new)
             assert (app/'settings.json').read_text()=='preserved-library-and-pairing'
             result=(updates/'last-result.txt').read_text();assert ('failed' if broken else 'installed') in result

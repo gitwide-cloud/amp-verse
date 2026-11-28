@@ -1,7 +1,15 @@
 use std::{net::SocketAddr, path::PathBuf};
 mod startup_catalog;
-#[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
+    let result = runtime.block_on(run());
+    // A background catalogue refresh must not hold a verified restart indefinitely.
+    runtime.shutdown_timeout(std::time::Duration::from_secs(3));
+    result
+}
+async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let root = PathBuf::from(
         std::env::args_os()
             .nth(1)
@@ -138,21 +146,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         env!("CARGO_PKG_VERSION"),
         listener.local_addr()?
     );
-    axum::serve(listener, amp_cast::router(cast.clone()))
-        .with_graceful_shutdown(async move {
-            #[cfg(unix)]
-            {
-                let mut terminate =
-                    tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                        .expect("SIGTERM handler");
-                tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=terminate.recv()=>{}, _=cast.updater.exit.notified()=>{} }
-            }
-            #[cfg(not(unix))]
-            tokio::select! { _=tokio::signal::ctrl_c()=>{}, _=cast.updater.exit.notified()=>{} };
-            cast.analysis.stop();
-            cast.shutdown().await;
-        })
-        .await?;
+    amp_cast::updater::serve(listener, cast).await?;
     Ok(())
 }
 
