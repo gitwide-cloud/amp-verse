@@ -51,6 +51,13 @@ pub struct Release {
     pub prerelease: bool,
     pub assets: Vec<Asset>,
 }
+/// Component installers may install the current release, not only newer apps.
+pub fn channel_accepts(candidate: &str, prerelease: bool, installed: &str) -> bool {
+    let (Ok(candidate), Ok(current)) = (version(candidate), version(installed)) else {
+        return false;
+    };
+    prerelease == (candidate.0[3] < 2) && candidate.0[3] >= current.0[3]
+}
 pub fn select(releases: &[Release], installed: &str) -> Result<Option<Release>, String> {
     let current = version(installed)?;
     Ok(releases
@@ -59,10 +66,8 @@ pub fn select(releases: &[Release], installed: &str) -> Result<Option<Release>, 
             let Ok(v) = version(&r.tag_name) else {
                 return false;
             };
-            let allowed = v.0[3] == 2 || (current.0[3] < 2 && v.0[3] >= current.0[3]);
             !r.draft
-                && r.prerelease == (v.0[3] < 2)
-                && allowed
+                && channel_accepts(&r.tag_name, r.prerelease, installed)
                 && v > current
                 && r.assets.iter().any(|a| a.name == "amp-update.json")
         })

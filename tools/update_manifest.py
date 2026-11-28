@@ -31,7 +31,7 @@ def generate(directory, version, apk=None, version_code=None):
     if editions.is_file():
         android = json.loads(editions.read_text(encoding="utf-8"))
         for key in android["packages"]:
-            if not re.fullmatch(r"android-(?:full|lite|dj|lab|cast|podcasts|remote)-arm64", key):
+            if key != "android-arm64" and not re.fullmatch(r"android-(?:full|lite|dj|lab|cast|podcasts|remote)-arm64", key):
                 raise ValueError("Unknown Android edition")
             entry = android["packages"][key]
             path = directory / entry["name"]

@@ -75,7 +75,23 @@ pub fn download() -> Result<(), String> {
         2 * 1024 * 1024,
     )?;
     let value: serde_json::Value = serde_json::from_slice(&release).map_err(|e| e.to_string())?;
-    let releases = value.as_array().ok_or("Invalid GitHub release response")?;
+    let mut releases = value
+        .as_array()
+        .ok_or("Invalid GitHub release response")?
+        .iter()
+        .filter(|r| {
+            r["draft"] == false
+                && r["tag_name"]
+                    .as_str()
+                    .zip(r["prerelease"].as_bool())
+                    .is_some_and(|(tag, pre)| {
+                        amp_updater::release::channel_accepts(tag, pre, env!("CARGO_PKG_VERSION"))
+                    })
+        })
+        .collect::<Vec<_>>();
+    releases.sort_by_key(|r| {
+        std::cmp::Reverse(amp_updater::release::version(r["tag_name"].as_str().unwrap()).unwrap())
+    });
     let (assets,asset)=releases.iter().filter(|r|r["draft"].as_bool()!=Some(true)).filter_map(|r|r["assets"].as_array()).find_map(|assets|assets.iter().find(|a|a["name"].as_str().is_some_and(|s|s.starts_with("amp-podcasts-")&&s.ends_with(".ampplugin"))).map(|asset|(assets,asset))).ok_or("No AMP Podcasts package has been published. Use Install downloaded package or open GitHub Releases.")?;
     let name = asset["name"].as_str().ok_or("Missing package name")?;
     let checksum = assets

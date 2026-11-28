@@ -286,11 +286,10 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then asset=amp-engine-windows-x86_64.exe; else asset=amp-engine-linux-x86_64; fi
           cp target/release/amp-engine${{ matrix.suffix }} "engine-dist/$asset"
           (cd engine-dist && sha256sum "$asset" > "$asset.sha256")
-          # Only stable release tags are auto-installable. Beta artifacts remain manual.
-          if [[ "$GITHUB_REF" == refs/tags/v* ]]; then
-            if [ "${{ runner.os }}" = "Windows" ]; then platform=windows-x86_64; else platform=linux-x86_64; fi
-            python tools/engine_release_metadata.py --directory engine-dist --platform "$platform" --release "$GITHUB_REF_NAME"
-          fi
+          # Component compatibility metadata follows the verified product channel.
+          if [ "${{ runner.os }}" = "Windows" ]; then platform=windows-x86_64; else platform=linux-x86_64; fi
+          release=$(python -c "import sys;sys.path.insert(0,'tools');from package_downloads import product_release;from pathlib import Path;print('v'+product_release(Path('.'))[0])")
+          python tools/engine_release_metadata.py --directory engine-dist --platform "$platform" --release "$release"
       - uses: actions/upload-artifact@v4
         with:
           name: amp-analysis-engine-${{ runner.os }}
@@ -438,6 +437,19 @@ jobs:
         run: python tools/update_manifest.py --version "${GITHUB_REF_NAME#v}" --directory packages --apk "$(find packages -maxdepth 1 -name 'amp-verse-full-*.apk' -print -quit)" --version-code "$(cat packages/version-code.txt)"
       - name: Package optional AMP Podcasts
         run: python tools/package_podcasts.py --version "${GITHUB_REF_NAME#v}" --destination packages
+      - name: Finalize checksums for every published package
+        run: |
+          python - <<'PY'
+          import hashlib,pathlib
+          root=pathlib.Path('packages')
+          patterns=('*.zip','*.apk','*.apk.sha256','amp-update.json','amp-modules.json','android-packages.json','amp-engine-*','*.ampplugin*')
+          paths=sorted({p for pattern in patterns for p in root.glob(pattern) if p.is_file()})
+          lines=[]
+          for path in paths:
+              with path.open('rb') as source: digest=hashlib.file_digest(source,'sha256').hexdigest()
+              lines.append(digest+'  '+path.name)
+          (root/'SHA256SUMS.txt').write_text('\n'.join(lines)+'\n',encoding='utf-8')
+          PY
       - uses: softprops/action-gh-release@v2
         with:
           prerelease: false
@@ -445,6 +457,9 @@ jobs:
           files: |
             packages/*.zip
             packages/*.apk
+            packages/*.apk.sha256
+            packages/amp-modules.json
+            packages/android-packages.json
             packages/SHA256SUMS.txt
             packages/amp-update.json
             packages/amp-engine-*

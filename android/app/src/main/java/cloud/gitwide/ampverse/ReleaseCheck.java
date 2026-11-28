@@ -31,15 +31,18 @@ final class ReleaseCheck {
         return "New update: "+release.getString("tag_name")+". Tap Update to install.";
     }
     static JSONObject select(JSONArray releases,String installed)throws Exception {
+        return newestWithAsset(releases,installed,"amp-update.json",true);
+    }
+    static JSONObject newestWithAsset(JSONArray releases,String installed,String assetName,boolean newerOnly)throws Exception {
         int[] current=version(installed);JSONObject selected=null;
         for(int i=0;i<releases.length();i++){
             JSONObject item=releases.optJSONObject(i);if(item==null||item.optBoolean("draft",true))continue;
             String tag=item.optString("tag_name");int[] candidate;
             try{candidate=version(tag);}catch(IllegalArgumentException error){continue;}
             boolean pre=candidate[3]<2;
-            if(item.optBoolean("prerelease",!pre)!=pre||candidate[3]<current[3]||compare(tag,installed)<=0)continue;
+            if(item.optBoolean("prerelease",!pre)!=pre||candidate[3]<current[3]||(newerOnly&&compare(tag,installed)<=0))continue;
             JSONArray assets=item.optJSONArray("assets");boolean complete=false;
-            if(assets!=null)for(int a=0;a<assets.length();a++){JSONObject asset=assets.optJSONObject(a);if(asset!=null&&asset.optString("name").equals("amp-update.json"))complete=true;}
+            if(assets!=null)for(int a=0;a<assets.length();a++){JSONObject asset=assets.optJSONObject(a);if(asset!=null&&asset.optString("name").equals(assetName))complete=true;}
             if(complete&&(selected==null||compare(tag,selected.getString("tag_name"))>0))selected=item;
         }return selected;
     }

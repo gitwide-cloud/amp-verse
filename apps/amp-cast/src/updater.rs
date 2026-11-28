@@ -105,7 +105,7 @@ fn prepare(cast: &Cast) -> Result<(), String> {
         .clone()
         .ok_or("Server settings folder unavailable")?
         .join("updates");
-    let (temp, files) = amp_updater::delivery::extract(&update, &root, &cast.updater.cancel)?;
+    let (temp, mut files) = amp_updater::delivery::extract(&update, &root, &cast.updater.cancel)?;
     let executable = std::env::current_exe().map_err(|e| e.to_string())?;
     let destination = executable
         .parent()
@@ -150,6 +150,7 @@ fn prepare(cast: &Cast) -> Result<(), String> {
         .map_err(|e| format!("Server folder is not writable: {e}"))?;
     drop(probe);
     let stage = temp.path().join("files");
+    isolate_build_record(&stage, &destination, &mut files)?;
     let runner = temp.path().join(helper);
     std::fs::copy(stage.join(helper), &runner).map_err(|e| e.to_string())?;
     #[cfg(unix)]
@@ -190,6 +191,25 @@ fn prepare(cast: &Cast) -> Result<(), String> {
     cast.updater.exit.notify_one();
     Ok(())
 }
+// Desktop and server can share one application folder. Updating the server
+// must not replace the desktop's release identity with a server build record.
+fn isolate_build_record(
+    stage: &std::path::Path,
+    destination: &std::path::Path,
+    files: &mut [PathBuf],
+) -> Result<(), String> {
+    if (destination.join("amp-player.exe").is_file() || destination.join("amp-player").is_file())
+        && let Some(path) = files
+            .iter_mut()
+            .find(|p| p.as_path() == std::path::Path::new("build.json"))
+    {
+        std::fs::rename(stage.join("build.json"), stage.join("server-build.json"))
+            .map_err(|e| e.to_string())?;
+        *path = PathBuf::from("server-build.json");
+    }
+    Ok(())
+}
+
 // Bound HTTP draining: a radio listener can otherwise keep its stream open forever
 // and prevent the verified helper from replacing the exited server process.
 async fn drain(
@@ -307,6 +327,28 @@ mod tests {
             )
             .await
             .is_err()
+        );
+    }
+    #[test]
+    fn shared_install_keeps_desktop_build_identity() {
+        let root = tempfile::tempdir().unwrap();
+        let stage = root.path().join("stage");
+        let destination = root.path().join("app");
+        std::fs::create_dir_all(&stage).unwrap();
+        std::fs::create_dir_all(&destination).unwrap();
+        std::fs::write(destination.join("amp-player.exe"), b"desktop").unwrap();
+        std::fs::write(destination.join("build.json"), b"desktop release").unwrap();
+        std::fs::write(stage.join("build.json"), b"server release").unwrap();
+        let mut files = vec![PathBuf::from("build.json")];
+        isolate_build_record(&stage, &destination, &mut files).unwrap();
+        amp_updater::package::install(&stage, &destination, &files).unwrap();
+        assert_eq!(
+            std::fs::read(destination.join("build.json")).unwrap(),
+            b"desktop release"
+        );
+        assert_eq!(
+            std::fs::read(destination.join("server-build.json")).unwrap(),
+            b"server release"
         );
     }
 }

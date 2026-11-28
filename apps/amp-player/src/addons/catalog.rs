@@ -55,30 +55,14 @@ impl Filter {
         }
     }
 }
-fn version(s: &str) -> Option<([u64; 3], Option<u64>)> {
-    let s = s.strip_prefix('v').unwrap_or(s);
-    let (base, rc) = match s.split_once("-rc.") {
-        Some((b, r)) => (b, Some(r.parse().ok()?)),
-        None => (s, None),
-    };
-    let parts = base
-        .split('.')
-        .map(str::parse)
-        .collect::<Result<Vec<u64>, _>>()
-        .ok()?;
-    Some((parts.try_into().ok()?, rc))
-}
 pub(super) fn newer(candidate: &str, installed: &str) -> bool {
-    let (Some((c, cr)), Some((i, ir))) = (version(candidate), version(installed)) else {
-        return false;
-    };
-    c > i
-        || (c == i
-            && match (cr, ir) {
-                (None, Some(_)) => true,
-                (Some(a), Some(b)) => a > b,
-                _ => false,
-            })
+    match (
+        amp_updater::release::version(candidate),
+        amp_updater::release::version(installed),
+    ) {
+        (Ok(candidate), Ok(installed)) => candidate > installed,
+        _ => false,
+    }
 }
 pub(super) fn update(local: &Local, release: Option<&Release>) -> bool {
     local.installed
@@ -172,12 +156,17 @@ pub(super) fn fetch() -> Result<Catalog, String> {
         .iter()
         .filter(|r| {
             r["draft"] == false
-                && r["prerelease"] == false
-                && r["tag_name"].as_str().is_some_and(|s| version(s).is_some())
+                && r["tag_name"]
+                    .as_str()
+                    .zip(r["prerelease"].as_bool())
+                    .is_some_and(|(tag, pre)| {
+                        amp_updater::release::channel_accepts(tag, pre, env!("CARGO_PKG_VERSION"))
+                    })
         })
         .collect::<Vec<_>>();
-    releases
-        .sort_by_key(|r| std::cmp::Reverse(version(r["tag_name"].as_str().unwrap()).unwrap().0));
+    releases.sort_by_key(|r| {
+        std::cmp::Reverse(amp_updater::release::version(r["tag_name"].as_str().unwrap()).unwrap())
+    });
     let mut result = Catalog::default();
     for r in releases {
         let info = Release {
@@ -234,7 +223,9 @@ pub(super) fn fetch() -> Result<Catalog, String> {
             if let Ok(p) = serde_json::from_slice::<serde_json::Value>(&b)
                 && p["id"] == "amp-podcasts"
                 && p["host_api"] == 1
-                && let Some(v) = p["version"].as_str().filter(|v| version(v).is_some())
+                && let Some(v) = p["version"]
+                    .as_str()
+                    .filter(|v| amp_updater::release::version(v).is_ok())
             {
                 result.releases[7] = Some(Release {
                     version: v.into(),

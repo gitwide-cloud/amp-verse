@@ -88,9 +88,10 @@ class UpdateManifestTests(unittest.TestCase):
                 path = root / f"amp-{edition}.apk"
                 path.write_bytes(edition.encode())
                 editions[f"android-{edition}-arm64"] = {"name":path.name,"sha256":hashlib.sha256(path.read_bytes()).hexdigest(),"size":path.stat().st_size,"version_code":55}
+            editions["android-arm64"] = editions["android-full-arm64"]
             (root / "android-packages.json").write_text(json.dumps({"packages":editions}))
             result = generate(root, "1.1.0-rc.11")
-            self.assertEqual(len(result["packages"]), 12)
+            self.assertEqual(len(result["packages"]), 13)
             self.assertIn("android-dj-arm64", result["packages"])
             self.assertIn("engine-windows-x86_64", result["packages"])
             self.assertIn("server-linux-x86_64", result["packages"])
