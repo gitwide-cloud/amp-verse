@@ -181,6 +181,21 @@ fn mix(parts: &[Vec<f32>; 3], levels: [f32; 3]) -> Result<Vec<f32>, String> {
         .collect())
 }
 /// Writes a user-selected result or disposable mixed preview, never per-stem files.
+/// User clip exports keep their own metadata timeline; temporary processing
+/// renders deliberately use `render` without creating a catalog for scratch files.
+pub(super) fn export_clip(
+    source: &Path, start: f64, length: f64, p: Processing, filter: &str,
+    output: &Path, cancel: Arc<AtomicBool>,
+) -> Result<(), String> {
+    let source_preparation = amp_core::preparation::load(source)?;
+    render(source, start, length, p, filter, output, cancel)?;
+    let preparation = amp_core::music_annotations::for_clip(&source_preparation);
+    let parent = output.parent().ok_or("Export folder missing")?;
+    let filename = output.file_name().ok_or("Export filename missing")?;
+    amp_core::preparation::save_if_unchanged(parent, Path::new(filename), &preparation, None)
+        .map_err(|e| format!("Audio saved at {}; clip categories could not be saved: {e}", output.display()))
+}
+
 pub(super) fn render(
     source: &Path,
     start: f64,
@@ -530,6 +545,29 @@ mod render_tests {
             .is_err()
         );
         assert_eq!(std::fs::read(&s).unwrap(), before);
+    }
+    #[test]
+    #[ignore = "requires FFmpeg; run with Lab codec acceptance"]
+    fn clip_export_records_categories_without_copying_source_timeline() {
+        use amp_core::music_annotations::{Category, marked, set};
+        let d = tempfile::tempdir().unwrap();
+        let input = source(d.path());
+        let before = std::fs::read(&input).unwrap();
+        let mut original = amp_core::Preparation { bpm: Some(120.), cue_in: 2., cue_out: Some(10.), ..Default::default() };
+        set(&mut original, Category::AiGenerated, true);
+        amp_core::preparation::save(d.path(), Path::new("source.wav"), &original).unwrap();
+        let recorded_source = amp_core::preparation::load(&input).unwrap();
+        let out = d.path().join("clip.mp3");
+        export_clip(&input, 0.25, 1., Processing::default(), "anull", &out, Arc::new(AtomicBool::new(false))).unwrap();
+        let saved = amp_core::preparation::load(&out).unwrap();
+        assert!(marked(&saved, Category::Clip));
+        assert!(marked(&saved, Category::AiGenerated));
+        assert!(saved.bpm.is_none() && saved.cues.is_empty() && saved.analysis.is_none());
+        assert_eq!(saved.cue_in, 0.);
+        assert!(saved.cue_out.is_none());
+        assert_eq!(std::fs::read(&input).unwrap(), before);
+        assert_eq!(amp_core::preparation::load(&input).unwrap(), recorded_source);
+        assert!(export_clip(&input, 0., 1., Processing::default(), "anull", &out, Arc::new(AtomicBool::new(false))).is_err());
     }
     #[test]
     #[ignore = "requires configured native stem model and FFmpeg"]

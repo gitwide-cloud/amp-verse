@@ -338,16 +338,10 @@ impl Editor {
         let processing = self.processing;
         self.status = "Exporting 256 kbps MP3".into();
         thread::spawn(move || {
-            let outcome = crate::lab_audio::render(
-                &input,
-                start,
-                length,
-                processing,
-                &filters,
-                &output,
+            let outcome = crate::lab_audio::export_clip(
+                &input, start, length, processing, &filters, &output,
                 std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            )
-            .map(|_| output);
+            ).map(|_| output);
             let _ = tx.send(outcome);
         });
     }

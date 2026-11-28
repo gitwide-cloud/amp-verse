@@ -521,9 +521,13 @@ mod tests {
                 .contains("Suno source: https://suno.com/song/")
         );
         let mut editor = crate::lab_editor::Editor::default();
-        assert!(editor.load_path(saved));
+        assert!(editor.load_path(saved.clone()));
+        let prep = amp_core::preparation::load(&saved).unwrap();
+        assert!(amp_core::music_annotations::marked(&prep, amp_core::music_annotations::Category::AiGenerated));
+        assert_eq!(prep.extensions["source_service"], "suno");
+        assert_eq!(prep.extensions["source_url"], "https://suno.com/song/ab39a04d-b2e6-463b-9b8e-ddea725422f5");
         assert_eq!(fs::read(&input).unwrap(), original);
-        assert_eq!(fs::read_dir(&destination).unwrap().count(), 1);
+        assert_eq!(fs::read_dir(&destination).unwrap().filter_map(Result::ok).filter(|e| e.path().extension().is_some_and(|ext| ext == "mp3")).count(), 1);
     }
     #[test]
     fn validates_song_share_and_untrusted_links() {

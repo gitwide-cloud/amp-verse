@@ -242,6 +242,7 @@ fn lookup_inputs(library: &amp_core::Library) -> Vec<LookupInput> {
         .iter()
         .filter(|t| {
             amp_core::media_kind::is_music(&t.path, &t.preparation)
+                && amp_core::music_annotations::automatic_lookup_allowed(&t.preparation)
                 && [
                     ("title", "TrackTitle"),
                     ("artist", "TrackArtist"),
@@ -845,5 +846,46 @@ mod tests {
         assert!(http_url("file:///tmp/song").is_err());
         assert!(http_url("https://user:password@example.com").is_err());
         assert!(color_image(b"not an image").is_err());
+    }
+}
+
+#[cfg(test)]
+mod category_lookup_tests {
+    #[test]
+    fn automatic_lookup_skips_ai_and_clips_but_keeps_instrumentals() {
+        use amp_core::music_annotations::{Category, set};
+        let mut tracks = Vec::new();
+        for category in [
+            None,
+            Some(Category::AiGenerated),
+            Some(Category::Clip),
+            Some(Category::Instrumental),
+        ] {
+            let mut preparation = amp_core::Preparation::default();
+            if let Some(category) = category {
+                set(&mut preparation, category, true);
+            }
+            tracks.push(amp_core::Track {
+                path: format!("{}.mp3", tracks.len()).into(),
+                title: "Song".into(),
+                preparation,
+            });
+        }
+        let library = amp_core::Library {
+            tracks,
+            tree: amp_core::Folder {
+                name: "Music".into(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        };
+        let inputs = super::lookup_inputs(&library);
+        assert_eq!(
+            inputs
+                .iter()
+                .map(|i| i.path.to_string_lossy().to_string())
+                .collect::<Vec<_>>(),
+            ["0.mp3", "3.mp3"]
+        );
     }
 }

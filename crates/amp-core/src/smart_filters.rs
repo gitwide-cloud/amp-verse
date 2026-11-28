@@ -5,6 +5,10 @@ mod seasonal;
 pub use seasonal::presets as seasonal_presets;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Field {
+    AiGenerated,
+    Acappella,
+    Instrumental,
+    Clip,
     Clean,
     Holiday,
     Season,
@@ -52,6 +56,10 @@ impl Field {
         Self::Holiday,
         Self::Season,
         Self::Clean,
+        Self::AiGenerated,
+        Self::Acappella,
+        Self::Instrumental,
+        Self::Clip,
         Self::Bpm,
         Self::TempoAlternative,
         Self::Key,
@@ -90,6 +98,10 @@ impl Field {
             Self::Holiday => "Holiday",
             Self::Season => "Season",
             Self::Clean => "Clean / non-explicit (known clean only)",
+            Self::AiGenerated => "Marked AI-generated",
+            Self::Acappella => "Marked a cappella",
+            Self::Instrumental => "Marked instrumental",
+            Self::Clip => "Marked clip",
             Self::Bpm => "BPM",
             Self::TempoAlternative => "Alternative BPM",
             Self::Key => "Musical key",
@@ -138,6 +150,10 @@ impl Field {
             | Self::Album
             | Self::Year => Kind::Text,
             Self::Clean
+            | Self::AiGenerated
+            | Self::Acappella
+            | Self::Instrumental
+            | Self::Clip
             | Self::Analyzed
             | Self::Reviewed
             | Self::BeatGrid
@@ -299,7 +315,12 @@ fn numbers(field: Field, p: &Preparation) -> Vec<f64> {
     value.into_iter().collect()
 }
 fn flag(field: Field, p: &Preparation) -> bool {
+    use crate::music_annotations::{Category, marked};
     match field {
+        Field::AiGenerated => marked(p, Category::AiGenerated),
+        Field::Acappella => marked(p, Category::Acappella),
+        Field::Instrumental => marked(p, Category::Instrumental),
+        Field::Clip => marked(p, Category::Clip),
         Field::Clean => {
             crate::content_advisory::classification(p)
                 == crate::content_advisory::Classification::Clean

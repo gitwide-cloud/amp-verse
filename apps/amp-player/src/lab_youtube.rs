@@ -949,7 +949,34 @@ fn convert_publish(
     if !duration.is_finite() || duration <= 0. {
         return Err("Converted MP3 is empty or invalid; original editor audio was kept.".into());
     }
-    publish(&converted, dir, &format!("{name} [{id}]"), cancel)
+    let output = publish(&converted, dir, &format!("{name} [{id}]"), cancel)?;
+    if let Some(source_url) = suno_source {
+        let mut preparation = amp_core::Preparation::default();
+        amp_core::music_annotations::set(
+            &mut preparation,
+            amp_core::music_annotations::Category::AiGenerated,
+            true,
+        );
+        preparation
+            .extensions
+            .insert("source_service".into(), serde_json::json!("suno"));
+        preparation
+            .extensions
+            .insert("source_url".into(), serde_json::json!(source_url));
+        amp_core::preparation::save_if_unchanged(
+            dir,
+            Path::new(output.file_name().ok_or("Download filename missing")?),
+            &preparation,
+            None,
+        )
+        .map_err(|e| {
+            format!(
+                "Audio saved at {}; source categories could not be saved: {e}",
+                output.display()
+            )
+        })?;
+    }
+    Ok(output)
 }
 fn safe_name(title: &str) -> String {
     let mut name = String::new();
