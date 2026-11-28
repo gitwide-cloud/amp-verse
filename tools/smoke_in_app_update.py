@@ -43,7 +43,7 @@ def exercise(helper,server):
                 while process.exists() and time.monotonic()<end:
                     try:
                         if process.read_text().split()[2]=='Z':break
-                    except FileNotFoundError:break
+                    except (FileNotFoundError,ProcessLookupError):break
                     time.sleep(.01)
             assert digest(app/executable)==digest(old if broken else new)
             assert (app/'settings.json').read_text()=='preserved-library-and-pairing'
