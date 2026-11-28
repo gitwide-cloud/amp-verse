@@ -152,7 +152,7 @@ fn playlist_key(path: &Path) -> String {
             text
         }
     } else {
-        crate::playlist_sync::root_key(path)
+        text.into_owned()
     }
 }
 impl Browser {
