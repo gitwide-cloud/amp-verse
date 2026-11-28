@@ -108,3 +108,7 @@ snapshots both accept at most 256 MiB, so a complete desktop-sized library is no
 rejected by a smaller server-only limit. The bounds, library root checks, path
 validation and preservation of a previous snapshot on failed publication remain
 in force. Raising the limit does not truncate tracks or strip preparation metadata.
+
+Completed full discoveries wait for saved-queue initialization instead of being
+dropped when their result arrives first. This lets the authoritative discovery
+reconcile obsolete terminal history while preserving cached manual preparation.

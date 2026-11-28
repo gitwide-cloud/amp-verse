@@ -625,6 +625,10 @@ impl Preparer {
         self.review_selected.clear();
         self.open = true;
     }
+    /// Keep a complete discovery in its result channel until initialization can accept it.
+    pub fn accepts_discovery(&self) -> bool {
+        self.queue_init.is_none() && self.queue_discovery.is_none()
+    }
     /// A late discovery result must not undo a user's Stop request.
     pub fn batch_ref(&mut self, root: PathBuf, tracks: &[Track]) {
         if self.queue_enabled {

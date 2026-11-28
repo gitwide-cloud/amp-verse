@@ -600,6 +600,9 @@ impl Player {
             "Queue running; checking folders for new songs in the background…".into();
     }
     fn poll_analysis_scan(&mut self) {
+        if !self.preparer.accepts_discovery() {
+            return;
+        }
         let result = self
             .analysis_scan
             .as_ref()
@@ -4398,6 +4401,57 @@ mod window_tests {
             assert_eq!(old.preparation.bpm, Some(123.));
             assert!(old.preparation.manual_override);
         }
+    }
+    #[test]
+    fn complete_analysis_discovery_waits_for_the_saved_queue_to_open() {
+        let root = tempfile::tempdir().unwrap();
+        std::fs::write(root.path().join("old.mp3"), b"fixture").unwrap();
+        let mut cached = amp_core::scan(root.path()).unwrap();
+        cached.tracks[0].preparation.bpm = Some(123.);
+        cached.tracks[0].preparation.manual_override = true;
+        std::fs::create_dir_all(root.path().join("new")).unwrap();
+        std::fs::write(root.path().join("new/song.mp3"), b"fixture").unwrap();
+        let mut player = Player {
+            root: root.path().into(),
+            library: Some(cached),
+            analyze_after_scan: true,
+            ..Default::default()
+        };
+        player.preparer.resume_cached(
+            player.root.clone(),
+            &player.library.as_ref().unwrap().tracks,
+        );
+        let (tx, rx) = mpsc::channel();
+        player.analysis_scan = Some(rx);
+        tx.send(Ok(amp_core::scan_job_inputs(root.path()).unwrap()))
+            .unwrap();
+        player.poll_analysis_scan();
+        assert!(
+            player.analysis_scan.is_some(),
+            "A complete scan must not be dropped while saved queue initialization is pending"
+        );
+        assert_eq!(player.library.as_ref().unwrap().tracks.len(), 1);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::time::Instant::now() < deadline
+            && (player.analysis_scan.is_some() || player.preparer.progress().1 != 2)
+        {
+            player.preparer.poll(&player.root, player.library.as_mut());
+            player.poll_analysis_scan();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        player.preparer.stop_queue();
+        assert!(player.analysis_scan.is_none());
+        assert_eq!(player.preparer.progress().1, 2);
+        let old = player
+            .library
+            .as_ref()
+            .unwrap()
+            .tracks
+            .iter()
+            .find(|t| t.path == Path::new("old.mp3"))
+            .unwrap();
+        assert_eq!(old.preparation.bpm, Some(123.));
+        assert!(old.preparation.manual_override);
     }
     #[test]
     fn unavailable_root_does_not_clear_existing_library_or_live_session() {
