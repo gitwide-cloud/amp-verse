@@ -344,7 +344,7 @@ fn result(
     Ok(p)
 }
 pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, String> {
-    crate::background::checkpoint();
+    crate::background::checkpoint()?;
     existing.validate()?;
     let before = std::fs::metadata(path).map_err(|e| e.to_string())?;
     let staged = if let Some(directory) = std::env::var_os("AMP_PREPARATION_CACHE_DIR") {
@@ -392,7 +392,7 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
         let mut chroma = chroma_engine::Analyzer::new();
         let mut total = 0usize;
         loop {
-            crate::background::checkpoint();
+            crate::background::checkpoint()?;
             let mut n = 0;
             while n < buffer.len() {
                 let got = stream.read(&mut buffer[n..]).map_err(|e| e.to_string())?;
@@ -442,7 +442,7 @@ pub fn analyze(path: &Path, existing: &Preparation) -> Result<Preparation, Strin
                 break;
             }
         }
-        crate::background::checkpoint();
+        crate::background::checkpoint()?;
         perceptual_energy = loudness.and_then(|l| {
             crate::perceptual_energy::from_rms(&energy, RATE / BLOCK as f64, l.integrated_lufs)
         });

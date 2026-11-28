@@ -119,14 +119,8 @@ impl Panel {
             });
         }
         ui.separator();
-        ui.strong("Local prepared stems");
-        ui.weak("Optional: prepare only the selected playlist as compressed local audio. Live processing still stays in memory. Originals are unchanged.");
-        if let Some((songs, bytes)) = state.stats {
-            ui.label(format!(
-                "Cache: {songs} songs · {:.1} MiB used · 10 GiB maximum",
-                bytes as f64 / 1048576.
-            ));
-        }
+        ui.strong("Playlist preparation");
+        ui.weak("Prepared songs are ready for the stem controls when you mix.");
         if let Some(task) = &state.task {
             ui.label(format!("Preparing {}", task.name));
             if let Some(progress) = &state.progress {
@@ -150,11 +144,14 @@ impl Panel {
                 choice.snapshot.tracks.len()
             ));
             ui.label(format!(
-                "Estimated compressed size: {:.1} MiB · 256 kbps MP3 per part",
-                choice.estimated_bytes as f64 / 1048576.
+                "Estimated space needed: {:.1} MB",
+                choice.estimated_bytes as f64 / 1000000.
             ));
             if choice.unknown > 0 {
-                ui.weak(format!("{} song durations are unknown; the estimate uses four minutes each. Actual disk use is bounded.",choice.unknown));
+                ui.weak(format!(
+                    "{} song lengths are unknown; the space estimate allows four minutes each.",
+                    choice.unknown
+                ));
             }
             let mut start = false;
             let mut dismiss = false;
@@ -166,16 +163,16 @@ impl Panel {
                             crate::onnx_stem_worker::configured(),
                             live_enabled,
                         ),
-                        egui::Button::new("Prepare selected playlist locally"),
+                        egui::Button::new("Prepare stems"),
                     )
                     .clicked();
                 dismiss = ui.button("Cancel selection").clicked();
             });
             if live_enabled {
-                ui.weak("Switch live-stem decks to original audio before preparing a playlist. Prepared and original playback may continue.");
+                ui.weak("Finish using live stems before preparing another playlist. Your music can keep playing.");
             }
             if !crate::onnx_stem_worker::configured() {
-                ui.weak("Install the stem engine before preparing this playlist. Existing prepared songs can still play.");
+                ui.weak("Set up stems before preparing this playlist. Songs you already prepared can still play.");
             }
             if start
                 && let Some(choice) = state.choice.take()
@@ -208,10 +205,17 @@ impl Panel {
                 state.choice = None;
             }
         } else {
-            ui.weak("Select a normal or Smart Playlist and choose Prepare playlist stems to review its song snapshot.");
+            ui.weak("Choose a playlist, then press Prepare stems.");
         }
         if !state.status.is_empty() {
             ui.label(&state.status);
+        }
+        ui.collapsing("Prepared music storage", |ui| {
+        if let Some((songs, bytes)) = state.stats {
+            ui.label(format!(
+                "Cache: {songs} songs · {:.1} MiB used · 10 GiB maximum",
+                bytes as f64 / 1048576.
+            ));
         }
         if state.task.is_none() {
             if ui.button("Clear prepared stem cache…").clicked() {
@@ -254,6 +258,7 @@ impl Panel {
                 });
             }
         }
+        });
     }
 }
 

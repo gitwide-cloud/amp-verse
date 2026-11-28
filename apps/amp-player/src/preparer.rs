@@ -16,6 +16,15 @@ struct Update {
 pub struct Preparer {
     pub revision: u64,
     analysis_summary: Option<(PathBuf, std::time::Instant, usize, usize, usize)>,
+    saved_stats_root: PathBuf,
+    saved_stats_failures: usize,
+    saved_stats_job: Option<
+        mpsc::Receiver<(
+            PathBuf,
+            Result<Option<amp_core::analysis_queue::Stats>, String>,
+        )>,
+    >,
+    saved_stats_check: Option<std::time::Instant>,
     wave: crate::waveform::Lane,
     position: f64,
     zoom: Option<f64>,
@@ -509,6 +518,7 @@ impl Preparer {
         root: &std::path::Path,
         library: Option<&Library>,
     ) -> (usize, usize, usize) {
+        self.poll_saved_stats(root);
         let Some(library) = library else {
             self.analysis_summary = None;
             return (0, 0, 0);
@@ -541,6 +551,54 @@ impl Preparer {
         let (_, _, len, total, analyzed) = self.analysis_summary.as_ref().unwrap();
         (*total, *analyzed, *len - *total)
     }
+    fn poll_saved_stats(&mut self, root: &std::path::Path) {
+        if let Some(rx) = &self.saved_stats_job
+            && let Ok((key, result)) = rx.try_recv()
+        {
+            self.saved_stats_job = None;
+            if key == root {
+                match result {
+                    Ok(stats) => {
+                        self.saved_stats_root = key;
+                        let stats = stats.unwrap_or_default();
+                        self.saved_stats_failures = stats.failed;
+                        if self.queue.is_none() {
+                            self.failures = stats.failed;
+                            self.total = stats.total;
+                            self.done = stats.done + stats.failed;
+                        }
+                    }
+                    Err(e) => self.status = format!("Analysis status unavailable: {e}"),
+                }
+            }
+        }
+        if (self.queue.is_none() || self.queue_root != root)
+            && self.saved_stats_job.is_none()
+            && (self.saved_stats_root != root
+                || self
+                    .saved_stats_check
+                    .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(10)))
+        {
+            self.saved_stats_check = Some(std::time::Instant::now());
+            let root = root.to_path_buf();
+            let (tx, rx) = mpsc::channel();
+            self.saved_stats_job = Some(rx);
+            std::thread::spawn(move || {
+                let result = amp_core::analysis_queue::Queue::saved_stats(&root);
+                let _ = tx.send((root, result));
+            });
+        }
+    }
+    pub fn saved_failures(&self, root: &std::path::Path) -> Option<usize> {
+        if self.queue.is_some() && self.queue_root == root {
+            Some(self.failures)
+        } else if self.saved_stats_root == root {
+            Some(self.saved_stats_failures)
+        } else {
+            None
+        }
+    }
+
     pub fn failed(&self) -> usize {
         self.failures
     }
@@ -760,7 +818,7 @@ impl Preparer {
         self.queue_enabled = false;
         self.stop_queue
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.status = "Stopping after active songs; pending work is saved.".into();
+        self.status = "Stopping analysis; unfinished songs remain queued.".into();
     }
     fn start_queue(&mut self, root: PathBuf) {
         self.queue_retry_at = None;
@@ -820,7 +878,9 @@ impl Preparer {
                             };
                             let _heartbeat = q.keep_alive(&job);
                             let mut skipped = false;
-                            let result = match crate::engine::analyze(root, &job.path, None) {
+                            let result = match crate::engine::analyze_cancellable(
+                                root, &job.path, None, stop,
+                            ) {
                                 Ok(Some(p)) => Ok(p),
                                 Ok(None) => {
                                     skipped = true;
@@ -841,11 +901,16 @@ impl Preparer {
                                         },
                                     )
                                 });
-                            let recorded = if waiting {
+                            let cancelled =
+                                stop.load(std::sync::atomic::Ordering::Relaxed) && result.is_err();
+                            let recorded = if waiting || cancelled {
                                 q.defer(&job)
                             } else {
                                 q.finish(&job, result.as_ref().map(|_| ()).map_err(String::as_str))
                             };
+                            if cancelled && recorded.is_ok() {
+                                break;
+                            }
                             let queue_failed = recorded.is_err();
                             let result = match recorded {
                                 Ok(()) => result,
@@ -1075,6 +1140,9 @@ impl Preparer {
                 );
             }
             self.job = None;
+            if !self.queue_enabled {
+                self.status = "Analysis stopped. Completed results were kept; unfinished songs remain queued.".into();
+            }
             if let Some(q) = &self.queue
                 && let Ok(stats) = q.stats()
             {

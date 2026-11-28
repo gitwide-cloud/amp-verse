@@ -1269,15 +1269,22 @@ impl Player {
                 "{excluded} audiobook, speech or podcast files are excluded from music analysis."
             ));
         }
-        ui.columns(3, |columns| {
+        ui.columns(4, |columns| {
             for (column, label, value) in [
-                (0, "Music tracks", total),
-                (1, "With analysis", analyzed),
-                (2, "Missing analysis", total - analyzed),
+                (0, "Music tracks", total.to_string()),
+                (1, "With analysis", analyzed.to_string()),
+                (2, "Missing analysis", (total - analyzed).to_string()),
+                (
+                    3,
+                    "Errored",
+                    self.preparer
+                        .saved_failures(&self.root)
+                        .map_or_else(|| "Checking…".into(), |n| n.to_string()),
+                ),
             ] {
                 skin::panel(&mut columns[column], false, |ui| {
                     ui.set_min_width(ui.available_width());
-                    ui.label(RichText::new(value.to_string()).size(30.).strong());
+                    ui.label(RichText::new(value).size(30.).strong());
                     ui.weak(label);
                 });
             }
@@ -1348,9 +1355,42 @@ impl Player {
         ui.add_space(18.);
         skin::panel(ui, false, |ui| {
             ui.set_min_width(ui.available_width());
-            self.stem_panel.library(ui, &self.root);
-            if crate::stems::runtime().is_none() && ui.button("Open stem add-on setup…").clicked()
-            {
+            ui.heading("Prepare playlist stems");
+            ui.label(
+                "Prepare a playlist so vocals, instruments and beats are ready to mix more easily.",
+            );
+            ui.weak("Only the playlist you choose is prepared. This uses compressed local storage and leaves your original songs unchanged.");
+            let mut choice = None;
+            ui.menu_button("Choose playlist…", |ui| {
+                ui.strong("Playlists");
+                for (_, list) in &self.dj_browser.playlists {
+                    if ui.button(&list.name).clicked() {
+                        choice = Some((list.name.clone(), Some(list.tracks.clone())));
+                        ui.close();
+                    }
+                }
+                ui.separator();
+                ui.strong("Smart Playlists");
+                for list in &self.run.settings.playlists {
+                    if ui.button(&list.name).clicked() {
+                        choice = Some((list.id.clone(), None));
+                        ui.close();
+                    }
+                }
+                if self.dj_browser.playlists.is_empty() && self.run.settings.playlists.is_empty() {
+                    ui.weak("Create a playlist in Library first.");
+                }
+            });
+            if let Some((name, tracks)) = choice {
+                if let Some(tracks) = tracks {
+                    self.offer_playlist_stems(name, tracks);
+                } else {
+                    self.offer_smart_playlist_stems(&name);
+                }
+            }
+            let (live, cached) = self.playlist_processing_state();
+            self.stem_panel.playlist_preparation_ui(ui, live, cached);
+            if !crate::onnx_stem_worker::configured() && ui.button("Set up stems…").clicked() {
                 self.addons.selected = 6;
                 self.activate(ui, Some(skin::Module::Addons));
             }

@@ -31,27 +31,35 @@ pub fn now_ms() -> u64 {
         .unwrap_or_default()
         .as_millis() as u64
 }
-pub fn checkpoint() {
-    if let Some(path) = std::env::var_os(PAUSE_ENV) {
-        loop {
-            match activity_at(Path::new(&path), now_ms()) {
-                Activity::Pause => std::thread::sleep(Duration::from_millis(100)),
-                Activity::Slow => {
-                    std::thread::sleep(Duration::from_millis(20));
-                    break;
-                }
-                Activity::Idle => break,
+pub const CANCEL_ENV: &str = "AMP_ANALYSIS_CANCEL_FILE";
+pub fn checkpoint() -> Result<(), String> {
+    let pause = std::env::var_os(PAUSE_ENV).map(std::path::PathBuf::from);
+    let cancel = std::env::var_os(CANCEL_ENV).map(std::path::PathBuf::from);
+    checkpoint_at(pause.as_deref(), cancel.as_deref())
+}
+fn checkpoint_at(pause: Option<&Path>, cancel: Option<&Path>) -> Result<(), String> {
+    loop {
+        if cancel.is_some_and(Path::is_file) {
+            return Err("Analysis stopped; unfinished songs remain queued".into());
+        }
+        match pause.map_or(Activity::Idle, |path| activity_at(path, now_ms())) {
+            Activity::Pause => std::thread::sleep(Duration::from_millis(50)),
+            Activity::Slow => {
+                std::thread::sleep(Duration::from_millis(20));
+                return Ok(());
             }
+            Activity::Idle => return Ok(()),
         }
     }
 }
+
 pub fn copy_input(source: &Path, destination: &Path) -> Result<(), String> {
     use std::io::{Read, Write};
     let mut input = std::fs::File::open(source).map_err(|e| e.to_string())?;
     let mut output = std::fs::File::create(destination).map_err(|e| e.to_string())?;
     let mut buffer = vec![0; 256 * 1024];
     loop {
-        checkpoint();
+        checkpoint()?;
         let n = input.read(&mut buffer).map_err(|e| e.to_string())?;
         if n == 0 {
             break;
@@ -80,5 +88,24 @@ mod tests {
         assert_eq!(activity_at(&path, 1000), Activity::Slow);
         std::fs::write(&path, "1200 pause").unwrap();
         assert_eq!(activity_at(&path, 1000), Activity::Pause);
+    }
+}
+
+#[cfg(test)]
+mod cancellation_tests {
+    #[test]
+    fn cancellation_interrupts_a_playback_pause() {
+        let dir = tempfile::tempdir().unwrap();
+        let pause = dir.path().join("pause");
+        let cancel = dir.path().join("cancel");
+        std::fs::write(&pause, format!("{} pause", super::now_ms() + 9000)).unwrap();
+        std::fs::write(&cancel, b"stop").unwrap();
+        let started = std::time::Instant::now();
+        assert!(
+            super::checkpoint_at(Some(&pause), Some(&cancel))
+                .unwrap_err()
+                .contains("stopped")
+        );
+        assert!(started.elapsed() < std::time::Duration::from_secs(1));
     }
 }

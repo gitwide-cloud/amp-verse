@@ -432,12 +432,6 @@ pub struct Panel {
     pub manual_change: Option<(usize, [f32; 3])>,
     job: Option<Job>,
     batch: Option<Job>,
-    batch_rx: Option<mpsc::Receiver<(usize, usize, String)>>,
-    batch_progress: (usize, usize),
-    batch_status: String,
-    gpu_rx: Option<mpsc::Receiver<String>>,
-    gpu_status: String,
-    gpu_checked: bool,
     status: [String; 6],
     level: [[f32; 3]; 6],
     generation: [u64; 6],
@@ -449,12 +443,6 @@ impl Default for Panel {
             job: None,
             manual_change: None,
             batch: None,
-            batch_rx: None,
-            batch_progress: (0, 0),
-            batch_status: String::new(),
-            gpu_rx: None,
-            gpu_status: String::new(),
-            gpu_checked: false,
             status: Default::default(),
             level: [[0.; 3]; 6],
             generation: [0; 6],
@@ -545,169 +533,7 @@ impl Panel {
         ui.label(&self.status[0]);
         prepared
     }
-    pub fn library(&mut self, ui: &mut egui::Ui, root: &Path) {
-        if crate::onnx_stem_worker::configured() {
-            ui.heading("On-demand DJ stems");
-            ui.label("Choose on-demand separation on a loaded, paused DJ deck. There is no library-wide batch operation.");
-            ui.weak("The current local worker uses CPU processing with a 3 GiB process RAM cap. Initial model startup can take several seconds. Stem audio stays in RAM and is not saved.");
-            return;
-        }
-        ui.label(STORAGE_DISABLED);
-        if let Some(rx) = &self.batch_rx {
-            while let Ok((done, total, title)) = rx.try_recv() {
-                self.batch_progress = (done, total);
-                self.batch_status = title;
-            }
-        }
-        if let Some(job) = &self.batch
-            && let Ok(result) = job.rx.try_recv()
-        {
-            self.batch_status = result.map_or_else(|e| e, |()| "Stem preparation complete.".into());
-            self.batch = None;
-            self.batch_rx = None;
-        }
-        if !self.gpu_checked
-            && let Some(python) = runtime()
-        {
-            self.gpu_checked = true;
-            self.gpu_status = "Checking GPU support…".into();
-            let (tx, rx) = mpsc::channel();
-            self.gpu_rx = Some(rx);
-            std::thread::spawn(move || {
-                let result = (|| -> Result<String, String> {
-                    crate::preparation_speed::wait(None);
-                    let stage = tempfile::tempdir().map_err(|e| e.to_string())?;
-                    let worker = stage.path().join("probe.py");
-                    fs::write(&worker, include_str!("stem_worker.py"))
-                        .map_err(|e| e.to_string())?;
-                    let mut command = amp_core::command(python.to_string_lossy().as_ref());
-                    command.arg(worker).arg("--probe");
-                    crate::preparation_speed::configure(&mut command);
-                    let output = command.output().map_err(|e| e.to_string())?;
-                    if !output.status.success() {
-                        return Err(
-                            "Stem runtime could not be checked; reinstall the stem add-on".into(),
-                        );
-                    }
-                    let value: Value =
-                        serde_json::from_slice(&output.stdout).map_err(|e| e.to_string())?;
-                    Ok(if value["device"] == "cuda" {
-                        format!(
-                            "GPU ready: {}",
-                            value["name"].as_str().unwrap_or("NVIDIA GPU")
-                        )
-                    } else {
-                        "CPU fallback — GPU runtime unavailable. Install the GPU stem add-on to accelerate compatible NVIDIA hardware.".into()
-                    })
-                })();
-                let _ = tx.send(result.unwrap_or_else(|error| error));
-            });
-        }
-        if let Some(rx) = &self.gpu_rx
-            && let Ok(status) = rx.try_recv()
-        {
-            self.gpu_status = status;
-            self.gpu_rx = None;
-        }
-        ui.heading("Prepare Stems");
-        ui.label(&self.gpu_status);
-        ui.label("Separate vocals, instruments and beat for the DJ stem knobs.");
-        ui.weak("Uses your GPU when available, with a safe CPU fallback. Completed stems are reused. Your playback setting chooses slower work or an automatic pause.");
-        if let Some(job) = &self.batch {
-            let (done, total) = self.batch_progress;
-            ui.add(
-                egui::ProgressBar::new(done as f32 / total.max(1) as f32)
-                    .text(format!("{done} / {total} songs")),
-            );
-            ui.spinner();
-            if ui.button("Stop preparing stems").clicked() {
-                job.cancel.store(true, Relaxed);
-            }
-            ui.ctx().request_repaint_after(Duration::from_millis(150));
-        } else if ui
-            .add_enabled(
-                !root.as_os_str().is_empty() && self.job.is_none() && runtime().is_some(),
-                egui::Button::new("Library-wide stem preparation withdrawn"),
-            )
-            .clicked()
-            && let (Some(cache), Some(python)) = (cache_root(), runtime())
-        {
-            let root = root.to_path_buf();
-            self.batch_progress = (0, 0);
-            self.batch_status = "Finding songs in all music sources and subfolders…".into();
-            let cancel = Arc::new(AtomicBool::new(false));
-            let process = Arc::new(Mutex::new(None));
-            let (tx, rx) = mpsc::channel();
-            let (progress, updates) = mpsc::channel();
-            let stop = cancel.clone();
-            let child = process.clone();
-            std::thread::spawn(move || {
-                let result = (|| {
-                    let library = amp_core::scan_job_inputs(&root).map_err(|e| e.to_string())?;
-                    let sources: Vec<_> = library
-                        .tracks
-                        .iter()
-                        .filter_map(|track| {
-                            let source = amp_core::music_sources::audio_path(&root, &track.path);
-                            let mut prep = amp_core::preparation::load(&source).unwrap_or_default();
-                            amp_core::media_kind::inspect_audio(&source, &mut prep);
-                            amp_core::media_kind::is_music(&source, &prep)
-                                .then(|| (source, track.title.clone()))
-                        })
-                        .collect();
-                    let total = sources.len();
-                    let mut failed = 0;
-                    let mut last_error = String::new();
-                    for (index, (source, title)) in sources.into_iter().enumerate() {
-                        if stop.load(Relaxed) {
-                            return Err(
-                                "Stem preparation stopped. Completed songs are retained.".into()
-                            );
-                        }
-                        let _ = progress.send((index, total, format!("Preparing {title}")));
-                        match prepare(&cache, &source, &python, &stop, &child) {
-                            Ok(()) => {
-                                let _ =
-                                    progress.send((index + 1, total, format!("Prepared {title}")));
-                            }
-                            Err(error) if stop.load(Relaxed) => return Err(error),
-                            Err(error) => {
-                                failed += 1;
-                                last_error = format!("{title}: {error}");
-                                let _ = progress.send((
-                                    index + 1,
-                                    total,
-                                    format!("Skipped failed song: {last_error}"),
-                                ));
-                            }
-                        }
-                    }
-                    if failed > 0 {
-                        return Err(format!(
-                            "Stem preparation finished: {} prepared/reused, {failed} failed. Last error: {last_error}",
-                            total - failed
-                        ));
-                    }
-                    Ok(())
-                })();
-                let _ = tx.send(result);
-            });
-            self.batch = Some(Job {
-                cancel,
-                process,
-                rx,
-                deck: 0,
-            });
-            self.batch_rx = Some(updates);
-        }
-        if runtime().is_none() {
-            ui.hyperlink_to(
-                "Stem processing withdrawn — storage incident",
-                "https://github.com/gitwide-cloud/amp-verse/blob/main/docs/STEMS.md",
-            );
-        }
-        ui.label(&self.batch_status);
-    }
+
     pub fn live_knobs(
         &mut self,
         ui: &mut egui::Ui,
