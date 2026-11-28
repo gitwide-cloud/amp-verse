@@ -121,7 +121,7 @@ jobs:
         shell: bash
         run: |
           if [ "${{ runner.os }}" = "Windows" ]; then ext=.exe; else ext=; fi
-          python tools/smoke_in_app_update.py --server-helper "target/release/amp-server-update$ext"
+          python tools/smoke_in_app_update.py --server-helper "target/release/amp-server-update$ext" --server "target/release/amp-cast$ext"
       - uses: actions/setup-dotnet@v4
         if: runner.os == 'Windows'
         with:

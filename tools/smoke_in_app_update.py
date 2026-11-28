@@ -52,8 +52,39 @@ def exercise(helper,server):
             if server:assert (app/'PENDING_UPDATE.txt').exists(),'Server update modified unrelated desktop state'
             print(('server' if server else 'desktop'),('rollback' if broken else 'upgrade'),'replaced, restarted and preserved identity/settings; download cleanup passed',flush=True)
 
+def headless_server(server):
+    import socket, urllib.request, urllib.error
+    with tempfile.TemporaryDirectory(prefix='amp-headless-update-') as name:
+        root=pathlib.Path(name);music=root/'music';music.mkdir()
+        with socket.socket() as reservation:
+            reservation.bind(('127.0.0.1',0));port=reservation.getsockname()[1]
+        env=os.environ.copy();env.update(AMP_CAST_BIND=f'127.0.0.1:{port}',AMP_CAST_CONFIG_DIR=str(root/'config'),AMP_DEVICE_CONFIG_DIR=str(root/'device'),AMP_ANALYSIS_ENABLED='0',AMP_CAST_DISCOVERY_PORT='0',AMP_CAST_PASSWORD='fixture-control')
+        with (root/'server.log').open('wb') as log:
+            process=subprocess.Popen([str(server.resolve()),str(music)],env=env,stdout=log,stderr=log,creationflags=subprocess.CREATE_NO_WINDOW if os.name=='nt' else 0)
+            try:
+                end=time.monotonic()+20;status=None
+                while time.monotonic()<end:
+                    assert process.poll() is None,'Headless server exited before becoming ready'
+                    try:
+                        request=urllib.request.Request(f'http://127.0.0.1:{port}/api/update',headers={'x-amp-password':'fixture-control'})
+                        with urllib.request.urlopen(request,timeout=1) as response:status=json.load(response)
+                        break
+                    except (OSError,ValueError):time.sleep(.1)
+                assert status and status['available'] and not status['busy']
+                time.sleep(.25);assert process.poll() is None,'Missing console incorrectly stopped server'
+                request=urllib.request.Request(f'http://127.0.0.1:{port}/api/update/install',data=b'{}',headers={'x-amp-password':'fixture-control','Origin':'https://untrusted.invalid'},method='POST')
+                try:urllib.request.urlopen(request,timeout=2);raise AssertionError('Cross-site update was accepted')
+                except urllib.error.HTTPError as error:assert error.code==401
+                print('real headless server stays online and rejects cross-site update installation',flush=True)
+            finally:
+                if process.poll() is None:process.terminate()
+                try:process.wait(timeout=10)
+                except subprocess.TimeoutExpired:process.kill();process.wait();raise
+
 if __name__=='__main__':
-    parser=argparse.ArgumentParser();parser.add_argument('--helper',type=pathlib.Path);parser.add_argument('--server-helper',type=pathlib.Path);args=parser.parse_args()
+    parser=argparse.ArgumentParser();parser.add_argument('--helper',type=pathlib.Path);parser.add_argument('--server-helper',type=pathlib.Path);parser.add_argument('--server',type=pathlib.Path);args=parser.parse_args()
     if not args.helper and not args.server_helper:parser.error('At least one native helper is required')
     if args.helper:exercise(args.helper,False)
     if args.server_helper:exercise(args.server_helper,True)
+
+    if args.server:headless_server(args.server)

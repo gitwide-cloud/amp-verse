@@ -171,7 +171,7 @@ jobs:
         run: cargo test -p amp-player --bin amp-player lab_youtube::suno::tests::local_codec_import -- --ignored --test-threads=1
       - run: cargo build --workspace --release --locked
       - name: Verify native desktop and server update, restart, rollback and cleanup
-        run: python tools/smoke_in_app_update.py --helper target/release/amp-update${{ matrix.suffix }} --server-helper target/release/amp-server-update${{ matrix.suffix }}
+        run: python tools/smoke_in_app_update.py --helper target/release/amp-update${{ matrix.suffix }} --server-helper target/release/amp-server-update${{ matrix.suffix }} --server target/release/amp-cast${{ matrix.suffix }}
       - name: Build base player without analysis implementation
         run: cargo build -p amp-player --release --locked
       - name: Verify optional analysis process

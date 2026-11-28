@@ -211,15 +211,22 @@ async fn drain(
         _=started.notified()=>match tokio::time::timeout(grace,&mut serving).await {Ok(result)=>result,Err(_)=>Ok(())}
     }
 }
+// A Windows server launched without a console has no Ctrl+C source. Treat an
+// unavailable optional signal as disabled, never as a request to stop serving.
+async fn optional_signal<E>(signal: impl std::future::Future<Output = Result<(), E>>) {
+    if signal.await.is_err() {
+        std::future::pending::<()>().await;
+    }
+}
 pub async fn serve(listener: tokio::net::TcpListener, cast: Arc<Cast>) -> std::io::Result<()> {
     let app = super::router(cast.clone());
     drain(listener,app,async move {
         #[cfg(unix)] {
             let mut terminate=tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()).expect("SIGTERM handler");
-            tokio::select!{_=tokio::signal::ctrl_c()=>{},_=terminate.recv()=>{},_=cast.updater.exit.notified()=>{}}
+            tokio::select!{_=optional_signal(tokio::signal::ctrl_c())=>{},_=terminate.recv()=>{},_=cast.updater.exit.notified()=>{}}
         }
         #[cfg(not(unix))]
-        tokio::select!{_=tokio::signal::ctrl_c()=>{},_=cast.updater.exit.notified()=>{}};
+        tokio::select!{_=optional_signal(tokio::signal::ctrl_c())=>{},_=cast.updater.exit.notified()=>{}};
         cast.analysis.stop();cast.shutdown().await;
     },std::time::Duration::from_secs(3)).await
 }
@@ -290,5 +297,16 @@ mod tests {
             .unwrap()
             .unwrap()
             .unwrap();
+    }
+    #[tokio::test]
+    async fn missing_console_cannot_trigger_server_shutdown() {
+        assert!(
+            tokio::time::timeout(
+                std::time::Duration::from_millis(5),
+                optional_signal(std::future::ready(Err::<(), ()>(())))
+            )
+            .await
+            .is_err()
+        );
     }
 }
