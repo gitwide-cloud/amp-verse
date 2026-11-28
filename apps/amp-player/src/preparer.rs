@@ -1439,7 +1439,6 @@ mod cancelled_discovery_regressions {
     fn late_complete_scan_does_not_restart_a_stopped_queue() {
         let root = tempfile::tempdir().unwrap();
         let mut preparer = Preparer::default();
-        preparer.queue_enabled = false;
         preparer.batch_ref(root.path().into(), &[]);
         assert!(
             !preparer.queue_enabled,
