@@ -23,7 +23,7 @@ fn wait(pid: u32) -> Result<(), String> {
                 let result = WaitForSingleObject(handle, 120000).0;
                 let _ = windows::Win32::Foundation::CloseHandle(handle);
                 if result != 0 {
-                    return Err("Player did not close; no files were changed".into());
+                    return Err("Application did not close; no files were changed".into());
                 }
             }
             Err(error) if error.code().0 as u32 == 0x80070057 => {}
@@ -35,7 +35,7 @@ fn wait(pid: u32) -> Result<(), String> {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(120);
         while std::path::Path::new(&format!("/proc/{pid}")).exists() {
             if std::time::Instant::now() > end {
-                return Err("Player did not close; no files were changed".into());
+                return Err("Application did not close; no files were changed".into());
             }
             std::thread::sleep(std::time::Duration::from_millis(200));
         }
@@ -76,25 +76,24 @@ fn run() -> Result<(), String> {
     // Reclaim the owned download/staging directory after applying the transaction.
     // On Windows the running helper itself remains locked until it exits; large
     // archives and extracted payloads must not accumulate between updates.
-    if let (Some(job_root), Some(updates)) = (path.parent(), job.result.parent()) {
-        if job_root.parent() == Some(updates)
-            && job.stage == job_root.join("files")
-            && job_root
-                .file_name()
-                .is_some_and(|name| name.to_string_lossy().starts_with(".tmp"))
-            && !job_root.is_symlink()
-            && !job.stage.is_symlink()
-        {
-            let _ = std::fs::remove_dir_all(&job.stage);
-            if let Ok(entries) = std::fs::read_dir(job_root) {
-                for entry in entries.flatten() {
-                    if entry.file_type().is_ok_and(|kind| kind.is_file()) {
-                        let _ = std::fs::remove_file(entry.path());
-                    }
+    if let (Some(job_root), Some(updates)) = (path.parent(), job.result.parent())
+        && job_root.parent() == Some(updates)
+        && job.stage == job_root.join("files")
+        && job_root
+            .file_name()
+            .is_some_and(|name| name.to_string_lossy().starts_with(".tmp"))
+        && !job_root.is_symlink()
+        && !job.stage.is_symlink()
+    {
+        let _ = std::fs::remove_dir_all(&job.stage);
+        if let Ok(entries) = std::fs::read_dir(job_root) {
+            for entry in entries.flatten() {
+                if entry.file_type().is_ok_and(|kind| kind.is_file()) {
+                    let _ = std::fs::remove_file(entry.path());
                 }
             }
-            let _ = std::fs::remove_dir(job_root);
         }
+        let _ = std::fs::remove_dir(job_root);
     }
     outcome
 }

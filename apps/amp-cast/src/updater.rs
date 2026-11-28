@@ -35,12 +35,11 @@ async fn status(State(cast): State<Arc<Cast>>, headers: HeaderMap) -> Response {
         return StatusCode::UNAUTHORIZED.into_response();
     }
     let mut state = cast.updater.state.lock().unwrap().clone();
-    if state.is_null() {
-        if let Some(dir) = cast.config_dir.lock().unwrap().as_ref() {
-            if let Ok(message) = std::fs::read_to_string(dir.join("updates/last-result.txt")) {
-                state = json!({"status":message});
-            }
-        }
+    if state.is_null()
+        && let Some(dir) = cast.config_dir.lock().unwrap().as_ref()
+        && let Ok(message) = std::fs::read_to_string(dir.join("updates/last-result.txt"))
+    {
+        state = json!({"status":message});
     }
     Json(json!({"version":env!("CARGO_PKG_VERSION"),"available":available(),"busy":cast.updater.busy.load(Ordering::Relaxed),"update":state})).into_response()
 }

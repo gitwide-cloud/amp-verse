@@ -30,10 +30,10 @@ final class AppUpdate {
             return c.getInputStream();
         }throw new IOException("Too many download redirects");
     }
-    static String text(String url)throws Exception {
-        try(InputStream in=open(url);ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] b=new byte[8192];int n;while((n=in.read(b))!=-1){if(out.size()+n>1048576)throw new IOException("Update metadata too large");out.write(b,0,n);}return out.toString("UTF-8");}finally{if(active!=null)active.disconnect();}
+    static String text(String url,int limit)throws Exception {
+        try(InputStream in=open(url);ByteArrayOutputStream out=new ByteArrayOutputStream()){byte[] b=new byte[8192];int n;while((n=in.read(b))!=-1){if(out.size()+n>limit)throw new IOException("Update metadata too large");out.write(b,0,n);}return out.toString("UTF-8");}finally{if(active!=null)active.disconnect();}
     }
-    static JSONObject json(String url)throws Exception {return new JSONObject(text(url));}
+    static JSONObject json(String url)throws Exception {return new JSONObject(text(url,1048576));}
     static JSONObject androidPackage(JSONObject manifest)throws IOException {
         JSONObject packages=manifest.optJSONObject("packages"),phone=packages==null?null:packages.optJSONObject("android-"+BuildConfig.EDITION+"-arm64");
         if(phone==null&&packages!=null&&(BuildConfig.EDITION.equals("full")||BuildConfig.EDITION.equals("lite")))phone=packages.optJSONObject("android-arm64");
@@ -42,7 +42,7 @@ final class AppUpdate {
     }
     static void start(Context context){if(busy)return;Context app=context.getApplicationContext();busy=true;cancelled=false;status="Checking for updates…";
         new Thread(()->{File partial=null;try{
-            JSONObject release=ReleaseCheck.select(new JSONArray(text("https://api.github.com/repos/gitwide-cloud/amp-verse/releases?per_page=100")),BuildConfig.VERSION_NAME);
+            JSONObject release=ReleaseCheck.select(new JSONArray(text("https://api.github.com/repos/gitwide-cloud/amp-verse/releases?per_page=100",4*1048576)),BuildConfig.VERSION_NAME);
             if(release==null){status="You have the latest compatible Android update.";return;}
             String tag=release.getString("tag_name");
             String base=GITHUB+"/releases/download/"+tag+"/";JSONObject manifest=json(base+"amp-update.json");

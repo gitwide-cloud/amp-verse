@@ -10,6 +10,9 @@ pub fn version(value: &str) -> Result<Version, String> {
             "rc" => 1,
             _ => return Err("Unsupported release channel".into()),
         };
+        if number.len() > 8 || !number.bytes().all(|b| b.is_ascii_digit()) {
+            return Err("Invalid release sequence".into());
+        }
         let number = number
             .parse::<u32>()
             .map_err(|_| "Invalid release sequence")?;

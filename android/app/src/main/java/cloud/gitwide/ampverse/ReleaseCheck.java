@@ -19,7 +19,7 @@ final class ReleaseCheck {
             if(code==403||code==429)return "GitHub is limiting update checks. Try later or open Releases.";
             if(code!=200)return "Update check unavailable (HTTP "+code+"). Your installed app still works offline.";
             try(InputStream input=connection.getInputStream();ByteArrayOutputStream body=new ByteArrayOutputStream()){
-                byte[] bytes=new byte[8192];int size;while((size=input.read(bytes))!=-1){if(body.size()+size>1048576)throw new java.io.IOException("Response too large");body.write(bytes,0,size);}
+                byte[] bytes=new byte[8192];int size;while((size=input.read(bytes))!=-1){if(body.size()+size>4*1048576)throw new java.io.IOException("Response too large");body.write(bytes,0,size);}
                 return describe(body.toString("UTF-8"),installed);
             }
         }catch(Exception error){return "Could not check for updates. Check your connection or open GitHub Releases.";}
