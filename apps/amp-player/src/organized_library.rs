@@ -434,6 +434,16 @@ impl Player {
                 },
             );
         });
+        if self.show_editor.seasonal_cancel {
+            self.show_editor.seasonal_cancel = false;
+            if let Some(lookup) = self.seasonal_lookup.get_mut() {
+                lookup.cancel();
+            }
+        }
+        if let Some((categories, more)) = self.show_editor.seasonal_request.take() {
+            self.seasonal_lookup
+                .request(&self.root, categories, self.library.as_ref(), more);
+        }
         if let Some((root, playlist)) = self.show_editor.connect_import.take() {
             if let Ok(saved) = amp_core::show::Settings::load(&root) {
                 self.connect_music_root(root);
@@ -1396,14 +1406,16 @@ impl Player {
             }
         });
         ui.add_space(18.);
-        let blocked = self.run.auto
-            || self.stem_panel.busy()
-            || self
-                .audio
-                .as_ref()
-                .is_some_and(|a| a.playing(0) || a.playing(1));
         skin::panel(ui, false, |ui| {
-            self.preparer.catalog_ui(ui, &self.root, blocked)
+            self.catalog_export.show(
+                ui,
+                &self.root,
+                self.library.as_ref(),
+                &self.run.settings,
+                &self.dj_browser.playlists,
+                self.library_generation
+                    .wrapping_add(self.preparer.progress().0 as u64),
+            );
         });
     }
     fn organized_music(&mut self, ui: &mut egui::Ui, height: f32) {

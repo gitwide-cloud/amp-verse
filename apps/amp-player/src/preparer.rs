@@ -5,6 +5,11 @@ use amp_core::{
 };
 use eframe::egui;
 use std::{path::PathBuf, sync::mpsc};
+type SavedStatsResult = (
+    PathBuf,
+    Result<Option<amp_core::analysis_queue::Stats>, String>,
+);
+
 struct Update {
     root: PathBuf,
     path: PathBuf,
@@ -18,19 +23,13 @@ pub struct Preparer {
     analysis_summary: Option<(PathBuf, std::time::Instant, usize, usize, usize)>,
     saved_stats_root: PathBuf,
     saved_stats_failures: usize,
-    saved_stats_job: Option<
-        mpsc::Receiver<(
-            PathBuf,
-            Result<Option<amp_core::analysis_queue::Stats>, String>,
-        )>,
-    >,
+    saved_stats_job: Option<mpsc::Receiver<SavedStatsResult>>,
     saved_stats_check: Option<std::time::Instant>,
     wave: crate::waveform::Lane,
     position: f64,
     zoom: Option<f64>,
     section: Option<String>,
     pub mix_section: Option<(PathBuf, String)>,
-    compact_job: Option<mpsc::Receiver<Result<usize, String>>>,
     stem_panel: crate::stems::Panel,
     stem_preview: Option<crate::mixer::Engine>,
     pub preview_blocked: bool,
@@ -606,45 +605,7 @@ impl Preparer {
         (self.done, self.total)
     }
     pub fn busy(&self) -> bool {
-        self.job.is_some()
-            || self.compact_job.is_some()
-            || self.queue_init.is_some()
-            || self.queue_discovery.is_some()
-    }
-    pub fn catalog_ui(&mut self, ui: &mut egui::Ui, root: &std::path::Path, blocked: bool) {
-        if let Some(rx) = &self.compact_job
-            && let Ok(result) = rx.try_recv()
-        {
-            self.status=result.map_or_else(|e|e,|n|format!("Consolidated {n} records. Catalog database ready; recovery values retained inside the database."));
-            self.compact_job = None;
-        }
-        ui.heading("Portable catalog");
-        ui.weak("A shared index points to 500-song catalog files. More files are created as needed, with no fixed library limit. No database server needed.");
-        if amp_core::catalog_db::path(root).is_file() {
-            ui.label("Index: ampdj/catalog.ampdb. Starting the analysis queue organizes song catalogs in ampdj/catalogs and keeps a recovery copy.");
-        } else if ui
-            .add_enabled(
-                !blocked && !self.busy(),
-                egui::Button::new("Create portable catalog storage"),
-            )
-            .clicked()
-        {
-            let root = root.to_path_buf();
-            let (tx, rx) = mpsc::channel();
-            self.compact_job = Some(rx);
-            std::thread::spawn(move || {
-                let _ = tx.send(amp_core::catalog_db::compact(&root));
-            });
-        }
-        if self.compact_job.is_some() {
-            ui.spinner();
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(100));
-        }
-        if blocked {
-            ui.weak("Stop playback and stem preparation before converting.");
-        }
-        ui.label(&self.status);
+        self.job.is_some() || self.queue_init.is_some() || self.queue_discovery.is_some()
     }
     pub fn edit(&mut self, root: &std::path::Path, track: &Track) {
         self.stem_preview = None;

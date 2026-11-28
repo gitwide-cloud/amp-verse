@@ -7,7 +7,11 @@ use std::{
     sync::{Mutex, mpsc},
     time::{Duration, Instant},
 };
-pub const USER_AGENT: &str = "AMPVerse/0.1 (https://github.com/gitwide-cloud/amp-verse)";
+pub const USER_AGENT: &str = concat!(
+    "AMPVerse/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/gitwide-cloud/amp-verse)"
+);
 pub fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(25)))
@@ -99,7 +103,7 @@ pub fn parse_matches(v: serde_json::Value) -> Vec<Match> {
     }
     results
 }
-fn musicbrainz(url: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn musicbrainz(url: &str) -> Result<Vec<u8>, String> {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     let mut last = LAST
         .lock()

@@ -3,7 +3,7 @@ members = ["crates/amp-stems", "crates/amp-stem-worker", "crates/amp-dj-policy",
 resolver = "2"
 
 [workspace.package]
-version = "1.1.0-rc.9"
+version = "1.1.0-rc.10"
 edition = "2024"
 license = "MIT"
 
