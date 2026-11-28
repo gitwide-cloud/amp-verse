@@ -660,6 +660,9 @@ impl Player {
                     for track in &mut library.tracks {
                         track.preparation.extensions.remove("scan_source_stat");
                     }
+                    if self.preparer.queue_enabled {
+                        self.lookup.start_with_analysis(&self.root, &library);
+                    }
                     self.accept_library_scan(library);
                 }
                 Err(error) => {

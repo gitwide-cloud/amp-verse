@@ -49,6 +49,7 @@ If you've got a NAS, another computer, or a home server, you can take it further
 - **Hands-on DJing:** Use cues, loops, a crossfader, sampler pads, and prepared stem controls. You can work manually or let Auto DJ keep music flowing.
 - **Music on the network:** AMP Cast supports live master-audio broadcasts and playlist-based listening. Use supported remote controls and Google Cast where available.
 - **Keep your preparation:** Analyzed metadata and manual corrections are reusable; automatic analysis suggests improvements rather than silently overwriting approved edits.
+- **Metadata during analysis (desktop):** In Library → Analyze Music, optionally enable **Look up missing metadata while analyzing**, then Start / resume analysis. MusicBrainz receives titles and artists, not audio. Lookup runs separately in batches of up to 500 music tracks; audiobooks and spoken recordings are excluded. Open **Tags & artwork** to review the correct edition and save missing fields/artwork into AMP Verse. Existing edits and embedded MP3 tags are preserved; mismatches can be discarded. Internet lookup can be stopped without stopping audio analysis.
 
 ## Windows, Linux, and Android
 

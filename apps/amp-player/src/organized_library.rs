@@ -1338,6 +1338,11 @@ impl Player {
                 self.preparer.stop_queue();
             }
             crate::preparation_speed::controls(ui);
+            ui.separator();
+            self.lookup.analysis_controls(ui);
+            if ui.button("Review metadata in Tags & artwork").clicked() {
+                self.library_page = 9;
+            }
             ui.weak("Analysis requires the optional engine add-on. Manual edits remain protected.");
         });
         ui.add_space(18.);
