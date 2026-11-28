@@ -91,6 +91,18 @@ fn safe(path: &Path) -> Result<(), String> {
     }
     Ok(())
 }
+// RAR stores a verbatim UNC prefix as server/share directories. Normalize only
+// its input spelling; canonical source paths still own identity and validation.
+fn rar_input(path: &Path) -> Result<String, String> {
+    let text = path
+        .to_str()
+        .ok_or("An export filename is not valid Unicode")?;
+    Ok(if let Some(rest) = text.strip_prefix(r"\\?\UNC\") {
+        format!(r"\\{rest}")
+    } else {
+        text.strip_prefix(r"\\?\").unwrap_or(text).to_owned()
+    })
+}
 fn stored_absolute(path: &Path) -> PathBuf {
     path.components()
         .filter_map(|c| match c {
@@ -456,9 +468,7 @@ pub fn export(
         } else {
             song.source.clone()
         };
-        let text = path
-            .to_str()
-            .ok_or("An export filename is not valid Unicode")?;
+        let text = rar_input(&path)?;
         if text.contains(['\r', '\n', '\0', '"']) {
             return Err("A selected filename cannot be exported safely.".into());
         }
@@ -472,11 +482,7 @@ pub fn export(
     }
     for path in &metadata {
         let full = package.join(path);
-        lines.push(format!(
-            "\"{}\"",
-            full.to_str()
-                .ok_or("Export destination is not valid Unicode")?
-        ));
+        lines.push(format!("\"{}\"", rar_input(&full)?));
         expected.insert(path.to_string_lossy().replace('\\', "/").to_lowercase());
     }
     let listing = stage.path().join("files.txt");
@@ -824,5 +830,20 @@ mod tests {
         assert_eq!(settings.playlists.len(), 1);
         assert_eq!(settings.playlists[0].allowed, vec!["Selected.mp3"]);
         assert!(settings.playlists[0].restrict_allowed);
+    }
+    #[test]
+    fn windows_verbatim_paths_keep_rar_member_names_portable() {
+        assert_eq!(
+            rar_input(Path::new(r"\\?\UNC\server\share\music\song.mp3")).unwrap(),
+            r"\\server\share\music\song.mp3"
+        );
+        assert_eq!(
+            rar_input(Path::new(r"\\?\C:\Music\song.mp3")).unwrap(),
+            r"C:\Music\song.mp3"
+        );
+        assert_eq!(
+            rar_input(Path::new("Music/song.mp3")).unwrap(),
+            "Music/song.mp3"
+        );
     }
 }
