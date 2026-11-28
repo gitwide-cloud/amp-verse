@@ -786,11 +786,10 @@ mod tests {
         assert_eq!(lookup_inputs(&library).len(), 501);
     }
     #[test]
+    #[allow(clippy::field_reassign_with_default)] // Lookup owns cancellation and implements Drop.
     fn analysis_lookup_is_opt_in_and_does_not_discard_pending_review() {
-        let mut lookup = Lookup {
-            analysis_enabled: Some(false),
-            ..Default::default()
-        };
+        let mut lookup = Lookup::default();
+        lookup.analysis_enabled = Some(false);
         let library = amp_core::Library {
             tracks: vec![],
             tree: amp_core::Folder {
