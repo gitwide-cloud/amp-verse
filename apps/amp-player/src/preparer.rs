@@ -5,6 +5,11 @@ use amp_core::{
 };
 use eframe::egui;
 use std::{path::PathBuf, sync::mpsc};
+type SavedStatsResult = (
+    PathBuf,
+    Result<Option<amp_core::analysis_queue::Stats>, String>,
+);
+
 struct Update {
     root: PathBuf,
     path: PathBuf,
@@ -16,12 +21,15 @@ struct Update {
 pub struct Preparer {
     pub revision: u64,
     analysis_summary: Option<(PathBuf, std::time::Instant, usize, usize, usize)>,
+    saved_stats_root: PathBuf,
+    saved_stats_failures: usize,
+    saved_stats_job: Option<mpsc::Receiver<SavedStatsResult>>,
+    saved_stats_check: Option<std::time::Instant>,
     wave: crate::waveform::Lane,
     position: f64,
     zoom: Option<f64>,
     section: Option<String>,
     pub mix_section: Option<(PathBuf, String)>,
-    compact_job: Option<mpsc::Receiver<Result<usize, String>>>,
     stem_panel: crate::stems::Panel,
     stem_preview: Option<crate::mixer::Engine>,
     pub preview_blocked: bool,
@@ -509,6 +517,7 @@ impl Preparer {
         root: &std::path::Path,
         library: Option<&Library>,
     ) -> (usize, usize, usize) {
+        self.poll_saved_stats(root);
         let Some(library) = library else {
             self.analysis_summary = None;
             return (0, 0, 0);
@@ -541,6 +550,54 @@ impl Preparer {
         let (_, _, len, total, analyzed) = self.analysis_summary.as_ref().unwrap();
         (*total, *analyzed, *len - *total)
     }
+    fn poll_saved_stats(&mut self, root: &std::path::Path) {
+        if let Some(rx) = &self.saved_stats_job
+            && let Ok((key, result)) = rx.try_recv()
+        {
+            self.saved_stats_job = None;
+            if key == root {
+                match result {
+                    Ok(stats) => {
+                        self.saved_stats_root = key;
+                        let stats = stats.unwrap_or_default();
+                        self.saved_stats_failures = stats.failed;
+                        if self.queue.is_none() {
+                            self.failures = stats.failed;
+                            self.total = stats.total;
+                            self.done = stats.done + stats.failed;
+                        }
+                    }
+                    Err(e) => self.status = format!("Analysis status unavailable: {e}"),
+                }
+            }
+        }
+        if (self.queue.is_none() || self.queue_root != root)
+            && self.saved_stats_job.is_none()
+            && (self.saved_stats_root != root
+                || self
+                    .saved_stats_check
+                    .is_none_or(|at| at.elapsed() >= std::time::Duration::from_secs(10)))
+        {
+            self.saved_stats_check = Some(std::time::Instant::now());
+            let root = root.to_path_buf();
+            let (tx, rx) = mpsc::channel();
+            self.saved_stats_job = Some(rx);
+            std::thread::spawn(move || {
+                let result = amp_core::analysis_queue::Queue::saved_stats(&root);
+                let _ = tx.send((root, result));
+            });
+        }
+    }
+    pub fn saved_failures(&self, root: &std::path::Path) -> Option<usize> {
+        if self.queue.is_some() && self.queue_root == root {
+            Some(self.failures)
+        } else if self.saved_stats_root == root {
+            Some(self.saved_stats_failures)
+        } else {
+            None
+        }
+    }
+
     pub fn failed(&self) -> usize {
         self.failures
     }
@@ -548,45 +605,7 @@ impl Preparer {
         (self.done, self.total)
     }
     pub fn busy(&self) -> bool {
-        self.job.is_some()
-            || self.compact_job.is_some()
-            || self.queue_init.is_some()
-            || self.queue_discovery.is_some()
-    }
-    pub fn catalog_ui(&mut self, ui: &mut egui::Ui, root: &std::path::Path, blocked: bool) {
-        if let Some(rx) = &self.compact_job
-            && let Ok(result) = rx.try_recv()
-        {
-            self.status=result.map_or_else(|e|e,|n|format!("Consolidated {n} records. Catalog database ready; recovery values retained inside the database."));
-            self.compact_job = None;
-        }
-        ui.heading("Portable catalog");
-        ui.weak("A shared index points to 500-song catalog files. More files are created as needed, with no fixed library limit. No database server needed.");
-        if amp_core::catalog_db::path(root).is_file() {
-            ui.label("Index: ampdj/catalog.ampdb. Starting the analysis queue organizes song catalogs in ampdj/catalogs and keeps a recovery copy.");
-        } else if ui
-            .add_enabled(
-                !blocked && !self.busy(),
-                egui::Button::new("Create portable catalog storage"),
-            )
-            .clicked()
-        {
-            let root = root.to_path_buf();
-            let (tx, rx) = mpsc::channel();
-            self.compact_job = Some(rx);
-            std::thread::spawn(move || {
-                let _ = tx.send(amp_core::catalog_db::compact(&root));
-            });
-        }
-        if self.compact_job.is_some() {
-            ui.spinner();
-            ui.ctx()
-                .request_repaint_after(std::time::Duration::from_millis(100));
-        }
-        if blocked {
-            ui.weak("Stop playback and stem preparation before converting.");
-        }
-        ui.label(&self.status);
+        self.job.is_some() || self.queue_init.is_some() || self.queue_discovery.is_some()
     }
     pub fn edit(&mut self, root: &std::path::Path, track: &Track) {
         self.stem_preview = None;
@@ -760,7 +779,7 @@ impl Preparer {
         self.queue_enabled = false;
         self.stop_queue
             .store(true, std::sync::atomic::Ordering::Relaxed);
-        self.status = "Stopping after active songs; pending work is saved.".into();
+        self.status = "Stopping analysis; unfinished songs remain queued.".into();
     }
     fn start_queue(&mut self, root: PathBuf) {
         self.queue_retry_at = None;
@@ -820,7 +839,9 @@ impl Preparer {
                             };
                             let _heartbeat = q.keep_alive(&job);
                             let mut skipped = false;
-                            let result = match crate::engine::analyze(root, &job.path, None) {
+                            let result = match crate::engine::analyze_cancellable(
+                                root, &job.path, None, stop,
+                            ) {
                                 Ok(Some(p)) => Ok(p),
                                 Ok(None) => {
                                     skipped = true;
@@ -841,11 +862,16 @@ impl Preparer {
                                         },
                                     )
                                 });
-                            let recorded = if waiting {
+                            let cancelled =
+                                stop.load(std::sync::atomic::Ordering::Relaxed) && result.is_err();
+                            let recorded = if waiting || cancelled {
                                 q.defer(&job)
                             } else {
                                 q.finish(&job, result.as_ref().map(|_| ()).map_err(String::as_str))
                             };
+                            if cancelled && recorded.is_ok() {
+                                break;
+                            }
                             let queue_failed = recorded.is_err();
                             let result = match recorded {
                                 Ok(()) => result,
@@ -1075,6 +1101,9 @@ impl Preparer {
                 );
             }
             self.job = None;
+            if !self.queue_enabled {
+                self.status = "Analysis stopped. Completed results were kept; unfinished songs remain queued.".into();
+            }
             if let Some(q) = &self.queue
                 && let Ok(stats) = q.stats()
             {

@@ -49,6 +49,10 @@ If you've got a NAS, another computer, or a home server, you can take it further
 - **Hands-on DJing:** Use cues, loops, a crossfader, sampler pads, and prepared stem controls. You can work manually or let Auto DJ keep music flowing.
 - **Music on the network:** AMP Cast supports live master-audio broadcasts and playlist-based listening. Use supported remote controls and Google Cast where available.
 - **Keep your preparation:** Analyzed metadata and manual corrections are reusable; automatic analysis suggests improvements rather than silently overwriting approved edits.
+- **Metadata during analysis (desktop):** In Library → Analyze Music, optionally enable **Look up missing metadata while analyzing**, then Start / resume analysis. MusicBrainz receives titles and artists, not audio. Lookup runs separately in batches of up to 500 music tracks; audiobooks and spoken recordings are excluded. Open **Tags & artwork** to review the correct edition and save missing fields/artwork into AMP Verse. Existing edits and embedded MP3 tags are preserved; mismatches can be discarded. Internet lookup can be stopped without stopping audio analysis.
+- **Holiday and season matching (desktop):** Holiday/Season Smart Playlist filters can match public MusicBrainz catalogs against your library locally, including songs without seasonal file tags. No audio or library list is uploaded. Results are cached in the shared library; tags remain an offline fallback. Matching is conservative about artist/edition, and catalog coverage is shown rather than assumed complete.
+- **Portable catalog export (desktop):** Library → Analyze Music → Export catalog selects folders, playlists, Smart Playlists, categories and filters. It archives selected original music plus a fresh portable index, saved cues and selected artwork into genuine RAR volumes of at most 100 MB. WinRAR/RAR must be installed separately. Temporary staging holds metadata rather than a second copy of the music; canceled or failed exports leave originals unchanged.
+
 
 ## Windows, Linux, and Android
 

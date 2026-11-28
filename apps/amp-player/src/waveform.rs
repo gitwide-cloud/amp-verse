@@ -23,7 +23,8 @@ pub struct Lane {
     pub seek: Option<f64>,
     pub scrub: Option<f64>,
     pub drag: Option<f64>,
-    path: Option<PathBuf>,
+    path: Option<(PathBuf, PathBuf)>,
+    retry_after: Option<std::time::Instant>,
     cancel: Option<Arc<AtomicBool>>,
     rx: Option<mpsc::Receiver<Result<Peaks, String>>>,
     peaks: Arc<[[f32; 2]]>,
@@ -182,22 +183,41 @@ fn graph_rect(rect: egui::Rect) -> egui::Rect {
 }
 impl Lane {
     fn prepare(&mut self, ui: &egui::Ui, root: &Path, track: Option<&amp_core::Track>) {
-        let path = track.and_then(|t| amp_core::resolve(root, &t.path).ok());
-        if path != self.path {
+        self.prepare_with(ui, root, track, |root, path| {
+            amp_core::resolve(root, path).map_err(|e| e.to_string())
+        });
+    }
+    fn prepare_with(
+        &mut self,
+        ui: &egui::Ui,
+        root: &Path,
+        track: Option<&amp_core::Track>,
+        resolve: impl FnOnce(&Path, &Path) -> Result<PathBuf, String> + Send + 'static,
+    ) {
+        // Identity is cheap: resolving/canonicalizing a NAS path belongs to the worker.
+        let path = track.map(|t| (root.to_path_buf(), t.path.clone()));
+        if path != self.path
+            || self
+                .retry_after
+                .is_some_and(|at| std::time::Instant::now() >= at)
+        {
             if let Some(cancel) = self.cancel.take() {
                 cancel.store(true, Ordering::Relaxed);
             }
             self.path = path.clone();
             self.peaks = Arc::default();
             self.error = None;
+            self.retry_after = None;
             self.rx = None;
-            if let Some(path) = path {
+            if let Some((root, relative)) = path {
                 let cancel = Arc::new(AtomicBool::new(false));
                 self.cancel = Some(cancel.clone());
                 let (tx, rx) = mpsc::channel();
                 self.rx = Some(rx);
                 std::thread::spawn(move || {
-                    let _ = tx.send(shared_decode(&path, &cancel));
+                    let result =
+                        resolve(&root, &relative).and_then(|path| shared_decode(&path, &cancel));
+                    let _ = tx.send(result);
                 });
             }
         }
@@ -206,7 +226,12 @@ impl Lane {
                 Ok(result) => {
                     match result {
                         Ok(p) => self.peaks = p,
-                        Err(e) => self.error = Some(e),
+                        Err(e) => {
+                            self.error = Some(e);
+                            self.retry_after = Some(
+                                std::time::Instant::now() + std::time::Duration::from_secs(10),
+                            );
+                        }
                     };
                     self.rx = None;
                 }
@@ -838,6 +863,48 @@ mod pointer_scrub_tests {
         assert!(
             dragged,
             "Waveform drag was visual-only: no audio hand motion emitted"
+        );
+    }
+}
+
+#[cfg(test)]
+mod storage_thread_tests {
+    use super::*;
+    #[test]
+    fn redraw_does_not_resolve_storage_on_the_ui_thread_or_repeat_failed_work() {
+        let ctx = egui::Context::default();
+        let ui_thread = std::thread::current().id();
+        let (tx, rx) = mpsc::channel();
+        let mut lane = Lane::default();
+        let track = amp_core::Track {
+            path: "song.mp3".into(),
+            title: "Song".into(),
+            preparation: Default::default(),
+        };
+        for _ in 0..3 {
+            let tx = tx.clone();
+            let mut output = ctx.run_ui(egui::RawInput::default(), |ui| {
+                let tx = tx.clone();
+                lane.prepare_with(
+                    ui,
+                    Path::new("unavailable-storage"),
+                    Some(&track),
+                    move |_, _| {
+                        tx.send(std::thread::current().id() == ui_thread).unwrap();
+                        Err("Storage temporarily unavailable".into())
+                    },
+                );
+            });
+            output.textures_delta.clear();
+        }
+        assert!(
+            !rx.recv_timeout(std::time::Duration::from_secs(2)).unwrap(),
+            "Storage resolution blocked the UI thread"
+        );
+        assert!(
+            rx.recv_timeout(std::time::Duration::from_millis(50))
+                .is_err(),
+            "Unchanged frames repeated storage resolution"
         );
     }
 }

@@ -7,7 +7,11 @@ use std::{
     sync::{Mutex, mpsc},
     time::{Duration, Instant},
 };
-pub const USER_AGENT: &str = "AMPVerse/0.1 (https://github.com/gitwide-cloud/amp-verse)";
+pub const USER_AGENT: &str = concat!(
+    "AMPVerse/",
+    env!("CARGO_PKG_VERSION"),
+    " (https://github.com/gitwide-cloud/amp-verse)"
+);
 pub fn agent() -> ureq::Agent {
     ureq::Agent::config_builder()
         .timeout_global(Some(Duration::from_secs(25)))
@@ -99,7 +103,7 @@ pub fn parse_matches(v: serde_json::Value) -> Vec<Match> {
     }
     results
 }
-fn musicbrainz(url: &str) -> Result<Vec<u8>, String> {
+pub(crate) fn musicbrainz(url: &str) -> Result<Vec<u8>, String> {
     static LAST: Mutex<Option<Instant>> = Mutex::new(None);
     let mut last = LAST
         .lock()
@@ -208,6 +212,7 @@ enum Update {
 #[derive(Default)]
 pub struct Lookup {
     batch_job: Option<mpsc::Receiver<BatchUpdate>>,
+    analysis_enabled: Option<bool>,
     batch_error: Option<String>,
     batch_cancel: std::sync::Arc<std::sync::atomic::AtomicBool>,
     suggestions: Vec<SearchResult>,
@@ -224,7 +229,149 @@ pub struct Lookup {
     cover: Option<egui::TextureHandle>,
     cover_job: Option<mpsc::Receiver<Update>>,
 }
+
+#[derive(Debug)]
+struct LookupInput {
+    path: PathBuf,
+    title: String,
+    artist: String,
+}
+fn lookup_inputs(library: &amp_core::Library) -> Vec<LookupInput> {
+    library
+        .tracks
+        .iter()
+        .filter(|t| {
+            amp_core::media_kind::is_music(&t.path, &t.preparation)
+                && [
+                    ("title", "TrackTitle"),
+                    ("artist", "TrackArtist"),
+                    ("album", "AlbumTitle"),
+                    ("year", "RecordingDate"),
+                ]
+                .iter()
+                .any(|(key, embedded)| missing(&t.preparation, key, embedded))
+        })
+        .take(501)
+        .map(|t| LookupInput {
+            path: t.path.clone(),
+            title: t.title.clone(),
+            artist: crate::track_columns::cell(t, "artist"),
+        })
+        .collect()
+}
+fn analysis_option_path() -> Option<PathBuf> {
+    crate::theme::settings_path().map(|p| p.with_file_name("analysis-metadata.txt"))
+}
 impl Lookup {
+    pub fn analysis_enabled(&mut self) -> bool {
+        *self.analysis_enabled.get_or_insert_with(|| {
+            analysis_option_path()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .is_some_and(|s| s.trim() == "review")
+        })
+    }
+    pub fn start_with_analysis(&mut self, root: &Path, library: &amp_core::Library) {
+        if self.analysis_enabled() {
+            self.start_batch(root, library);
+        }
+    }
+    pub fn analysis_controls(&mut self, ui: &mut egui::Ui) {
+        let mut enabled = self.analysis_enabled();
+        if ui
+            .checkbox(&mut enabled, "Look up missing metadata while analyzing")
+            .changed()
+        {
+            self.analysis_enabled = Some(enabled);
+            let result = (|| -> Result<(), String> {
+                let path = analysis_option_path().ok_or("Settings folder unavailable")?;
+                std::fs::create_dir_all(path.parent().ok_or("Settings folder unavailable")?)
+                    .map_err(|e| e.to_string())?;
+                std::fs::write(path, if enabled { "review" } else { "off" })
+                    .map_err(|e| e.to_string())
+            })();
+            if let Err(e) = result {
+                self.status = format!("Metadata preference could not be saved: {e}");
+            }
+        }
+        ui.weak("Optional MusicBrainz lookup sends song titles and artists, never audio. Review matches in Tags & artwork before saving missing title, artist, album or year to AMP Verse. MP3 tags and existing edits stay unchanged.");
+        ui.weak("Starts with Start / resume analysis. Online lookup has separate progress and does not delay audio analysis.");
+        if self.batch_job.is_some()
+            && ui
+                .button("Stop metadata lookup (keep suggestions)")
+                .clicked()
+        {
+            self.batch_cancel
+                .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if !self.status.is_empty() {
+            ui.label(&self.status);
+        }
+    }
+    pub fn start_batch(&mut self, root: &Path, library: &amp_core::Library) {
+        if self.batch_job.is_some() || self.job.is_some() {
+            return;
+        }
+        if !self.suggestions.is_empty() {
+            self.status = "Review the current metadata suggestions in Tags & artwork before starting another batch.".into();
+            return;
+        }
+        self.suggestions.clear();
+        self.batch_error = None;
+        self.batch_root = root.to_owned();
+        self.batch_cancel = Default::default();
+        let cancel = self.batch_cancel.clone();
+        let root = root.to_owned();
+        let tracks = lookup_inputs(library);
+        let (tx, rx) = mpsc::channel();
+        self.batch_job = Some(rx);
+        self.status = "Looking up missing metadata; audio analysis continues independently.".into();
+        std::thread::spawn(move || {
+            let mut failures = 0;
+            for (index, t) in tracks.into_iter().enumerate() {
+                if cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                    break;
+                }
+                if index >= 500 {
+                    let _ = tx.send((
+                        index,
+                        None,
+                        Some(
+                            "Review this batch before looking up more songs (500-song limit)."
+                                .into(),
+                        ),
+                    ));
+                    break;
+                }
+                let result = (|| {
+                    let audio = amp_core::music_sources::audio_path(&root, &t.path);
+                    let (_, revision) = amp_core::preparation::load_with_revision(&audio)?;
+                    let query = format!("{} {}", t.artist, t.title);
+                    let results = search(&query)?;
+                    Ok::<_, String>((t.path, revision, results))
+                })();
+                match result {
+                    Ok((path, revision, matches)) => {
+                        failures = 0;
+                        let suggestion = (!matches.is_empty()).then_some((path, revision, matches));
+                        if tx.send((index + 1, suggestion, None)).is_err() {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        failures += 1;
+                        let throttled = error.contains("429") || error.contains("503");
+                        let _ = tx.send((index + 1, None, Some(error)));
+                        if throttled || failures >= 3 {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_secs(3));
+                    }
+                }
+            }
+            let _ = tx.send((usize::MAX, None, None));
+        });
+    }
+
     pub fn poll(
         &mut self,
         ctx: &egui::Context,
@@ -257,6 +404,8 @@ impl Lookup {
                         t.preparation = *p;
                     }
                     self.status="Missing metadata saved to ampdj; existing tags, cues and original audio preserved.".into();
+                    self.suggestions
+                        .retain(|(candidate, _, _)| candidate != &path);
                     self.snapshot = None;
                     self.cover_key.clear();
                     changed = true;
@@ -289,7 +438,7 @@ impl Lookup {
                     "Lookup finished. {} songs have suggestions to review. {}",
                     self.suggestions.len(),
                     self.batch_error.as_ref().map_or(String::new(), |e| format!(
-                        "Some requests failed: {e}. Retry Find for a song."
+                        "Lookup note: {e}. Review available matches or retry Find for a song."
                     ))
                 );
             }
@@ -312,69 +461,19 @@ impl Lookup {
             )
             .clicked()
         {
-            self.suggestions.clear();
-            self.batch_error = None;
-            self.batch_root = root.to_owned();
-            self.batch_cancel = Default::default();
-            let cancel = self.batch_cancel.clone();
-            let root = root.to_owned();
-            let tracks = library.unwrap().tracks.clone();
-            let (tx, rx) = mpsc::channel();
-            self.batch_job = Some(rx);
-            std::thread::spawn(move || {
-                let mut failures = 0;
-                for (index, t) in tracks.into_iter().enumerate() {
-                    if t.preparation
-                        .extensions
-                        .get("media_kind")
-                        .and_then(|v| v.as_str())
-                        == Some("podcast")
-                    {
-                        continue;
-                    }
-                    if cancel.load(std::sync::atomic::Ordering::Relaxed) {
-                        break;
-                    }
-                    if !missing(&t.preparation, "artist", "TrackArtist")
-                        && !missing(&t.preparation, "album", "AlbumTitle")
-                        && t.preparation.extensions.contains_key("artwork_id")
-                    {
-                        continue;
-                    }
-                    let result = (|| {
-                        let audio = amp_core::resolve(&root, &t.path).map_err(|e| e.to_string())?;
-                        let (_, revision) = amp_core::preparation::load_with_revision(&audio)?;
-                        let query =
-                            format!("{} {}", crate::track_columns::cell(&t, "artist"), t.title);
-                        let results = search(&query)?;
-                        Ok::<_, String>((t.path, revision, results))
-                    })();
-                    match result {
-                        Ok((path, revision, matches)) => {
-                            failures = 0;
-                            let suggestion =
-                                (!matches.is_empty()).then_some((path, revision, matches));
-                            if tx.send((index + 1, suggestion, None)).is_err() {
-                                return;
-                            }
-                        }
-                        Err(error) => {
-                            failures += 1;
-                            let throttled = error.contains("429") || error.contains("503");
-                            let _ = tx.send((index + 1, None, Some(error)));
-                            if throttled || failures >= 3 {
-                                break;
-                            }
-                            std::thread::sleep(Duration::from_secs(3));
-                        }
-                    }
-                }
-                let _ = tx.send((usize::MAX, None, None));
-            });
+            self.start_batch(root, library.unwrap());
         }
         if self.batch_job.is_some() && ui.button("Stop lookup (keep suggestions)").clicked() {
             self.batch_cancel
                 .store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        if self.batch_job.is_none()
+            && !self.suggestions.is_empty()
+            && ui.button("Discard metadata suggestions").clicked()
+        {
+            self.suggestions.clear();
+            self.status =
+                "Suggestions discarded. Saved metadata and music files are unchanged.".into();
         }
         let mut selected = None;
         if self.batch_root == root {
@@ -529,14 +628,16 @@ impl Lookup {
                 .clicked()
             {
                 let (root, m) = (root.to_owned(), m.clone());
-                let (path, revision) = self.snapshot.clone().unwrap();
+                let (path, _) = self.snapshot.clone().unwrap();
                 let (tx, rx) = mpsc::channel();
                 self.job = Some(rx);
                 self.status = "Saving metadata / fetching cover…".into();
                 std::thread::spawn(move || {
                     let result = (|| {
                         let audio = amp_core::resolve(&root, &path).map_err(|e| e.to_string())?;
-                        let mut p = amp_core::preparation::load(&audio)?;
+                        // Rebase on the latest completed analysis/manual edits, then use a
+                        // revision-checked save so a simultaneous write is never lost.
+                        let (mut p, revision) = amp_core::preparation::load_with_revision(&audio)?;
                         fill_missing(&mut p, &m);
                         if amp_core::genres::values(&p).is_empty() {
                             match recording_genres(&m.recording) {
@@ -648,6 +749,66 @@ mod tests {
             found,
             "No cover available for the first five public release results"
         );
+    }
+    #[test]
+    fn analysis_lookup_excludes_books_and_complete_tags_and_bounds_pending_work() {
+        let song = |path: &str, complete: bool| {
+            let mut p = amp_core::Preparation::default();
+            if complete {
+                p.extensions.insert(
+                    "embedded_tags".into(),
+                    serde_json::json!({
+                        "TrackTitle": ["Song"], "TrackArtist": ["Artist"],
+                        "AlbumTitle": ["Album"], "RecordingDate": ["2020"]
+                    }),
+                );
+            }
+            amp_core::Track {
+                path: path.into(),
+                title: "Song".into(),
+                preparation: p,
+            }
+        };
+        let mut library = amp_core::Library {
+            tracks: vec![
+                song("songs/missing.mp3", false),
+                song("songs/complete.mp3", true),
+                song("audios/Light Novels Audiobooks/book.mp3", false),
+            ],
+            tree: amp_core::Folder {
+                name: "test".into(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        };
+        let inputs = lookup_inputs(&library);
+        assert_eq!(inputs.len(), 1);
+        assert_eq!(inputs[0].path, Path::new("songs/missing.mp3"));
+        library
+            .tracks
+            .extend((0..1000).map(|i| song(&format!("songs/{i}.mp3"), false)));
+        assert_eq!(lookup_inputs(&library).len(), 501);
+    }
+    #[test]
+    #[allow(clippy::field_reassign_with_default)] // Lookup owns cancellation and implements Drop.
+    fn analysis_lookup_is_opt_in_and_does_not_discard_pending_review() {
+        let mut lookup = Lookup::default();
+        lookup.analysis_enabled = Some(false);
+        let library = amp_core::Library {
+            tracks: vec![],
+            tree: amp_core::Folder {
+                name: "test".into(),
+                folders: vec![],
+                tracks: vec![],
+            },
+        };
+        lookup.start_with_analysis(Path::new("music"), &library);
+        assert!(lookup.batch_job.is_none());
+        lookup.analysis_enabled = Some(true);
+        lookup.suggestions.push(("song.mp3".into(), None, vec![]));
+        lookup.start_with_analysis(Path::new("music"), &library);
+        assert!(lookup.batch_job.is_none());
+        assert_eq!(lookup.suggestions.len(), 1);
     }
     #[test]
     fn fills_only_empty_fields_and_preserves_dj_edits() {

@@ -10,6 +10,7 @@ mod addons;
 mod app_update;
 mod audio_output;
 mod cast;
+mod catalog_export;
 mod control;
 mod controllers;
 mod crossfade_settings;
@@ -75,6 +76,7 @@ mod resources;
 mod sample_editor;
 mod sample_library;
 mod sampler;
+mod seasonal_lookup;
 mod section_controls;
 mod session;
 mod show_editor;
@@ -176,6 +178,8 @@ struct Player {
     organizer: library_organizer::Organizer,
     outputs: module_runtime::Module<audio_output::Panel>,
     lookup: module_runtime::Module<media_lookup::Lookup>,
+    seasonal_lookup: module_runtime::Module<seasonal_lookup::Lookup>,
+    catalog_export: module_runtime::Module<catalog_export::Panel>,
     podcasts: module_runtime::Module<podcasts::Podcasts>,
     transcription: module_runtime::Module<transcription::Panel>,
     auto_dj_controls: bool,
@@ -292,6 +296,8 @@ impl Default for Player {
             organizer: Default::default(),
             outputs: Default::default(),
             lookup: Default::default(),
+            seasonal_lookup: Default::default(),
+            catalog_export: Default::default(),
             podcasts: Default::default(),
             transcription: Default::default(),
             auto_dj_controls: false,
@@ -659,6 +665,9 @@ impl Player {
                     self.preparer.batch_ref(self.root.clone(), &library.tracks);
                     for track in &mut library.tracks {
                         track.preparation.extensions.remove("scan_source_stat");
+                    }
+                    if self.preparer.queue_enabled {
+                        self.lookup.start_with_analysis(&self.root, &library);
                     }
                     self.accept_library_scan(library);
                 }
@@ -3750,6 +3759,12 @@ impl eframe::App for Player {
             && lookup.poll(ui.ctx(), &self.root, self.library.as_mut())
         {
             self.library_generation = self.library_generation.wrapping_add(1);
+        }
+        if let Some(lookup) = self.seasonal_lookup.get_mut() {
+            if lookup.poll(ui.ctx(), &self.root, self.library.as_mut()) {
+                self.library_generation = self.library_generation.wrapping_add(1);
+            }
+            self.show_editor.seasonal_status = lookup.status.clone();
         }
         if self.podcasts.get().is_some() || (self.workspace.enabled && self.workspace.pane == 6) {
             self.podcasts

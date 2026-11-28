@@ -35,6 +35,14 @@ pub fn playlist_menu(response: &egui::Response) -> Option<PlaylistAction> {
 #[derive(Default)]
 pub struct Editor {
     pub open: bool,
+    pub seasonal_request: Option<(Vec<crate::seasonal_lookup::Category>, bool)>,
+    pub seasonal_cancel: bool,
+    pub seasonal_status: String,
+    seasonal_seen: Option<(
+        std::path::PathBuf,
+        usize,
+        Vec<crate::seasonal_lookup::Category>,
+    )>,
     selected: usize,
     status: String,
     search: String,
@@ -399,6 +407,20 @@ impl Editor {
                     ui.weak("Uses saved genre tags. Untagged songs are skipped. Edit a song’s genre in Library tags.");
                 }
                 crate::smart_filter_ui::show(ui,p,library);
+                let seasonal = crate::seasonal_lookup::categories(&p.filters);
+                if !seasonal.is_empty() {
+                    let key=(root.to_path_buf(),library.map_or(0,|l|l.tracks.len()),seasonal.clone());
+                    if self.seasonal_seen.as_ref()!=Some(&key) {self.seasonal_seen=Some(key);self.seasonal_request=Some((seasonal.clone(),false));}
+                    ui.strong("Online holiday / season matching");
+                    ui.weak("Matches an online music catalog against your library, including songs without holiday tags. Existing tags are an offline fallback. Music is never uploaded.");
+                    ui.horizontal_wrapped(|ui|{
+                        if ui.button("Match online catalog").clicked(){self.seasonal_request=Some((seasonal.clone(),false));}
+                        if ui.button("Find more online").clicked(){self.seasonal_request=Some((seasonal.clone(),true));}
+                        if ui.button("Stop matching").clicked(){self.seasonal_cancel=true;}
+                    });
+                    if !self.seasonal_status.is_empty(){ui.label(&self.seasonal_status);}
+                }
+
                 ui.add_space(16.);
                 ui.strong("Mixing style");
                 ui.horizontal(|ui| {

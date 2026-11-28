@@ -61,3 +61,5 @@ by Jeremy Tribby. The fonts are distributed under the SIL Open Font License 1.1.
 Source: https://github.com/google/fonts/tree/main/ofl/barlow
 The complete license is included at `licenses/Barlow/OFL.txt` in desktop
 packages and `apps/amp-player/assets/fonts/OFL.txt` in the source tree.
+
+Portable catalog free-space checks use fs2 0.4.3 (MIT OR Apache-2.0); original notices are in licenses/fs2. Creating RAR volumes requires a separately installed WinRAR/RAR. No proprietary RAR binary is bundled.

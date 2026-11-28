@@ -75,32 +75,50 @@ impl Player {
             .show(ui, |ui| {
                 ui.set_min_size(ui.available_size());
                 ui.horizontal(|ui| {
-                    let header = ui.add(
-                        egui::Label::new(
-                            RichText::new(if dj { "AMP DJ" } else { "AMP PLAYER" }).strong(),
-                        )
-                        .sense(egui::Sense::drag()),
-                    );
-                    if header.drag_started() {
-                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
-                    }
-                    if ui.button("Full window").clicked() {
-                        ui.ctx().send_viewport_cmd_to(
-                            egui::ViewportId::ROOT,
-                            egui::ViewportCommand::Minimized(false),
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        let close = ui
+                            .button("X")
+                            .on_hover_text("Hide compact controls; keep playing");
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(egui::Id::unique("mini-close"), close.rect)
+                        });
+                        if close.clicked() {
+                            self.mini.dismissed = true;
+                        }
+                        let full = ui.button("Full window");
+                        #[cfg(test)]
+                        ui.ctx().data_mut(|data| {
+                            data.insert_temp(egui::Id::unique("mini-full"), full.rect)
+                        });
+                        if full.clicked() {
+                            ui.ctx().send_viewport_cmd_to(
+                                egui::ViewportId::ROOT,
+                                egui::ViewportCommand::Minimized(false),
+                            );
+                            ui.ctx().send_viewport_cmd_to(
+                                egui::ViewportId::ROOT,
+                                egui::ViewportCommand::Focus,
+                            );
+                        }
+                        let (rect, drag) = ui.allocate_exact_size(
+                            egui::vec2(ui.available_width(), ui.spacing().interact_size.y),
+                            egui::Sense::drag(),
                         );
-                        ui.ctx().send_viewport_cmd_to(
-                            egui::ViewportId::ROOT,
-                            egui::ViewportCommand::Focus,
+                        #[cfg(test)]
+                        ui.ctx()
+                            .data_mut(|data| data.insert_temp(egui::Id::unique("mini-drag"), rect));
+                        ui.painter().text(
+                            rect.left_center(),
+                            egui::Align2::LEFT_CENTER,
+                            if dj { "AMP DJ" } else { "AMP PLAYER" },
+                            egui::FontId::proportional(16.),
+                            ui.visuals().text_color(),
                         );
-                    }
-                    if ui
-                        .button("X")
-                        .on_hover_text("Hide compact controls; keep playing")
-                        .clicked()
-                    {
-                        self.mini.dismissed = true;
-                    }
+                        if drag.drag_started() {
+                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
+                        }
+                    });
                 });
                 ui.separator();
                 ui.spacing_mut().slider_width = 100.;
@@ -283,5 +301,70 @@ mod layout_tests {
             assert!(!player.playing.iter().any(|playing| *playing));
             assert!(player.queue.is_empty());
         }
+    }
+}
+
+#[cfg(test)]
+mod header_drag_tests {
+    use super::*;
+    fn draw(ctx: &egui::Context, player: &mut Player, events: Vec<egui::Event>) -> bool {
+        let mut output = ctx.run_ui(
+            egui::RawInput {
+                events,
+                screen_rect: Some(egui::Rect::from_min_size(
+                    egui::Pos2::ZERO,
+                    egui::vec2(400., 600.),
+                )),
+                ..Default::default()
+            },
+            |ui| {
+                player.mini_surface(ui, true);
+            },
+        );
+        let dragged = output.viewport_output.values().any(|v| {
+            v.commands
+                .iter()
+                .any(|c| matches!(c, egui::ViewportCommand::StartDrag))
+        });
+        output.textures_delta.clear();
+        dragged
+    }
+    #[test]
+    fn empty_header_space_drags_and_window_buttons_stay_at_the_right() {
+        let ctx = egui::Context::default();
+        let mut player = Player::default();
+        draw(&ctx, &mut player, vec![]);
+        let rect = |name| {
+            ctx.data_mut(|data| data.get_temp::<egui::Rect>(egui::Id::unique(name)).unwrap())
+        };
+        let drag = rect("mini-drag");
+        let full = rect("mini-full");
+        let close = rect("mini-close");
+        assert!(drag.right() <= full.left());
+        assert!(full.right() <= close.left());
+        assert!(close.right() > 360.);
+        let point = egui::pos2(drag.right() - 4., drag.center().y);
+        let pressed = draw(
+            &ctx,
+            &mut player,
+            vec![
+                egui::Event::PointerMoved(point),
+                egui::Event::PointerButton {
+                    pos: point,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: Default::default(),
+                },
+            ],
+        );
+        let moved = draw(
+            &ctx,
+            &mut player,
+            vec![egui::Event::PointerMoved(point + egui::vec2(12., 0.))],
+        );
+        assert!(
+            pressed || moved,
+            "Empty header space did not issue a native window drag"
+        );
     }
 }

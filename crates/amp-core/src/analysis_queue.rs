@@ -522,26 +522,47 @@ impl Queue {
         tx.execute_batch("CREATE TEMP TABLE retry_jobs AS SELECT path,stamp,attempts FROM analysis_jobs WHERE state='failed' ORDER BY seq; DELETE FROM analysis_jobs WHERE state='failed'; INSERT INTO analysis_jobs(path,stamp,state,attempts) SELECT path,stamp,'pending',attempts FROM retry_jobs ORDER BY rowid; DROP TABLE retry_jobs;").map_err(err)?;tx.commit().map_err(err)?;Ok(count)
     })
     }
-    pub fn stats(&self) -> Result<Stats, String> {
-        self.access(false, |db| {
-            let mut stats = Stats::default();
-            let mut q = db
-                .prepare("SELECT state,COUNT(*) FROM analysis_jobs GROUP BY state")
+    /// Read status without opening/resetting a queue or starting preparation.
+    pub fn saved_stats(root: &Path) -> Result<Option<Stats>, String> {
+        if !crate::catalog_db::path(root).is_file() {
+            return Ok(None);
+        }
+        crate::catalog_db::queue_access(root, false, |db| {
+            let exists = db
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE name='analysis_jobs')",
+                    [],
+                    |r| r.get::<_, bool>(0),
+                )
                 .map_err(err)?;
-            for row in q
-                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?)))
-                .map_err(err)?
-            {
-                let (s, n) = row.map_err(err)?;
-                stats.total += n;
-                match s.as_str() {
-                    "done" => stats.done += n,
-                    "failed" => stats.failed += n,
-                    _ => stats.pending += n,
-                }
+            if exists {
+                Self::read_stats(db).map(Some)
+            } else {
+                Ok(None)
             }
-            Ok(stats)
         })
+    }
+    pub fn stats(&self) -> Result<Stats, String> {
+        self.access(false, Self::read_stats)
+    }
+    fn read_stats(db: &mut Connection) -> Result<Stats, String> {
+        let mut stats = Stats::default();
+        let mut q = db
+            .prepare("SELECT state,COUNT(*) FROM analysis_jobs GROUP BY state")
+            .map_err(err)?;
+        for row in q
+            .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, usize>(1)?)))
+            .map_err(err)?
+        {
+            let (s, n) = row.map_err(err)?;
+            stats.total += n;
+            match s.as_str() {
+                "done" => stats.done += n,
+                "failed" => stats.failed += n,
+                _ => stats.pending += n,
+            }
+        }
+        Ok(stats)
     }
 }
 /// Retry only known publication-lock contention. Each attempt still checks the
@@ -973,6 +994,38 @@ mod discovery_reconciliation_regressions {
         assert_eq!(
             std::fs::read(temp.path().join(path)).unwrap(),
             b"keep audio"
+        );
+    }
+}
+
+#[cfg(test)]
+mod saved_status_tests {
+    use super::*;
+    #[test]
+    fn saved_status_is_read_only_and_keeps_running_claims_untouched() {
+        let dir = tempfile::tempdir().unwrap();
+        assert!(Queue::saved_stats(dir.path()).unwrap().is_none());
+        assert!(!dir.path().join("ampdj").exists());
+        std::fs::create_dir(dir.path().join("ampdj")).unwrap();
+        let file = crate::catalog_db::path(dir.path());
+        let db = Connection::open(&file).unwrap();
+        db.execute_batch("PRAGMA user_version=1; CREATE TABLE records(key TEXT PRIMARY KEY,document TEXT NOT NULL);").unwrap();
+        db.execute_batch(SCHEMA).unwrap();
+        db.execute_batch("INSERT INTO analysis_jobs(path,stamp,state,token,expires) VALUES('a.mp3','1','failed',NULL,0),('b.mp3','1','running','owned',9999999999999);").unwrap();
+        drop(db);
+        let before = std::fs::read(&file).unwrap();
+        let stats = Queue::saved_stats(dir.path()).unwrap().unwrap();
+        assert_eq!((stats.total, stats.failed, stats.pending), (2, 1, 1));
+        assert_eq!(std::fs::read(&file).unwrap(), before);
+        let db = Connection::open(&file).unwrap();
+        assert_eq!(
+            db.query_row(
+                "SELECT token FROM analysis_jobs WHERE path='b.mp3'",
+                [],
+                |r| r.get::<_, String>(0)
+            )
+            .unwrap(),
+            "owned"
         );
     }
 }
