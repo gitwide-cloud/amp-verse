@@ -1,15 +1,15 @@
 # AMP⚡VERSE
 
-## Latest test release: 1.1.0-rc.7
+## Latest test release: 1.1.0-rc.12
 
-**[Download RC7 for all platforms](https://github.com/gitwide-cloud/amp-verse/releases/tag/v1.1.0-rc.7)**
+**[Download RC12 for all platforms](https://github.com/gitwide-cloud/amp-verse/releases/tag/v1.1.0-rc.12)**
 
-- [Windows desktop installer (.exe)](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.7/AMP-Verse-Desktop-Setup-1.1.0-rc.7.exe)
-- [Android Full APK, build 51](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.7/amp-verse-full-1.1.0-rc.7-b51-arm64-v8a.apk)
-- [Windows standalone server installer (.zip)](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.7/AMP-Verse-Server-Setup-1.1.0-rc.7-windows-x86_64.zip)
-- [Linux desktop](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.7/amp-verse-linux-v1.1.0-rc.7.zip) / [Linux standalone server](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.7/amp-verse-server-linux-v1.1.0-rc.7.zip)
+- [Windows desktop installer (.exe)](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.12/AMP-Verse-Desktop-Setup-1.1.0-rc.12.exe)
+- [Android Full APK, build 56](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.12/amp-verse-full-1.1.0-rc.12-b56-arm64-v8a.apk)
+- [Windows standalone server (.zip)](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.12/amp-verse-server-windows-v1.1.0-rc.12.zip)
+- [Linux desktop](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.12/amp-verse-linux-v1.1.0-rc.12.zip) / [Linux standalone server](https://github.com/gitwide-cloud/amp-verse/releases/download/v1.1.0-rc.12/amp-verse-server-linux-v1.1.0-rc.12.zip)
 
-This is a release candidate for testing. Android Lite, the five existing Android companion add-ons, analysis engines, the Bitfocus Companion module and checksums are on the release page. Older in-app update checkers show stable releases only; download this RC directly from GitHub. Install over your existing app without uninstalling to retain its data.
+This is a release candidate for testing. Android Lite, the five existing Android add-ons, matching analysis engines, the Bitfocus Companion module and verified checksums are on the release page. RC11 and newer can update inside the desktop app, server web UI and Android app. Android retains its normal installation permission and approval. Older stable-only updaters need the installer once; install over the existing app to retain data. See the release notes for qualification evidence and known issues.
 
 **Your music. Your playground.**
 
