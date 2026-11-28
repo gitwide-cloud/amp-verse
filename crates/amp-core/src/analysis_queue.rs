@@ -27,9 +27,80 @@ fn err(e: impl std::fmt::Display) -> String {
 }
 pub(crate) const SCHEMA: &str = "CREATE TABLE IF NOT EXISTS analysis_jobs(seq INTEGER PRIMARY KEY AUTOINCREMENT,path TEXT NOT NULL UNIQUE,stamp TEXT NOT NULL,state TEXT NOT NULL,token TEXT,error TEXT,attempts INTEGER NOT NULL DEFAULT 0,expires INTEGER NOT NULL DEFAULT 0,device TEXT NOT NULL DEFAULT ''); CREATE INDEX IF NOT EXISTS analysis_fifo ON analysis_jobs(state,seq);";
 impl Queue {
+    /// Remove only queue entries classified as spoken audio. Audio and preparation are untouched.
+    /// Saved explicit Music overrides win over folder hints; unavailable metadata is retained.
+    pub fn reconcile_non_music(&self, tracks: &[crate::Track]) -> Result<usize, String> {
+        let known: std::collections::HashMap<_, _> = tracks
+            .iter()
+            .map(|t| {
+                (
+                    t.path.to_string_lossy().replace('\\', "/"),
+                    crate::media_kind::is_music(&t.path, &t.preparation),
+                )
+            })
+            .collect();
+        let paths = self.access(false, |db| {
+            let mut query = db.prepare("SELECT path FROM analysis_jobs").map_err(err)?;
+            query
+                .query_map([], |r| r.get::<_, String>(0))
+                .map_err(err)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(err)
+        })?;
+        let mut excluded = Vec::new();
+        for key in paths {
+            let path = Path::new(&key);
+            if path.is_absolute()
+                || key.contains(':')
+                || path
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                continue;
+            }
+            let hinted = !crate::media_kind::is_music(path, &crate::Preparation::default());
+            if known.get(&key) == Some(&true) || (!hinted && known.get(&key) != Some(&false)) {
+                continue;
+            }
+            let Ok((owner, relative)) = crate::music_sources::owner(&self.root, path) else {
+                continue;
+            };
+            let Ok(preparation) = crate::preparation::load(&owner.join(&relative)) else {
+                continue;
+            };
+            if preparation
+                .extensions
+                .get("media_kind")
+                .and_then(|v| v.as_str())
+                .is_some_and(|v| v.eq_ignore_ascii_case("music"))
+            {
+                continue;
+            }
+            if known.get(&key) == Some(&false)
+                || !crate::media_kind::is_music(&relative, &preparation)
+            {
+                excluded.push(key);
+            }
+        }
+        if excluded.is_empty() {
+            return Ok(0);
+        }
+        self.access(true, |db| {
+            let tx = db.transaction().map_err(err)?;
+            let mut count = 0;
+            for key in &excluded {
+                count += tx
+                    .execute("DELETE FROM analysis_jobs WHERE path=?1", [key])
+                    .map_err(err)?;
+            }
+            tx.commit().map_err(err)?;
+            Ok(count)
+        })
+    }
     /// Seed trusted catalog/cache entries without stat-ing every file first.
     /// Discovery verifies changes independently; existing shared work is authoritative.
     pub fn seed_known(&self, tracks: &[crate::Track]) -> Result<usize, String> {
+        self.reconcile_non_music(tracks)?;
         let mut rows = Vec::new();
         for track in tracks {
             if !crate::media_kind::is_music(&track.path, &track.preparation) {
@@ -124,6 +195,7 @@ impl Queue {
             }
         }
         q.recover_contention()?;
+        q.reconcile_non_music(&[])?;
         Ok(q)
     }
     pub fn open(file: &Path, root: &Path) -> Result<Self, String> {
@@ -196,8 +268,53 @@ impl Queue {
         }
         self.enqueue_rows(prepared)
     }
+    /// Call only after a successful, complete scan of every configured source.
+    /// A cached/partial library or an offline source is not an authoritative snapshot.
+    /// Retire terminal history for vanished paths, retaining all live claims and audio.
+    pub fn reconcile_discovered_paths(&self, paths: &[PathBuf]) -> Result<usize, String> {
+        let present: std::collections::HashSet<_> = paths
+            .iter()
+            .map(|p| p.to_string_lossy().replace('\\', "/"))
+            .collect();
+        let obsolete = self.access(false, |db| {
+            let mut stmt = db
+                .prepare("SELECT seq,path FROM analysis_jobs WHERE state IN ('done','failed')")
+                .map_err(err)?;
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+                .map_err(err)?;
+            let mut obsolete = Vec::new();
+            for row in rows {
+                let (seq, path) = row.map_err(err)?;
+                if !present.contains(&path) {
+                    obsolete.push((seq, path));
+                }
+            }
+            Ok(obsolete)
+        })?;
+        if obsolete.is_empty() {
+            return Ok(0);
+        }
+        self.access(true, |db| {
+            let tx=db.transaction().map_err(err)?;
+            let mut removed=0;
+            for (seq,path) in &obsolete {
+                removed += tx.execute("DELETE FROM analysis_jobs WHERE seq=?1 AND path=?2 AND state IN ('done','failed')",params![seq,path]).map_err(err)?;
+            }
+            tx.commit().map_err(err)?;
+            Ok(removed)
+        })
+    }
+    /// The caller must have successfully scanned all configured sources.
+    pub fn enqueue_discovered_tracks(&self, tracks: &[crate::Track]) -> Result<usize, String> {
+        self.reconcile_discovered_paths(
+            &tracks.iter().map(|t| t.path.clone()).collect::<Vec<_>>(),
+        )?;
+        self.enqueue_tracks(tracks)
+    }
     /// Use directory metadata instead of a second per-file NAS stat pass.
     pub fn enqueue_tracks(&self, tracks: &[crate::Track]) -> Result<usize, String> {
+        self.reconcile_non_music(tracks)?;
         let mut rows = Vec::new();
         let mut fallback = Vec::new();
         for track in tracks {
@@ -301,15 +418,16 @@ impl Queue {
         Ok(added)
     }
     pub fn cached_complete(root: &Path, track: &crate::Track) -> bool {
-        let p = &track.preparation;
-        if !crate::media_kind::is_music(&track.path, p) {
+        Self::cached_preparation_complete(root, &track.path, &track.preparation)
+    }
+    pub fn cached_preparation_complete(root: &Path, path: &Path, p: &crate::Preparation) -> bool {
+        if !crate::media_kind::is_music(path, p) {
             return true;
         }
         if p.analysis.is_none() || p.source_sha256.is_none() {
             return false;
         }
-        let Ok(meta) = std::fs::metadata(crate::music_sources::audio_path(root, &track.path))
-        else {
+        let Ok(meta) = std::fs::metadata(crate::music_sources::audio_path(root, path)) else {
             return false;
         };
         let ns = meta
@@ -761,6 +879,100 @@ mod heartbeat_retry_tests {
                 )
             },
             || panic!("renewal after worker owner disconnected"),
+        );
+    }
+}
+
+#[cfg(test)]
+mod spoken_backlog_regressions {
+    use super::*;
+    #[test]
+    fn legacy_audiobook_backlog_is_removed_before_dispatch_without_touching_audio() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("music");
+        let book = root.join("audios/Light Novels Audiobooks/Chapter.mp3");
+        std::fs::create_dir_all(book.parent().unwrap()).unwrap();
+        std::fs::write(&book, b"protected book audio").unwrap();
+        std::fs::write(root.join("song.mp3"), b"music").unwrap();
+        let q = Queue::open(&temp.path().join("queue.ampdb"), &root).unwrap();
+        q.access(true,|db|{db.execute("INSERT INTO analysis_jobs(path,stamp,state) VALUES('audios/Light Novels Audiobooks/Chapter.mp3','','pending')",[]).map_err(err)?;Ok(())}).unwrap();
+        q.seed_known(&[crate::Track {
+            path: "song.mp3".into(),
+            title: "song".into(),
+            preparation: Default::default(),
+        }])
+        .unwrap();
+        assert_eq!(q.next().unwrap().unwrap().path, Path::new("song.mp3"));
+        assert_eq!(q.stats().unwrap().total, 1);
+        assert_eq!(std::fs::read(&book).unwrap(), b"protected book audio");
+    }
+}
+
+#[cfg(test)]
+mod discovery_reconciliation_regressions {
+    use super::*;
+    #[test]
+    fn complete_discovery_retires_only_missing_terminal_jobs() {
+        let temp = tempfile::tempdir().unwrap();
+        let q = Queue::open(&temp.path().join("queue.ampdb"), temp.path()).unwrap();
+        q.access(true, |db| {
+            for (path, state) in [
+                ("removed.mp3", "done"),
+                ("missing.mp3", "failed"),
+                ("present.mp3", "failed"),
+                ("waiting.mp3", "pending"),
+                ("claimed.mp3", "running"),
+            ] {
+                db.execute(
+                    "INSERT INTO analysis_jobs(path,stamp,state) VALUES(?1,'',?2)",
+                    params![path, state],
+                )
+                .map_err(err)?;
+            }
+            Ok(())
+        })
+        .unwrap();
+        q.seed_known(&[]).unwrap();
+        assert_eq!(
+            q.stats().unwrap().total,
+            5,
+            "cached resume must not prune history"
+        );
+        assert_eq!(
+            q.reconcile_discovered_paths(&["present.mp3".into()])
+                .unwrap(),
+            2
+        );
+        let stats = q.stats().unwrap();
+        assert_eq!(stats.total, 3);
+        assert_eq!(stats.failed, 1);
+        assert_eq!(stats.pending, 2);
+    }
+    #[test]
+    fn explicit_music_override_and_preparation_survive_spoken_cleanup() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = Path::new("audios/song.mp3");
+        std::fs::create_dir_all(temp.path().join("audios")).unwrap();
+        std::fs::write(temp.path().join(path), b"keep audio").unwrap();
+        let mut preparation = crate::Preparation::default();
+        preparation
+            .extensions
+            .insert("media_kind".into(), serde_json::json!("music"));
+        crate::preparation::save(temp.path(), path, &preparation).unwrap();
+        let q = Queue::open(&temp.path().join("queue.ampdb"), temp.path()).unwrap();
+        q.enqueue([(path.into(), false)]).unwrap();
+        assert_eq!(q.reconcile_non_music(&[]).unwrap(), 0);
+        assert_eq!(q.stats().unwrap().total, 1);
+        assert_eq!(
+            crate::preparation::load(&temp.path().join(path))
+                .unwrap()
+                .extensions
+                .get("media_kind"),
+            Some(&serde_json::json!("music"))
+        );
+        assert_eq!(
+            std::fs::read(temp.path().join(path)).unwrap(),
+            b"keep audio"
         );
     }
 }

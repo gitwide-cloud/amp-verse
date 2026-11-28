@@ -1261,16 +1261,17 @@ impl Player {
         ui.heading("Analyze Music");
         ui.weak("Prepare BPM, key, beatgrids, waveforms and cue suggestions.");
         ui.add_space(18.);
-        let total = self.library.as_ref().map_or(0, |l| l.tracks.len());
-        let analyzed = self.library.as_ref().map_or(0, |l| {
-            l.tracks
-                .iter()
-                .filter(|t| t.preparation.analysis.is_some())
-                .count()
-        });
+        let (total, analyzed, excluded) = self
+            .preparer
+            .analysis_counts(&self.root, self.library.as_ref());
+        if excluded > 0 {
+            ui.weak(format!(
+                "{excluded} audiobook, speech or podcast files are excluded from music analysis."
+            ));
+        }
         ui.columns(3, |columns| {
             for (column, label, value) in [
-                (0, "Total tracks", total),
+                (0, "Music tracks", total),
                 (1, "With analysis", analyzed),
                 (2, "Missing analysis", total - analyzed),
             ] {
@@ -1289,9 +1290,13 @@ impl Player {
             if total > 0 {
                 ui.add(
                     egui::ProgressBar::new(done as f32 / total as f32)
-                        .text(format!("{done} / {total} jobs returned")),
+                        .text(format!("{done} / {total} jobs finished")),
                 );
             }
+            ui.weak(format!(
+                "{} failed jobs. Deferred claims do not count as finished.",
+                self.preparer.failed()
+            ));
             ui.label(if self.preparer.status.is_empty() {
                 if self.root.as_os_str().is_empty() {
                     "Add a music folder above to begin."

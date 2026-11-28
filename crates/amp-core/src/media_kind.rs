@@ -47,8 +47,22 @@ pub fn kind(path: &Path, p: &crate::Preparation) -> Kind {
             return k;
         }
     }
-    for part in path.parent().unwrap_or(Path::new("")).components() {
+    for part in path.parent().unwrap_or(Path::new("")).components().rev() {
         let folder = part.as_os_str().to_string_lossy().to_lowercase();
+        let words: Vec<_> = folder
+            .split(|c: char| !c.is_alphanumeric())
+            .filter(|v| !v.is_empty())
+            .collect();
+        if folder == "audios"
+            || words
+                .iter()
+                .any(|v| matches!(*v, "audiobook" | "audiobooks"))
+            || words
+                .windows(2)
+                .any(|w| w[0] == "audio" && matches!(w[1], "book" | "books"))
+        {
+            return Kind::Audiobook;
+        }
         if matches!(
             folder.as_str(),
             "audiobooks" | "audio books" | "spoken word" | "speeches" | "lectures" | "podcasts"
@@ -112,5 +126,38 @@ mod tests {
         p.extensions
             .insert("genre".into(), serde_json::json!("Spoken Word"));
         assert_eq!(kind(Path::new("Mixed files/Track.mp3"), &p), Kind::Speech);
+    }
+}
+
+#[cfg(test)]
+mod stalled_queue_regressions {
+    use super::*;
+    #[test]
+    fn declared_audios_and_compound_audiobook_folders_are_not_music() {
+        for path in [
+            "audios/Light Novels Audiobooks/Ecstas Online/Volume 1.mp3",
+            "Light Novels Audiobooks/Chapter.mp3",
+            "Audio Books/Chapter.mp3",
+        ] {
+            assert_eq!(
+                kind(Path::new(path), &crate::Preparation::default()),
+                Kind::Audiobook,
+                "{path}"
+            );
+        }
+        let mut p = crate::Preparation::default();
+        p.extensions
+            .insert("media_kind".into(), serde_json::json!("music"));
+        assert_eq!(
+            kind(Path::new("audios/Intentional music.mp3"), &p),
+            Kind::Music
+        );
+        assert_eq!(
+            kind(
+                Path::new("Primerica DJ/Song.mp3"),
+                &crate::Preparation::default()
+            ),
+            Kind::Music
+        );
     }
 }

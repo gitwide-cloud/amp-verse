@@ -83,3 +83,19 @@ Directory scans carry file size/time observations into queue discovery; queue
 ingestion uses those observations rather than stat-ing every file again. Scan-only
 values are removed before publishing Library UI snapshots. Cached queue resume
 does not run a file-signature confirmation pass.
+
+## Spoken backlog and accurate progress
+
+`audios` and compound audiobook folder names (including Light Novels Audiobooks)
+are excluded from music analysis. Explicit saved Music classifications take
+precedence. Opening/discovering the queue removes legacy spoken jobs without
+deleting audio, preparations, or manual cues. Failed/unreadable classification
+metadata is retained rather than guessed.
+
+Only a successful complete directory scan across every configured source retires
+missing terminal job history. Cached resumes and partial discoveries cannot do
+this; pending/running jobs are always retained by this reconciliation. Offline or
+failed source scans return errors before this step. Deferred claims are displayed
+as waiting and do not increment finished progress. Failed jobs are shown separately
+from the music preparation cards. Playback throttling follows active transports,
+including silent DJ playback; pausing the deck and Auto Mix clears it.

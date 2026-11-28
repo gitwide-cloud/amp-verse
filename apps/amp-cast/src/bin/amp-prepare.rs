@@ -78,7 +78,7 @@ fn prepare(root: &std::path::Path, requested: usize, force: bool) -> Result<(), 
     let library = amp_core::scan_job_inputs(root).map_err(|e| e.to_string())?;
     if !force {
         let queue = amp_core::analysis_queue::Queue::for_library(root, "cli")?;
-        queue.enqueue_tracks(&library.tracks)?;
+        queue.enqueue_discovered_tracks(&library.tracks)?;
         let errors = std::sync::atomic::AtomicUsize::new(0);
         let count = amp_core::batch::workers(requested, queue.stats()?.pending);
         let slots = vec![(); count];

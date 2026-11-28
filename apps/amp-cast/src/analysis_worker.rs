@@ -91,7 +91,9 @@ impl Worker {
                         scanner_state.progress.lock().unwrap().scanning = true;
                         let outcome = amp_core::scan_job_inputs(&host.root)
                             .map_err(|e| e.to_string())
-                            .and_then(|library| scanner_queue.enqueue_tracks(&library.tracks));
+                            .and_then(|library| {
+                                scanner_queue.enqueue_discovered_tracks(&library.tracks)
+                            });
                         let mut p = scanner_state.progress.lock().unwrap();
                         p.scanning = false;
                         if let Err(e) = outcome {
