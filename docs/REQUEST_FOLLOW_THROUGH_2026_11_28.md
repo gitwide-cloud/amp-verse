@@ -5,7 +5,7 @@ Baseline: published RC11, canonical source `8dfb0e87c8caf60f276bad78f084a6e228bc
 ## Confirmed gaps repaired for RC12
 
 - Duplicate normal-playlist cards: `Browser::refresh_sync_saved` and `Player::accept_scan` compare literal paths. The same Windows playlist received as ordinary UNC and verbatim UNC produces two cards. Route scan, sync, Save and import through one lexical saved-playlist identity; preserve different files, song ordering, duplicates within a playlist, and revision protection. Never delete playlist files to fix display duplication.
-- Automatic recovery: cached-library availability currently triggers restoration during the background startup refresh, and the recovery window appears before that automatic work has a chance to finish. Wait for refresh completion and suppress the choice window while automatic recovery is pending. Real unreadable/missing-source errors must remain recoverable; never start audible playback automatically.
+- Automatic recovery: check only saved deck and cue inputs on a background worker, independently of the full library refresh. Restore paused only while playback and Auto Mix are idle. A slow storage check shows a waiting message after 15 seconds, retains one worker and the checkpoint, and disables duplicate restore attempts until that check returns. This deadline does not cancel operating-system network I/O. Actual source/output failures remain available under Details; never start audible playback automatically.
 
 - Smart Playlist matching dispatch: removed the full track-metadata copy on the UI thread. The worker shares the existing immutable catalog snapshot. A 20,000-row production-code extraction benchmark measured 263.248 ms before and 0.102 ms after. This is not a total cold-screen latency claim.
 
@@ -45,3 +45,9 @@ Focused regression results before this optimization: 9 Browser, 9 Session and 19
 - Overnight playback, physical receiver coverage and simultaneous hardware-qualified stem deck counts are not established by a green build.
 
 Keep this list attached to the integration source. Update evidence after a fix ships; do not replace unresolved items with a queued-task claim.
+
+## Follow-up recovery and Android filter corrections
+
+RC12 owned-device startup exposed recovery waiting on the entire NAS refresh. The follow-up checks only saved deck inputs in the background and restores paused while playback is idle. A 15-second UI deadline reports slow storage without starting duplicate workers or claiming to cancel operating-system I/O. Portable catalog reads and writes take the same publication lock; writers publish immutable snapshots from local copies. A concurrent test exercised 32 guarded writes and 64 recovery reads without torn records or audio changes.
+
+Focused Linux player recovery tests: 15 passed, 1 native-output test ignored. The shared 35-field Rust filter contract passed separately. Android Clean parity and a Java contract consumer are implemented; Android Gradle and native Windows startup acceptance remain pending. This source is not an installed or qualified release.

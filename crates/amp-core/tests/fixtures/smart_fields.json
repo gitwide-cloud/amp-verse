@@ -1,0 +1,180 @@
+{
+  "schema": 1,
+  "fields": [
+    {
+      "field": "Holiday",
+      "label": "Holiday",
+      "kind": "Text"
+    },
+    {
+      "field": "Season",
+      "label": "Season",
+      "kind": "Text"
+    },
+    {
+      "field": "Clean",
+      "label": "Clean / non-explicit (known clean only)",
+      "kind": "Flag"
+    },
+    {
+      "field": "Bpm",
+      "label": "BPM",
+      "kind": "Number"
+    },
+    {
+      "field": "TempoAlternative",
+      "label": "Alternative BPM",
+      "kind": "Number"
+    },
+    {
+      "field": "Key",
+      "label": "Musical key",
+      "kind": "Text"
+    },
+    {
+      "field": "Camelot",
+      "label": "Camelot key",
+      "kind": "Text"
+    },
+    {
+      "field": "Energy",
+      "label": "Energy (1–10)",
+      "kind": "Number"
+    },
+    {
+      "field": "Duration",
+      "label": "Duration (seconds)",
+      "kind": "Number"
+    },
+    {
+      "field": "TempoConfidence",
+      "label": "BPM confidence (%)",
+      "kind": "Number"
+    },
+    {
+      "field": "KeyConfidence",
+      "label": "Key confidence (%)",
+      "kind": "Number"
+    },
+    {
+      "field": "Analyzed",
+      "label": "Has analysis",
+      "kind": "Flag"
+    },
+    {
+      "field": "Reviewed",
+      "label": "Analysis reviewed",
+      "kind": "Flag"
+    },
+    {
+      "field": "BeatGrid",
+      "label": "Has beatgrid",
+      "kind": "Flag"
+    },
+    {
+      "field": "ManualEdits",
+      "label": "Has manual edits",
+      "kind": "Flag"
+    },
+    {
+      "field": "CueCount",
+      "label": "Cue count",
+      "kind": "Number"
+    },
+    {
+      "field": "ManualCueCount",
+      "label": "Manual cue count",
+      "kind": "Number"
+    },
+    {
+      "field": "CueKind",
+      "label": "Cue type",
+      "kind": "Text"
+    },
+    {
+      "field": "CueLabel",
+      "label": "Cue label",
+      "kind": "Text"
+    },
+    {
+      "field": "SectionCount",
+      "label": "Section count",
+      "kind": "Number"
+    },
+    {
+      "field": "SectionName",
+      "label": "Section label",
+      "kind": "Text"
+    },
+    {
+      "field": "SectionEnergy",
+      "label": "Any section energy (1–10)",
+      "kind": "Number"
+    },
+    {
+      "field": "EnergyProfile",
+      "label": "Has energy profile",
+      "kind": "Flag"
+    },
+    {
+      "field": "Engine",
+      "label": "Analysis engine",
+      "kind": "Text"
+    },
+    {
+      "field": "BeatOffset",
+      "label": "Beat offset (seconds)",
+      "kind": "Number"
+    },
+    {
+      "field": "CueIn",
+      "label": "Cue-in (seconds)",
+      "kind": "Number"
+    },
+    {
+      "field": "CueOut",
+      "label": "Cue-out (seconds)",
+      "kind": "Number"
+    },
+    {
+      "field": "StemCount",
+      "label": "Recorded stem count",
+      "kind": "Number"
+    },
+    {
+      "field": "Artist",
+      "label": "Artist",
+      "kind": "Text"
+    },
+    {
+      "field": "Album",
+      "label": "Album",
+      "kind": "Text"
+    },
+    {
+      "field": "Year",
+      "label": "Year tag",
+      "kind": "Text"
+    },
+    {
+      "field": "Rating",
+      "label": "Rating",
+      "kind": "Number"
+    },
+    {
+      "field": "Bitrate",
+      "label": "Bitrate (kbps)",
+      "kind": "Number"
+    },
+    {
+      "field": "SampleRate",
+      "label": "Sample rate (Hz)",
+      "kind": "Number"
+    },
+    {
+      "field": "Channels",
+      "label": "Audio channels",
+      "kind": "Number"
+    }
+  ]
+}
