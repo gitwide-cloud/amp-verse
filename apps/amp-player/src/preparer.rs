@@ -625,8 +625,11 @@ impl Preparer {
         self.review_selected.clear();
         self.open = true;
     }
+    /// A late discovery result must not undo a user's Stop request.
     pub fn batch_ref(&mut self, root: PathBuf, tracks: &[Track]) {
-        self.queue_inputs(root, tracks, true);
+        if self.queue_enabled {
+            self.queue_inputs(root, tracks, true);
+        }
     }
     pub fn resume_cached(&mut self, root: PathBuf, tracks: &[Track]) {
         self.queue_inputs(root, tracks, false);
@@ -1406,5 +1409,24 @@ mod deferred_progress_regressions {
         assert_eq!(p.done, 3, "A deferred claim is not a completed job");
         assert_eq!(p.failures, 1);
         drop(tx);
+    }
+}
+
+#[cfg(test)]
+mod cancelled_discovery_regressions {
+    use super::*;
+    #[test]
+    fn late_complete_scan_does_not_restart_a_stopped_queue() {
+        let root = tempfile::tempdir().unwrap();
+        let mut preparer = Preparer::default();
+        preparer.queue_enabled = false;
+        preparer.batch_ref(root.path().into(), &[]);
+        assert!(
+            !preparer.queue_enabled,
+            "A completed scan must respect Stop"
+        );
+        assert!(preparer.queue_init.is_none());
+        assert!(preparer.queue_discovery.is_none());
+        assert!(preparer.job.is_none());
     }
 }

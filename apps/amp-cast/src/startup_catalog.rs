@@ -13,7 +13,8 @@ struct Snapshot<T = Library> {
     library: T,
 }
 
-const MAX_SNAPSHOT_BYTES: u64 = 128 * 1024 * 1024;
+// Match the desktop catalog budget: complete client snapshots can bootstrap this server.
+const MAX_SNAPSHOT_BYTES: u64 = 256 * 1024 * 1024;
 
 struct LimitedWriter<W> {
     inner: W,
@@ -148,6 +149,44 @@ mod tests {
             .canonicalize()
             .unwrap();
         assert!(load(&file, &root).is_some());
+    }
+    #[test]
+    fn complete_desktop_snapshot_larger_than_old_server_limit_is_usable() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("catalog.json");
+        let mut preparation = amp_core::Preparation::default();
+        preparation
+            .extensions
+            .insert("preserved".into(), serde_json::json!("complete metadata"));
+        let library = Library {
+            tracks: vec![amp_core::Track {
+                path: "song.mp3".into(),
+                title: "Kept song".into(),
+                preparation,
+            }],
+            tree: Folder {
+                name: "Music".into(),
+                tracks: vec![0],
+                folders: vec![],
+            },
+        };
+        let mut writer = BufWriter::new(std::fs::File::create(&file).unwrap());
+        // Legal JSON whitespace models a large complete desktop snapshot without
+        // weakening validation or constructing millions of invented track records.
+        let block = vec![b' '; 1024 * 1024];
+        for _ in 0..129 {
+            writer.write_all(&block).unwrap();
+        }
+        serde_json::to_writer(&mut writer, &serde_json::json!({"version":1,"root":dir.path(),"library":library,"sources":[],"settings":null,"playlists":[]})).unwrap();
+        writer.flush().unwrap();
+        drop(writer);
+        let restored =
+            load(&file, dir.path()).expect("A complete desktop-sized snapshot must be accepted");
+        assert_eq!(restored.tracks[0].title, "Kept song");
+        assert_eq!(
+            restored.tracks[0].preparation.extensions["preserved"],
+            "complete metadata"
+        );
     }
     #[test]
     fn snapshots_are_root_bound_and_reject_unsafe_tracks() {
